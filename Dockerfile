@@ -10,7 +10,7 @@ RUN bun install
 
 FROM deps AS build
 COPY . .
-RUN bun --cwd apps/web run build
+RUN bun run --cwd apps/web build
 
 FROM base AS runner
 ENV NODE_ENV=production
@@ -18,4 +18,6 @@ ENV API_HOST=0.0.0.0
 ENV API_PORT=3000
 COPY --from=build /app ./
 EXPOSE 3000
-CMD ["bun", "apps/api/src/index.ts"]
+# Apply pending migrations, then start the server. exec keeps the server as PID 1
+# so it receives signals (graceful shutdown) correctly.
+CMD ["sh", "-c", "bun run --cwd packages/db db:migrate:ci && exec bun apps/api/src/index.ts"]
