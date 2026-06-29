@@ -9,7 +9,7 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "noUncheckedIndexedAccess": true,
-    "types": ["bun-types"],
+    "types": ["bun"],
     "paths": {
       "@basse/db": ["./packages/db/src/index.ts"],
       "@basse/db/*": ["./packages/db/src/*"]
