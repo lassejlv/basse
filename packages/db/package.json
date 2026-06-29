@@ -10,7 +10,7 @@
     "check": "tsc --noEmit -p tsconfig.json",
     "db:generate": "bun --env-file=../../.env drizzle-kit generate",
     "db:migrate": "bun --env-file=../../.env drizzle-kit migrate",
-    "db:migrate:ci": "drizzle-kit migrate"
+    "db:migrate:run": "bun src/migrate.ts"
   },
   "dependencies": {
     "drizzle-orm": "latest"

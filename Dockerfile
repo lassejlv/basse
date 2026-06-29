@@ -20,4 +20,4 @@ COPY --from=build /app ./
 EXPOSE 3000
 # Apply pending migrations, then start the server. exec keeps the server as PID 1
 # so it receives signals (graceful shutdown) correctly.
-CMD ["sh", "-c", "bun run --cwd packages/db db:migrate:ci && exec bun apps/api/src/index.ts"]
+CMD ["sh", "-c", "bun run --cwd packages/db db:migrate:run && exec bun apps/api/src/index.ts"]
