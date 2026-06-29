@@ -3,7 +3,9 @@ import { serveStatic } from "hono/bun";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { auth } from "./auth";
+import { depot } from "./depot";
 import { projects } from "./projects";
+import { sshKeys } from "./ssh-keys";
 
 const app = new Hono();
 const webDist = Bun.env.WEB_DIST ?? "./apps/web/dist";
@@ -27,6 +29,8 @@ app.use(
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
 app.route("/api/projects", projects);
+app.route("/api/ssh-keys", sshKeys);
+app.route("/api/depot", depot);
 
 app.get("/health", (c) =>
   c.json({

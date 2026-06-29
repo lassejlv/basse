@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@basse/db": "workspace:*",
+    "@basse/shared": "workspace:*",
     "better-auth": "latest",
     "drizzle-orm": "latest",
     "hono": "latest"

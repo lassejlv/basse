@@ -93,3 +93,48 @@ export const deploymentRelations = relations(deployment, ({ one }) => ({
     references: [app.id],
   }),
 }));
+
+export const sshKey = pgTable(
+  "ssh_key",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    publicKey: text("public_key").notNull(),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [index("ssh_key_organizationId_idx").on(table.organizationId)],
+);
+
+// One Depot connection per workspace. `token` is encrypted at rest.
+export const depotConnection = pgTable(
+  "depot_connection",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .unique()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    token: text("token").notNull(),
+    projectId: text("project_id").notNull(),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+);
+
+export const sshKeyRelations = relations(sshKey, ({ one }) => ({
+  organization: one(organization, {
+    fields: [sshKey.organizationId],
+    references: [organization.id],
+  }),
+}));
+
+export const depotConnectionRelations = relations(depotConnection, ({ one }) => ({
+  organization: one(organization, {
+    fields: [depotConnection.organizationId],
+    references: [organization.id],
+  }),
+}));

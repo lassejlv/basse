@@ -22,6 +22,13 @@
       "when": 1782772539339,
       "tag": "0002_pretty_toad_men",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1782775421301,
+      "tag": "0003_fearless_sunfire",
+      "breakpoints": true
     }
   ]
 }

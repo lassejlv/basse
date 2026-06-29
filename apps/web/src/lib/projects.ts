@@ -1,11 +1,6 @@
-export type Project = {
-  id: string;
-  organizationId: string;
-  name: string;
-  slug: string;
-  createdAt: string;
-  updatedAt: string;
-};
+import type { Project } from "@basse/shared";
+
+export type { Project };
 
 const apiBaseUrl = import.meta.env.VITE_API_URL ?? "";
 

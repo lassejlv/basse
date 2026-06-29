@@ -12,7 +12,8 @@
     "types": ["bun"],
     "paths": {
       "@basse/db": ["./packages/db/src/index.ts"],
-      "@basse/db/*": ["./packages/db/src/*"]
+      "@basse/db/*": ["./packages/db/src/*"],
+      "@basse/shared": ["./packages/shared/src/index.ts"]
     }
   }
 }

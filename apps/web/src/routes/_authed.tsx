@@ -1,5 +1,5 @@
-import { Link, Outlet, createFileRoute, redirect } from "@tanstack/react-router";
-import { CloudIcon, LayoutDashboardIcon } from "lucide-react";
+import { Link, Outlet, createFileRoute, redirect, useLocation } from "@tanstack/react-router";
+import { CloudIcon, LayoutDashboardIcon, SettingsIcon } from "lucide-react";
 import { useEffect } from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Select, SelectButton, SelectItem, SelectPopup, SelectValue } from "@/components/ui/select";
@@ -43,6 +43,8 @@ export const Route = createFileRoute("/_authed")({
 
 function AuthedLayout() {
   const { session } = Route.useRouteContext();
+  const pathname = useLocation({ select: (location) => location.pathname });
+  const pageTitle = pathname === "/settings" ? "Settings" : "Overview";
   const user = session.user;
   const displayName = user.name || user.email;
   const initials = getInitials(displayName);
@@ -119,9 +121,23 @@ function AuthedLayout() {
             <SidebarGroupContent>
               <SidebarMenu>
                 <SidebarMenuItem>
-                  <SidebarMenuButton isActive render={<Link to="/dashboard" />} tooltip="Overview">
+                  <SidebarMenuButton
+                    isActive={pathname === "/dashboard"}
+                    render={<Link to="/dashboard" />}
+                    tooltip="Overview"
+                  >
                     <LayoutDashboardIcon />
                     <span>Overview</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    isActive={pathname === "/settings"}
+                    render={<Link to="/settings" />}
+                    tooltip="Settings"
+                  >
+                    <SettingsIcon />
+                    <span>Settings</span>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               </SidebarMenu>
@@ -153,7 +169,7 @@ function AuthedLayout() {
       <SidebarInset>
         <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-3 border-b bg-background/94 px-4 backdrop-blur md:px-6">
           <SidebarTrigger />
-          <p className="truncate font-medium text-sm">Overview</p>
+          <p className="truncate font-medium text-sm">{pageTitle}</p>
         </header>
 
         <Outlet />
