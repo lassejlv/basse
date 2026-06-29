@@ -4,7 +4,6 @@
 !.env.example
 
 node_modules/
-bun.lock
 
 dist/
 .vite/

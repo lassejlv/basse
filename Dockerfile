@@ -2,11 +2,11 @@ FROM oven/bun:latest AS base
 WORKDIR /app
 
 FROM base AS deps
-COPY package.json bunfig.toml ./
+COPY package.json bun.lock bunfig.toml ./
 COPY apps/api/package.json ./apps/api/
 COPY apps/web/package.json ./apps/web/
 COPY packages/db/package.json ./packages/db/
-RUN bun install
+RUN bun install --frozen-lockfile
 
 FROM deps AS build
 COPY . .
