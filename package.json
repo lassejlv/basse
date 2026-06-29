@@ -1,0 +1,25 @@
+{
+  "name": "basse",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "bun --filter '*' dev",
+    "dev:api": "bun --cwd apps/api dev",
+    "dev:web": "bun --cwd apps/web dev",
+    "check": "bun --filter '*' check",
+    "lint": "oxlint .",
+    "format": "oxfmt --write .",
+    "db:generate": "bun --cwd packages/db db:generate",
+    "db:migrate": "bun --cwd packages/db db:migrate",
+    "auth:secret": "bun --cwd apps/api auth:secret"
+  },
+  "devDependencies": {
+    "oxfmt": "latest",
+    "oxlint": "latest",
+    "typescript": "latest"
+  }
+}

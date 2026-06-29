@@ -1,0 +1,16 @@
+.git
+node_modules
+**/node_modules
+dist
+**/dist
+.vite
+**/.vite
+.tanstack
+**/.tanstack
+coverage
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+.env.*
+.remember

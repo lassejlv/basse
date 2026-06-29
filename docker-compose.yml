@@ -1,0 +1,40 @@
+services:
+  caddy:
+    image: caddy:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - control-plane
+    networks:
+      - basse
+
+  control-plane:
+    image: ${CONTROL_PLANE_IMAGE:-ghcr.io/lassejlv/basse-control-plane:latest}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      BETTER_AUTH_URL: https://${DOMAIN}
+      WEB_ORIGIN: https://${DOMAIN}
+      API_HOST: 0.0.0.0
+      API_PORT: "3000"
+    expose:
+      - "3000"
+    networks:
+      - basse
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  basse:
+    name: basse

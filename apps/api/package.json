@@ -1,0 +1,19 @@
+{
+  "name": "@basse/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --env-file=../../.env --hot src/index.ts",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "auth:secret": "bun x @better-auth/cli@latest secret"
+  },
+  "dependencies": {
+    "@basse/db": "workspace:*",
+    "better-auth": "latest",
+    "drizzle-orm": "latest",
+    "hono": "latest"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
