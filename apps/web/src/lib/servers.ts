@@ -67,6 +67,17 @@ export async function checkServerConnection(id: string): Promise<ConnectionCheck
   return response.json() as Promise<ConnectionCheck>;
 }
 
+export async function provisionServer(id: string): Promise<void> {
+  const response = await fetch(`${apiBaseUrl}/api/servers/${id}/provision`, {
+    method: "POST",
+    credentials: "include",
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+}
+
 export async function deleteServer(id: string): Promise<void> {
   const response = await fetch(`${apiBaseUrl}/api/servers/${id}`, {
     method: "DELETE",

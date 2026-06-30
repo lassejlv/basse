@@ -169,7 +169,7 @@ export async function writeRemoteFile(
   const mode = options.mode ?? "600";
 
   const result = await withKeyMaterial(conn, async ({ keyPath, knownHostsPath }) => {
-    const command = `set -e; umask 077; cat > '${remotePath}'; chmod ${mode} '${remotePath}'`;
+    const command = `set -e; mkdir -p "$(dirname '${remotePath}')"; umask 077; cat > '${remotePath}'; chmod ${mode} '${remotePath}'`;
     const proc = Bun.spawn(
       [
         "ssh",

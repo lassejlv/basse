@@ -5,7 +5,12 @@ import { useState } from "react";
 import { ServerStatusBadge } from "@/components/server-status-badge";
 import { Button } from "@/components/ui/button";
 import { authClient } from "@/lib/auth-client";
-import { checkServerConnection, deleteServer, getServer } from "@/lib/servers";
+import {
+  checkServerConnection,
+  deleteServer,
+  getServer,
+  provisionServer,
+} from "@/lib/servers";
 
 export const Route = createFileRoute("/_authed/servers/$serverId")({
   component: ServerDetailRoute,
@@ -21,6 +26,11 @@ function ServerDetailRoute() {
   const server = useQuery({
     queryKey: ["server", serverId],
     queryFn: () => getServer(serverId),
+    // Poll while a provision is in flight; stop once it reaches a terminal state.
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === "pending" || status === "provisioning" ? 2000 : false;
+    },
   });
 
   const remove = useMutation({
@@ -33,6 +43,13 @@ function ServerDetailRoute() {
 
   const test = useMutation({
     mutationFn: () => checkServerConnection(serverId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["server", serverId] });
+    },
+  });
+
+  const provision = useMutation({
+    mutationFn: () => provisionServer(serverId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["server", serverId] });
     },
@@ -103,6 +120,37 @@ function ServerDetailRoute() {
                 {test.data.error ?? "Unreachable"}
               </span>
             )
+          ) : null}
+        </div>
+      </div>
+
+      <div className="max-w-2xl rounded-lg border bg-card p-6">
+        <h2 className="text-lg font-semibold">Provisioning</h2>
+        <p className="mt-1 text-muted-foreground text-sm">
+          Installs Docker (if missing) and runs the Basse agent over SSH. Safe to run again.
+        </p>
+        {data.status === "active" ? (
+          <p className="mt-3 text-success-foreground text-sm">
+            Agent active
+            {data.lastSeenAt
+              ? ` · last seen ${new Date(data.lastSeenAt).toLocaleString()}`
+              : null}
+          </p>
+        ) : null}
+        <div className="mt-4 flex items-center gap-2">
+          <Button
+            loading={provision.isPending || data.status === "provisioning"}
+            onClick={() => provision.mutate()}
+            disabled={data.status === "provisioning"}
+          >
+            {data.status === "active" || data.status === "unreachable"
+              ? "Re-provision"
+              : "Provision"}
+          </Button>
+          {provision.isError ? (
+            <span className="text-destructive-foreground text-sm">
+              {(provision.error as Error).message}
+            </span>
           ) : null}
         </div>
       </div>

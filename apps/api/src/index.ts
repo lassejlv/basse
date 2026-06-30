@@ -5,6 +5,7 @@ import { logger } from "hono/logger";
 import { auth } from "./auth";
 import { depot } from "./depot";
 import { projects } from "./projects";
+import { reconcileStuckProvisions } from "./provision";
 import { servers } from "./servers";
 import { sshKeys } from "./ssh-keys";
 
@@ -43,6 +44,9 @@ app.get("/health", (c) =>
 
 app.use("/*", serveStatic({ root: webDist }));
 app.get("*", serveStatic({ path: `${webDist}/index.html` }));
+
+// Recover any server left mid-provision by a previous process (crash/restart).
+void reconcileStuckProvisions().catch(() => {});
 
 export default {
   port: Number(Bun.env.API_PORT ?? 3000),

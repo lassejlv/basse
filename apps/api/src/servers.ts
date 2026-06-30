@@ -1,8 +1,9 @@
 import { db, server } from "@basse/db";
 import type { CreateServerInput, Server } from "@basse/shared";
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { Hono } from "hono";
 import { decryptSecret, encryptSecret } from "./crypto";
+import { provisionServer } from "./provision";
 import { connectionFromServer } from "./server-connection";
 import { generateServerKeyPair } from "./server-keys";
 import { probeReachable } from "./ssh";
@@ -135,6 +136,51 @@ servers.post("/", async (c) => {
   }
 
   return c.json(await sanitizeServer(created), 201);
+});
+
+servers.post("/:id/provision", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+
+  if (organizationId instanceof Response) {
+    return organizationId;
+  }
+
+  const id = c.req.param("id");
+
+  // Atomically claim the row: only a server that is not already provisioning can
+  // be (re-)provisioned. The conditional update is the concurrency lock.
+  const claimed = await db
+    .update(server)
+    .set({ status: "provisioning", statusMessage: "Queued…", updatedAt: new Date() })
+    .where(
+      and(
+        eq(server.id, id),
+        eq(server.organizationId, organizationId),
+        ne(server.status, "provisioning"),
+      ),
+    )
+    .returning({ id: server.id });
+
+  if (!claimed[0]) {
+    // Either it does not exist/belong to the workspace, or it is already running.
+    const [row] = await db
+      .select({ id: server.id })
+      .from(server)
+      .where(and(eq(server.id, id), eq(server.organizationId, organizationId)))
+      .limit(1);
+
+    if (!row) {
+      return c.json({ error: "Server not found" }, 404);
+    }
+
+    return c.json({ error: "Server is already provisioning" }, 409);
+  }
+
+  // Fire-and-forget: provisioning takes minutes. The guard ensures an unhandled
+  // rejection can never take down the process.
+  void provisionServer(id).catch(() => {});
+
+  return c.body(null, 202);
 });
 
 servers.post("/:id/check-connection", async (c) => {
