@@ -1,7 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "@xterm/xterm";
+import "@xterm/xterm/css/xterm.css";
 import { PlusIcon, TrashIcon } from "lucide-react";
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import type { AppBuildRunner, AppSourceType, AppVolume, DeploymentStatus } from "@basse/shared";
 import { chartCssVars } from "@/components/charts/chart-context";
 import { Grid } from "@/components/charts/grid";
@@ -435,9 +438,6 @@ function RuntimeCard({ app }: { app: App }) {
   const [samples, setSamples] = useState<
     { date: Date; cpuPercent: number; memoryPercent: number }[]
   >([]);
-  const [command, setCommand] = useState("");
-  const [history, setHistory] = useState<{ command: string; exitCode: number; output: string }[]>([]);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!serverId || !app.serverIds.includes(serverId)) {
@@ -471,16 +471,6 @@ function RuntimeCard({ app }: { app: App }) {
       },
     ]);
   }, [metrics.data]);
-
-  const run = useMutation({
-    mutationFn: () => runAppConsoleCommand(app.id, { command, serverId }),
-    onSuccess: (result) => {
-      setHistory((current) => [{ command, ...result }, ...current].slice(0, 8));
-      setCommand("");
-      setError(null);
-    },
-    onError: (e: Error) => setError(e.message),
-  });
 
   return (
     <div className="max-w-2xl rounded-lg border bg-card p-6">
@@ -576,42 +566,117 @@ function RuntimeCard({ app }: { app: App }) {
             </pre>
           </div>
 
-          <form
-            className="mt-6 flex items-end gap-2 border-t pt-6"
-            onSubmit={(event) => {
-              event.preventDefault();
-              run.mutate();
-            }}
-          >
-            <div className="flex-1 space-y-2">
-              <Label htmlFor="app-console-command">Console</Label>
-              <Input
-                className="font-mono"
-                id="app-console-command"
-                onChange={(event) => setCommand(event.currentTarget.value)}
-                placeholder="ls -la"
-                value={command}
-              />
-            </div>
-            <Button disabled={!command.trim() || !serverId} loading={run.isPending} type="submit">
-              Run
-            </Button>
-          </form>
-          {error ? <p className="mt-2 text-destructive-foreground text-sm">{error}</p> : null}
-          {history.length > 0 ? (
-            <div className="mt-4 flex flex-col gap-3">
-              {history.map((entry, index) => (
-                <pre
-                  key={`${entry.command}-${index}`}
-                  className="max-h-48 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs"
-                >
-                  {`$ ${entry.command}\nexit ${entry.exitCode}\n${entry.output || "(no output)"}`}
-                </pre>
-              ))}
-            </div>
-          ) : null}
+          <AppConsoleTerminal appId={app.id} serverId={serverId} />
         </>
       )}
+    </div>
+  );
+}
+
+function AppConsoleTerminal({ appId, serverId }: { appId: string; serverId: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const commandRef = useRef("");
+  const runningRef = useRef(false);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    commandRef.current = "";
+    runningRef.current = false;
+
+    const terminal = new Terminal({
+      allowProposedApi: false,
+      convertEol: true,
+      cursorBlink: true,
+      disableStdin: !serverId,
+      fontFamily: '"Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace',
+      fontSize: 12,
+      scrollback: 1000,
+      theme: {
+        background: "#0f1115",
+        foreground: "#e5e7eb",
+        cursor: "#e5e7eb",
+        selectionBackground: "#334155",
+      },
+    });
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
+    terminal.open(container);
+    terminalRef.current = terminal;
+
+    const fit = () => {
+      try {
+        fitAddon.fit();
+      } catch {
+        // xterm can throw if the container has not been measured yet.
+      }
+    };
+    fit();
+    const resizeObserver = new ResizeObserver(fit);
+    resizeObserver.observe(container);
+
+    const writePrompt = () => terminal.write("\r\n$ ");
+    terminal.write(serverId ? "$ " : "Select a server first.");
+
+    const dataDisposable = terminal.onData((data) => {
+      if (!serverId || runningRef.current) return;
+
+      if (data === "\r") {
+        const command = commandRef.current.trim();
+        terminal.write("\r\n");
+        commandRef.current = "";
+        if (!command) {
+          terminal.write("$ ");
+          return;
+        }
+
+        runningRef.current = true;
+        void runAppConsoleCommand(appId, { command, serverId })
+          .then((result) => {
+            const output = result.output || "(no output)";
+            terminal.write(output.endsWith("\n") ? output : `${output}\r\n`);
+            terminal.write(`exit ${result.exitCode}`);
+          })
+          .catch((error: Error) => {
+            terminal.write(`Error: ${error.message}`);
+          })
+          .finally(() => {
+            runningRef.current = false;
+            writePrompt();
+          });
+        return;
+      }
+
+      if (data === "\u007F") {
+        if (commandRef.current.length > 0) {
+          commandRef.current = commandRef.current.slice(0, -1);
+          terminal.write("\b \b");
+        }
+        return;
+      }
+
+      if (data >= " " && data !== "\u007F") {
+        commandRef.current += data;
+        terminal.write(data);
+      }
+    });
+
+    return () => {
+      dataDisposable.dispose();
+      resizeObserver.disconnect();
+      terminal.dispose();
+      terminalRef.current = null;
+    };
+  }, [appId, serverId]);
+
+  return (
+    <div className="mt-6 border-t pt-6">
+      <Label>Console</Label>
+      <div className="mt-2 overflow-hidden rounded-md border bg-[#0f1115] p-2">
+        <div ref={containerRef} className="h-72" />
+      </div>
     </div>
   );
 }
