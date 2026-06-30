@@ -7,9 +7,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
-  SelectButton,
   SelectItem,
   SelectPopup,
+  SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { createApp, listApps } from "@/lib/apps";
@@ -246,13 +246,13 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
             </p>
           ) : (
             <Select value={serverId} onValueChange={(v) => setServerId(v ?? "")}>
-              <SelectButton className="w-full">
+              <SelectTrigger className="w-full">
                 <SelectValue placeholder="Select a server">
                   {(value: string) =>
                     serverList.find((s) => s.id === value)?.name ?? "Select a server"
                   }
                 </SelectValue>
-              </SelectButton>
+              </SelectTrigger>
               <SelectPopup>
                 {serverList.map((s) => (
                   <SelectItem key={s.id} value={s.id}>

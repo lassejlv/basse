@@ -9,9 +9,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
-  SelectButton,
   SelectItem,
   SelectPopup,
+  SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
@@ -104,14 +104,14 @@ function ServerCard({ app }: { app: App }) {
               if (v) setServer.mutate(v);
             }}
           >
-            <SelectButton className="w-full max-w-sm">
+            <SelectTrigger className="w-full max-w-sm">
               <SelectValue placeholder="Select a server">
                 {(value: string) => {
                   const s = serverList.find((x) => x.id === value);
                   return s ? `${s.name} (${s.status})` : "Select a server";
                 }}
               </SelectValue>
-            </SelectButton>
+            </SelectTrigger>
             <SelectPopup>
               {serverList.map((s) => (
                 <SelectItem key={s.id} value={s.id}>

@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { useEffect } from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Select, SelectButton, SelectItem, SelectPopup, SelectValue } from "@/components/ui/select";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Sidebar,
   SidebarContent,
@@ -113,7 +113,7 @@ function AuthedLayout() {
                 setActiveWorkspace(organizationId);
               }}
             >
-              <SelectButton
+              <SelectTrigger
                 className="h-9 w-full min-w-0 bg-background"
                 disabled={!workspaceList.length}
               >
@@ -122,7 +122,7 @@ function AuthedLayout() {
                     workspaceList.find((o) => o.id === value)?.name ?? "Select workspace"
                   }
                 </SelectValue>
-              </SelectButton>
+              </SelectTrigger>
               <SelectPopup>
                 {workspaceList.map((organization) => (
                   <SelectItem key={organization.id} value={organization.id}>
