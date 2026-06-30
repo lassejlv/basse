@@ -1,4 +1,4 @@
-import { app, appServer, db, environment, project, server } from "@basse/db";
+import { app, appServer, db, deployment, environment, project, server } from "@basse/db";
 import type {
   App,
   AppBuildMode,
@@ -329,6 +329,11 @@ apps.post("/:id/stop", async (c) => {
     { timeoutMs: 30_000 },
   );
   if (result.exitCode !== 0) return c.json({ error: "Could not stop container" }, 502);
+
+  await db
+    .update(deployment)
+    .set({ status: "stopped", updatedAt: new Date() })
+    .where(and(eq(deployment.appId, appId), eq(deployment.status, "healthy")));
 
   return c.json({ ok: true });
 });

@@ -106,7 +106,8 @@ export type DeploymentStatus =
   | "healthy"
   | "superseded"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "stopped";
 
 export type Deployment = {
   id: string;

@@ -53,6 +53,7 @@ const DEPLOY_STATUS_VARIANT: Record<
   superseded: "secondary",
   failed: "error",
   cancelled: "secondary",
+  stopped: "secondary",
 };
 
 function AppDetailRoute() {
@@ -488,6 +489,7 @@ function RuntimeCard({ app }: { app: App }) {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["app-metrics", app.id, serverId] }),
         queryClient.invalidateQueries({ queryKey: ["app-logs", app.id, serverId] }),
+        queryClient.invalidateQueries({ queryKey: ["deployments", app.id] }),
       ]);
     },
     onError: (error: Error) => setStopError(error.message),
