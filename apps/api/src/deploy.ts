@@ -120,7 +120,14 @@ function databasePort(kind: DatabaseKind): number {
   return kind === "postgres" ? POSTGRES_PORT : REDIS_PORT;
 }
 
-function databaseVolume(appId: string, kind: DatabaseKind): AppVolume {
+function postgresDataPath(version: string | null): string {
+  const major = Number.parseInt(version ?? DEFAULT_POSTGRES_VERSION, 10);
+  return Number.isFinite(major) && major >= 18
+    ? "/var/lib/postgresql"
+    : "/var/lib/postgresql/data";
+}
+
+function databaseVolume(appId: string, kind: DatabaseKind, version: string | null): AppVolume {
   if (kind === "redis") {
     return {
       hostPath: `basse-redis-${appId}`,
@@ -130,7 +137,7 @@ function databaseVolume(appId: string, kind: DatabaseKind): AppVolume {
   }
   return {
     hostPath: `basse-postgres-${appId}`,
-    containerPath: "/var/lib/postgresql/data",
+    containerPath: postgresDataPath(version),
     readOnly: false,
   };
 }
@@ -397,7 +404,10 @@ export async function runDeployment(deploymentId: string): Promise<void> {
     }
     const volumes =
       appRow.appKind === "database"
-        ? [databaseVolume(appRow.id, databaseKind), ...parseVolumes(appRow.volumes)]
+        ? [
+            databaseVolume(appRow.id, databaseKind, appRow.databaseVersion),
+            ...parseVolumes(appRow.volumes),
+          ]
         : parseVolumes(appRow.volumes);
 
     let allRunning = true;
