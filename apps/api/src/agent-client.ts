@@ -151,7 +151,11 @@ export async function getAppStatus(
   appId: string,
 ): Promise<{ exists: boolean; running: boolean }> {
   return withTunnel(conn, AGENT_PORT, (baseUrl) =>
-    getJson<{ exists: boolean; running: boolean }>({ baseUrl, token }, `/v1/apps/${appId}/status`, true),
+    getJson<{ exists: boolean; running: boolean }>(
+      { baseUrl, token },
+      `/v1/apps/${appId}/status`,
+      true,
+    ),
   );
 }
 

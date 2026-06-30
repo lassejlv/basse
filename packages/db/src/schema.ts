@@ -311,22 +311,19 @@ export const sshKey = pgTable(
 );
 
 // One Depot connection per workspace. `token` is encrypted at rest.
-export const depotConnection = pgTable(
-  "depot_connection",
-  {
-    id: text("id").primaryKey(),
-    organizationId: text("organization_id")
-      .notNull()
-      .unique()
-      .references(() => organization.id, { onDelete: "cascade" }),
-    token: text("token").notNull(),
-    projectId: text("project_id").notNull(),
-    // Depot organization id — the registry subdomain ({orgId}.registry.depot.dev).
-    orgId: text("org_id"),
-    createdAt: timestamp("created_at").notNull(),
-    updatedAt: timestamp("updated_at").notNull(),
-  },
-);
+export const depotConnection = pgTable("depot_connection", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id")
+    .notNull()
+    .unique()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  token: text("token").notNull(),
+  projectId: text("project_id").notNull(),
+  // Depot organization id — the registry subdomain ({orgId}.registry.depot.dev).
+  orgId: text("org_id"),
+  createdAt: timestamp("created_at").notNull(),
+  updatedAt: timestamp("updated_at").notNull(),
+});
 
 export const sshKeyRelations = relations(sshKey, ({ one }) => ({
   organization: one(organization, {

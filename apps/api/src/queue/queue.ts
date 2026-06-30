@@ -46,7 +46,10 @@ export async function enqueueAction(name: ActionName, entityId: string): Promise
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error("enqueue timed out (queue unavailable)")), ENQUEUE_TIMEOUT_MS);
+    timer = setTimeout(
+      () => reject(new Error("enqueue timed out (queue unavailable)")),
+      ENQUEUE_TIMEOUT_MS,
+    );
   });
 
   try {

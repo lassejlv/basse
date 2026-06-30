@@ -32,7 +32,7 @@ Bun-workspace monorepo: `apps/*` + `packages/*`, isolated linker (`bunfig.toml`)
 
 ### Auth + workspaces (the key cross-cutting flow)
 
-Auth is **Better Auth** with the **organization plugin**; an "organization" *is* a workspace in product terms. On user signup, a `databaseHooks.user.create.after` hook calls `ensurePersonalWorkspace` (`packages/db/src/workspaces.ts`), which creates a personal organization (slug `personal-<userId>`, metadata `{type:"personal"}`) and adds the user as `owner`. Every user therefore always has at least one workspace.
+Auth is **Better Auth** with the **organization plugin**; an "organization" _is_ a workspace in product terms. On user signup, a `databaseHooks.user.create.after` hook calls `ensurePersonalWorkspace` (`packages/db/src/workspaces.ts`), which creates a personal organization (slug `personal-<userId>`, metadata `{type:"personal"}`) and adds the user as `owner`. Every user therefore always has at least one workspace.
 
 The web app has **no typed API client for auth** — `apps/web/src/lib/organizations.ts` calls Better Auth's organization endpoints (`/api/auth/organization/*`) directly with `fetch` + `credentials: "include"`. Active-workspace selection lives in the sidebar in `apps/web/src/routes/_authed.tsx`.
 

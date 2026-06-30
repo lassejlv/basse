@@ -71,7 +71,17 @@ export async function cloneRepo(opts: {
 
   const cloneEnv = { GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/bin/true" };
   const clone = await run(
-    ["git", "clone", "--depth", "1", "--branch", opts.branch, "--", opts.repositoryUrl, opts.ctxDir],
+    [
+      "git",
+      "clone",
+      "--depth",
+      "1",
+      "--branch",
+      opts.branch,
+      "--",
+      opts.repositoryUrl,
+      opts.ctxDir,
+    ],
     { env: cloneEnv, onLine: opts.onLine, timeoutMs: 120_000 },
   );
   if (clone.exitCode !== 0) {
@@ -124,7 +134,12 @@ export async function buildImage(opts: {
   const dockerfileArg =
     opts.kind === "dockerfile"
       ? ["-f", join(opts.ctxDir, "Dockerfile")]
-      : ["--build-arg", `BUILDKIT_SYNTAX=${RAILPACK_FRONTEND}`, "-f", join(opts.ctxDir, "railpack-plan.json")];
+      : [
+          "--build-arg",
+          `BUILDKIT_SYNTAX=${RAILPACK_FRONTEND}`,
+          "-f",
+          join(opts.ctxDir, "railpack-plan.json"),
+        ];
 
   const build = await run(
     [

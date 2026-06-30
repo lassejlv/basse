@@ -45,14 +45,7 @@ export function TooltipDot({
 
   if (!animate) {
     return (
-      <circle
-        cx={x}
-        cy={y}
-        fill={color}
-        r={size}
-        stroke={strokeColor}
-        strokeWidth={strokeWidth}
-      />
+      <circle cx={x} cy={y} fill={color} r={size} stroke={strokeColor} strokeWidth={strokeWidth} />
     );
   }
 

@@ -196,7 +196,8 @@ function DepotSection({ organizationId }: { organizationId?: string }) {
           <div className="min-w-0 text-sm">
             <p className="font-medium">Connected</p>
             <p className="truncate font-mono text-muted-foreground text-xs">
-              project {connection.data?.projectId} · org {connection.data?.orgId ?? "—"} · token ••••
+              project {connection.data?.projectId} · org {connection.data?.orgId ?? "—"} · token
+              ••••
               {connection.data?.tokenHint}
             </p>
           </div>

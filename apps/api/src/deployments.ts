@@ -27,11 +27,7 @@ async function ownedDeployment(
   deploymentId: string,
   organizationId: string,
 ): Promise<DeploymentRow | null> {
-  const [row] = await db
-    .select()
-    .from(deployment)
-    .where(eq(deployment.id, deploymentId))
-    .limit(1);
+  const [row] = await db.select().from(deployment).where(eq(deployment.id, deploymentId)).limit(1);
   if (!row) return null;
   const owned = await ownedApp(row.appId, organizationId);
   return owned ? row : null;

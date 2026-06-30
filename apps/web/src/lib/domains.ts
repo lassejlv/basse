@@ -10,9 +10,12 @@ async function parseError(response: Response): Promise<string> {
 }
 
 export async function listDomains(serverId: string): Promise<Domain[]> {
-  const response = await fetch(`${apiBaseUrl}/api/domains?serverId=${encodeURIComponent(serverId)}`, {
-    credentials: "include",
-  });
+  const response = await fetch(
+    `${apiBaseUrl}/api/domains?serverId=${encodeURIComponent(serverId)}`,
+    {
+      credentials: "include",
+    },
+  );
 
   if (!response.ok) {
     throw new Error(await parseError(response));
@@ -21,10 +24,7 @@ export async function listDomains(serverId: string): Promise<Domain[]> {
   return response.json() as Promise<Domain[]>;
 }
 
-export async function createDomain(
-  serverId: string,
-  input: CreateDomainInput,
-): Promise<Domain> {
+export async function createDomain(serverId: string, input: CreateDomainInput): Promise<Domain> {
   const response = await fetch(`${apiBaseUrl}/api/domains`, {
     method: "POST",
     credentials: "include",

@@ -1,6 +1,6 @@
-import type { EnvVarMasked } from "@basse/shared";
+import type { EnvVarMasked, EnvVarPlain } from "@basse/shared";
 
-export type { EnvVarMasked };
+export type { EnvVarMasked, EnvVarPlain };
 
 const apiBaseUrl = import.meta.env.VITE_API_URL ?? "";
 
@@ -15,6 +15,14 @@ export async function listEnvVars(appId: string): Promise<EnvVarMasked[]> {
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<EnvVarMasked[]>;
+}
+
+export async function revealEnvVars(appId: string): Promise<EnvVarPlain[]> {
+  const response = await fetch(`${apiBaseUrl}/api/apps/${appId}/env-vars/reveal`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<EnvVarPlain[]>;
 }
 
 export async function setEnvVars(

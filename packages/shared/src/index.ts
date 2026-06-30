@@ -101,11 +101,18 @@ export type UpdateAppInput = {
   serverIds?: string[];
 };
 
-// Env var with the value masked (last-4 only). Plaintext never leaves the API.
+// Env var with the value masked (last-4 only), returned by the list endpoint.
 export type EnvVarMasked = {
   key: string;
   valueHint: string;
   updatedAt: string;
+};
+
+// A decrypted key/value pair, returned only by the explicit reveal endpoint so
+// the user can view, copy, and round-trip-edit their own workspace's secrets.
+export type EnvVarPlain = {
+  key: string;
+  value: string;
 };
 
 export type SetEnvVarsInput = {

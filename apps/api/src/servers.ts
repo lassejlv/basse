@@ -139,9 +139,7 @@ function parseByteSize(value: string): number {
 }
 
 function imageIdFromOutput(output: string, key: string): string | null {
-  const line = output
-    .split("\n")
-    .find((candidate) => candidate.startsWith(`${key}=`));
+  const line = output.split("\n").find((candidate) => candidate.startsWith(`${key}=`));
   const value = line?.slice(key.length + 1).trim();
   return value || null;
 }
@@ -353,7 +351,8 @@ servers.post("/", async (c) => {
   const name = typeof body?.name === "string" ? body.name.trim() : "";
   const sshHost = typeof body?.sshHost === "string" ? body.sshHost.trim() : "";
   const sshPort = typeof body?.sshPort === "number" ? body.sshPort : 22;
-  const sshUser = typeof body?.sshUser === "string" && body.sshUser.trim() ? body.sshUser.trim() : "root";
+  const sshUser =
+    typeof body?.sshUser === "string" && body.sshUser.trim() ? body.sshUser.trim() : "root";
   const providedPrivateKey =
     typeof body?.privateKey === "string" && body.privateKey.trim() ? body.privateKey.trim() : null;
 
@@ -381,10 +380,7 @@ servers.post("/", async (c) => {
       publicKey = await derivePublicKey(providedPrivateKey);
       privateKey = providedPrivateKey;
     } catch (error) {
-      return c.json(
-        { error: error instanceof Error ? error.message : "Invalid private key" },
-        400,
-      );
+      return c.json({ error: error instanceof Error ? error.message : "Invalid private key" }, 400);
     }
   } else {
     const keyPair = await generateServerKeyPair(id);

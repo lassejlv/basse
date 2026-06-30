@@ -13,12 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
-import {
-  createDomain,
-  deleteDomain,
-  listDomains,
-  resyncProxy,
-} from "@/lib/domains";
+import { createDomain, deleteDomain, listDomains, resyncProxy } from "@/lib/domains";
 import {
   checkServerConnection,
   checkAgentUpdate,
@@ -128,7 +123,12 @@ function ServerDetailRoute() {
           <Button onClick={copyPublicKey} size="sm" variant="outline">
             {copied ? "Copied" : "Copy key"}
           </Button>
-          <Button loading={test.isPending} onClick={() => test.mutate()} size="sm" variant="outline">
+          <Button
+            loading={test.isPending}
+            onClick={() => test.mutate()}
+            size="sm"
+            variant="outline"
+          >
             Test connection
           </Button>
           {test.data ? (
@@ -151,9 +151,7 @@ function ServerDetailRoute() {
         {data.status === "active" ? (
           <p className="mt-3 text-success-foreground text-sm">
             Agent active
-            {data.lastSeenAt
-              ? ` · last seen ${new Date(data.lastSeenAt).toLocaleString()}`
-              : null}
+            {data.lastSeenAt ? ` · last seen ${new Date(data.lastSeenAt).toLocaleString()}` : null}
           </p>
         ) : null}
         <div className="mt-4 flex items-center gap-2">
@@ -260,7 +258,9 @@ function AgentSection({ serverId, enabled }: { serverId: string; enabled: boolea
       </div>
 
       {!enabled ? (
-        <p className="mt-5 text-muted-foreground text-sm">Provision this server to install the agent.</p>
+        <p className="mt-5 text-muted-foreground text-sm">
+          Provision this server to install the agent.
+        </p>
       ) : (
         <>
           <div className="mt-5 grid gap-3 text-sm sm:grid-cols-2">
@@ -297,7 +297,11 @@ function AgentSection({ serverId, enabled }: { serverId: string; enabled: boolea
               >
                 <Grid horizontal />
                 <Line dataKey="cpuPercent" stroke={chartCssVars.linePrimary} strokeWidth={2.5} />
-                <Line dataKey="memoryPercent" stroke={chartCssVars.lineSecondary} strokeWidth={2.5} />
+                <Line
+                  dataKey="memoryPercent"
+                  stroke={chartCssVars.lineSecondary}
+                  strokeWidth={2.5}
+                />
                 <XAxis />
                 <ChartTooltip
                   rows={(point) => [
@@ -411,7 +415,12 @@ function DomainsSection({ serverId, sshHost }: { serverId: string; sshHost: stri
     <div className="max-w-2xl rounded-lg border bg-card p-6">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-lg font-semibold">Domains</h2>
-        <Button loading={resync.isPending} onClick={() => resync.mutate()} size="sm" variant="outline">
+        <Button
+          loading={resync.isPending}
+          onClick={() => resync.mutate()}
+          size="sm"
+          variant="outline"
+        >
           Resync proxy
         </Button>
       </div>

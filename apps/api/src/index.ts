@@ -19,11 +19,11 @@ import { sshKeys } from "./ssh-keys";
 
 const app = new Hono();
 const webDist = Bun.env.WEB_DIST ?? "./apps/web/dist";
-const allowedOrigins = new Set([
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  Bun.env.WEB_ORIGIN,
-].filter((origin): origin is string => Boolean(origin)));
+const allowedOrigins = new Set(
+  ["http://localhost:5173", "http://127.0.0.1:5173", Bun.env.WEB_ORIGIN].filter(
+    (origin): origin is string => Boolean(origin),
+  ),
+);
 
 app.use(logger());
 app.use(

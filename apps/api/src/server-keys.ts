@@ -22,17 +22,7 @@ export async function generateServerKeyPair(serverId: string): Promise<Generated
 
   try {
     const proc = Bun.spawn(
-      [
-        "ssh-keygen",
-        "-t",
-        "ed25519",
-        "-N",
-        "",
-        "-C",
-        `basse-${serverId}`,
-        "-f",
-        keyPath,
-      ],
+      ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", `basse-${serverId}`, "-f", keyPath],
       { stdout: "pipe", stderr: "pipe" },
     );
 

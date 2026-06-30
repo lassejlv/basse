@@ -23,20 +23,20 @@ build hermetic (no `go.sum`, no module downloads).
 
 ## Endpoints
 
-| Method | Path          | Auth   | Purpose                                  |
-| ------ | ------------- | ------ | ---------------------------------------- |
-| GET    | `/healthz`    | none   | Liveness. Always 200 if the process is up. |
+| Method | Path          | Auth   | Purpose                                       |
+| ------ | ------------- | ------ | --------------------------------------------- |
+| GET    | `/healthz`    | none   | Liveness. Always 200 if the process is up.    |
 | GET    | `/readyz`     | none   | Readiness. 200 if Docker reachable, else 503. |
-| GET    | `/v1/info`    | bearer | Host + Docker facts.                     |
-| GET    | `/v1/version` | bearer | Agent build version.                     |
+| GET    | `/v1/info`    | bearer | Host + Docker facts.                          |
+| GET    | `/v1/version` | bearer | Agent build version.                          |
 
 ## Configuration
 
-| Env var               | Default                  | Notes                            |
-| --------------------- | ------------------------ | -------------------------------- |
-| `BASSE_AGENT_TOKEN`   | —                        | Required. Bearer credential.     |
-| `BASSE_AGENT_PORT`    | `8888`                   | Listen port.                     |
-| `BASSE_DOCKER_SOCKET` | `/var/run/docker.sock`   | Docker Engine API socket.        |
+| Env var               | Default                | Notes                        |
+| --------------------- | ---------------------- | ---------------------------- |
+| `BASSE_AGENT_TOKEN`   | —                      | Required. Bearer credential. |
+| `BASSE_AGENT_PORT`    | `8888`                 | Listen port.                 |
+| `BASSE_DOCKER_SOCKET` | `/var/run/docker.sock` | Docker Engine API socket.    |
 
 ## Commands
 

@@ -3,7 +3,18 @@ import { Link, createFileRoute } from "@tanstack/react-router";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { ArrowLeftIcon, ExternalLinkIcon, PlusIcon, RocketIcon, TrashIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  CheckIcon,
+  CopyIcon,
+  ExternalLinkIcon,
+  EyeIcon,
+  EyeOffIcon,
+  PencilIcon,
+  PlusIcon,
+  RocketIcon,
+  TrashIcon,
+} from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import type { AppBuildRunner, AppSourceType, AppVolume, Deployment } from "@basse/shared";
 import { chartCssVars } from "@/components/charts/chart-context";
@@ -38,7 +49,8 @@ import {
 } from "@/lib/apps";
 import { listDeployments, triggerDeploy } from "@/lib/deployments";
 import { createDomain, deleteDomain, listDomains } from "@/lib/domains";
-import { listEnvVars, setEnvVars } from "@/lib/env-vars";
+import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
+import { listEnvVars, revealEnvVars, setEnvVars } from "@/lib/env-vars";
 import { listServers } from "@/lib/servers";
 
 export const Route = createFileRoute("/_authed/apps/$appId")({
@@ -963,78 +975,197 @@ function AppConsoleTerminal({ appId, serverId }: { appId: string; serverId: stri
   );
 }
 
+function useClipboard() {
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function copy(id: string, text: string) {
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopiedId(id);
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => setCopiedId(null), 1500);
+    });
+  }
+
+  return { copiedId, copy };
+}
+
 function EnvVarsCard({ appId }: { appId: string }) {
   const queryClient = useQueryClient();
-  const queryKey = ["env-vars", appId];
+  const maskedKey = ["env-vars", appId];
+  const revealKey = ["env-vars-reveal", appId];
+
+  const [editing, setEditing] = useState(false);
+  const [revealed, setRevealed] = useState(false);
+  const [preparing, setPreparing] = useState(false);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const { copiedId, copy } = useClipboard();
 
-  const vars = useQuery({ queryKey, queryFn: () => listEnvVars(appId) });
+  const vars = useQuery({ queryKey: maskedKey, queryFn: () => listEnvVars(appId) });
+  const reveal = useQuery({
+    queryKey: revealKey,
+    queryFn: () => revealEnvVars(appId),
+    enabled: revealed && !editing,
+  });
+
+  const list = vars.data ?? [];
+  const revealedMap = new Map((reveal.data ?? []).map((v) => [v.key, v.value]));
+
+  function ensureRevealed() {
+    return queryClient.fetchQuery({ queryKey: revealKey, queryFn: () => revealEnvVars(appId) });
+  }
 
   const save = useMutation({
-    mutationFn: () => {
-      const parsed = draft
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line && !line.startsWith("#"))
-        .map((line) => {
-          const eq = line.indexOf("=");
-          return { key: line.slice(0, eq).trim(), value: line.slice(eq + 1) };
-        })
-        .filter((v) => v.key);
-      return setEnvVars(appId, parsed);
-    },
+    mutationFn: () => setEnvVars(appId, parseDotenv(draft)),
     onSuccess: async () => {
-      setDraft("");
       setError(null);
-      await queryClient.invalidateQueries({ queryKey });
+      setEditing(false);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: maskedKey }),
+        queryClient.invalidateQueries({ queryKey: revealKey }),
+      ]);
     },
     onError: (e: Error) => setError(e.message),
   });
 
-  const list = vars.data ?? [];
+  async function startEdit() {
+    setError(null);
+    setPreparing(true);
+    try {
+      setDraft(serializeDotenv(await ensureRevealed()));
+      setEditing(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load variables.");
+    } finally {
+      setPreparing(false);
+    }
+  }
+
+  async function copyAll() {
+    try {
+      copy("__all__", serializeDotenv(await ensureRevealed()));
+    } catch {
+      // Reveal failed — nothing to copy.
+    }
+  }
+
+  async function copyRow(key: string) {
+    try {
+      const pairs = await ensureRevealed();
+      copy(key, pairs.find((pair) => pair.key === key)?.value ?? "");
+    } catch {
+      // Reveal failed — nothing to copy.
+    }
+  }
 
   return (
     <Card className="p-6">
-      <h2 className="font-semibold text-lg">Environment variables</h2>
-      <p className="mt-1 text-muted-foreground text-sm">
-        Runtime variables, encrypted at rest. Changes apply on the next deploy.
-      </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="font-semibold text-lg">Environment variables</h2>
+          <p className="mt-1 text-muted-foreground text-sm">
+            Runtime variables, encrypted at rest. Changes apply on the next deploy.
+          </p>
+        </div>
+        {!editing && list.length > 0 ? (
+          <div className="flex items-center gap-2">
+            <Button onClick={() => setRevealed((value) => !value)} size="sm" variant="outline">
+              {revealed ? <EyeOffIcon /> : <EyeIcon />}
+              {revealed ? "Hide" : "Reveal"}
+            </Button>
+            <Button onClick={copyAll} size="sm" variant="outline">
+              {copiedId === "__all__" ? <CheckIcon /> : <CopyIcon />}
+              .env
+            </Button>
+            <Button loading={preparing} onClick={startEdit} size="sm">
+              <PencilIcon />
+              Edit
+            </Button>
+          </div>
+        ) : null}
+      </div>
 
-      <div className="mt-5">
-        {vars.isPending ? (
-          <p className="text-muted-foreground text-sm">Loading…</p>
-        ) : list.length === 0 ? (
+      {editing ? (
+        <form
+          className="mt-5 space-y-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            save.mutate();
+          }}
+        >
+          <Textarea
+            autoFocus
+            className="min-h-56 font-mono text-xs leading-relaxed"
+            onChange={(event) => setDraft(event.currentTarget.value)}
+            spellCheck={false}
+            value={draft}
+          />
+          <p className="text-muted-foreground text-xs">
+            One <code className="font-mono">KEY=value</code> per line. Quote values with spaces, use{" "}
+            <code className="font-mono">\n</code> for newlines, <code className="font-mono">#</code> for
+            comments. Saving replaces the whole set.
+          </p>
+          {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+          <div className="flex gap-2">
+            <Button loading={save.isPending} type="submit">
+              Save variables
+            </Button>
+            <Button
+              onClick={() => {
+                setEditing(false);
+                setError(null);
+              }}
+              type="button"
+              variant="outline"
+            >
+              Cancel
+            </Button>
+          </div>
+        </form>
+      ) : vars.isPending ? (
+        <p className="mt-5 text-muted-foreground text-sm">Loading…</p>
+      ) : list.length === 0 ? (
+        <div className="mt-5 flex flex-col items-start gap-3 rounded-md border border-dashed p-5">
           <p className="text-muted-foreground text-sm">No variables set.</p>
-        ) : (
-          <ul className="divide-y rounded-md border">
-            {list.map((v) => (
-              <li key={v.key} className="flex justify-between gap-3 px-3 py-2 font-mono text-sm">
-                <span className="truncate font-medium">{v.key}</span>
-                <span className="shrink-0 text-muted-foreground">{v.valueHint}</span>
+          <Button loading={preparing} onClick={startEdit} size="sm" variant="outline">
+            <PlusIcon />
+            Add variables
+          </Button>
+        </div>
+      ) : (
+        <ul className="mt-5 divide-y rounded-md border">
+          {list.map((v) => {
+            const display = revealed
+              ? reveal.isPending
+                ? "…"
+                : (revealedMap.get(v.key) ?? "")
+              : v.valueHint;
+            return (
+              <li key={v.key} className="flex items-center gap-3 px-3 py-2 font-mono text-sm">
+                <span className="min-w-0 max-w-[45%] truncate font-medium text-foreground">
+                  {v.key}
+                </span>
+                <span
+                  className="min-w-0 flex-1 truncate text-right text-muted-foreground"
+                  title={revealed ? revealedMap.get(v.key) : undefined}
+                >
+                  {display}
+                </span>
+                <Button
+                  aria-label={`Copy ${v.key}`}
+                  className="shrink-0"
+                  onClick={() => copyRow(v.key)}
+                  size="icon-xs"
+                  variant="ghost"
+                >
+                  {copiedId === v.key ? <CheckIcon /> : <CopyIcon />}
+                </Button>
               </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      <div className="mt-6 space-y-3 border-t pt-6">
-        <p className="text-sm">
-          Paste <code className="font-mono">KEY=value</code> lines to <strong>replace</strong> the
-          whole set:
-        </p>
-        <Textarea
-          className="font-mono text-xs"
-          onChange={(e) => setDraft(e.currentTarget.value)}
-          placeholder={"DATABASE_URL=postgres://…\nPORT=3000"}
-          rows={5}
-          value={draft}
-        />
-        {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
-        <Button disabled={!draft.trim()} loading={save.isPending} onClick={() => save.mutate()}>
-          Save variables
-        </Button>
-      </div>
+            );
+          })}
+        </ul>
+      )}
     </Card>
   );
 }

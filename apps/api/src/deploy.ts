@@ -123,7 +123,11 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       .returning({ id: deployment.id });
     if (!claimed[0]) return;
 
-    const [dep] = await db.select().from(deployment).where(eq(deployment.id, deploymentId)).limit(1);
+    const [dep] = await db
+      .select()
+      .from(deployment)
+      .where(eq(deployment.id, deploymentId))
+      .limit(1);
     if (!dep) return;
 
     const [appRow] = await db.select().from(app).where(eq(app.id, dep.appId)).limit(1);
@@ -173,7 +177,9 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       appRow.buildRunner === "server" &&
       targetServers.length !== 1
     ) {
-      log.line("Selected-server builds require exactly one attached server. Use Depot for multi-server deploys.");
+      log.line(
+        "Selected-server builds require exactly one attached server. Use Depot for multi-server deploys.",
+      );
       await log.done();
       await setStatus(deploymentId, "failed");
       return;

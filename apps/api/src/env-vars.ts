@@ -1,5 +1,5 @@
 import { db, envVar } from "@basse/db";
-import type { EnvVarMasked, SetEnvVarsInput } from "@basse/shared";
+import type { EnvVarMasked, EnvVarPlain, SetEnvVarsInput } from "@basse/shared";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { ownedApp } from "./apps";
@@ -25,11 +25,7 @@ envVars.get("/:appId/env-vars", async (c) => {
   const owned = await ownedApp(c.req.param("appId"), organizationId);
   if (!owned) return c.json({ error: "App not found" }, 404);
 
-  const rows = await db
-    .select()
-    .from(envVar)
-    .where(eq(envVar.appId, owned.id))
-    .orderBy(envVar.key);
+  const rows = await db.select().from(envVar).where(eq(envVar.appId, owned.id)).orderBy(envVar.key);
 
   const masked: EnvVarMasked[] = await Promise.all(
     rows.map(async (row) => ({
@@ -40,6 +36,24 @@ envVars.get("/:appId/env-vars", async (c) => {
   );
 
   return c.json(masked);
+});
+
+// GET /api/apps/:appId/env-vars/reveal — decrypted plaintext for the editor.
+// Same workspace-auth gate as everything else; the user owns these secrets.
+envVars.get("/:appId/env-vars/reveal", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const owned = await ownedApp(c.req.param("appId"), organizationId);
+  if (!owned) return c.json({ error: "App not found" }, 404);
+
+  const rows = await db.select().from(envVar).where(eq(envVar.appId, owned.id)).orderBy(envVar.key);
+
+  const revealed: EnvVarPlain[] = await Promise.all(
+    rows.map(async (row) => ({ key: row.key, value: await decryptSecret(row.value) })),
+  );
+
+  return c.json(revealed);
 });
 
 // PUT /api/apps/:appId/env-vars — bulk replace the whole set (encrypted at rest).
