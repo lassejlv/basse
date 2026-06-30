@@ -1,6 +1,6 @@
-import { app, db, environment, project, server } from "@basse/db";
+import { app, appServer, db, environment, project, server } from "@basse/db";
 import type { App, AppBuildMode, CreateAppInput, UpdateAppInput } from "@basse/shared";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import { resolveActiveWorkspace } from "./workspace";
 
@@ -29,10 +29,11 @@ function validateRepositoryUrl(url: string): string | null {
   return null;
 }
 
-function toApp(row: AppRow): App {
+function toApp(row: AppRow, serverIds: string[] = row.serverId ? [row.serverId] : []): App {
   return {
     id: row.id,
     environmentId: row.environmentId,
+    serverIds,
     serverId: row.serverId,
     name: row.name,
     slug: row.slug,
@@ -43,6 +44,31 @@ function toApp(row: AppRow): App {
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+async function loadAppServerIds(appIds: string[]): Promise<Map<string, string[]>> {
+  const ids = [...new Set(appIds)];
+  const map = new Map<string, string[]>();
+  for (const id of ids) map.set(id, []);
+  if (ids.length === 0) return map;
+
+  const rows = await db
+    .select({ appId: appServer.appId, serverId: appServer.serverId })
+    .from(appServer)
+    .where(inArray(appServer.appId, ids));
+  for (const row of rows) {
+    map.get(row.appId)?.push(row.serverId);
+  }
+  return map;
+}
+
+function normalizeServerIds(body: Partial<CreateAppInput | UpdateAppInput> | null): string[] | null {
+  if (Array.isArray(body?.serverIds)) {
+    return [...new Set(body.serverIds.filter((id): id is string => typeof id === "string" && id.length > 0))];
+  }
+  if (typeof body?.serverId === "string" && body.serverId) return [body.serverId];
+  if (body && "serverId" in body && body.serverId === null) return [];
+  return null;
 }
 
 /** Verifies an environment belongs to the active workspace (env->project->org). */
@@ -71,14 +97,13 @@ export async function ownedApp(appId: string, organizationId: string): Promise<A
   return row?.app ?? null;
 }
 
-/** Verifies a server belongs to the active workspace. */
-async function serverInOrg(serverId: string, organizationId: string): Promise<boolean> {
-  const [row] = await db
+async function validateServersInOrg(serverIds: string[], organizationId: string): Promise<boolean> {
+  if (serverIds.length === 0) return true;
+  const rows = await db
     .select({ id: server.id })
     .from(server)
-    .where(and(eq(server.id, serverId), eq(server.organizationId, organizationId)))
-    .limit(1);
-  return Boolean(row);
+    .where(and(inArray(server.id, serverIds), eq(server.organizationId, organizationId)));
+  return rows.length === serverIds.length;
 }
 
 export const apps = new Hono();
@@ -98,7 +123,8 @@ apps.get("/", async (c) => {
     .where(eq(app.environmentId, environmentId))
     .orderBy(app.createdAt);
 
-  return c.json(rows.map(toApp));
+  const serverIds = await loadAppServerIds(rows.map((row) => row.id));
+  return c.json(rows.map((row) => toApp(row, serverIds.get(row.id))));
 });
 
 apps.get("/:id", async (c) => {
@@ -108,7 +134,8 @@ apps.get("/:id", async (c) => {
   const row = await ownedApp(c.req.param("id"), organizationId);
   if (!row) return c.json({ error: "App not found" }, 404);
 
-  return c.json(toApp(row));
+  const serverIds = await loadAppServerIds([row.id]);
+  return c.json(toApp(row, serverIds.get(row.id)));
 });
 
 apps.post("/", async (c) => {
@@ -124,7 +151,8 @@ apps.post("/", async (c) => {
   const buildMode = BUILD_MODES.includes(body?.buildMode as AppBuildMode)
     ? (body?.buildMode as AppBuildMode)
     : "auto";
-  const serverId = typeof body?.serverId === "string" && body.serverId ? body.serverId : null;
+  const serverIds = normalizeServerIds(body) ?? [];
+  const serverId = serverIds[0] ?? null;
 
   if (!(await ownedEnvironmentId(environmentId, organizationId))) {
     return c.json({ error: "Environment not found" }, 404);
@@ -135,31 +163,45 @@ apps.post("/", async (c) => {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return c.json({ error: "port must be a valid port" }, 400);
   }
-  if (serverId && !(await serverInOrg(serverId, organizationId))) {
+  if (!(await validateServersInOrg(serverIds, organizationId))) {
     return c.json({ error: "Server not found" }, 404);
   }
 
   const now = new Date();
   try {
-    const [created] = await db
-      .insert(app)
-      .values({
-        id: crypto.randomUUID(),
-        environmentId,
-        serverId,
-        name,
-        slug: slugify(name),
-        repositoryUrl,
-        branch,
-        port,
-        buildMode,
-        createdAt: now,
-        updatedAt: now,
-      })
-      .returning();
+    const created = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .insert(app)
+        .values({
+          id: crypto.randomUUID(),
+          environmentId,
+          serverId,
+          name,
+          slug: slugify(name),
+          repositoryUrl,
+          branch,
+          port,
+          buildMode,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+
+      if (row && serverIds.length > 0) {
+        await tx.insert(appServer).values(
+          serverIds.map((selectedServerId) => ({
+            appId: row.id,
+            serverId: selectedServerId,
+            createdAt: now,
+          })),
+        );
+      }
+
+      return row;
+    });
 
     if (!created) return c.json({ error: "Failed to create app" }, 500);
-    return c.json(toApp(created), 201);
+    return c.json(toApp(created, serverIds), 201);
   } catch {
     return c.json({ error: "An app with that name already exists in this environment" }, 409);
   }
@@ -194,20 +236,33 @@ apps.patch("/:id", async (c) => {
   if (BUILD_MODES.includes(body?.buildMode as AppBuildMode)) {
     updates.buildMode = body?.buildMode as AppBuildMode;
   }
-  if (body && "serverId" in body) {
-    if (body.serverId === null) {
-      updates.serverId = null;
-    } else if (typeof body.serverId === "string") {
-      if (!(await serverInOrg(body.serverId, organizationId))) {
-        return c.json({ error: "Server not found" }, 404);
-      }
-      updates.serverId = body.serverId;
+  const serverIds = normalizeServerIds(body);
+  if (serverIds) {
+    if (!(await validateServersInOrg(serverIds, organizationId))) {
+      return c.json({ error: "Server not found" }, 404);
     }
+    updates.serverId = serverIds[0] ?? null;
   }
 
-  const [updated] = await db.update(app).set(updates).where(eq(app.id, existing.id)).returning();
+  const updated = await db.transaction(async (tx) => {
+    const [row] = await tx.update(app).set(updates).where(eq(app.id, existing.id)).returning();
+    if (serverIds) {
+      await tx.delete(appServer).where(eq(appServer.appId, existing.id));
+      if (serverIds.length > 0) {
+        await tx.insert(appServer).values(
+          serverIds.map((selectedServerId) => ({
+            appId: existing.id,
+            serverId: selectedServerId,
+            createdAt: new Date(),
+          })),
+        );
+      }
+    }
+    return row;
+  });
   if (!updated) return c.json({ error: "Failed to update app" }, 500);
-  return c.json(toApp(updated));
+  const currentServerIds = serverIds ?? (await loadAppServerIds([updated.id])).get(updated.id);
+  return c.json(toApp(updated, currentServerIds));
 });
 
 apps.delete("/:id", async (c) => {

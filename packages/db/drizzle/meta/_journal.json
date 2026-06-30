@@ -57,6 +57,13 @@
       "when": 1782783820340,
       "tag": "0007_deploy_drop_project",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1782786492914,
+      "tag": "0008_sticky_sue_storm",
+      "breakpoints": true
     }
   ]
 }

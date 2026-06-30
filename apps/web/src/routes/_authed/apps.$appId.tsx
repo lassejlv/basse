@@ -5,15 +5,9 @@ import { FormEvent, useState } from "react";
 import type { DeploymentStatus } from "@basse/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectItem,
-  SelectPopup,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import type { App } from "@/lib/apps";
 import { getApp, updateApp } from "@/lib/apps";
@@ -58,17 +52,21 @@ function AppDetailRoute() {
         <p className="mt-2 font-mono text-muted-foreground text-sm">
           {data.repositoryUrl} · {data.branch} · :{data.port} · {data.buildMode}
         </p>
-        {!data.serverId ? (
+        {data.serverIds.length === 0 ? (
           <p className="mt-2 text-warning-foreground text-sm">
-            No server attached — set one before deploying.
+            No servers attached — select at least one before deploying.
           </p>
         ) : null}
       </div>
 
       <ServerCard app={data} />
-      <DeploySection appId={appId} canDeploy={Boolean(data.serverId)} />
+      <DeploySection appId={appId} canDeploy={data.serverIds.length > 0} />
       <EnvVarsCard appId={appId} />
-      {data.serverId ? <AppDomainsSection app={data} serverId={data.serverId} /> : null}
+      {data.serverIds.length === 1 ? (
+        <AppDomainsSection app={data} serverId={data.serverIds[0]!} />
+      ) : data.serverIds.length > 1 ? (
+        <DisabledDomainsSection />
+      ) : null}
     </section>
   );
 }
@@ -77,20 +75,28 @@ function ServerCard({ app }: { app: App }) {
   const queryClient = useQueryClient();
   const servers = useQuery({ queryKey: ["servers", "for-apps"], queryFn: listServers });
 
-  const setServer = useMutation({
-    mutationFn: (serverId: string) => updateApp(app.id, { serverId }),
+  const setServers = useMutation({
+    mutationFn: (serverIds: string[]) => updateApp(app.id, { serverIds }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["app", app.id] });
     },
   });
 
   const serverList = servers.data ?? [];
+  const selectedServerIds = app.serverIds;
+
+  function toggleServer(serverId: string, checked: boolean) {
+    const next = checked
+      ? [...new Set([...selectedServerIds, serverId])]
+      : selectedServerIds.filter((id) => id !== serverId);
+    setServers.mutate(next);
+  }
 
   return (
     <div className="max-w-2xl rounded-lg border bg-card p-6">
-      <h2 className="text-lg font-semibold">Server</h2>
+      <h2 className="text-lg font-semibold">Servers</h2>
       <p className="mt-1 text-muted-foreground text-sm">
-        The server this app deploys to. Only active servers can run deployments.
+        The servers this app deploys to. Only active servers can run deployments.
       </p>
       <div className="mt-4">
         {servers.isPending ? (
@@ -98,28 +104,27 @@ function ServerCard({ app }: { app: App }) {
         ) : serverList.length === 0 ? (
           <p className="text-muted-foreground text-sm">No servers in this workspace yet.</p>
         ) : (
-          <Select
-            value={app.serverId ?? ""}
-            onValueChange={(v) => {
-              if (v) setServer.mutate(v);
-            }}
-          >
-            <SelectTrigger className="w-full max-w-sm">
-              <SelectValue placeholder="Select a server">
-                {(value: string) => {
-                  const s = serverList.find((x) => x.id === value);
-                  return s ? `${s.name} (${s.status})` : "Select a server";
-                }}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              {serverList.map((s) => (
-                <SelectItem key={s.id} value={s.id}>
-                  {s.name} ({s.status})
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
+          <div className="flex flex-col gap-2">
+            {serverList.map((s) => {
+              const checked = selectedServerIds.includes(s.id);
+              return (
+                <label
+                  key={s.id}
+                  className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium">{s.name}</span>
+                    <span className="text-muted-foreground">{s.status}</span>
+                  </span>
+                  <Checkbox
+                    checked={checked}
+                    disabled={setServers.isPending}
+                    onCheckedChange={(value) => toggleServer(s.id, value === true)}
+                  />
+                </label>
+              );
+            })}
+          </div>
         )}
       </div>
     </div>
@@ -270,6 +275,7 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
   const queryClient = useQueryClient();
   const queryKey = ["domains", serverId];
   const upstream = `basse-app-${app.id}:${app.port}`;
+  const servers = useQuery({ queryKey: ["servers", "for-domains"], queryFn: listServers });
   const [host, setHost] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -304,13 +310,15 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
 
   // Only this app's domains (the server may host domains for other apps too).
   const appDomains = (domains.data ?? []).filter((d) => d.appId === app.id);
+  const selectedServer = (servers.data ?? []).find((s) => s.id === serverId);
 
   return (
     <div className="max-w-2xl rounded-lg border bg-card p-6">
       <h2 className="text-lg font-semibold">Domains</h2>
       <p className="mt-1 text-muted-foreground text-sm">
-        Point a domain's DNS at the app's server; it routes to{" "}
-        <code className="font-mono">{upstream}</code> with automatic HTTPS.
+        Add an A record for your domain pointing to{" "}
+        <code className="font-mono">{selectedServer?.sshHost ?? "this server"}</code>. Basse will
+        configure HTTPS on that server and route traffic to the app.
       </p>
 
       <div className="mt-5">
@@ -355,6 +363,18 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
         </Button>
       </form>
       {error ? <p className="mt-2 text-destructive-foreground text-sm">{error}</p> : null}
+    </div>
+  );
+}
+
+function DisabledDomainsSection() {
+  return (
+    <div className="max-w-2xl rounded-lg border bg-card p-6 opacity-70">
+      <h2 className="text-lg font-semibold">Domains</h2>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Domain management is disabled while this app deploys to multiple servers. Select one target
+        server, or add a load balancer/shared ingress before attaching domains here.
+      </p>
     </div>
   );
 }

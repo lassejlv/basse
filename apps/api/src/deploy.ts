@@ -1,4 +1,14 @@
-import { app, db, deployment, depotConnection, environment, envVar, project, server } from "@basse/db";
+import {
+  app,
+  appServer,
+  db,
+  deployment,
+  depotConnection,
+  environment,
+  envVar,
+  project,
+  server,
+} from "@basse/db";
 import { and, eq, inArray, ne } from "drizzle-orm";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -101,16 +111,23 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         ),
       );
 
-    if (!appRow.serverId) {
-      log.line("No server attached to this app.");
+    const serverRows = await db
+      .select({ server })
+      .from(appServer)
+      .innerJoin(server, eq(appServer.serverId, server.id))
+      .where(eq(appServer.appId, appRow.id));
+    const targetServers = serverRows.map((row) => row.server);
+
+    if (targetServers.length === 0) {
+      log.line("No servers attached to this app.");
       await log.done();
       await setStatus(deploymentId, "failed");
       return;
     }
 
-    const [srv] = await db.select().from(server).where(eq(server.id, appRow.serverId)).limit(1);
-    if (!srv || srv.status !== "active" || !srv.agentToken) {
-      log.line("Target server is not active.");
+    const inactive = targetServers.find((srv) => srv.status !== "active" || !srv.agentToken);
+    if (inactive) {
+      log.line(`Target server ${inactive.name} is not active.`);
       await log.done();
       await setStatus(deploymentId, "failed");
       return;
@@ -179,26 +196,34 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       envMap[v.key] = await decryptSecret(v.value);
     }
 
-    // Deploy on the server's agent (ensure the proxy first so it has a router).
-    log.line("Deploying to the server…");
-    const connection = await connectionFromServer(srv);
-    const agentToken = await decryptSecret(srv.agentToken);
-    await ensureProxy(connection, agentToken);
-    const result = await deployApp(connection, agentToken, {
-      appId: appRow.id,
-      image: imageRef,
-      port: appRow.port,
-      env: envMap,
-      registry: {
-        host: `${depot.orgId}.registry.depot.dev`,
-        user: "x-token",
-        token: pullToken,
-      },
-    });
+    let allRunning = true;
+    for (const srv of targetServers) {
+      log.line(`Deploying to ${srv.name}…`);
+      const connection = await connectionFromServer(srv);
+      const agentToken = await decryptSecret(srv.agentToken!);
+      await ensureProxy(connection, agentToken);
+      const result = await deployApp(connection, agentToken, {
+        appId: appRow.id,
+        image: imageRef,
+        port: appRow.port,
+        env: envMap,
+        registry: {
+          host: `${depot.orgId}.registry.depot.dev`,
+          user: "x-token",
+          token: pullToken,
+        },
+      });
 
-    log.line(result.running ? "Container is running." : "Container did not start.");
+      log.line(
+        result.running
+          ? `Container is running on ${srv.name}.`
+          : `Container did not start on ${srv.name}.`,
+      );
+      allRunning &&= result.running;
+    }
+
     await log.done();
-    await setStatus(deploymentId, result.running ? "healthy" : "failed");
+    await setStatus(deploymentId, allRunning ? "healthy" : "failed");
   } catch (error) {
     log.line(`Error: ${error instanceof Error ? error.message : String(error)}`);
     await log.done().catch(() => {});

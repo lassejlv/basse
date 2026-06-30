@@ -3,15 +3,9 @@ import { Link, createFileRoute } from "@tanstack/react-router";
 import { ArrowLeftIcon } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectItem,
-  SelectPopup,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { createApp, listApps } from "@/lib/apps";
 import { createEnvironment, listEnvironments } from "@/lib/environments";
 import { getProject } from "@/lib/projects";
@@ -131,7 +125,7 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [branch, setBranch] = useState("main");
   const [port, setPort] = useState("3000");
-  const [serverId, setServerId] = useState("");
+  const [serverIds, setServerIds] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const add = useMutation({
@@ -142,14 +136,14 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
         repositoryUrl,
         branch,
         port: Number(port),
-        serverId: serverId || undefined,
+        serverIds,
       }),
     onSuccess: async () => {
       setName("");
       setRepositoryUrl("");
       setBranch("main");
       setPort("3000");
-      setServerId("");
+      setServerIds([]);
       setError(null);
       await queryClient.invalidateQueries({ queryKey });
     },
@@ -163,6 +157,14 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
 
   const appList = apps.data ?? [];
   const serverList = servers.data ?? [];
+
+  function toggleServer(serverId: string, checked: boolean) {
+    setServerIds((current) =>
+      checked
+        ? [...new Set([...current, serverId])]
+        : current.filter((selectedServerId) => selectedServerId !== serverId),
+    );
+  }
 
   return (
     <div className="flex max-w-3xl flex-col gap-6">
@@ -233,7 +235,7 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
           </div>
         </div>
         <div className="space-y-2">
-          <Label>Server</Label>
+          <Label>Servers</Label>
           {servers.isPending ? (
             <p className="text-muted-foreground text-sm">Loading servers…</p>
           ) : serverList.length === 0 ? (
@@ -245,22 +247,23 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
               first (you can also attach it after creating the app).
             </p>
           ) : (
-            <Select value={serverId} onValueChange={(v) => setServerId(v ?? "")}>
-              <SelectTrigger className="w-full">
-                <SelectValue placeholder="Select a server">
-                  {(value: string) =>
-                    serverList.find((s) => s.id === value)?.name ?? "Select a server"
-                  }
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup>
-                {serverList.map((s) => (
-                  <SelectItem key={s.id} value={s.id}>
-                    {s.name}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
+            <div className="flex flex-col gap-2">
+              {serverList.map((s) => (
+                <label
+                  key={s.id}
+                  className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium">{s.name}</span>
+                    <span className="text-muted-foreground">{s.status}</span>
+                  </span>
+                  <Checkbox
+                    checked={serverIds.includes(s.id)}
+                    onCheckedChange={(value) => toggleServer(s.id, value === true)}
+                  />
+                </label>
+              ))}
+            </div>
           )}
         </div>
 

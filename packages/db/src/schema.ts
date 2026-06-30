@@ -117,6 +117,24 @@ export const app = pgTable(
   ],
 );
 
+export const appServer = pgTable(
+  "app_server",
+  {
+    appId: text("app_id")
+      .notNull()
+      .references(() => app.id, { onDelete: "cascade" }),
+    serverId: text("server_id")
+      .notNull()
+      .references(() => server.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("app_server_appId_serverId_uidx").on(table.appId, table.serverId),
+    index("app_server_appId_idx").on(table.appId),
+    index("app_server_serverId_idx").on(table.serverId),
+  ],
+);
+
 // Runtime environment variables for an app. Values are encrypted at rest.
 export const envVar = pgTable(
   "env_var",
@@ -177,6 +195,7 @@ export const serverRelations = relations(server, ({ one, many }) => ({
     references: [organization.id],
   }),
   apps: many(app),
+  appServers: many(appServer),
 }));
 
 export const appRelations = relations(app, ({ one, many }) => ({
@@ -190,6 +209,18 @@ export const appRelations = relations(app, ({ one, many }) => ({
   }),
   deployments: many(deployment),
   envVars: many(envVar),
+  appServers: many(appServer),
+}));
+
+export const appServerRelations = relations(appServer, ({ one }) => ({
+  app: one(app, {
+    fields: [appServer.appId],
+    references: [app.id],
+  }),
+  server: one(server, {
+    fields: [appServer.serverId],
+    references: [server.id],
+  }),
 }));
 
 export const envVarRelations = relations(envVar, ({ one }) => ({

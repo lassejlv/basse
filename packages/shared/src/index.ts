@@ -35,6 +35,7 @@ export type AppBuildMode = "auto" | "dockerfile" | "railpack";
 export type App = {
   id: string;
   environmentId: string;
+  serverIds: string[];
   serverId: string | null;
   name: string;
   slug: string;
@@ -54,6 +55,7 @@ export type CreateAppInput = {
   port?: number;
   buildMode?: AppBuildMode;
   serverId?: string;
+  serverIds?: string[];
 };
 
 export type UpdateAppInput = {
@@ -63,6 +65,7 @@ export type UpdateAppInput = {
   port?: number;
   buildMode?: AppBuildMode;
   serverId?: string | null;
+  serverIds?: string[];
 };
 
 // Env var with the value masked (last-4 only). Plaintext never leaves the API.

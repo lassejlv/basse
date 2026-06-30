@@ -1,4 +1,4 @@
-import { db, deployment } from "@basse/db";
+import { appServer, db, deployment } from "@basse/db";
 import type { Deployment } from "@basse/shared";
 import { desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -66,8 +66,12 @@ deployments.post("/", async (c) => {
 
   const appRow = await ownedApp(appId, organizationId);
   if (!appRow) return c.json({ error: "App not found" }, 404);
-  if (!appRow.serverId) {
-    return c.json({ error: "Attach a server to the app before deploying" }, 400);
+  const targetServers = await db
+    .select({ serverId: appServer.serverId })
+    .from(appServer)
+    .where(eq(appServer.appId, appRow.id));
+  if (targetServers.length === 0) {
+    return c.json({ error: "Attach at least one server to the app before deploying" }, 400);
   }
 
   const now = new Date();
