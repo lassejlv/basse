@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -55,6 +56,18 @@ type RegistryAuth struct {
 type ContainerState struct {
 	Exists  bool
 	Running bool
+}
+
+type ContainerMetrics struct {
+	CPUPercent       float64 `json:"cpuPercent"`
+	MemoryBytes      uint64  `json:"memoryBytes"`
+	MemoryLimitBytes uint64  `json:"memoryLimitBytes"`
+	MemoryPercent    float64 `json:"memoryPercent"`
+}
+
+type ExecResult struct {
+	ExitCode int    `json:"exitCode"`
+	Output   string `json:"output"`
 }
 
 // imagePullTimeout bounds a (possibly large) image pull.
@@ -211,6 +224,171 @@ func (c *Client) RemoveContainer(ctx context.Context, name string) error {
 		return fmt.Errorf("remove %s: status %d: %s", name, resp.StatusCode, b)
 	}
 	return nil
+}
+
+func (c *Client) ContainerStats(ctx context.Context, name string) (ContainerMetrics, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/containers/"+name+"/stats?stream=false", nil)
+	if err != nil {
+		return ContainerMetrics{}, err
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return ContainerMetrics{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return ContainerMetrics{}, fmt.Errorf("stats %s: status %d: %s", name, resp.StatusCode, b)
+	}
+
+	var out struct {
+		CPUStats struct {
+			CPUUsage struct {
+				TotalUsage  uint64   `json:"total_usage"`
+				PercpuUsage []uint64 `json:"percpu_usage"`
+			} `json:"cpu_usage"`
+			SystemCPUUsage uint64 `json:"system_cpu_usage"`
+			OnlineCPUs     uint32 `json:"online_cpus"`
+		} `json:"cpu_stats"`
+		PreCPUStats struct {
+			CPUUsage struct {
+				TotalUsage uint64 `json:"total_usage"`
+			} `json:"cpu_usage"`
+			SystemCPUUsage uint64 `json:"system_cpu_usage"`
+		} `json:"precpu_stats"`
+		MemoryStats struct {
+			Usage uint64 `json:"usage"`
+			Limit uint64 `json:"limit"`
+		} `json:"memory_stats"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return ContainerMetrics{}, err
+	}
+
+	cpuDelta := uintDelta(out.CPUStats.CPUUsage.TotalUsage, out.PreCPUStats.CPUUsage.TotalUsage)
+	systemDelta := uintDelta(out.CPUStats.SystemCPUUsage, out.PreCPUStats.SystemCPUUsage)
+	onlineCPUs := float64(out.CPUStats.OnlineCPUs)
+	if onlineCPUs == 0 {
+		onlineCPUs = float64(len(out.CPUStats.CPUUsage.PercpuUsage))
+	}
+	cpuPercent := 0.0
+	if systemDelta > 0 && cpuDelta > 0 && onlineCPUs > 0 {
+		cpuPercent = (cpuDelta / systemDelta) * onlineCPUs * 100
+	}
+
+	memoryPercent := 0.0
+	if out.MemoryStats.Limit > 0 {
+		memoryPercent = (float64(out.MemoryStats.Usage) / float64(out.MemoryStats.Limit)) * 100
+	}
+
+	return ContainerMetrics{
+		CPUPercent:       cpuPercent,
+		MemoryBytes:      out.MemoryStats.Usage,
+		MemoryLimitBytes: out.MemoryStats.Limit,
+		MemoryPercent:    memoryPercent,
+	}, nil
+}
+
+func uintDelta(current uint64, previous uint64) float64 {
+	if current <= previous {
+		return 0
+	}
+	return float64(current - previous)
+}
+
+func (c *Client) ExecContainer(ctx context.Context, name string, command string) (ExecResult, error) {
+	createBody, _ := json.Marshal(map[string]any{
+		"AttachStdout": true,
+		"AttachStderr": true,
+		"Cmd":          []string{"sh", "-lc", command},
+	})
+	createReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://docker/containers/"+name+"/exec", bytes.NewReader(createBody))
+	if err != nil {
+		return ExecResult{}, err
+	}
+	createReq.Header.Set("Content-Type", "application/json")
+
+	createResp, err := c.http.Do(createReq)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode < 200 || createResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(createResp.Body, 2048))
+		return ExecResult{}, fmt.Errorf("create exec %s: status %d: %s", name, createResp.StatusCode, b)
+	}
+
+	var created struct {
+		ID string `json:"Id"`
+	}
+	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
+		return ExecResult{}, err
+	}
+	if created.ID == "" {
+		return ExecResult{}, fmt.Errorf("create exec %s: missing id", name)
+	}
+
+	startBody, _ := json.Marshal(map[string]any{"Detach": false, "Tty": false})
+	startReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://docker/exec/"+created.ID+"/start", bytes.NewReader(startBody))
+	if err != nil {
+		return ExecResult{}, err
+	}
+	startReq.Header.Set("Content-Type", "application/json")
+	startResp, err := c.stream.Do(startReq)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	defer startResp.Body.Close()
+	if startResp.StatusCode < 200 || startResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(startResp.Body, 2048))
+		return ExecResult{}, fmt.Errorf("start exec %s: status %d: %s", name, startResp.StatusCode, b)
+	}
+
+	raw, err := io.ReadAll(io.LimitReader(startResp.Body, 64*1024))
+	if err != nil {
+		return ExecResult{}, err
+	}
+
+	inspectReq, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/exec/"+created.ID+"/json", nil)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	inspectResp, err := c.http.Do(inspectReq)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	defer inspectResp.Body.Close()
+	if inspectResp.StatusCode < 200 || inspectResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(inspectResp.Body, 2048))
+		return ExecResult{}, fmt.Errorf("inspect exec %s: status %d: %s", name, inspectResp.StatusCode, b)
+	}
+	var inspected struct {
+		ExitCode int `json:"ExitCode"`
+	}
+	if err := json.NewDecoder(inspectResp.Body).Decode(&inspected); err != nil {
+		return ExecResult{}, err
+	}
+
+	return ExecResult{ExitCode: inspected.ExitCode, Output: demuxDockerStream(raw)}, nil
+}
+
+func demuxDockerStream(raw []byte) string {
+	var out strings.Builder
+	for len(raw) >= 8 {
+		size := int(raw[4])<<24 | int(raw[5])<<16 | int(raw[6])<<8 | int(raw[7])
+		raw = raw[8:]
+		if size < 0 || size > len(raw) {
+			break
+		}
+		out.Write(raw[:size])
+		raw = raw[size:]
+	}
+	if out.Len() == 0 && len(raw) > 0 {
+		return string(raw)
+	}
+	return out.String()
 }
 
 // CreateContainer creates a container with the given name and spec, returning its id.

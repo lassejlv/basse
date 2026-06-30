@@ -19,6 +19,7 @@
     "hooks": "src/hooks"
   },
   "registries": {
+    "@bklit": "https://ui.bklit.com/r/{name}.json",
     "@coss": "https://coss.com/ui/r/{name}.json"
   }
 }

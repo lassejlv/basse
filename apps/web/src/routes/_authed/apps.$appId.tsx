@@ -1,16 +1,28 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { TrashIcon } from "lucide-react";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import type { DeploymentStatus } from "@basse/shared";
+import { chartCssVars } from "@/components/charts/chart-context";
+import { Grid } from "@/components/charts/grid";
+import { Line, LineChart } from "@/components/charts/line-chart";
+import { ChartTooltip } from "@/components/charts/tooltip";
+import { XAxis } from "@/components/charts/x-axis";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectItem,
+  SelectPopup,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import type { App } from "@/lib/apps";
-import { getApp, updateApp } from "@/lib/apps";
+import { getApp, getAppMetrics, runAppConsoleCommand, updateApp } from "@/lib/apps";
 import { listDeployments, triggerDeploy } from "@/lib/deployments";
 import { createDomain, deleteDomain, listDomains } from "@/lib/domains";
 import { listEnvVars, setEnvVars } from "@/lib/env-vars";
@@ -62,6 +74,7 @@ function AppDetailRoute() {
 
       <ServerCard app={data} />
       <DeploySection appId={appId} canDeploy={data.serverIds.length > 0} />
+      <RuntimeCard app={data} />
       <EnvVarsCard appId={appId} />
       {data.serverIds.length === 1 ? (
         <AppDomainsSection app={data} serverId={data.serverIds[0]!} />
@@ -128,6 +141,165 @@ function ServerCard({ app }: { app: App }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function RuntimeCard({ app }: { app: App }) {
+  const servers = useQuery({ queryKey: ["servers", "runtime"], queryFn: listServers });
+  const targetServers = (servers.data ?? []).filter((server) => app.serverIds.includes(server.id));
+  const [serverId, setServerId] = useState(app.serverIds[0] ?? "");
+  const [samples, setSamples] = useState<
+    { date: Date; cpuPercent: number; memoryPercent: number }[]
+  >([]);
+  const [command, setCommand] = useState("");
+  const [history, setHistory] = useState<{ command: string; exitCode: number; output: string }[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!serverId || !app.serverIds.includes(serverId)) {
+      setServerId(app.serverIds[0] ?? "");
+      setSamples([]);
+    }
+  }, [app.serverIds, serverId]);
+
+  const metrics = useQuery({
+    queryKey: ["app-metrics", app.id, serverId],
+    queryFn: () => getAppMetrics(app.id, serverId),
+    enabled: Boolean(serverId),
+    refetchInterval: 5000,
+  });
+
+  useEffect(() => {
+    if (!metrics.data) return;
+    setSamples((current) => [
+      ...current.slice(-29),
+      {
+        date: new Date(metrics.data.timestamp),
+        cpuPercent: Number(metrics.data.cpuPercent.toFixed(2)),
+        memoryPercent: Number(metrics.data.memoryPercent.toFixed(2)),
+      },
+    ]);
+  }, [metrics.data]);
+
+  const run = useMutation({
+    mutationFn: () => runAppConsoleCommand(app.id, { command, serverId }),
+    onSuccess: (result) => {
+      setHistory((current) => [{ command, ...result }, ...current].slice(0, 8));
+      setCommand("");
+      setError(null);
+    },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  return (
+    <div className="max-w-2xl rounded-lg border bg-card p-6">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">Runtime</h2>
+          <p className="mt-1 text-muted-foreground text-sm">
+            Live container metrics and command console for the selected server.
+          </p>
+        </div>
+        {targetServers.length > 1 ? (
+          <Select value={serverId} onValueChange={(value) => setServerId(value ?? "")}>
+            <SelectTrigger className="w-48">
+              <SelectValue placeholder="Select server">
+                {(value: string) =>
+                  targetServers.find((server) => server.id === value)?.name ?? "Select server"
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup>
+              {targetServers.map((server) => (
+                <SelectItem key={server.id} value={server.id}>
+                  {server.name}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        ) : null}
+      </div>
+
+      {app.serverIds.length === 0 ? (
+        <p className="mt-5 text-muted-foreground text-sm">Select a server before using runtime tools.</p>
+      ) : (
+        <>
+          <div className="mt-5 h-64 rounded-md border bg-muted/20 p-3">
+            {samples.length > 1 ? (
+              <LineChart
+                animationDuration={700}
+                aspectRatio={undefined}
+                data={samples}
+                margin={{ bottom: 28, left: 28, right: 20, top: 18 }}
+                xDataKey="date"
+              >
+                <Grid horizontal />
+                <Line dataKey="cpuPercent" stroke={chartCssVars.linePrimary} strokeWidth={2.5} />
+                <Line dataKey="memoryPercent" stroke={chartCssVars.lineSecondary} strokeWidth={2.5} />
+                <XAxis />
+                <ChartTooltip
+                  rows={(point) => [
+                    {
+                      color: chartCssVars.linePrimary,
+                      label: "CPU",
+                      value: `${Number(point.cpuPercent).toFixed(1)}%`,
+                    },
+                    {
+                      color: chartCssVars.lineSecondary,
+                      label: "Memory",
+                      value: `${Number(point.memoryPercent).toFixed(1)}%`,
+                    },
+                  ]}
+                />
+              </LineChart>
+            ) : (
+              <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
+                {metrics.isError ? "Metrics unavailable." : "Collecting metrics…"}
+              </div>
+            )}
+          </div>
+          <div className="mt-2 flex gap-4 text-muted-foreground text-xs">
+            <span>CPU</span>
+            <span>Memory</span>
+          </div>
+
+          <form
+            className="mt-6 flex items-end gap-2 border-t pt-6"
+            onSubmit={(event) => {
+              event.preventDefault();
+              run.mutate();
+            }}
+          >
+            <div className="flex-1 space-y-2">
+              <Label htmlFor="app-console-command">Console</Label>
+              <Input
+                className="font-mono"
+                id="app-console-command"
+                onChange={(event) => setCommand(event.currentTarget.value)}
+                placeholder="ls -la"
+                value={command}
+              />
+            </div>
+            <Button disabled={!command.trim() || !serverId} loading={run.isPending} type="submit">
+              Run
+            </Button>
+          </form>
+          {error ? <p className="mt-2 text-destructive-foreground text-sm">{error}</p> : null}
+          {history.length > 0 ? (
+            <div className="mt-4 flex flex-col gap-3">
+              {history.map((entry, index) => (
+                <pre
+                  key={`${entry.command}-${index}`}
+                  className="max-h-48 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs"
+                >
+                  {`$ ${entry.command}\nexit ${entry.exitCode}\n${entry.output || "(no output)"}`}
+                </pre>
+              ))}
+            </div>
+          ) : null}
+        </>
+      )}
     </div>
   );
 }

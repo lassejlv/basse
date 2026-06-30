@@ -1,7 +1,17 @@
 import { app, appServer, db, environment, project, server } from "@basse/db";
-import type { App, AppBuildMode, CreateAppInput, UpdateAppInput } from "@basse/shared";
+import type {
+  App,
+  AppBuildMode,
+  AppConsoleResult,
+  AppMetrics,
+  CreateAppInput,
+  UpdateAppInput,
+} from "@basse/shared";
 import { and, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
+import { execAppCommand, getAppMetrics as getAgentAppMetrics } from "./agent-client";
+import { decryptSecret } from "./crypto";
+import { connectionFromServer } from "./server-connection";
 import { resolveActiveWorkspace } from "./workspace";
 
 type AppRow = typeof app.$inferSelect;
@@ -106,6 +116,37 @@ async function validateServersInOrg(serverIds: string[], organizationId: string)
   return rows.length === serverIds.length;
 }
 
+async function resolveAttachedServer(appId: string, requestedServerId?: string) {
+  const rows = await db
+    .select({ server })
+    .from(appServer)
+    .innerJoin(server, eq(appServer.serverId, server.id))
+    .where(eq(appServer.appId, appId));
+
+  if (rows.length === 0) {
+    return { error: "Attach at least one server to the app first" };
+  }
+  if (requestedServerId) {
+    const row = rows.find((candidate) => candidate.server.id === requestedServerId);
+    return row ? { server: row.server } : { error: "Server is not attached to this app" };
+  }
+  if (rows.length > 1) {
+    return { error: "Choose a server for this app" };
+  }
+  return { server: rows[0]!.server };
+}
+
+async function requireAgentTarget(appId: string, requestedServerId?: string) {
+  const resolved = await resolveAttachedServer(appId, requestedServerId);
+  if (!resolved.server) return resolved;
+  if (resolved.server.status !== "active" || !resolved.server.agentToken) {
+    return { error: "Target server is not active" };
+  }
+  const connection = await connectionFromServer(resolved.server);
+  const token = await decryptSecret(resolved.server.agentToken);
+  return { server: resolved.server, connection, token };
+}
+
 export const apps = new Hono();
 
 apps.get("/", async (c) => {
@@ -136,6 +177,49 @@ apps.get("/:id", async (c) => {
 
   const serverIds = await loadAppServerIds([row.id]);
   return c.json(toApp(row, serverIds.get(row.id)));
+});
+
+apps.get("/:id/metrics", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const appId = c.req.param("id");
+  const row = await ownedApp(appId, organizationId);
+  if (!row) return c.json({ error: "App not found" }, 404);
+
+  const target = await requireAgentTarget(appId, c.req.query("serverId"));
+  if (!target.server) return c.json({ error: target.error }, 400);
+
+  const metrics = await getAgentAppMetrics(target.connection!, target.token!, appId);
+  return c.json({
+    timestamp: new Date().toISOString(),
+    ...metrics,
+  } satisfies AppMetrics);
+});
+
+apps.post("/:id/console", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const appId = c.req.param("id");
+  const row = await ownedApp(appId, organizationId);
+  if (!row) return c.json({ error: "App not found" }, 404);
+
+  const body = (await c.req.json().catch(() => null)) as
+    | { command?: unknown; serverId?: unknown }
+    | null;
+  const command = typeof body?.command === "string" ? body.command.trim() : "";
+  if (!command) return c.json({ error: "command is required" }, 400);
+  if (command.length > 500) return c.json({ error: "command is too long" }, 400);
+
+  const target = await requireAgentTarget(
+    appId,
+    typeof body?.serverId === "string" ? body.serverId : undefined,
+  );
+  if (!target.server) return c.json({ error: target.error }, 400);
+
+  const result = await execAppCommand(target.connection!, target.token!, appId, command);
+  return c.json(result satisfies AppConsoleResult);
 });
 
 apps.post("/", async (c) => {

@@ -130,6 +130,43 @@ export async function getAppStatus(
   );
 }
 
+export type AgentAppMetrics = {
+  cpuPercent: number;
+  memoryBytes: number;
+  memoryLimitBytes: number;
+  memoryPercent: number;
+};
+
+export async function getAppMetrics(
+  conn: SshConnection,
+  token: string,
+  appId: string,
+): Promise<AgentAppMetrics> {
+  return withTunnel(conn, AGENT_PORT, (baseUrl) =>
+    getJson<AgentAppMetrics>({ baseUrl, token }, `/v1/apps/${appId}/metrics`, true),
+  );
+}
+
+export async function execAppCommand(
+  conn: SshConnection,
+  token: string,
+  appId: string,
+  command: string,
+): Promise<{ exitCode: number; output: string }> {
+  return withTunnel(
+    conn,
+    AGENT_PORT,
+    (baseUrl) =>
+      postJson<{ exitCode: number; output: string }>(
+        { baseUrl, token },
+        `/v1/apps/${appId}/exec`,
+        { command },
+        25_000,
+      ),
+    { timeoutMs: 20_000 },
+  );
+}
+
 /** Tears down an app container. Throws on failure. */
 export async function removeApp(conn: SshConnection, token: string, appId: string): Promise<void> {
   await withTunnel(conn, AGENT_PORT, async (baseUrl) => {

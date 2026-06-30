@@ -100,6 +100,19 @@ export type Deployment = {
   updatedAt: string;
 };
 
+export type AppMetrics = {
+  timestamp: string;
+  cpuPercent: number;
+  memoryBytes: number;
+  memoryLimitBytes: number;
+  memoryPercent: number;
+};
+
+export type AppConsoleResult = {
+  exitCode: number;
+  output: string;
+};
+
 export type SshKey = {
   id: string;
   organizationId: string;

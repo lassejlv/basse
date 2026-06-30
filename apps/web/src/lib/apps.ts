@@ -1,4 +1,10 @@
-import type { App, CreateAppInput, UpdateAppInput } from "@basse/shared";
+import type {
+  App,
+  AppConsoleResult,
+  AppMetrics,
+  CreateAppInput,
+  UpdateAppInput,
+} from "@basse/shared";
 
 export type { App };
 
@@ -44,6 +50,29 @@ export async function updateApp(id: string, input: UpdateAppInput): Promise<App>
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<App>;
+}
+
+export async function getAppMetrics(id: string, serverId?: string): Promise<AppMetrics> {
+  const query = serverId ? `?serverId=${encodeURIComponent(serverId)}` : "";
+  const response = await fetch(`${apiBaseUrl}/api/apps/${id}/metrics${query}`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<AppMetrics>;
+}
+
+export async function runAppConsoleCommand(
+  id: string,
+  input: { command: string; serverId?: string },
+): Promise<AppConsoleResult> {
+  const response = await fetch(`${apiBaseUrl}/api/apps/${id}/console`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<AppConsoleResult>;
 }
 
 export async function deleteApp(id: string): Promise<void> {

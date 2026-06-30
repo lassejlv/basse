@@ -1,10 +1,13 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/lassejlv/basse/apps/agent/internal/config"
 	"github.com/lassejlv/basse/apps/agent/internal/dockerx"
@@ -124,6 +127,43 @@ func (a Apps) Status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]bool{"exists": state.Exists, "running": state.Running})
+}
+
+func (a Apps) Metrics(w http.ResponseWriter, r *http.Request) {
+	metrics, err := a.Docker.ContainerStats(r.Context(), containerName(r.PathValue("appId")))
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, metrics)
+}
+
+func (a Apps) Exec(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Command string `json:"command"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	command := strings.TrimSpace(req.Command)
+	if command == "" {
+		httpx.Error(w, http.StatusBadRequest, "command is required")
+		return
+	}
+	if len(command) > 500 {
+		httpx.Error(w, http.StatusBadRequest, "command is too long")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	result, err := a.Docker.ExecContainer(ctx, containerName(r.PathValue("appId")), command)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, result)
 }
 
 // Remove tears down the app container. Bearer-guarded.
