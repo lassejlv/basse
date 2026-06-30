@@ -3,6 +3,7 @@ package dockerx
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,8 +38,17 @@ type HostConfig struct {
 type ContainerSpec struct {
 	Image        string              `json:"Image"`
 	Cmd          []string            `json:"Cmd,omitempty"`
+	Env          []string            `json:"Env,omitempty"`
+	Labels       map[string]string   `json:"Labels,omitempty"`
 	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
 	HostConfig   HostConfig          `json:"HostConfig"`
+}
+
+// RegistryAuth is the credential for pulling a private image.
+type RegistryAuth struct {
+	Username      string `json:"username"`
+	Password      string `json:"password"`
+	ServerAddress string `json:"serveraddress"`
 }
 
 // ContainerState is the subset of GET /containers/{id}/json we read.
@@ -50,10 +60,22 @@ type ContainerState struct {
 // imagePullTimeout bounds a (possibly large) image pull.
 const imagePullTimeout = 5 * time.Minute
 
-// PullImage pulls an image and DRAINS the progress stream to completion — the
-// image is not guaranteed present until the stream ends. Returns an error if the
-// stream reports one.
+// PullImage pulls a public image.
 func (c *Client) PullImage(ctx context.Context, image string) error {
+	return c.pull(ctx, image, nil)
+}
+
+// PullImageAuth pulls a private image, authenticating with the given registry
+// credential (sent in the X-Registry-Auth header, base64url-encoded JSON — the
+// encoding Docker's own client uses).
+func (c *Client) PullImageAuth(ctx context.Context, image string, auth RegistryAuth) error {
+	return c.pull(ctx, image, &auth)
+}
+
+// pull pulls an image and DRAINS the progress stream to completion — the image
+// is not guaranteed present until the stream ends. Returns an error if the
+// stream reports one.
+func (c *Client) pull(ctx context.Context, image string, auth *RegistryAuth) error {
 	ref, tag := splitImageRef(image)
 	q := url.Values{}
 	q.Set("fromImage", ref)
@@ -67,6 +89,14 @@ func (c *Client) PullImage(ctx context.Context, image string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://docker/images/create?"+q.Encode(), nil)
 	if err != nil {
 		return err
+	}
+
+	if auth != nil {
+		encoded, err := json.Marshal(auth)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("X-Registry-Auth", base64.URLEncoding.EncodeToString(encoded))
 	}
 
 	resp, err := c.stream.Do(req)

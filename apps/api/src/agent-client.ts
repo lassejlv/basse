@@ -86,6 +86,64 @@ export async function syncDomains(
   );
 }
 
+export type DeployAppInput = {
+  appId: string;
+  image: string;
+  port: number;
+  env: Record<string, string>;
+  registry: { host: string; user: string; token: string };
+};
+
+export type DeployAppResult = {
+  containerId: string;
+  name: string;
+  upstream: string;
+  running: boolean;
+};
+
+/**
+ * Deploys an app on the server: pulls the (private Depot) image and runs the
+ * container on the 'basse' network. The image pull dominates, so the inner
+ * timeout is generous. Throws on failure.
+ */
+export async function deployApp(
+  conn: SshConnection,
+  token: string,
+  input: DeployAppInput,
+): Promise<DeployAppResult> {
+  return withTunnel(
+    conn,
+    AGENT_PORT,
+    (baseUrl) => postJson<DeployAppResult>({ baseUrl, token }, "/v1/apps/deploy", input, 300_000),
+    { timeoutMs: 20_000 },
+  );
+}
+
+/** Reports whether an app container exists and is running. Throws on failure. */
+export async function getAppStatus(
+  conn: SshConnection,
+  token: string,
+  appId: string,
+): Promise<{ exists: boolean; running: boolean }> {
+  return withTunnel(conn, AGENT_PORT, (baseUrl) =>
+    getJson<{ exists: boolean; running: boolean }>({ baseUrl, token }, `/v1/apps/${appId}/status`, true),
+  );
+}
+
+/** Tears down an app container. Throws on failure. */
+export async function removeApp(conn: SshConnection, token: string, appId: string): Promise<void> {
+  await withTunnel(conn, AGENT_PORT, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/v1/apps/${appId}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      throw new Error(`agent app remove returned ${response.status}`);
+    }
+  });
+}
+
 /**
  * Opens a tunnel to the agent and checks liveness, readiness, and version.
  * Retries with backoff (the agent may still be starting right after bootstrap).

@@ -1,0 +1,136 @@
+package handlers
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"sort"
+
+	"github.com/lassejlv/basse/apps/agent/internal/config"
+	"github.com/lassejlv/basse/apps/agent/internal/dockerx"
+	"github.com/lassejlv/basse/apps/agent/internal/httpx"
+)
+
+// Apps deploys and manages user application containers.
+type Apps struct {
+	Docker *dockerx.Client
+	Cfg    config.Config
+}
+
+func containerName(appID string) string {
+	return "basse-app-" + appID
+}
+
+type deployRequest struct {
+	AppID    string            `json:"appId"`
+	Image    string            `json:"image"`
+	Port     int               `json:"port"`
+	Env      map[string]string `json:"env"`
+	Registry struct {
+		Host  string `json:"host"`
+		User  string `json:"user"`
+		Token string `json:"token"`
+	} `json:"registry"`
+}
+
+type deployResponse struct {
+	ContainerID string `json:"containerId"`
+	Name        string `json:"name"`
+	Upstream    string `json:"upstream"`
+	Running     bool   `json:"running"`
+}
+
+// Deploy pulls the app image (private Depot registry) and (re)runs the container
+// on the shared 'basse' network so Caddy can reverse-proxy to it. Bearer-guarded.
+func (a Apps) Deploy(w http.ResponseWriter, r *http.Request) {
+	var req deployRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.AppID == "" || req.Image == "" || req.Port < 1 || req.Port > 65535 {
+		httpx.Error(w, http.StatusBadRequest, "appId, image and a valid port are required")
+		return
+	}
+
+	ctx := r.Context()
+	name := containerName(req.AppID)
+
+	if err := a.Docker.EnsureNetwork(ctx, a.Cfg.ProxyNetwork); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "ensure network: "+err.Error())
+		return
+	}
+
+	if err := a.Docker.PullImageAuth(ctx, req.Image, dockerx.RegistryAuth{
+		Username:      req.Registry.User,
+		Password:      req.Registry.Token,
+		ServerAddress: req.Registry.Host,
+	}); err != nil {
+		httpx.Error(w, http.StatusBadGateway, "pull image: "+err.Error())
+		return
+	}
+
+	if err := a.Docker.RemoveContainer(ctx, name); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "remove old container: "+err.Error())
+		return
+	}
+
+	// Deterministic env ordering keeps container specs stable across deploys.
+	env := make([]string, 0, len(req.Env))
+	for k, v := range req.Env {
+		env = append(env, k+"="+v)
+	}
+	sort.Strings(env)
+
+	port := fmt.Sprintf("%d/tcp", req.Port)
+	spec := dockerx.ContainerSpec{
+		Image:  req.Image,
+		Env:    env,
+		Labels: map[string]string{"basse.managed": "true", "basse.app": req.AppID},
+		ExposedPorts: map[string]struct{}{
+			port: {},
+		},
+		HostConfig: dockerx.HostConfig{
+			// No PortBindings — traffic arrives via Caddy on the basse network.
+			NetworkMode:   a.Cfg.ProxyNetwork,
+			RestartPolicy: dockerx.RestartPolicy{Name: "unless-stopped"},
+		},
+	}
+
+	id, err := a.Docker.CreateContainer(ctx, name, spec)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "create container: "+err.Error())
+		return
+	}
+	if err := a.Docker.StartContainer(ctx, id); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "start container: "+err.Error())
+		return
+	}
+
+	state, _ := a.Docker.InspectContainer(ctx, name)
+	httpx.JSON(w, http.StatusOK, deployResponse{
+		ContainerID: id,
+		Name:        name,
+		Upstream:    fmt.Sprintf("%s:%d", name, req.Port),
+		Running:     state.Running,
+	})
+}
+
+// Status reports whether the app container exists and is running. Bearer-guarded.
+func (a Apps) Status(w http.ResponseWriter, r *http.Request) {
+	state, err := a.Docker.InspectContainer(r.Context(), containerName(r.PathValue("appId")))
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]bool{"exists": state.Exists, "running": state.Running})
+}
+
+// Remove tears down the app container. Bearer-guarded.
+func (a Apps) Remove(w http.ResponseWriter, r *http.Request) {
+	if err := a.Docker.RemoveContainer(r.Context(), containerName(r.PathValue("appId"))); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]bool{"ok": true})
+}

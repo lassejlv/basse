@@ -26,6 +26,7 @@ func Run(cfg config.Config, version string) error {
 	health := handlers.Health{Docker: docker}
 	system := handlers.System{Docker: docker, Version: version}
 	proxy := handlers.Proxy{Docker: docker, Caddy: caddy, Cfg: cfg}
+	apps := handlers.Apps{Docker: docker, Cfg: cfg}
 
 	mux := http.NewServeMux()
 
@@ -39,6 +40,9 @@ func Run(cfg config.Config, version string) error {
 	mux.Handle("POST /v1/proxy/ensure", middleware.Bearer(cfg.Token, http.HandlerFunc(proxy.Ensure)))
 	mux.Handle("GET /v1/proxy/status", middleware.Bearer(cfg.Token, http.HandlerFunc(proxy.Status)))
 	mux.Handle("POST /v1/proxy/sync", middleware.Bearer(cfg.Token, http.HandlerFunc(proxy.Sync)))
+	mux.Handle("POST /v1/apps/deploy", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Deploy)))
+	mux.Handle("GET /v1/apps/{appId}/status", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Status)))
+	mux.Handle("DELETE /v1/apps/{appId}", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Remove)))
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
