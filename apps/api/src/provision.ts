@@ -146,18 +146,3 @@ export async function provisionServer(serverId: string): Promise<void> {
     await setStatus(serverId, "error", `Provisioning error: ${message}`).catch(() => {});
   }
 }
-
-/**
- * On API startup, any server stuck in 'provisioning' is from a crashed/restarted
- * process (no provision can legitimately be running yet). Flip it to 'error'.
- */
-export async function reconcileStuckProvisions(): Promise<void> {
-  await db
-    .update(server)
-    .set({
-      status: "error",
-      statusMessage: "Provisioning was interrupted by a restart. Re-provision to retry.",
-      updatedAt: new Date(),
-    })
-    .where(eq(server.status, "provisioning"));
-}

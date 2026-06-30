@@ -5,7 +5,9 @@ import { logger } from "hono/logger";
 import { auth } from "./auth";
 import { depot } from "./depot";
 import { projects } from "./projects";
-import { reconcileStuckProvisions } from "./provision";
+import { actionsQueue } from "./queue/queue";
+import { reconcileProvisioningServers } from "./queue/reconcile";
+import { startWorker } from "./queue/worker";
 import { servers } from "./servers";
 import { sshKeys } from "./ssh-keys";
 
@@ -45,8 +47,36 @@ app.get("/health", (c) =>
 app.use("/*", serveStatic({ root: webDist }));
 app.get("*", serveStatic({ path: `${webDist}/index.html` }));
 
-// Recover any server left mid-provision by a previous process (crash/restart).
-void reconcileStuckProvisions().catch(() => {});
+// Start the in-process worker that runs background actions (provisioning, …).
+const worker = startWorker();
+
+// Re-enqueue any server left mid-provision by a previous process (crash/restart).
+void reconcileProvisioningServers().catch(() => {});
+
+// Graceful shutdown: stop fetching new jobs and let the in-flight job finish
+// before the process exits (docker-compose grants a stop_grace_period for this).
+let shuttingDown = false;
+async function shutdown(): Promise<void> {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  try {
+    await worker.close();
+    await actionsQueue.close();
+  } catch (error) {
+    console.error("[shutdown]", error);
+  } finally {
+    process.exit(0);
+  }
+}
+
+process.on("SIGTERM", () => void shutdown());
+process.on("SIGINT", () => void shutdown());
+
+// PID-1 backstops: a stray rejection/exception must never take the server down.
+process.on("unhandledRejection", (reason) => console.error("[unhandledRejection]", reason));
+process.on("uncaughtException", (error) => console.error("[uncaughtException]", error));
 
 export default {
   port: Number(Bun.env.API_PORT ?? 3000),

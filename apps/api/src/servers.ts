@@ -3,7 +3,7 @@ import type { CreateServerInput, Server } from "@basse/shared";
 import { and, eq, ne } from "drizzle-orm";
 import { Hono } from "hono";
 import { decryptSecret, encryptSecret } from "./crypto";
-import { provisionServer } from "./provision";
+import { enqueueAction } from "./queue/queue";
 import { connectionFromServer } from "./server-connection";
 import { derivePublicKey, generateServerKeyPair } from "./server-keys";
 import { probeReachable } from "./ssh";
@@ -199,9 +199,23 @@ servers.post("/:id/provision", async (c) => {
     return c.json({ error: "Server is already provisioning" }, 409);
   }
 
-  // Fire-and-forget: provisioning takes minutes. The guard ensures an unhandled
-  // rejection can never take down the process.
-  void provisionServer(id).catch(() => {});
+  // Enqueue the durable job. The worker runs provisionServer (which owns all
+  // status writes). If Redis is unreachable, revert the claim so the row isn't
+  // stuck on "Queued…" and the user can retry.
+  try {
+    await enqueueAction("provision-server", id);
+  } catch {
+    await db
+      .update(server)
+      .set({
+        status: "error",
+        statusMessage: "Could not queue provisioning (queue unavailable). Retry.",
+        updatedAt: new Date(),
+      })
+      .where(eq(server.id, id));
+
+    return c.json({ error: "Could not queue provisioning" }, 503);
+  }
 
   return c.body(null, 202);
 });
