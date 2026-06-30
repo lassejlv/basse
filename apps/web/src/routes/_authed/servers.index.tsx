@@ -11,7 +11,7 @@ import { createServer, listServers } from "@/lib/servers";
 
 type KeySource = "generate" | "paste";
 
-export const Route = createFileRoute("/_authed/servers")({
+export const Route = createFileRoute("/_authed/servers/")({
   component: ServersRoute,
 });
 

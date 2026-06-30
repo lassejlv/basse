@@ -14,9 +14,9 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as AuthedRouteImport } from './routes/_authed'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthedSettingsRouteImport } from './routes/_authed/settings'
-import { Route as AuthedServersRouteImport } from './routes/_authed/servers'
 import { Route as AuthedSecretsRouteImport } from './routes/_authed/secrets'
 import { Route as AuthedDashboardRouteImport } from './routes/_authed/dashboard'
+import { Route as AuthedServersIndexRouteImport } from './routes/_authed/servers.index'
 import { Route as AuthedServersServerIdRouteImport } from './routes/_authed/servers.$serverId'
 
 const SignupRoute = SignupRouteImport.update({
@@ -43,11 +43,6 @@ const AuthedSettingsRoute = AuthedSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => AuthedRoute,
 } as any)
-const AuthedServersRoute = AuthedServersRouteImport.update({
-  id: '/servers',
-  path: '/servers',
-  getParentRoute: () => AuthedRoute,
-} as any)
 const AuthedSecretsRoute = AuthedSecretsRouteImport.update({
   id: '/secrets',
   path: '/secrets',
@@ -58,10 +53,15 @@ const AuthedDashboardRoute = AuthedDashboardRouteImport.update({
   path: '/dashboard',
   getParentRoute: () => AuthedRoute,
 } as any)
+const AuthedServersIndexRoute = AuthedServersIndexRouteImport.update({
+  id: '/servers/',
+  path: '/servers/',
+  getParentRoute: () => AuthedRoute,
+} as any)
 const AuthedServersServerIdRoute = AuthedServersServerIdRouteImport.update({
-  id: '/$serverId',
-  path: '/$serverId',
-  getParentRoute: () => AuthedServersRoute,
+  id: '/servers/$serverId',
+  path: '/servers/$serverId',
+  getParentRoute: () => AuthedRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -70,9 +70,9 @@ export interface FileRoutesByFullPath {
   '/signup': typeof SignupRoute
   '/dashboard': typeof AuthedDashboardRoute
   '/secrets': typeof AuthedSecretsRoute
-  '/servers': typeof AuthedServersRouteWithChildren
   '/settings': typeof AuthedSettingsRoute
   '/servers/$serverId': typeof AuthedServersServerIdRoute
+  '/servers/': typeof AuthedServersIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -80,9 +80,9 @@ export interface FileRoutesByTo {
   '/signup': typeof SignupRoute
   '/dashboard': typeof AuthedDashboardRoute
   '/secrets': typeof AuthedSecretsRoute
-  '/servers': typeof AuthedServersRouteWithChildren
   '/settings': typeof AuthedSettingsRoute
   '/servers/$serverId': typeof AuthedServersServerIdRoute
+  '/servers': typeof AuthedServersIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -92,9 +92,9 @@ export interface FileRoutesById {
   '/signup': typeof SignupRoute
   '/_authed/dashboard': typeof AuthedDashboardRoute
   '/_authed/secrets': typeof AuthedSecretsRoute
-  '/_authed/servers': typeof AuthedServersRouteWithChildren
   '/_authed/settings': typeof AuthedSettingsRoute
   '/_authed/servers/$serverId': typeof AuthedServersServerIdRoute
+  '/_authed/servers/': typeof AuthedServersIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -104,9 +104,9 @@ export interface FileRouteTypes {
     | '/signup'
     | '/dashboard'
     | '/secrets'
-    | '/servers'
     | '/settings'
     | '/servers/$serverId'
+    | '/servers/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -114,9 +114,9 @@ export interface FileRouteTypes {
     | '/signup'
     | '/dashboard'
     | '/secrets'
-    | '/servers'
     | '/settings'
     | '/servers/$serverId'
+    | '/servers'
   id:
     | '__root__'
     | '/'
@@ -125,9 +125,9 @@ export interface FileRouteTypes {
     | '/signup'
     | '/_authed/dashboard'
     | '/_authed/secrets'
-    | '/_authed/servers'
     | '/_authed/settings'
     | '/_authed/servers/$serverId'
+    | '/_authed/servers/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -174,13 +174,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedSettingsRouteImport
       parentRoute: typeof AuthedRoute
     }
-    '/_authed/servers': {
-      id: '/_authed/servers'
-      path: '/servers'
-      fullPath: '/servers'
-      preLoaderRoute: typeof AuthedServersRouteImport
-      parentRoute: typeof AuthedRoute
-    }
     '/_authed/secrets': {
       id: '/_authed/secrets'
       path: '/secrets'
@@ -195,40 +188,37 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedDashboardRouteImport
       parentRoute: typeof AuthedRoute
     }
+    '/_authed/servers/': {
+      id: '/_authed/servers/'
+      path: '/servers'
+      fullPath: '/servers/'
+      preLoaderRoute: typeof AuthedServersIndexRouteImport
+      parentRoute: typeof AuthedRoute
+    }
     '/_authed/servers/$serverId': {
       id: '/_authed/servers/$serverId'
-      path: '/$serverId'
+      path: '/servers/$serverId'
       fullPath: '/servers/$serverId'
       preLoaderRoute: typeof AuthedServersServerIdRouteImport
-      parentRoute: typeof AuthedServersRoute
+      parentRoute: typeof AuthedRoute
     }
   }
 }
 
-interface AuthedServersRouteChildren {
-  AuthedServersServerIdRoute: typeof AuthedServersServerIdRoute
-}
-
-const AuthedServersRouteChildren: AuthedServersRouteChildren = {
-  AuthedServersServerIdRoute: AuthedServersServerIdRoute,
-}
-
-const AuthedServersRouteWithChildren = AuthedServersRoute._addFileChildren(
-  AuthedServersRouteChildren,
-)
-
 interface AuthedRouteChildren {
   AuthedDashboardRoute: typeof AuthedDashboardRoute
   AuthedSecretsRoute: typeof AuthedSecretsRoute
-  AuthedServersRoute: typeof AuthedServersRouteWithChildren
   AuthedSettingsRoute: typeof AuthedSettingsRoute
+  AuthedServersServerIdRoute: typeof AuthedServersServerIdRoute
+  AuthedServersIndexRoute: typeof AuthedServersIndexRoute
 }
 
 const AuthedRouteChildren: AuthedRouteChildren = {
   AuthedDashboardRoute: AuthedDashboardRoute,
   AuthedSecretsRoute: AuthedSecretsRoute,
-  AuthedServersRoute: AuthedServersRouteWithChildren,
   AuthedSettingsRoute: AuthedSettingsRoute,
+  AuthedServersServerIdRoute: AuthedServersServerIdRoute,
+  AuthedServersIndexRoute: AuthedServersIndexRoute,
 }
 
 const AuthedRouteWithChildren =
