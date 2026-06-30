@@ -41,3 +41,32 @@ export type SaveDepotConnectionInput = {
   token: string;
   projectId: string;
 };
+
+export type ServerStatus = "pending" | "provisioning" | "active" | "error" | "unreachable";
+
+// Server DTO returned to the client. Secrets (private key, raw agent token) are
+// never included — only the public key and a last-4 token hint.
+export type Server = {
+  id: string;
+  organizationId: string;
+  name: string;
+  sshHost: string;
+  sshPort: number;
+  sshUser: string;
+  sshPublicKey: string;
+  agentUrl: string | null;
+  status: ServerStatus;
+  statusMessage: string | null;
+  hostKeyFingerprint: string | null;
+  agentTokenHint?: string;
+  lastSeenAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateServerInput = {
+  name: string;
+  sshHost: string;
+  sshPort?: number;
+  sshUser?: string;
+};

@@ -1,16 +1,44 @@
 import { relations } from "drizzle-orm";
-import { index, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { index, integer, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 export * from "./auth-schema";
 import { organization } from "./auth-schema";
 
-export const server = pgTable("server", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  agentUrl: text("agent_url").notNull(),
-  createdAt: timestamp("created_at").notNull(),
-  updatedAt: timestamp("updated_at").notNull(),
-});
+// A user server, workspace-scoped. Basse SSHes in (using its own per-server
+// keypair), installs Docker, and runs the Go agent. Secret columns (private
+// key, agent token) are encrypted at rest by the API.
+export const server = pgTable(
+  "server",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    sshHost: text("ssh_host").notNull(),
+    sshPort: integer("ssh_port").notNull().default(22),
+    sshUser: text("ssh_user").notNull().default("root"),
+    // Basse-generated per-server keypair. Public key is shown to the user to
+    // paste into authorized_keys; private key is encrypted.
+    sshPublicKey: text("ssh_public_key").notNull(),
+    sshPrivateKey: text("ssh_private_key").notNull(),
+    // Bearer token the agent requires; encrypted at rest. Null until provisioned.
+    agentToken: text("agent_token"),
+    // Loopback URL the agent listens on (reached via SSH tunnel). Null until up.
+    agentUrl: text("agent_url"),
+    hostKeyFingerprint: text("host_key_fingerprint"),
+    status: text("status", {
+      enum: ["pending", "provisioning", "active", "error", "unreachable"],
+    })
+      .notNull()
+      .default("pending"),
+    statusMessage: text("status_message"),
+    lastSeenAt: timestamp("last_seen_at"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [index("server_organizationId_idx").on(table.organizationId)],
+);
 
 export const project = pgTable(
   "project",
@@ -70,6 +98,14 @@ export const deployment = pgTable("deployment", {
 export const projectRelations = relations(project, ({ one, many }) => ({
   organization: one(organization, {
     fields: [project.organizationId],
+    references: [organization.id],
+  }),
+  apps: many(app),
+}));
+
+export const serverRelations = relations(server, ({ one, many }) => ({
+  organization: one(organization, {
+    fields: [server.organizationId],
     references: [organization.id],
   }),
   apps: many(app),

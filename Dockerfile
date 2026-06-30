@@ -17,6 +17,10 @@ FROM base AS runner
 ENV NODE_ENV=production
 ENV API_HOST=0.0.0.0
 ENV API_PORT=3000
+# openssh-client provides ssh + ssh-keygen, used to generate per-server keypairs
+# and to SSH into user servers during provisioning. The oven/bun base lacks them.
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client \
+  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app ./
 EXPOSE 3000
 # Apply pending migrations, then start the server. exec keeps the server as PID 1

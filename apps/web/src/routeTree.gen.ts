@@ -14,7 +14,9 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as AuthedRouteImport } from './routes/_authed'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthedSettingsRouteImport } from './routes/_authed/settings'
+import { Route as AuthedServersRouteImport } from './routes/_authed/servers'
 import { Route as AuthedDashboardRouteImport } from './routes/_authed/dashboard'
+import { Route as AuthedServersServerIdRouteImport } from './routes/_authed/servers.$serverId'
 
 const SignupRoute = SignupRouteImport.update({
   id: '/signup',
@@ -40,10 +42,20 @@ const AuthedSettingsRoute = AuthedSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => AuthedRoute,
 } as any)
+const AuthedServersRoute = AuthedServersRouteImport.update({
+  id: '/servers',
+  path: '/servers',
+  getParentRoute: () => AuthedRoute,
+} as any)
 const AuthedDashboardRoute = AuthedDashboardRouteImport.update({
   id: '/dashboard',
   path: '/dashboard',
   getParentRoute: () => AuthedRoute,
+} as any)
+const AuthedServersServerIdRoute = AuthedServersServerIdRouteImport.update({
+  id: '/$serverId',
+  path: '/$serverId',
+  getParentRoute: () => AuthedServersRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
@@ -51,14 +63,18 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/signup': typeof SignupRoute
   '/dashboard': typeof AuthedDashboardRoute
+  '/servers': typeof AuthedServersRouteWithChildren
   '/settings': typeof AuthedSettingsRoute
+  '/servers/$serverId': typeof AuthedServersServerIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/signup': typeof SignupRoute
   '/dashboard': typeof AuthedDashboardRoute
+  '/servers': typeof AuthedServersRouteWithChildren
   '/settings': typeof AuthedSettingsRoute
+  '/servers/$serverId': typeof AuthedServersServerIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -67,13 +83,29 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/signup': typeof SignupRoute
   '/_authed/dashboard': typeof AuthedDashboardRoute
+  '/_authed/servers': typeof AuthedServersRouteWithChildren
   '/_authed/settings': typeof AuthedSettingsRoute
+  '/_authed/servers/$serverId': typeof AuthedServersServerIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/login' | '/signup' | '/dashboard' | '/settings'
+  fullPaths:
+    | '/'
+    | '/login'
+    | '/signup'
+    | '/dashboard'
+    | '/servers'
+    | '/settings'
+    | '/servers/$serverId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/login' | '/signup' | '/dashboard' | '/settings'
+  to:
+    | '/'
+    | '/login'
+    | '/signup'
+    | '/dashboard'
+    | '/servers'
+    | '/settings'
+    | '/servers/$serverId'
   id:
     | '__root__'
     | '/'
@@ -81,7 +113,9 @@ export interface FileRouteTypes {
     | '/login'
     | '/signup'
     | '/_authed/dashboard'
+    | '/_authed/servers'
     | '/_authed/settings'
+    | '/_authed/servers/$serverId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -128,6 +162,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedSettingsRouteImport
       parentRoute: typeof AuthedRoute
     }
+    '/_authed/servers': {
+      id: '/_authed/servers'
+      path: '/servers'
+      fullPath: '/servers'
+      preLoaderRoute: typeof AuthedServersRouteImport
+      parentRoute: typeof AuthedRoute
+    }
     '/_authed/dashboard': {
       id: '/_authed/dashboard'
       path: '/dashboard'
@@ -135,16 +176,37 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedDashboardRouteImport
       parentRoute: typeof AuthedRoute
     }
+    '/_authed/servers/$serverId': {
+      id: '/_authed/servers/$serverId'
+      path: '/$serverId'
+      fullPath: '/servers/$serverId'
+      preLoaderRoute: typeof AuthedServersServerIdRouteImport
+      parentRoute: typeof AuthedServersRoute
+    }
   }
 }
 
+interface AuthedServersRouteChildren {
+  AuthedServersServerIdRoute: typeof AuthedServersServerIdRoute
+}
+
+const AuthedServersRouteChildren: AuthedServersRouteChildren = {
+  AuthedServersServerIdRoute: AuthedServersServerIdRoute,
+}
+
+const AuthedServersRouteWithChildren = AuthedServersRoute._addFileChildren(
+  AuthedServersRouteChildren,
+)
+
 interface AuthedRouteChildren {
   AuthedDashboardRoute: typeof AuthedDashboardRoute
+  AuthedServersRoute: typeof AuthedServersRouteWithChildren
   AuthedSettingsRoute: typeof AuthedSettingsRoute
 }
 
 const AuthedRouteChildren: AuthedRouteChildren = {
   AuthedDashboardRoute: AuthedDashboardRoute,
+  AuthedServersRoute: AuthedServersRouteWithChildren,
   AuthedSettingsRoute: AuthedSettingsRoute,
 }
 
