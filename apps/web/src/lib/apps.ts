@@ -1,6 +1,7 @@
 import type {
   App,
   AppConsoleResult,
+  AppLogs,
   AppMetrics,
   CreateAppInput,
   UpdateAppInput,
@@ -59,6 +60,16 @@ export async function getAppMetrics(id: string, serverId?: string): Promise<AppM
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<AppMetrics>;
+}
+
+export async function getAppLogs(id: string, serverId?: string): Promise<AppLogs> {
+  const params = new URLSearchParams({ tail: "250" });
+  if (serverId) params.set("serverId", serverId);
+  const response = await fetch(`${apiBaseUrl}/api/apps/${id}/logs?${params}`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<AppLogs>;
 }
 
 export async function runAppConsoleCommand(

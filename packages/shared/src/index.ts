@@ -133,6 +133,10 @@ export type AppConsoleResult = {
   output: string;
 };
 
+export type AppLogs = {
+  logs: string;
+};
+
 export type SshKey = {
   id: string;
   organizationId: string;

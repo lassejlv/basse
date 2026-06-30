@@ -43,6 +43,7 @@ func Run(cfg config.Config, version string) error {
 	mux.Handle("POST /v1/apps/deploy", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Deploy)))
 	mux.Handle("GET /v1/apps/{appId}/status", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Status)))
 	mux.Handle("GET /v1/apps/{appId}/metrics", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Metrics)))
+	mux.Handle("GET /v1/apps/{appId}/logs", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Logs)))
 	mux.Handle("POST /v1/apps/{appId}/exec", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Exec)))
 	mux.Handle("DELETE /v1/apps/{appId}", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Remove)))
 

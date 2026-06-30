@@ -172,6 +172,21 @@ export async function getAppMetrics(
   );
 }
 
+export async function getAppLogs(
+  conn: SshConnection,
+  token: string,
+  appId: string,
+  tail = 250,
+): Promise<{ logs: string }> {
+  return withTunnel(conn, AGENT_PORT, (baseUrl) =>
+    getJson<{ logs: string }>(
+      { baseUrl, token },
+      `/v1/apps/${appId}/logs?tail=${encodeURIComponent(String(tail))}`,
+      true,
+    ),
+  );
+}
+
 export async function execAppCommand(
   conn: SshConnection,
   token: string,

@@ -291,6 +291,45 @@ func (c *Client) ContainerStats(ctx context.Context, name string) (ContainerMetr
 	}, nil
 }
 
+func (c *Client) ContainerLogs(ctx context.Context, name string, tail int) (string, error) {
+	if tail < 1 {
+		tail = 200
+	}
+	if tail > 1000 {
+		tail = 1000
+	}
+
+	q := url.Values{}
+	q.Set("stdout", "1")
+	q.Set("stderr", "1")
+	q.Set("timestamps", "1")
+	q.Set("tail", fmt.Sprintf("%d", tail))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/containers/"+url.PathEscape(name)+"/logs?"+q.Encode(), nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return "", fmt.Errorf("logs %s: status %d: %s", name, resp.StatusCode, b)
+	}
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	if err != nil {
+		return "", err
+	}
+	return demuxDockerStream(raw), nil
+}
+
 func uintDelta(current uint64, previous uint64) float64 {
 	if current <= previous {
 		return 0

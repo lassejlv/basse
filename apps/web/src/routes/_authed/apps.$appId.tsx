@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import type { App } from "@/lib/apps";
-import { getApp, getAppMetrics, runAppConsoleCommand, updateApp } from "@/lib/apps";
+import { getApp, getAppLogs, getAppMetrics, runAppConsoleCommand, updateApp } from "@/lib/apps";
 import { listDeployments, triggerDeploy } from "@/lib/deployments";
 import { createDomain, deleteDomain, listDomains } from "@/lib/domains";
 import { listEnvVars, setEnvVars } from "@/lib/env-vars";
@@ -398,6 +398,13 @@ function RuntimeCard({ app }: { app: App }) {
     refetchInterval: 5000,
   });
 
+  const logs = useQuery({
+    queryKey: ["app-logs", app.id, serverId],
+    queryFn: () => getAppLogs(app.id, serverId),
+    enabled: Boolean(serverId),
+    refetchInterval: 5000,
+  });
+
   useEffect(() => {
     if (!metrics.data) return;
     setSamples((current) => [
@@ -426,7 +433,7 @@ function RuntimeCard({ app }: { app: App }) {
         <div>
           <h2 className="text-lg font-semibold">Runtime</h2>
           <p className="mt-1 text-muted-foreground text-sm">
-            Live container metrics and command console for the selected server.
+            Live container metrics, logs, and command console for the selected server.
           </p>
         </div>
         {targetServers.length > 1 ? (
@@ -490,6 +497,28 @@ function RuntimeCard({ app }: { app: App }) {
           <div className="mt-2 flex gap-4 text-muted-foreground text-xs">
             <span>CPU</span>
             <span>Memory</span>
+          </div>
+
+          <div className="mt-6 border-t pt-6">
+            <div className="flex items-center justify-between gap-3">
+              <Label>Logs</Label>
+              <Button
+                disabled={!serverId || logs.isFetching}
+                onClick={() => void logs.refetch()}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                Refresh
+              </Button>
+            </div>
+            <pre className="mt-2 max-h-72 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
+              {logs.isError
+                ? "Logs unavailable."
+                : logs.data?.logs?.trim()
+                  ? logs.data.logs
+                  : "No logs yet."}
+            </pre>
           </div>
 
           <form

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -162,6 +163,21 @@ func (a Apps) Metrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, metrics)
+}
+
+func (a Apps) Logs(w http.ResponseWriter, r *http.Request) {
+	tail := 200
+	if raw := r.URL.Query().Get("tail"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			tail = parsed
+		}
+	}
+	logs, err := a.Docker.ContainerLogs(r.Context(), containerName(r.PathValue("appId")), tail)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]string{"logs": logs})
 }
 
 func (a Apps) Exec(w http.ResponseWriter, r *http.Request) {

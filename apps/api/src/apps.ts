@@ -4,6 +4,7 @@ import type {
   AppBuildMode,
   AppBuildRunner,
   AppConsoleResult,
+  AppLogs,
   AppMetrics,
   AppSourceType,
   AppVolume,
@@ -12,7 +13,11 @@ import type {
 } from "@basse/shared";
 import { and, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
-import { execAppCommand, getAppMetrics as getAgentAppMetrics } from "./agent-client";
+import {
+  execAppCommand,
+  getAppLogs as getAgentAppLogs,
+  getAppMetrics as getAgentAppMetrics,
+} from "./agent-client";
 import { decryptSecret } from "./crypto";
 import { connectionFromServer } from "./server-connection";
 import { resolveActiveWorkspace } from "./workspace";
@@ -254,6 +259,22 @@ apps.get("/:id/metrics", async (c) => {
     timestamp: new Date().toISOString(),
     ...metrics,
   } satisfies AppMetrics);
+});
+
+apps.get("/:id/logs", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const appId = c.req.param("id");
+  const row = await ownedApp(appId, organizationId);
+  if (!row) return c.json({ error: "App not found" }, 404);
+
+  const target = await requireAgentTarget(appId, c.req.query("serverId"));
+  if (!target.server) return c.json({ error: target.error }, 400);
+
+  const tail = Math.min(Math.max(Number(c.req.query("tail") ?? 250) || 250, 20), 1000);
+  const logs = await getAgentAppLogs(target.connection!, target.token!, appId, tail);
+  return c.json(logs satisfies AppLogs);
 });
 
 apps.post("/:id/console", async (c) => {

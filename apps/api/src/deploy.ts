@@ -23,6 +23,7 @@ import {
 } from "./builder";
 import { decryptSecret } from "./crypto";
 import { connectionFromServer } from "./server-connection";
+import { runScript } from "./ssh";
 
 type DeploymentRow = typeof deployment.$inferSelect;
 type AppVolume = { hostPath: string; containerPath: string; readOnly: boolean };
@@ -98,6 +99,10 @@ function parseVolumes(value: string): AppVolume[] {
   } catch {
     return [];
   }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 /**
@@ -187,7 +192,6 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         return;
       }
       imageRef = appRow.imageRef;
-      pullImage = true;
       log.line(`Using prebuilt Docker image ${imageRef}.`);
     } else {
       // Clone.
@@ -285,6 +289,16 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       const connection = await connectionFromServer(srv);
       const agentToken = await decryptSecret(srv.agentToken!);
       await ensureProxy(connection, agentToken);
+      if (appRow.sourceType === "image") {
+        log.line(`Pulling ${imageRef} on ${srv.name}…`);
+        const pull = await runScript(connection, `docker pull ${shellQuote(imageRef)}`, {
+          onLine: log.line,
+          timeoutMs: 300_000,
+        });
+        if (pull.exitCode !== 0) {
+          throw new Error(`pull image on ${srv.name} failed`);
+        }
+      }
       const result = await deployApp(connection, agentToken, {
         appId: appRow.id,
         image: imageRef,
