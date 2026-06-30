@@ -1,10 +1,10 @@
-import type { Project } from "@basse/shared";
+import type { Project, ProjectListItem } from "@basse/shared";
 
-export type { Project };
+export type { Project, ProjectListItem };
 
 const apiBaseUrl = import.meta.env.VITE_API_URL ?? "";
 
-export async function listProjects(): Promise<Project[]> {
+export async function listProjects(): Promise<ProjectListItem[]> {
   const response = await fetch(`${apiBaseUrl}/api/projects`, {
     credentials: "include",
   });
@@ -13,7 +13,7 @@ export async function listProjects(): Promise<Project[]> {
     throw new Error(`Projects request failed with ${response.status}`);
   }
 
-  return response.json() as Promise<Project[]>;
+  return response.json() as Promise<ProjectListItem[]>;
 }
 
 export async function getProject(id: string): Promise<Project> {

@@ -11,6 +11,12 @@ export type Project = {
   updatedAt: string;
 };
 
+// Project plus rollup counts, returned by the list endpoint to render cards.
+export type ProjectListItem = Project & {
+  environmentCount: number;
+  appCount: number;
+};
+
 export type CreateProjectInput = {
   name: string;
 };
@@ -57,6 +63,13 @@ export type App = {
   volumes: AppVolume[];
   createdAt: string;
   updatedAt: string;
+  // Status of the most recent deployment, for at-a-glance health. Present on
+  // list/get responses; null when the app has never deployed.
+  latestDeploymentStatus?: DeploymentStatus | null;
+  // Breadcrumb context, populated on the single-app GET only.
+  environmentName?: string;
+  projectId?: string;
+  projectName?: string;
 };
 
 export type CreateAppInput = {

@@ -8,8 +8,15 @@ import {
   SettingsIcon,
 } from "lucide-react";
 import { useEffect } from "react";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectItem,
+  SelectPopup,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Sidebar,
   SidebarContent,
@@ -235,6 +242,7 @@ function AuthedLayout() {
         <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-3 border-b bg-background/94 px-4 backdrop-blur md:px-6">
           <SidebarTrigger />
           <p className="truncate font-medium text-sm">{pageTitle}</p>
+          <ThemeToggle className="ml-auto" />
         </header>
 
         <Outlet />

@@ -9,9 +9,10 @@ import type {
   AppSourceType,
   AppVolume,
   CreateAppInput,
+  DeploymentStatus,
   UpdateAppInput,
 } from "@basse/shared";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import {
   execAppCommand,
@@ -104,7 +105,11 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-function toApp(row: AppRow, serverIds: string[] = row.serverId ? [row.serverId] : []): App {
+function toApp(
+  row: AppRow,
+  serverIds: string[] = row.serverId ? [row.serverId] : [],
+  latestDeploymentStatus: DeploymentStatus | null = null,
+): App {
   return {
     id: row.id,
     environmentId: row.environmentId,
@@ -120,9 +125,30 @@ function toApp(row: AppRow, serverIds: string[] = row.serverId ? [row.serverId] 
     sourceType: row.sourceType,
     imageRef: row.imageRef,
     volumes: parseVolumes(row.volumes),
+    latestDeploymentStatus,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+/** Most recent deployment status per app, for at-a-glance health on lists. */
+async function loadLatestDeploymentStatus(
+  appIds: string[],
+): Promise<Map<string, DeploymentStatus>> {
+  const ids = [...new Set(appIds)];
+  const map = new Map<string, DeploymentStatus>();
+  if (ids.length === 0) return map;
+
+  const rows = await db
+    .select({ appId: deployment.appId, status: deployment.status })
+    .from(deployment)
+    .where(inArray(deployment.appId, ids))
+    .orderBy(desc(deployment.createdAt));
+  // Rows are newest-first; the first one seen per app is its latest.
+  for (const row of rows) {
+    if (!map.has(row.appId)) map.set(row.appId, row.status);
+  }
+  return map;
 }
 
 async function loadAppServerIds(appIds: string[]): Promise<Map<string, string[]>> {
@@ -141,9 +167,15 @@ async function loadAppServerIds(appIds: string[]): Promise<Map<string, string[]>
   return map;
 }
 
-function normalizeServerIds(body: Partial<CreateAppInput | UpdateAppInput> | null): string[] | null {
+function normalizeServerIds(
+  body: Partial<CreateAppInput | UpdateAppInput> | null,
+): string[] | null {
   if (Array.isArray(body?.serverIds)) {
-    return [...new Set(body.serverIds.filter((id): id is string => typeof id === "string" && id.length > 0))];
+    return [
+      ...new Set(
+        body.serverIds.filter((id): id is string => typeof id === "string" && id.length > 0),
+      ),
+    ];
   }
   if (typeof body?.serverId === "string" && body.serverId) return [body.serverId];
   if (body && "serverId" in body && body.serverId === null) return [];
@@ -233,8 +265,10 @@ apps.get("/", async (c) => {
     .where(eq(app.environmentId, environmentId))
     .orderBy(app.createdAt);
 
-  const serverIds = await loadAppServerIds(rows.map((row) => row.id));
-  return c.json(rows.map((row) => toApp(row, serverIds.get(row.id))));
+  const appIds = rows.map((row) => row.id);
+  const serverIds = await loadAppServerIds(appIds);
+  const statuses = await loadLatestDeploymentStatus(appIds);
+  return c.json(rows.map((row) => toApp(row, serverIds.get(row.id), statuses.get(row.id) ?? null)));
 });
 
 apps.get("/:id", async (c) => {
@@ -245,7 +279,26 @@ apps.get("/:id", async (c) => {
   if (!row) return c.json({ error: "App not found" }, 404);
 
   const serverIds = await loadAppServerIds([row.id]);
-  return c.json(toApp(row, serverIds.get(row.id)));
+  const statuses = await loadLatestDeploymentStatus([row.id]);
+
+  // Breadcrumb context: the environment and project this app lives under.
+  const [context] = await db
+    .select({
+      environmentName: environment.name,
+      projectId: project.id,
+      projectName: project.name,
+    })
+    .from(environment)
+    .innerJoin(project, eq(environment.projectId, project.id))
+    .where(eq(environment.id, row.environmentId))
+    .limit(1);
+
+  return c.json({
+    ...toApp(row, serverIds.get(row.id), statuses.get(row.id) ?? null),
+    environmentName: context?.environmentName,
+    projectId: context?.projectId,
+    projectName: context?.projectName,
+  });
 });
 
 apps.get("/:id/metrics", async (c) => {
@@ -290,9 +343,10 @@ apps.post("/:id/console", async (c) => {
   const row = await ownedApp(appId, organizationId);
   if (!row) return c.json({ error: "App not found" }, 404);
 
-  const body = (await c.req.json().catch(() => null)) as
-    | { command?: unknown; serverId?: unknown }
-    | null;
+  const body = (await c.req.json().catch(() => null)) as {
+    command?: unknown;
+    serverId?: unknown;
+  } | null;
   const command = typeof body?.command === "string" ? body.command.trim() : "";
   if (!command) return c.json({ error: "command is required" }, 400);
   if (command.length > 500) return c.json({ error: "command is too long" }, 400);
@@ -350,7 +404,8 @@ apps.post("/", async (c) => {
   const sourceType = SOURCE_TYPES.includes(body?.sourceType as AppSourceType)
     ? (body?.sourceType as AppSourceType)
     : "repository";
-  const branch = typeof body?.branch === "string" && body.branch.trim() ? body.branch.trim() : "main";
+  const branch =
+    typeof body?.branch === "string" && body.branch.trim() ? body.branch.trim() : "main";
   const port = typeof body?.port === "number" ? body.port : 3000;
   const buildMode = BUILD_MODES.includes(body?.buildMode as AppBuildMode)
     ? (body?.buildMode as AppBuildMode)

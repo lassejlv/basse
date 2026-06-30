@@ -1,6 +1,6 @@
-import { db, environment, project } from "@basse/db";
+import { app, db, environment, project } from "@basse/db";
 import type { CreateProjectInput } from "@basse/shared";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { resolveActiveWorkspace } from "./workspace";
 
@@ -27,7 +27,34 @@ projects.get("/", async (c) => {
     .where(eq(project.organizationId, organizationId))
     .orderBy(project.createdAt);
 
-  return c.json(rows);
+  const projectIds = rows.map((row) => row.id);
+  const environmentCount = new Map<string, number>();
+  const appCount = new Map<string, number>();
+
+  if (projectIds.length > 0) {
+    const envRows = await db
+      .select({ projectId: environment.projectId, count: sql<number>`count(*)::int` })
+      .from(environment)
+      .where(inArray(environment.projectId, projectIds))
+      .groupBy(environment.projectId);
+    for (const row of envRows) environmentCount.set(row.projectId, row.count);
+
+    const appRows = await db
+      .select({ projectId: environment.projectId, count: sql<number>`count(*)::int` })
+      .from(app)
+      .innerJoin(environment, eq(app.environmentId, environment.id))
+      .where(inArray(environment.projectId, projectIds))
+      .groupBy(environment.projectId);
+    for (const row of appRows) appCount.set(row.projectId, row.count);
+  }
+
+  return c.json(
+    rows.map((row) => ({
+      ...row,
+      environmentCount: environmentCount.get(row.id) ?? 0,
+      appCount: appCount.get(row.id) ?? 0,
+    })),
+  );
 });
 
 projects.get("/:id", async (c) => {

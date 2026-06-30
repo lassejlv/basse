@@ -1,18 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { PlusIcon, TrashIcon } from "lucide-react";
+import { ArrowLeftIcon, ExternalLinkIcon, PlusIcon, RocketIcon, TrashIcon } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
-import type { AppBuildRunner, AppSourceType, AppVolume, DeploymentStatus } from "@basse/shared";
+import type { AppBuildRunner, AppSourceType, AppVolume, Deployment } from "@basse/shared";
 import { chartCssVars } from "@/components/charts/chart-context";
 import { Grid } from "@/components/charts/grid";
 import { Line, LineChart } from "@/components/charts/line-chart";
 import { ChartTooltip } from "@/components/charts/tooltip";
 import { XAxis } from "@/components/charts/x-axis";
+import { DeployStatusBadge, StatusDot } from "@/components/deploy-status";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -23,6 +25,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import type { App } from "@/lib/apps";
 import {
@@ -42,63 +45,290 @@ export const Route = createFileRoute("/_authed/apps/$appId")({
   component: AppDetailRoute,
 });
 
-const DEPLOY_STATUS_VARIANT: Record<
-  DeploymentStatus,
-  "outline" | "info" | "success" | "error" | "secondary"
-> = {
-  queued: "outline",
-  building: "info",
-  deploying: "info",
-  healthy: "success",
-  superseded: "secondary",
-  failed: "error",
-  cancelled: "secondary",
-  stopped: "secondary",
-};
+const IN_FLIGHT: Deployment["status"][] = ["queued", "building", "deploying"];
 
 function AppDetailRoute() {
   const { appId } = Route.useParams();
   const app = useQuery({ queryKey: ["app", appId], queryFn: () => getApp(appId) });
 
+  const deployments = useQuery({
+    queryKey: ["deployments", appId],
+    queryFn: () => listDeployments(appId),
+    // Poll while the newest deployment is still in flight.
+    refetchInterval: (query) => {
+      const latest = query.state.data?.[0];
+      return latest && IN_FLIGHT.includes(latest.status) ? 2000 : false;
+    },
+  });
+
   if (app.isPending) {
-    return <p className="p-6 text-muted-foreground text-sm">Loading…</p>;
+    return <p className="p-4 text-muted-foreground text-sm md:p-6">Loading…</p>;
   }
   if (app.isError || !app.data) {
-    return <p className="p-6 text-destructive-foreground text-sm">App not found.</p>;
+    return <p className="p-4 text-destructive-foreground text-sm md:p-6">App not found.</p>;
   }
 
   const data = app.data;
+  const list = deployments.data ?? [];
+  const status = list[0]?.status ?? data.latestDeploymentStatus ?? null;
   const canDeploy =
     data.serverIds.length > 0 &&
     (data.sourceType === "image" || data.buildRunner !== "server" || data.serverIds.length === 1);
 
   return (
-    <section className="flex flex-1 flex-col gap-8 p-4 md:p-6">
-      <div className="max-w-2xl">
-        <h1 className="text-2xl font-semibold tracking-normal md:text-3xl">{data.name}</h1>
-        <p className="mt-2 font-mono text-muted-foreground text-sm">
-          {data.sourceType === "image" ? data.imageRef : data.repositoryUrl} · :{data.port} ·{" "}
-          {data.sourceType === "repository" ? `${data.branch} · ${data.buildMode} · ${data.buildRunner}` : "image"}
-        </p>
-        {data.serverIds.length === 0 ? (
-          <p className="mt-2 text-warning-foreground text-sm">
-            No servers attached — select at least one before deploying.
-          </p>
+    <section className="flex flex-1 flex-col p-4 md:p-6">
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-6">
+        <Breadcrumb app={data} />
+        <AppHeader app={data} appId={appId} canDeploy={canDeploy} status={status} />
+
+        <Tabs defaultValue="deployments">
+          <TabsList variant="underline" className="w-full justify-start overflow-x-auto">
+            <TabsTab value="deployments">Deployments</TabsTab>
+            <TabsTab value="runtime">Runtime</TabsTab>
+            <TabsTab value="variables">Variables</TabsTab>
+            <TabsTab value="domains">Domains</TabsTab>
+            <TabsTab value="settings">Settings</TabsTab>
+          </TabsList>
+
+          <TabsPanel className="pt-5" value="deployments">
+            <DeploymentsPanel deployments={list} isPending={deployments.isPending} />
+          </TabsPanel>
+          <TabsPanel className="pt-5" value="runtime">
+            <RuntimeCard app={data} />
+          </TabsPanel>
+          <TabsPanel className="pt-5" value="variables">
+            <EnvVarsCard appId={appId} />
+          </TabsPanel>
+          <TabsPanel className="pt-5" value="domains">
+            {data.serverIds.length === 1 ? (
+              <AppDomainsSection app={data} serverId={data.serverIds[0]!} />
+            ) : data.serverIds.length > 1 ? (
+              <DisabledDomainsSection />
+            ) : (
+              <Card className="p-6">
+                <p className="text-muted-foreground text-sm">
+                  Attach a server to this app to route a domain to it.
+                </p>
+              </Card>
+            )}
+          </TabsPanel>
+          <TabsPanel className="flex flex-col gap-6 pt-5" value="settings">
+            <BuildSettingsCard app={data} />
+            <ServerCard app={data} />
+            <VolumesCard app={data} />
+          </TabsPanel>
+        </Tabs>
+      </div>
+    </section>
+  );
+}
+
+function Breadcrumb({ app }: { app: App }) {
+  return (
+    <nav className="flex items-center gap-1.5 text-muted-foreground text-sm">
+      <Link
+        className="inline-flex items-center gap-1.5 transition hover:text-foreground"
+        to="/projects"
+      >
+        <ArrowLeftIcon className="size-4" />
+        Projects
+      </Link>
+      {app.projectId ? (
+        <>
+          <span aria-hidden className="text-muted-foreground/40">
+            /
+          </span>
+          <Link
+            className="transition hover:text-foreground"
+            params={{ projectId: app.projectId }}
+            to="/projects/$projectId"
+          >
+            {app.projectName}
+          </Link>
+        </>
+      ) : null}
+      {app.environmentName ? (
+        <>
+          <span aria-hidden className="text-muted-foreground/40">
+            /
+          </span>
+          <span className="font-mono text-xs">{app.environmentName}</span>
+        </>
+      ) : null}
+    </nav>
+  );
+}
+
+function AppHeader({
+  app,
+  appId,
+  canDeploy,
+  status,
+}: {
+  app: App;
+  appId: string;
+  canDeploy: boolean;
+  status: Deployment["status"] | null;
+}) {
+  const repoHost = app.repositoryUrl.replace(/^https?:\/\//, "");
+  const liveUrl = useLiveUrl(app);
+
+  return (
+    <Card className="gap-5 p-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <StatusDot className="size-3" status={status} />
+          <h1 className="truncate font-semibold text-2xl tracking-tight">{app.name}</h1>
+          <DeployStatusBadge status={status} />
+        </div>
+        <DeployButton appId={appId} canDeploy={canDeploy} />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-muted-foreground text-xs">
+        {app.sourceType === "image" ? (
+          <span className="text-foreground/80">{app.imageRef}</span>
+        ) : (
+          <a
+            className="inline-flex items-center gap-1 text-foreground/80 underline-offset-2 hover:underline"
+            href={app.repositoryUrl}
+            rel="noreferrer"
+            target="_blank"
+          >
+            {repoHost}
+            <ExternalLinkIcon className="size-3 opacity-70" />
+          </a>
+        )}
+        <SpecDivider />
+        {app.sourceType === "repository" ? (
+          <>
+            <span>{app.branch}</span>
+            <SpecDivider />
+          </>
+        ) : null}
+        <span>:{app.port}</span>
+        {app.sourceType === "repository" ? (
+          <>
+            <SpecDivider />
+            <span>{app.buildRunner}</span>
+          </>
         ) : null}
       </div>
 
-      <ServerCard app={data} />
-      <BuildSettingsCard app={data} />
-      <DeploySection appId={appId} canDeploy={canDeploy} />
-      <RuntimeCard app={data} />
-      <EnvVarsCard appId={appId} />
-      <VolumesCard app={data} />
-      {data.serverIds.length === 1 ? (
-        <AppDomainsSection app={data} serverId={data.serverIds[0]!} />
-      ) : data.serverIds.length > 1 ? (
-        <DisabledDomainsSection />
+      <div className="flex flex-wrap items-center gap-3 border-t pt-4 text-sm">
+        {liveUrl ? (
+          <a
+            className="inline-flex items-center gap-1.5 font-medium text-foreground underline-offset-4 hover:underline"
+            href={liveUrl}
+            rel="noreferrer"
+            target="_blank"
+          >
+            {liveUrl.replace(/^https?:\/\//, "")}
+            <ExternalLinkIcon className="size-3.5 opacity-70" />
+          </a>
+        ) : (
+          <span className="text-muted-foreground">No domain attached</span>
+        )}
+      </div>
+
+      {app.serverIds.length === 0 ? (
+        <p className="text-warning-foreground text-sm">
+          No servers attached — open Settings and select at least one before deploying.
+        </p>
       ) : null}
-    </section>
+    </Card>
+  );
+}
+
+function SpecDivider() {
+  return (
+    <span aria-hidden className="text-muted-foreground/40">
+      ·
+    </span>
+  );
+}
+
+/** First active domain for this app on its single attached server, if any. */
+function useLiveUrl(app: App): string | null {
+  const serverId = app.serverIds.length === 1 ? app.serverIds[0]! : null;
+  const domains = useQuery({
+    queryKey: ["domains", serverId],
+    queryFn: () => listDomains(serverId!),
+    enabled: Boolean(serverId),
+  });
+  if (!serverId) return null;
+  const active = (domains.data ?? []).find((d) => d.appId === app.id && d.status === "active");
+  return active ? `https://${active.host}` : null;
+}
+
+function DeployButton({ appId, canDeploy }: { appId: string; canDeploy: boolean }) {
+  const queryClient = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+
+  const deploy = useMutation({
+    mutationFn: () => triggerDeploy(appId),
+    onSuccess: async () => {
+      setError(null);
+      await queryClient.invalidateQueries({ queryKey: ["deployments", appId] });
+    },
+    onError: (mutationError: Error) => setError(mutationError.message),
+  });
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <Button disabled={!canDeploy} loading={deploy.isPending} onClick={() => deploy.mutate()}>
+        <RocketIcon />
+        Deploy
+      </Button>
+      {error ? <p className="text-destructive-foreground text-xs">{error}</p> : null}
+    </div>
+  );
+}
+
+function DeploymentsPanel({
+  deployments,
+  isPending,
+}: {
+  deployments: Deployment[];
+  isPending: boolean;
+}) {
+  const latest = deployments[0];
+
+  return (
+    <div className="flex flex-col gap-5">
+      <Card className="overflow-hidden p-0">
+        <div className="flex items-center justify-between gap-3 border-b px-5 py-3">
+          <h2 className="font-medium text-sm">Latest build log</h2>
+          {latest ? <DeployStatusBadge size="sm" status={latest.status} /> : null}
+        </div>
+        <pre className="max-h-80 overflow-auto bg-muted/30 p-4 font-mono text-xs leading-relaxed">
+          {latest ? (latest.logs ?? "Waiting for logs…") : "No deployments yet."}
+        </pre>
+      </Card>
+
+      <div>
+        <h2 className="mb-2 font-medium text-muted-foreground text-xs uppercase tracking-wider">
+          History
+        </h2>
+        {isPending ? (
+          <p className="text-muted-foreground text-sm">Loading…</p>
+        ) : deployments.length === 0 ? (
+          <p className="text-muted-foreground text-sm">No deployments yet.</p>
+        ) : (
+          <Card className="divide-y overflow-hidden p-0">
+            {deployments.map((deployment) => (
+              <div key={deployment.id} className="flex items-center gap-3 px-4 py-3">
+                <StatusDot status={deployment.status} />
+                <span className="flex-1 font-mono text-muted-foreground text-xs">
+                  {new Date(deployment.createdAt).toLocaleString()}
+                  {deployment.commitSha ? ` · ${deployment.commitSha.slice(0, 7)}` : ""}
+                </span>
+                <DeployStatusBadge size="sm" status={deployment.status} />
+              </div>
+            ))}
+          </Card>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -124,8 +354,8 @@ function ServerCard({ app }: { app: App }) {
   }
 
   return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6">
-      <h2 className="text-lg font-semibold">Servers</h2>
+    <Card className="p-6">
+      <h2 className="font-semibold text-lg">Servers</h2>
       <p className="mt-1 text-muted-foreground text-sm">
         The servers this app deploys to. Only active servers can run deployments.
       </p>
@@ -158,7 +388,7 @@ function ServerCard({ app }: { app: App }) {
           </div>
         )}
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -197,8 +427,8 @@ function BuildSettingsCard({ app }: { app: App }) {
   const localBuildInvalid = app.buildRunner === "server" && app.serverIds.length !== 1;
 
   return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6">
-      <h2 className="text-lg font-semibold">Build</h2>
+    <Card className="p-6">
+      <h2 className="font-semibold text-lg">Build</h2>
       <p className="mt-1 text-muted-foreground text-sm">
         Choose whether this app builds from Git or deploys an existing image.
       </p>
@@ -317,7 +547,7 @@ function BuildSettingsCard({ app }: { app: App }) {
           Save build settings
         </Button>
       </form>
-    </div>
+    </Card>
   );
 }
 
@@ -351,10 +581,7 @@ function VolumesCard({ app }: { app: App }) {
   }
 
   function addVolume() {
-    setVolumes((current) => [
-      ...current,
-      { hostPath: "", containerPath: "", readOnly: false },
-    ]);
+    setVolumes((current) => [...current, { hostPath: "", containerPath: "", readOnly: false }]);
   }
 
   function removeVolume(index: number) {
@@ -362,8 +589,8 @@ function VolumesCard({ app }: { app: App }) {
   }
 
   return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6">
-      <h2 className="text-lg font-semibold">Volumes</h2>
+    <Card className="p-6">
+      <h2 className="font-semibold text-lg">Volumes</h2>
       <p className="mt-1 text-muted-foreground text-sm">
         Bind host paths into the container on every deployment.
       </p>
@@ -387,7 +614,9 @@ function VolumesCard({ app }: { app: App }) {
                     <Label htmlFor={`volume-host-${index}`}>Host path</Label>
                     <Input
                       id={`volume-host-${index}`}
-                      onChange={(event) => updateVolume(index, { hostPath: event.currentTarget.value })}
+                      onChange={(event) =>
+                        updateVolume(index, { hostPath: event.currentTarget.value })
+                      }
                       placeholder="/srv/app/data"
                       value={volume.hostPath}
                     />
@@ -435,7 +664,7 @@ function VolumesCard({ app }: { app: App }) {
           Save volumes
         </Button>
       </form>
-    </div>
+    </Card>
   );
 }
 
@@ -496,10 +725,10 @@ function RuntimeCard({ app }: { app: App }) {
   });
 
   return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6">
+    <Card className="p-6">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold">Runtime</h2>
+          <h2 className="font-semibold text-lg">Runtime</h2>
           <p className="mt-1 text-muted-foreground text-sm">
             Live container metrics, logs, and command console for the selected server.
           </p>
@@ -537,7 +766,9 @@ function RuntimeCard({ app }: { app: App }) {
       {stopError ? <p className="mt-2 text-destructive-foreground text-sm">{stopError}</p> : null}
 
       {app.serverIds.length === 0 ? (
-        <p className="mt-5 text-muted-foreground text-sm">Select a server before using runtime tools.</p>
+        <p className="mt-5 text-muted-foreground text-sm">
+          Select a server before using runtime tools.
+        </p>
       ) : (
         <>
           <div className="mt-5 h-64 rounded-md border bg-muted/20 p-3">
@@ -551,7 +782,11 @@ function RuntimeCard({ app }: { app: App }) {
               >
                 <Grid horizontal />
                 <Line dataKey="cpuPercent" stroke={chartCssVars.linePrimary} strokeWidth={2.5} />
-                <Line dataKey="memoryPercent" stroke={chartCssVars.lineSecondary} strokeWidth={2.5} />
+                <Line
+                  dataKey="memoryPercent"
+                  stroke={chartCssVars.lineSecondary}
+                  strokeWidth={2.5}
+                />
                 <XAxis />
                 <ChartTooltip
                   rows={(point) => [
@@ -575,8 +810,20 @@ function RuntimeCard({ app }: { app: App }) {
             )}
           </div>
           <div className="mt-2 flex gap-4 text-muted-foreground text-xs">
-            <span>CPU</span>
-            <span>Memory</span>
+            <span className="inline-flex items-center gap-1.5">
+              <span
+                className="size-2 rounded-full"
+                style={{ background: chartCssVars.linePrimary }}
+              />
+              CPU
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span
+                className="size-2 rounded-full"
+                style={{ background: chartCssVars.lineSecondary }}
+              />
+              Memory
+            </span>
           </div>
 
           <div className="mt-6 border-t pt-6">
@@ -604,7 +851,7 @@ function RuntimeCard({ app }: { app: App }) {
           <AppConsoleTerminal appId={app.id} serverId={serverId} />
         </>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -716,70 +963,6 @@ function AppConsoleTerminal({ appId, serverId }: { appId: string; serverId: stri
   );
 }
 
-function DeploySection({ appId, canDeploy }: { appId: string; canDeploy: boolean }) {
-  const queryClient = useQueryClient();
-  const queryKey = ["deployments", appId];
-  const [error, setError] = useState<string | null>(null);
-
-  const deployments = useQuery({
-    queryKey,
-    queryFn: () => listDeployments(appId),
-    // Poll while the newest deployment is still in flight.
-    refetchInterval: (query) => {
-      const latest = query.state.data?.[0];
-      return latest && ["queued", "building", "deploying"].includes(latest.status) ? 2000 : false;
-    },
-  });
-
-  const deploy = useMutation({
-    mutationFn: () => triggerDeploy(appId),
-    onSuccess: async () => {
-      setError(null);
-      await queryClient.invalidateQueries({ queryKey });
-    },
-    onError: (e: Error) => setError(e.message),
-  });
-
-  const list = deployments.data ?? [];
-  const latest = list[0];
-
-  return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold">Deployments</h2>
-        <Button disabled={!canDeploy} loading={deploy.isPending} onClick={() => deploy.mutate()}>
-          Deploy
-        </Button>
-      </div>
-      {error ? <p className="mt-2 text-destructive-foreground text-sm">{error}</p> : null}
-
-      {latest ? (
-        <pre className="mt-4 max-h-72 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
-          {latest.logs ?? "Waiting for logs…"}
-        </pre>
-      ) : null}
-
-      <div className="mt-4">
-        {list.length === 0 ? (
-          <p className="text-muted-foreground text-sm">No deployments yet.</p>
-        ) : (
-          <ul className="flex flex-col gap-1.5">
-            {list.map((d) => (
-              <li key={d.id} className="flex items-center justify-between gap-3 text-sm">
-                <span className="font-mono text-muted-foreground text-xs">
-                  {new Date(d.createdAt).toLocaleString()}
-                  {d.commitSha ? ` · ${d.commitSha.slice(0, 7)}` : ""}
-                </span>
-                <Badge variant={DEPLOY_STATUS_VARIANT[d.status]}>{d.status}</Badge>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function EnvVarsCard({ appId }: { appId: string }) {
   const queryClient = useQueryClient();
   const queryKey = ["env-vars", appId];
@@ -812,8 +995,8 @@ function EnvVarsCard({ appId }: { appId: string }) {
   const list = vars.data ?? [];
 
   return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6">
-      <h2 className="text-lg font-semibold">Environment variables</h2>
+    <Card className="p-6">
+      <h2 className="font-semibold text-lg">Environment variables</h2>
       <p className="mt-1 text-muted-foreground text-sm">
         Runtime variables, encrypted at rest. Changes apply on the next deploy.
       </p>
@@ -824,11 +1007,11 @@ function EnvVarsCard({ appId }: { appId: string }) {
         ) : list.length === 0 ? (
           <p className="text-muted-foreground text-sm">No variables set.</p>
         ) : (
-          <ul className="flex flex-col gap-1">
+          <ul className="divide-y rounded-md border">
             {list.map((v) => (
-              <li key={v.key} className="flex justify-between gap-3 font-mono text-sm">
-                <span className="font-medium">{v.key}</span>
-                <span className="text-muted-foreground">{v.valueHint}</span>
+              <li key={v.key} className="flex justify-between gap-3 px-3 py-2 font-mono text-sm">
+                <span className="truncate font-medium">{v.key}</span>
+                <span className="shrink-0 text-muted-foreground">{v.valueHint}</span>
               </li>
             ))}
           </ul>
@@ -852,7 +1035,7 @@ function EnvVarsCard({ appId }: { appId: string }) {
           Save variables
         </Button>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -891,8 +1074,8 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
   const addPreview = useMutation({
     mutationFn: () => {
       const ip = selectedServer?.sshHost ?? "";
-      const host = `${app.slug}-${app.id.slice(0, 8)}.${ip}.sslip.io`;
-      return createDomain(serverId, { host, upstream, appId: app.id });
+      const previewDomainHost = `${app.slug}-${app.id.slice(0, 8)}.${ip}.sslip.io`;
+      return createDomain(serverId, { host: previewDomainHost, upstream, appId: app.id });
     },
     onSuccess: async () => {
       setError(null);
@@ -915,8 +1098,8 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
     : "";
 
   return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6">
-      <h2 className="text-lg font-semibold">Domains</h2>
+    <Card className="p-6">
+      <h2 className="font-semibold text-lg">Domains</h2>
       <p className="mt-1 text-muted-foreground text-sm">
         Add an A record for your domain pointing to{" "}
         <code className="font-mono">{selectedServer?.sshHost ?? "this server"}</code>. Basse will
@@ -952,7 +1135,17 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
                 key={d.id}
                 className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
               >
-                <span className="truncate font-medium text-sm">{d.host}</span>
+                <span className="flex min-w-0 items-center gap-2">
+                  <Badge
+                    size="sm"
+                    variant={
+                      d.status === "active" ? "success" : d.status === "error" ? "error" : "warning"
+                    }
+                  >
+                    {d.status}
+                  </Badge>
+                  <span className="truncate font-medium text-sm">{d.host}</span>
+                </span>
                 <Button
                   aria-label={`Delete ${d.host}`}
                   loading={remove.isPending && remove.variables === d.id}
@@ -984,18 +1177,18 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
         </Button>
       </form>
       {error ? <p className="mt-2 text-destructive-foreground text-sm">{error}</p> : null}
-    </div>
+    </Card>
   );
 }
 
 function DisabledDomainsSection() {
   return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6 opacity-70">
-      <h2 className="text-lg font-semibold">Domains</h2>
+    <Card className="p-6 opacity-70">
+      <h2 className="font-semibold text-lg">Domains</h2>
       <p className="mt-1 text-muted-foreground text-sm">
         Domain management is disabled while this app deploys to multiple servers. Select one target
         server, or add a load balancer/shared ingress before attaching domains here.
       </p>
-    </div>
+    </Card>
   );
 }
