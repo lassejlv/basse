@@ -214,7 +214,7 @@ function NewEnvironmentDialog({ projectId }: { projectId: string }) {
           </Button>
         }
       />
-      <DialogPopup className="max-w-md">
+      <DialogPopup className="h-fit max-w-md">
         <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -336,7 +336,7 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
           </Button>
         }
       />
-      <DialogPopup className="max-w-lg">
+      <DialogPopup className="h-fit max-w-lg">
         <form onSubmit={handleSubmit}>
           <DialogHeader>
             <DialogTitle>New app</DialogTitle>

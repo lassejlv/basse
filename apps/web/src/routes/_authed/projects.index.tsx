@@ -167,7 +167,7 @@ function CreateProjectDialog({ organizationId }: { organizationId: string | unde
           </Button>
         }
       />
-      <DialogPopup className="max-w-md">
+      <DialogPopup className="h-fit max-w-md">
         <form onSubmit={handleSubmit}>
           <DialogHeader>
             <DialogTitle>New project</DialogTitle>

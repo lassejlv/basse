@@ -783,11 +783,12 @@ function RuntimeCard({ app }: { app: App }) {
         </p>
       ) : (
         <>
-          <div className="mt-5 h-64 rounded-md border bg-muted/20 p-3">
+          <div className="mt-5 h-64 overflow-hidden rounded-md border bg-muted/20 p-3">
             {samples.length > 1 ? (
               <LineChart
                 animationDuration={700}
                 aspectRatio={undefined}
+                className="h-full"
                 data={samples}
                 margin={{ bottom: 28, left: 28, right: 20, top: 18 }}
                 xDataKey="date"
