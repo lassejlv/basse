@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@basse/db": "workspace:*",
+    "@basse/emails": "workspace:*",
     "@basse/shared": "workspace:*",
     "@opencoredev/email-sdk": "^0.6.5",
     "better-auth": "latest",

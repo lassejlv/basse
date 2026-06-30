@@ -55,6 +55,7 @@ Checked against the current repo on 2026-06-30.
 - [x] Added project shared and environment shared variables with `{{shared.KEY}}` / `{{env.KEY}}` references, autocomplete, and deploy-time resolution.
 - [x] Added background monitoring for server reachability, stuck deployments, app container health, resource pressure, and in-app alerts.
 - [x] Added Cloudflare Email Sending delivery for new monitor alerts through `@opencoredev/email-sdk`.
+- [x] Added `packages/emails` with React Email templates for monitor alert email rendering.
 
 ### Current Validation
 

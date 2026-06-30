@@ -1,0 +1,23 @@
+{
+  "name": "@basse/emails",
+  "private": true,
+  "type": "module",
+  "types": "./src/index.tsx",
+  "exports": {
+    ".": "./src/index.tsx"
+  },
+  "scripts": {
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@react-email/components": "^1.0.12",
+    "@react-email/render": "^2.0.9",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest"
+  }
+}

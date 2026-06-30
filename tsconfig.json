@@ -3,6 +3,7 @@
     "target": "ES2023",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
     "strict": true,
     "skipLibCheck": true,
     "allowSyntheticDefaultImports": true,
@@ -13,6 +14,7 @@
     "paths": {
       "@basse/db": ["./packages/db/src/index.ts"],
       "@basse/db/*": ["./packages/db/src/*"],
+      "@basse/emails": ["./packages/emails/src/index.tsx"],
       "@basse/shared": ["./packages/shared/src/index.ts"]
     }
   }

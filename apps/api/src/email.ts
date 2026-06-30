@@ -1,4 +1,5 @@
 import { db, member, user } from "@basse/db";
+import { renderMonitorAlertEmail } from "@basse/emails";
 import { createEmailClient, type EmailClient } from "@opencoredev/email-sdk";
 import { cloudflare } from "@opencoredev/email-sdk/cloudflare";
 import { observabilityPlugin } from "@opencoredev/email-sdk/plugins/observability";
@@ -49,15 +50,6 @@ function getEmailClient(): EmailClient | null {
   return emailClient;
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
 async function organizationRecipients(organizationId: string): Promise<string[]> {
   const rows = await db
     .select({ email: user.email })
@@ -84,26 +76,13 @@ export async function sendAlertEmail(alert: AlertEmail): Promise<void> {
   const baseUrl = appUrl();
   const alertsUrl = baseUrl ? `${baseUrl}/alerts` : null;
   const subject = `[Basse ${alert.severity}] ${alert.title}`;
-  const text = [
-    alert.title,
-    "",
-    alert.message,
-    "",
-    `Severity: ${alert.severity}`,
-    `Code: ${alert.code}`,
-    alertsUrl ? `Open alerts: ${alertsUrl}` : null,
-  ]
-    .filter(Boolean)
-    .join("\n");
-  const html = `
-    <div>
-      <h2>${escapeHtml(alert.title)}</h2>
-      <p>${escapeHtml(alert.message)}</p>
-      <p><strong>Severity:</strong> ${escapeHtml(alert.severity)}</p>
-      <p><strong>Code:</strong> ${escapeHtml(alert.code)}</p>
-      ${alertsUrl ? `<p><a href="${escapeHtml(alertsUrl)}">Open alerts in Basse</a></p>` : ""}
-    </div>
-  `;
+  const rendered = await renderMonitorAlertEmail({
+    title: alert.title,
+    message: alert.message,
+    severity: alert.severity,
+    code: alert.code,
+    alertsUrl,
+  });
 
   await Promise.all(
     recipients.map((email) =>
@@ -113,8 +92,8 @@ export async function sendAlertEmail(alert: AlertEmail): Promise<void> {
             from: Bun.env.EMAIL_FROM!,
             to: email,
             subject,
-            text,
-            html,
+            text: rendered.text,
+            html: rendered.html,
             headers: {
               "X-Basse-Alert-Code": alert.code,
             },
