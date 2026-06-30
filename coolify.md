@@ -53,6 +53,8 @@ Checked against the current repo on 2026-06-30.
 - [x] Added staged change history so applied and discarded config/env changes remain visible after the pending set is cleared.
 - [x] Made staged changes project-wide, with project-level review, apply, discard, and history across apps and environments.
 - [x] Added project shared and environment shared variables with `{{shared.KEY}}` / `{{env.KEY}}` references, autocomplete, and deploy-time resolution.
+- [x] Added background monitoring for server reachability, stuck deployments, app container health, resource pressure, and in-app alerts.
+- [x] Added Cloudflare Email Sending delivery for new monitor alerts through `@opencoredev/email-sdk`.
 
 ### Current Validation
 

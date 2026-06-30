@@ -1,5 +1,7 @@
+import { useQuery } from "@tanstack/react-query";
 import { Link, Outlet, createFileRoute, redirect, useLocation } from "@tanstack/react-router";
 import {
+  BellIcon,
   FolderIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
@@ -32,6 +34,7 @@ import {
   SidebarRail,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
+import { getAlertsOverview } from "@/lib/alerts";
 import { authClient } from "@/lib/auth-client";
 
 export const Route = createFileRoute("/_authed")({
@@ -61,18 +64,28 @@ function AuthedLayout() {
     ? "Servers"
     : pathname.startsWith("/projects") || pathname.startsWith("/apps")
       ? "Projects"
-      : pathname === "/secrets"
-        ? "Secrets"
-        : pathname === "/settings"
-          ? "Settings"
-          : "Overview";
+      : pathname === "/alerts"
+        ? "Alerts"
+        : pathname === "/secrets"
+          ? "Secrets"
+          : pathname === "/settings"
+            ? "Settings"
+            : "Overview";
   const user = session.user;
   const displayName = user.name || user.email;
   const initials = getInitials(displayName);
   const { data: organizations } = authClient.useListOrganizations();
   const { data: activeOrganization } = authClient.useActiveOrganization();
+  const alertsOverview = useQuery({
+    queryKey: ["alerts-overview", activeOrganization?.id],
+    queryFn: getAlertsOverview,
+    enabled: Boolean(activeOrganization?.id),
+    refetchInterval: 15_000,
+  });
   const workspaceList = organizations ?? [];
   const selectedWorkspaceId = activeOrganization?.id ?? workspaceList[0]?.id ?? "";
+  const activeAlertCount =
+    (alertsOverview.data?.openCount ?? 0) + (alertsOverview.data?.acknowledgedCount ?? 0);
 
   const setActiveWorkspace = (organizationId: string) => {
     void authClient.organization.setActive({ organizationId });
@@ -150,6 +163,21 @@ function AuthedLayout() {
                   >
                     <LayoutDashboardIcon />
                     <span>Overview</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    isActive={pathname === "/alerts"}
+                    render={<Link to="/alerts" />}
+                    tooltip="Alerts"
+                  >
+                    <BellIcon />
+                    <span>Alerts</span>
+                    {activeAlertCount > 0 ? (
+                      <span className="ml-auto rounded-sm bg-destructive px-1.5 py-0.5 text-[0.625rem] text-white group-data-[collapsible=icon]:hidden">
+                        {activeAlertCount}
+                      </span>
+                    ) : null}
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               </SidebarMenu>

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import { alerts } from "./alerts";
 import { apps } from "./apps";
 import { auth } from "./auth";
 import { changes, projectChanges } from "./changes";
@@ -12,6 +13,7 @@ import { domains } from "./domains";
 import { environments } from "./environments";
 import { envVars } from "./env-vars";
 import { loadBalancers } from "./load-balancers";
+import { startMonitor } from "./monitor";
 import { projects } from "./projects";
 import { actionsQueue } from "./queue/queue";
 import { reconcileProvisioningServers } from "./queue/reconcile";
@@ -62,6 +64,7 @@ app.route("/api/servers", servers);
 app.route("/api/domains", domains);
 app.route("/api/load-balancers", loadBalancers);
 app.route("/api/workspace", workspaceSettingsRoutes);
+app.route("/api/alerts", alerts);
 
 app.get("/health", (c) =>
   c.json({
@@ -75,6 +78,7 @@ app.get("*", serveStatic({ path: `${webDist}/index.html` }));
 
 // Start the in-process worker that runs background actions (provisioning, …).
 const worker = startWorker();
+const monitor = startMonitor();
 
 // Re-enqueue any server left mid-provision by a previous process (crash/restart).
 void reconcileProvisioningServers().catch(() => {});
@@ -91,6 +95,7 @@ async function shutdown(): Promise<void> {
   }
   shuttingDown = true;
   try {
+    monitor.close();
     await worker.close();
     await actionsQueue.close();
   } catch (error) {

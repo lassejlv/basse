@@ -338,6 +338,53 @@ export type Deployment = {
   updatedAt: string;
 };
 
+export type MonitorSeverity = "info" | "warning" | "critical";
+export type AlertStatus = "open" | "acknowledged" | "resolved";
+
+export type Alert = {
+  id: string;
+  organizationId: string;
+  severity: MonitorSeverity;
+  status: AlertStatus;
+  code: string;
+  title: string;
+  message: string;
+  fingerprint: string;
+  serverId: string | null;
+  serverName: string | null;
+  appId: string | null;
+  appName: string | null;
+  deploymentId: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  acknowledgedAt: string | null;
+  resolvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MonitorEvent = {
+  id: string;
+  organizationId: string;
+  severity: MonitorSeverity;
+  code: string;
+  title: string;
+  message: string;
+  fingerprint: string;
+  serverId: string | null;
+  serverName: string | null;
+  appId: string | null;
+  appName: string | null;
+  deploymentId: string | null;
+  createdAt: string;
+};
+
+export type AlertsOverview = {
+  openCount: number;
+  acknowledgedCount: number;
+  criticalOpenCount: number;
+};
+
 export type RollbackDeploymentInput = {
   deploymentId: string;
 };

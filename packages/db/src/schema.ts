@@ -250,6 +250,66 @@ export const deployment = pgTable("deployment", {
   updatedAt: timestamp("updated_at").notNull(),
 });
 
+export const monitorEvent = pgTable(
+  "monitor_event",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    severity: text("severity", { enum: ["info", "warning", "critical"] }).notNull(),
+    code: text("code").notNull(),
+    title: text("title").notNull(),
+    message: text("message").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+    serverId: text("server_id").references(() => server.id, { onDelete: "cascade" }),
+    appId: text("app_id").references(() => app.id, { onDelete: "cascade" }),
+    deploymentId: text("deployment_id").references(() => deployment.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at").notNull(),
+  },
+  (table) => [
+    index("monitor_event_organizationId_idx").on(table.organizationId),
+    index("monitor_event_fingerprint_idx").on(table.fingerprint),
+    index("monitor_event_createdAt_idx").on(table.createdAt),
+    index("monitor_event_serverId_idx").on(table.serverId),
+    index("monitor_event_appId_idx").on(table.appId),
+  ],
+);
+
+export const alert = pgTable(
+  "alert",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    severity: text("severity", { enum: ["info", "warning", "critical"] }).notNull(),
+    status: text("status", { enum: ["open", "acknowledged", "resolved"] })
+      .notNull()
+      .default("open"),
+    code: text("code").notNull(),
+    title: text("title").notNull(),
+    message: text("message").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+    serverId: text("server_id").references(() => server.id, { onDelete: "cascade" }),
+    appId: text("app_id").references(() => app.id, { onDelete: "cascade" }),
+    deploymentId: text("deployment_id").references(() => deployment.id, { onDelete: "set null" }),
+    firstSeenAt: timestamp("first_seen_at").notNull(),
+    lastSeenAt: timestamp("last_seen_at").notNull(),
+    acknowledgedAt: timestamp("acknowledged_at"),
+    resolvedAt: timestamp("resolved_at"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("alert_organizationId_idx").on(table.organizationId),
+    index("alert_status_idx").on(table.status),
+    index("alert_fingerprint_idx").on(table.fingerprint),
+    index("alert_serverId_idx").on(table.serverId),
+    index("alert_appId_idx").on(table.appId),
+  ],
+);
+
 // Railway-style staged ("uncommitted") changes for an app. Each row is one
 // pending edit to the app's config or env vars, not yet applied to the live
 // `app`/`env_var` tables. They survive page reloads and are applied as a batch
@@ -413,6 +473,44 @@ export const deploymentRelations = relations(deployment, ({ one }) => ({
   app: one(app, {
     fields: [deployment.appId],
     references: [app.id],
+  }),
+}));
+
+export const monitorEventRelations = relations(monitorEvent, ({ one }) => ({
+  organization: one(organization, {
+    fields: [monitorEvent.organizationId],
+    references: [organization.id],
+  }),
+  server: one(server, {
+    fields: [monitorEvent.serverId],
+    references: [server.id],
+  }),
+  app: one(app, {
+    fields: [monitorEvent.appId],
+    references: [app.id],
+  }),
+  deployment: one(deployment, {
+    fields: [monitorEvent.deploymentId],
+    references: [deployment.id],
+  }),
+}));
+
+export const alertRelations = relations(alert, ({ one }) => ({
+  organization: one(organization, {
+    fields: [alert.organizationId],
+    references: [organization.id],
+  }),
+  server: one(server, {
+    fields: [alert.serverId],
+    references: [server.id],
+  }),
+  app: one(app, {
+    fields: [alert.appId],
+    references: [app.id],
+  }),
+  deployment: one(deployment, {
+    fields: [alert.deploymentId],
+    references: [deployment.id],
   }),
 }));
 

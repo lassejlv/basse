@@ -16,6 +16,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthedSettingsRouteImport } from './routes/_authed/settings'
 import { Route as AuthedSecretsRouteImport } from './routes/_authed/secrets'
 import { Route as AuthedDashboardRouteImport } from './routes/_authed/dashboard'
+import { Route as AuthedAlertsRouteImport } from './routes/_authed/alerts'
 import { Route as AuthedServersIndexRouteImport } from './routes/_authed/servers.index'
 import { Route as AuthedProjectsIndexRouteImport } from './routes/_authed/projects.index'
 import { Route as AuthedServersServerIdRouteImport } from './routes/_authed/servers.$serverId'
@@ -56,6 +57,11 @@ const AuthedDashboardRoute = AuthedDashboardRouteImport.update({
   path: '/dashboard',
   getParentRoute: () => AuthedRoute,
 } as any)
+const AuthedAlertsRoute = AuthedAlertsRouteImport.update({
+  id: '/alerts',
+  path: '/alerts',
+  getParentRoute: () => AuthedRoute,
+} as any)
 const AuthedServersIndexRoute = AuthedServersIndexRouteImport.update({
   id: '/servers/',
   path: '/servers/',
@@ -86,6 +92,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/signup': typeof SignupRoute
+  '/alerts': typeof AuthedAlertsRoute
   '/dashboard': typeof AuthedDashboardRoute
   '/secrets': typeof AuthedSecretsRoute
   '/settings': typeof AuthedSettingsRoute
@@ -99,6 +106,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/signup': typeof SignupRoute
+  '/alerts': typeof AuthedAlertsRoute
   '/dashboard': typeof AuthedDashboardRoute
   '/secrets': typeof AuthedSecretsRoute
   '/settings': typeof AuthedSettingsRoute
@@ -114,6 +122,7 @@ export interface FileRoutesById {
   '/_authed': typeof AuthedRouteWithChildren
   '/login': typeof LoginRoute
   '/signup': typeof SignupRoute
+  '/_authed/alerts': typeof AuthedAlertsRoute
   '/_authed/dashboard': typeof AuthedDashboardRoute
   '/_authed/secrets': typeof AuthedSecretsRoute
   '/_authed/settings': typeof AuthedSettingsRoute
@@ -129,6 +138,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/signup'
+    | '/alerts'
     | '/dashboard'
     | '/secrets'
     | '/settings'
@@ -142,6 +152,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/signup'
+    | '/alerts'
     | '/dashboard'
     | '/secrets'
     | '/settings'
@@ -156,6 +167,7 @@ export interface FileRouteTypes {
     | '/_authed'
     | '/login'
     | '/signup'
+    | '/_authed/alerts'
     | '/_authed/dashboard'
     | '/_authed/secrets'
     | '/_authed/settings'
@@ -224,6 +236,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedDashboardRouteImport
       parentRoute: typeof AuthedRoute
     }
+    '/_authed/alerts': {
+      id: '/_authed/alerts'
+      path: '/alerts'
+      fullPath: '/alerts'
+      preLoaderRoute: typeof AuthedAlertsRouteImport
+      parentRoute: typeof AuthedRoute
+    }
     '/_authed/servers/': {
       id: '/_authed/servers/'
       path: '/servers'
@@ -263,6 +282,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AuthedRouteChildren {
+  AuthedAlertsRoute: typeof AuthedAlertsRoute
   AuthedDashboardRoute: typeof AuthedDashboardRoute
   AuthedSecretsRoute: typeof AuthedSecretsRoute
   AuthedSettingsRoute: typeof AuthedSettingsRoute
@@ -274,6 +294,7 @@ interface AuthedRouteChildren {
 }
 
 const AuthedRouteChildren: AuthedRouteChildren = {
+  AuthedAlertsRoute: AuthedAlertsRoute,
   AuthedDashboardRoute: AuthedDashboardRoute,
   AuthedSecretsRoute: AuthedSecretsRoute,
   AuthedSettingsRoute: AuthedSettingsRoute,

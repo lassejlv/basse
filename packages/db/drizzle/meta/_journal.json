@@ -134,6 +134,13 @@
       "when": 1782844560323,
       "tag": "0018_cold_quentin_quire",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1782849207934,
+      "tag": "0019_thick_hemingway",
+      "breakpoints": true
     }
   ]
 }

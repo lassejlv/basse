@@ -15,6 +15,7 @@
       "dependencies": {
         "@basse/db": "workspace:*",
         "@basse/shared": "workspace:*",
+        "@opencoredev/email-sdk": "^0.6.5",
         "better-auth": "latest",
         "bullmq": "^5.79.2",
         "drizzle-orm": "latest",
@@ -328,6 +329,8 @@
     "@noble/hashes": ["@noble/hashes@2.2.0", "", {}, "sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg=="],
 
     "@number-flow/react": ["@number-flow/react@0.6.1", "", { "dependencies": { "esm-env": "^1.1.4", "number-flow": "0.6.1" }, "peerDependencies": { "react": "^18 || ^19", "react-dom": "^18 || ^19" } }, "sha512-JsvB8FrmtRmn251jbJnFD7Tr6Sv/eQMLUAlbshGo4CfAPk0qgNYTio9HuFoETqtuflcJHQezeGsSTPbUn1oplw=="],
+
+    "@opencoredev/email-sdk": ["@opencoredev/email-sdk@0.6.5", "", { "bin": { "email-sdk": "dist/cli.js" } }, "sha512-CuEfbOSjjr4/bsCz7g/X7l7ha1D/QLq0Q4glX4CRsj0uUCnuhdBYRDXv6ffi9myaVx3afw3P8RzAnw+1++jLMg=="],
 
     "@opentelemetry/semantic-conventions": ["@opentelemetry/semantic-conventions@1.41.1", "", {}, "sha512-/UhIkaZgPutTFmQ7RnIJGgDXZmtEJ7Dvi86xNTFWcnRxVRNk/aotsqDJYeEvDP+FSMB2SdW+pQzNMcWP0rwuNA=="],
 

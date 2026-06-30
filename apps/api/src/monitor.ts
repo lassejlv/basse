@@ -1,0 +1,438 @@
+import {
+  alert,
+  app,
+  appServer,
+  db,
+  deployment,
+  environment,
+  monitorEvent,
+  project,
+  server,
+} from "@basse/db";
+import type { MonitorSeverity } from "@basse/shared";
+import { and, desc, eq, inArray, lt } from "drizzle-orm";
+import { checkAgentHealth, getAppMetrics, getAppStatus } from "./agent-client";
+import { decryptSecret } from "./crypto";
+import { sendAlertEmail } from "./email";
+import { connectionFromServer } from "./server-connection";
+
+type ServerRow = typeof server.$inferSelect;
+
+type MonitorIssue = {
+  organizationId: string;
+  severity: MonitorSeverity;
+  code: string;
+  title: string;
+  message: string;
+  fingerprint: string;
+  serverId?: string | null;
+  appId?: string | null;
+  deploymentId?: string | null;
+};
+
+const IN_FLIGHT_DEPLOYMENTS = ["queued", "building", "deploying"] as const;
+const pressureCounts = new Map<string, number>();
+
+function envNumber(name: string, fallback: number): number {
+  const value = Number(Bun.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+const MONITOR_INTERVAL_MS = envNumber("MONITOR_INTERVAL_SECONDS", 60) * 1000;
+const DEPLOYMENT_STUCK_MINUTES = envNumber("MONITOR_DEPLOYMENT_STUCK_MINUTES", 30);
+const CPU_PRESSURE_PERCENT = envNumber("MONITOR_CPU_PRESSURE_PERCENT", 90);
+const MEMORY_PRESSURE_PERCENT = envNumber("MONITOR_MEMORY_PRESSURE_PERCENT", 90);
+const PRESSURE_FAILURE_THRESHOLD = envNumber("MONITOR_RESOURCE_FAILURE_THRESHOLD", 3);
+
+async function recordEvent(issue: MonitorIssue): Promise<void> {
+  await db.insert(monitorEvent).values({
+    id: crypto.randomUUID(),
+    organizationId: issue.organizationId,
+    severity: issue.severity,
+    code: issue.code,
+    title: issue.title,
+    message: issue.message,
+    fingerprint: issue.fingerprint,
+    serverId: issue.serverId ?? null,
+    appId: issue.appId ?? null,
+    deploymentId: issue.deploymentId ?? null,
+    createdAt: new Date(),
+  });
+}
+
+async function raiseAlert(issue: MonitorIssue): Promise<void> {
+  const now = new Date();
+  const [existing] = await db
+    .select()
+    .from(alert)
+    .where(
+      and(
+        eq(alert.organizationId, issue.organizationId),
+        eq(alert.fingerprint, issue.fingerprint),
+        inArray(alert.status, ["open", "acknowledged"]),
+      ),
+    )
+    .limit(1);
+
+  if (existing) {
+    await db
+      .update(alert)
+      .set({
+        severity: issue.severity,
+        title: issue.title,
+        message: issue.message,
+        lastSeenAt: now,
+        updatedAt: now,
+      })
+      .where(eq(alert.id, existing.id));
+    return;
+  }
+
+  const [created] = await db
+    .insert(alert)
+    .values({
+      id: crypto.randomUUID(),
+      organizationId: issue.organizationId,
+      severity: issue.severity,
+      status: "open",
+      code: issue.code,
+      title: issue.title,
+      message: issue.message,
+      fingerprint: issue.fingerprint,
+      serverId: issue.serverId ?? null,
+      appId: issue.appId ?? null,
+      deploymentId: issue.deploymentId ?? null,
+      firstSeenAt: now,
+      lastSeenAt: now,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+  await recordEvent(issue);
+  if (created) {
+    await sendAlertEmail({
+      id: created.id,
+      organizationId: created.organizationId,
+      severity: created.severity,
+      title: created.title,
+      message: created.message,
+      code: created.code,
+      fingerprint: created.fingerprint,
+    });
+  }
+}
+
+async function resolveAlert(
+  organizationId: string,
+  fingerprint: string,
+  recovery: Omit<MonitorIssue, "organizationId" | "fingerprint">,
+): Promise<void> {
+  const rows = await db
+    .select()
+    .from(alert)
+    .where(
+      and(
+        eq(alert.organizationId, organizationId),
+        eq(alert.fingerprint, fingerprint),
+        inArray(alert.status, ["open", "acknowledged"]),
+      ),
+    );
+
+  if (rows.length === 0) return;
+
+  const now = new Date();
+  await db
+    .update(alert)
+    .set({ status: "resolved", resolvedAt: now, updatedAt: now })
+    .where(
+      and(
+        eq(alert.organizationId, organizationId),
+        eq(alert.fingerprint, fingerprint),
+        inArray(alert.status, ["open", "acknowledged"]),
+      ),
+    );
+
+  await recordEvent({
+    organizationId,
+    fingerprint,
+    ...recovery,
+  });
+}
+
+async function checkServer(row: ServerRow): Promise<boolean> {
+  if (!row.agentToken) return false;
+
+  const fingerprint = `server_unreachable:${row.id}`;
+  const token = await decryptSecret(row.agentToken);
+  const health = await checkAgentHealth(await connectionFromServer(row), token, { attempts: 1 });
+  const now = new Date();
+
+  if (!health.reachable || !health.ready) {
+    await db
+      .update(server)
+      .set({
+        status: "unreachable",
+        statusMessage: health.error ?? "Basse agent is not reachable",
+        updatedAt: now,
+      })
+      .where(eq(server.id, row.id));
+    await raiseAlert({
+      organizationId: row.organizationId,
+      severity: "critical",
+      code: "server_unreachable",
+      title: `${row.name} is unreachable`,
+      message: health.error ?? "Basse could not reach the server agent.",
+      fingerprint,
+      serverId: row.id,
+    });
+    return false;
+  }
+
+  await db
+    .update(server)
+    .set({
+      status: "active",
+      statusMessage: null,
+      lastSeenAt: now,
+      updatedAt: now,
+    })
+    .where(eq(server.id, row.id));
+  await resolveAlert(row.organizationId, fingerprint, {
+    severity: "info",
+    code: "server_recovered",
+    title: `${row.name} recovered`,
+    message: "Basse can reach the server agent again.",
+    serverId: row.id,
+  });
+  await resolveAlert(row.organizationId, `server_monitor_failed:${row.id}`, {
+    severity: "info",
+    code: "server_monitor_recovered",
+    title: `${row.name} monitoring recovered`,
+    message: "The server monitor check is succeeding again.",
+    serverId: row.id,
+  });
+  return true;
+}
+
+async function checkStuckDeployments(): Promise<void> {
+  const cutoff = new Date(Date.now() - DEPLOYMENT_STUCK_MINUTES * 60_000);
+  const rows = await db
+    .select({
+      deployment,
+      app,
+      project,
+    })
+    .from(deployment)
+    .innerJoin(app, eq(deployment.appId, app.id))
+    .innerJoin(environment, eq(app.environmentId, environment.id))
+    .innerJoin(project, eq(environment.projectId, project.id))
+    .where(and(inArray(deployment.status, IN_FLIGHT_DEPLOYMENTS), lt(deployment.createdAt, cutoff)))
+    .limit(100);
+
+  for (const row of rows) {
+    await raiseAlert({
+      organizationId: row.project.organizationId,
+      severity: "warning",
+      code: "deployment_stuck",
+      title: `${row.app.name} deployment is stuck`,
+      message: `Deployment ${row.deployment.id.slice(0, 8)} has been ${row.deployment.status} for more than ${DEPLOYMENT_STUCK_MINUTES} minutes.`,
+      fingerprint: `deployment_stuck:${row.deployment.id}`,
+      appId: row.app.id,
+      deploymentId: row.deployment.id,
+    });
+  }
+}
+
+async function resolveFinishedDeploymentAlerts(): Promise<void> {
+  const rows = await db
+    .select({ alert, deployment, app, project })
+    .from(alert)
+    .innerJoin(deployment, eq(alert.deploymentId, deployment.id))
+    .innerJoin(app, eq(deployment.appId, app.id))
+    .innerJoin(environment, eq(app.environmentId, environment.id))
+    .innerJoin(project, eq(environment.projectId, project.id))
+    .where(and(eq(alert.code, "deployment_stuck"), inArray(alert.status, ["open", "acknowledged"])));
+
+  for (const row of rows) {
+    if (IN_FLIGHT_DEPLOYMENTS.includes(row.deployment.status as (typeof IN_FLIGHT_DEPLOYMENTS)[number])) {
+      continue;
+    }
+    await resolveAlert(row.project.organizationId, row.alert.fingerprint, {
+      severity: "info",
+      code: "deployment_recovered",
+      title: `${row.app.name} deployment finished`,
+      message: `Deployment ${row.deployment.id.slice(0, 8)} is now ${row.deployment.status}.`,
+      appId: row.app.id,
+      deploymentId: row.deployment.id,
+    });
+  }
+}
+
+async function checkAppsOnServer(row: ServerRow): Promise<void> {
+  if (!row.agentToken) return;
+  const token = await decryptSecret(row.agentToken);
+  const conn = await connectionFromServer(row);
+
+  const attachedApps = await db
+    .select({
+      app,
+      project,
+    })
+    .from(appServer)
+    .innerJoin(app, eq(appServer.appId, app.id))
+    .innerJoin(environment, eq(app.environmentId, environment.id))
+    .innerJoin(project, eq(environment.projectId, project.id))
+    .where(eq(appServer.serverId, row.id));
+
+  for (const attached of attachedApps) {
+    const [latest] = await db
+      .select()
+      .from(deployment)
+      .where(eq(deployment.appId, attached.app.id))
+      .orderBy(desc(deployment.createdAt))
+      .limit(1);
+    if (!latest || latest.status !== "healthy") continue;
+
+    const downFingerprint = `app_container_down:${attached.app.id}:${row.id}`;
+    try {
+      const status = await getAppStatus(conn, token, attached.app.id);
+      await resolveAlert(
+        attached.project.organizationId,
+        `app_monitor_failed:${attached.app.id}:${row.id}`,
+        {
+          severity: "info",
+          code: "app_monitor_recovered",
+          title: `${attached.app.name} monitoring recovered`,
+          message: "The app monitor check is succeeding again.",
+          serverId: row.id,
+          appId: attached.app.id,
+          deploymentId: latest.id,
+        },
+      );
+      if (!status.exists || !status.running) {
+        await raiseAlert({
+          organizationId: attached.project.organizationId,
+          severity: "critical",
+          code: "app_container_down",
+          title: `${attached.app.name} is not running on ${row.name}`,
+          message: status.exists
+            ? "The managed container exists but is not running."
+            : "The managed container does not exist on the target server.",
+          fingerprint: downFingerprint,
+          serverId: row.id,
+          appId: attached.app.id,
+          deploymentId: latest.id,
+        });
+        continue;
+      }
+      await resolveAlert(attached.project.organizationId, downFingerprint, {
+        severity: "info",
+        code: "app_container_recovered",
+        title: `${attached.app.name} recovered on ${row.name}`,
+        message: "The managed container is running again.",
+        serverId: row.id,
+        appId: attached.app.id,
+        deploymentId: latest.id,
+      });
+
+      const metrics = await getAppMetrics(conn, token, attached.app.id);
+      const pressureFingerprint = `resource_pressure:${attached.app.id}:${row.id}`;
+      const cpuHot = metrics.cpuPercent >= CPU_PRESSURE_PERCENT;
+      const memoryHot = metrics.memoryPercent >= MEMORY_PRESSURE_PERCENT;
+      if (cpuHot || memoryHot) {
+        const count = (pressureCounts.get(pressureFingerprint) ?? 0) + 1;
+        pressureCounts.set(pressureFingerprint, count);
+        if (count >= PRESSURE_FAILURE_THRESHOLD) {
+          await raiseAlert({
+            organizationId: attached.project.organizationId,
+            severity: "warning",
+            code: "resource_pressure",
+            title: `${attached.app.name} is under resource pressure`,
+            message: `CPU ${metrics.cpuPercent.toFixed(1)}%, memory ${metrics.memoryPercent.toFixed(1)}% on ${row.name}.`,
+            fingerprint: pressureFingerprint,
+            serverId: row.id,
+            appId: attached.app.id,
+            deploymentId: latest.id,
+          });
+        }
+      } else {
+        pressureCounts.delete(pressureFingerprint);
+        await resolveAlert(attached.project.organizationId, pressureFingerprint, {
+          severity: "info",
+          code: "resource_pressure_recovered",
+          title: `${attached.app.name} resource usage recovered`,
+          message: `CPU ${metrics.cpuPercent.toFixed(1)}%, memory ${metrics.memoryPercent.toFixed(1)}% on ${row.name}.`,
+          serverId: row.id,
+          appId: attached.app.id,
+          deploymentId: latest.id,
+        });
+      }
+    } catch (error) {
+      await raiseAlert({
+        organizationId: attached.project.organizationId,
+        severity: "warning",
+        code: "app_monitor_failed",
+        title: `Could not monitor ${attached.app.name}`,
+        message: error instanceof Error ? error.message : String(error),
+        fingerprint: `app_monitor_failed:${attached.app.id}:${row.id}`,
+        serverId: row.id,
+        appId: attached.app.id,
+        deploymentId: latest.id,
+      });
+    }
+  }
+}
+
+export async function runMonitorOnce(): Promise<void> {
+  await checkStuckDeployments();
+  await resolveFinishedDeploymentAlerts();
+
+  const servers = await db
+    .select()
+    .from(server)
+    .where(inArray(server.status, ["active", "unreachable", "error"]));
+
+  for (const row of servers) {
+    try {
+      const reachable = await checkServer(row);
+      if (reachable) await checkAppsOnServer(row);
+    } catch (error) {
+      await raiseAlert({
+        organizationId: row.organizationId,
+        severity: "warning",
+        code: "server_monitor_failed",
+        title: `Could not monitor ${row.name}`,
+        message: error instanceof Error ? error.message : String(error),
+        fingerprint: `server_monitor_failed:${row.id}`,
+        serverId: row.id,
+      });
+    }
+  }
+}
+
+export function startMonitor(): { close: () => void } {
+  let running = false;
+  let stopped = false;
+
+  async function tick() {
+    if (running || stopped) return;
+    running = true;
+    try {
+      await runMonitorOnce();
+    } catch (error) {
+      console.error("[monitor]", error instanceof Error ? error.message : error);
+    } finally {
+      running = false;
+    }
+  }
+
+  const timer = setInterval(() => void tick(), MONITOR_INTERVAL_MS);
+  void tick();
+
+  return {
+    close: () => {
+      stopped = true;
+      clearInterval(timer);
+    },
+  };
+}
