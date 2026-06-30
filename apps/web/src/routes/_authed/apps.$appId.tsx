@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { TrashIcon } from "lucide-react";
+import { PlusIcon, TrashIcon } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 import type { AppBuildRunner, AppSourceType, AppVolume, DeploymentStatus } from "@basse/shared";
 import { chartCssVars } from "@/components/charts/chart-context";
@@ -310,40 +310,45 @@ function BuildSettingsCard({ app }: { app: App }) {
   );
 }
 
-function formatVolumes(volumes: AppVolume[]) {
-  return volumes
-    .map((volume) => `${volume.hostPath}:${volume.containerPath}${volume.readOnly ? ":ro" : ""}`)
-    .join("\n");
-}
-
-function parseVolumeLines(value: string): AppVolume[] {
-  return value
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [hostPath = "", containerPath = "", mode = ""] = line.split(":");
-      return { hostPath, containerPath, readOnly: mode === "ro" };
-    });
-}
-
 function VolumesCard({ app }: { app: App }) {
   const queryClient = useQueryClient();
-  const [draft, setDraft] = useState(formatVolumes(app.volumes));
+  const [volumes, setVolumes] = useState<AppVolume[]>(app.volumes);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setDraft(formatVolumes(app.volumes));
+    setVolumes(app.volumes.length > 0 ? app.volumes : []);
   }, [app.volumes]);
 
   const save = useMutation({
-    mutationFn: () => updateApp(app.id, { volumes: parseVolumeLines(draft) }),
+    mutationFn: () =>
+      updateApp(app.id, {
+        volumes: volumes.filter((volume) => volume.hostPath.trim() || volume.containerPath.trim()),
+      }),
     onSuccess: async () => {
       setError(null);
       await queryClient.invalidateQueries({ queryKey: ["app", app.id] });
     },
     onError: (e: Error) => setError(e.message),
   });
+
+  function updateVolume(index: number, patch: Partial<AppVolume>) {
+    setVolumes((current) =>
+      current.map((volume, currentIndex) =>
+        currentIndex === index ? { ...volume, ...patch } : volume,
+      ),
+    );
+  }
+
+  function addVolume() {
+    setVolumes((current) => [
+      ...current,
+      { hostPath: "", containerPath: "", readOnly: false },
+    ]);
+  }
+
+  function removeVolume(index: number) {
+    setVolumes((current) => current.filter((_, currentIndex) => currentIndex !== index));
+  }
 
   return (
     <div className="max-w-2xl rounded-lg border bg-card p-6">
@@ -358,12 +363,62 @@ function VolumesCard({ app }: { app: App }) {
           save.mutate();
         }}
       >
-        <Textarea
-          className="min-h-28 font-mono"
-          onChange={(event) => setDraft(event.currentTarget.value)}
-          placeholder={"/srv/app/data:/data\n/srv/app/config:/config:ro"}
-          value={draft}
-        />
+        {volumes.length === 0 ? (
+          <div className="rounded-md border border-dashed p-4 text-muted-foreground text-sm">
+            No volumes configured.
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {volumes.map((volume, index) => (
+              <div key={index} className="rounded-md border p-3">
+                <div className="grid gap-3 sm:grid-cols-[1fr_1fr_auto]">
+                  <div className="space-y-2">
+                    <Label htmlFor={`volume-host-${index}`}>Host path</Label>
+                    <Input
+                      id={`volume-host-${index}`}
+                      onChange={(event) => updateVolume(index, { hostPath: event.currentTarget.value })}
+                      placeholder="/srv/app/data"
+                      value={volume.hostPath}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor={`volume-container-${index}`}>Container path</Label>
+                    <Input
+                      id={`volume-container-${index}`}
+                      onChange={(event) =>
+                        updateVolume(index, { containerPath: event.currentTarget.value })
+                      }
+                      placeholder="/data"
+                      value={volume.containerPath}
+                    />
+                  </div>
+                  <div className="flex items-end">
+                    <Button
+                      aria-label="Remove volume"
+                      onClick={() => removeVolume(index)}
+                      size="icon"
+                      type="button"
+                      variant="outline"
+                    >
+                      <TrashIcon className="size-4" />
+                    </Button>
+                  </div>
+                </div>
+                <label className="mt-3 flex items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={volume.readOnly}
+                    onCheckedChange={(value) => updateVolume(index, { readOnly: value === true })}
+                  />
+                  <span>Read-only</span>
+                </label>
+              </div>
+            ))}
+          </div>
+        )}
+        <Button onClick={addVolume} type="button" variant="outline">
+          <PlusIcon className="size-4" />
+          Add volume
+        </Button>
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
         <Button loading={save.isPending} type="submit">
           Save volumes
