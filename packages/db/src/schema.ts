@@ -130,6 +130,43 @@ export const deploymentRelations = relations(deployment, ({ one }) => ({
   }),
 }));
 
+// A custom domain routed by the server's Caddy proxy to an upstream
+// (container:port or host:port). Workspace-scoped transitively via its server —
+// there is NO organizationId column, so every API path MUST join domain->server.
+export const domain = pgTable(
+  "domain",
+  {
+    id: text("id").primaryKey(),
+    serverId: text("server_id")
+      .notNull()
+      .references(() => server.id, { onDelete: "cascade" }),
+    appId: text("app_id").references(() => app.id, { onDelete: "set null" }),
+    host: text("host").notNull(),
+    upstream: text("upstream").notNull(),
+    status: text("status", { enum: ["pending", "active", "error"] })
+      .notNull()
+      .default("pending"),
+    statusMessage: text("status_message"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("domain_serverId_idx").on(table.serverId),
+    uniqueIndex("domain_host_uidx").on(table.host),
+  ],
+);
+
+export const domainRelations = relations(domain, ({ one }) => ({
+  server: one(server, {
+    fields: [domain.serverId],
+    references: [server.id],
+  }),
+  app: one(app, {
+    fields: [domain.appId],
+    references: [app.id],
+  }),
+}));
+
 export const sshKey = pgTable(
   "ssh_key",
   {

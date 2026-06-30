@@ -36,6 +36,13 @@
       "when": 1782777458420,
       "tag": "0004_many_frog_thor",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1782780736391,
+      "tag": "0005_special_james_howlett",
+      "breakpoints": true
     }
   ]
 }

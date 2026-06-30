@@ -73,3 +73,38 @@ export type CreateServerInput = {
   // server. When omitted, Basse generates a new per-server keypair.
   privateKey?: string;
 };
+
+export type DomainStatus = "pending" | "active" | "error";
+
+// A custom domain routed by a server's Caddy proxy to an upstream.
+export type Domain = {
+  id: string;
+  serverId: string;
+  appId: string | null;
+  host: string;
+  upstream: string;
+  status: DomainStatus;
+  statusMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateDomainInput = {
+  host: string;
+  upstream: string;
+  appId?: string;
+};
+
+// The desired-route shape pushed to the agent's /v1/proxy/sync (full set).
+export type DesiredDomain = {
+  host: string;
+  upstream: string;
+  appId?: string | null;
+};
+
+// Reported by the agent's /v1/proxy/status.
+export type ProxyStatus = {
+  running: boolean;
+  adminReachable: boolean;
+  caddyVersion?: string;
+};
