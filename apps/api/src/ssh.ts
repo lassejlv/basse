@@ -62,6 +62,8 @@ function baseArgs(
     "-o",
     `UserKnownHostsFile=${knownHostsPath}`,
     "-o",
+    "LogLevel=ERROR",
+    "-o",
     `ConnectTimeout=${connectTimeout}`,
     "-o",
     "ServerAliveInterval=10",
