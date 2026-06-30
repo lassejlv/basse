@@ -1,4 +1,5 @@
 import { provisionServer } from "../provision";
+import { syncServerDomains } from "../proxy-sync";
 import type { ActionName } from "./queue";
 
 // Maps each action to its handler. Imported ONLY by worker.ts — never by the
@@ -8,4 +9,5 @@ import type { ActionName } from "./queue";
 // would stall and re-run the job).
 export const actionHandlers: Record<ActionName, (entityId: string) => Promise<void>> = {
   "provision-server": (serverId) => provisionServer(serverId),
+  "sync-domains": (serverId) => syncServerDomains(serverId),
 };

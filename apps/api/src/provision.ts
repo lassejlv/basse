@@ -1,14 +1,21 @@
 import { db, server } from "@basse/db";
 import { eq } from "drizzle-orm";
-import { AGENT_PORT, checkAgentHealth } from "./agent-client";
+import { AGENT_PORT, checkAgentHealth, ensureProxy } from "./agent-client";
 import { decryptSecret, encryptSecret } from "./crypto";
+import { syncServerDomains } from "./proxy-sync";
 import { connectionFromServer } from "./server-connection";
 import { probeReachable, runScript, writeRemoteFile } from "./ssh";
 
 type ServerRow = typeof server.$inferSelect;
 
 const AGENT_IMAGE = Bun.env.BASSE_AGENT_IMAGE ?? "ghcr.io/lassejlv/basse-agent:latest";
+const CADDY_IMAGE = Bun.env.BASSE_CADDY_IMAGE ?? "caddy:2";
 const AGENT_ENV_PATH = "/etc/basse/agent.env";
+
+// The admin unix socket lives on this named volume, mounted into BOTH the agent
+// (at agent-run time, here) and the Caddy container (by the agent). Must match
+// the agent's BASSE_CADDY_ADMIN_VOLUME / BASSE_CADDY_ADMIN_DIR defaults.
+const CADDY_ADMIN_MOUNT = "basse_caddy_admin:/run/caddy-admin";
 
 // Operator-controlled image ref; validate defensively since it is the one value
 // interpolated into the remote bootstrap script.
@@ -59,6 +66,7 @@ docker rm -f basse-agent >/dev/null 2>&1 || true
 docker run -d --name basse-agent --restart unless-stopped \\
   -p 127.0.0.1:${AGENT_PORT}:${AGENT_PORT} \\
   -v /var/run/docker.sock:/var/run/docker.sock \\
+  -v ${CADDY_ADMIN_MOUNT} \\
   --env-file ${AGENT_ENV_PATH} \\
   "${image}"
 echo "Agent container started."
@@ -106,7 +114,7 @@ export async function provisionServer(serverId: string): Promise<void> {
     await writeRemoteFile(
       connection,
       AGENT_ENV_PATH,
-      `BASSE_AGENT_TOKEN=${token}\nBASSE_AGENT_PORT=${AGENT_PORT}\n`,
+      `BASSE_AGENT_TOKEN=${token}\nBASSE_AGENT_PORT=${AGENT_PORT}\nBASSE_CADDY_IMAGE=${CADDY_IMAGE}\n`,
     );
 
     await setStatus(serverId, "provisioning", "Installing Docker and starting agent…");
@@ -128,19 +136,33 @@ export async function provisionServer(serverId: string): Promise<void> {
     await setStatus(serverId, "provisioning", "Waiting for the agent to become healthy…");
     const health = await checkAgentHealth(connection, token);
 
-    if (health.reachable && health.ready) {
-      await setStatus(serverId, "active", null, {
-        agentUrl: `http://127.0.0.1:${AGENT_PORT}`,
-        lastSeenAt: new Date(),
-      });
+    if (!health.reachable || !health.ready) {
+      await setStatus(
+        serverId,
+        "unreachable",
+        health.error ?? "Agent started but did not become healthy",
+      );
       return;
     }
 
-    await setStatus(
-      serverId,
-      "unreachable",
-      health.error ?? "Agent started but did not become healthy",
-    );
+    // Bring up the Caddy proxy and push the current desired domain set. A proxy
+    // failure (e.g. :80/:443 already bound) is terminal — the server is not ready.
+    await setStatus(serverId, "provisioning", "Starting the proxy…");
+    try {
+      await ensureProxy(connection, token);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await setStatus(serverId, "error", `Proxy setup failed: ${message}`);
+      return;
+    }
+
+    await setStatus(serverId, "provisioning", "Applying domains…");
+    await syncServerDomains(serverId);
+
+    await setStatus(serverId, "active", null, {
+      agentUrl: `http://127.0.0.1:${AGENT_PORT}`,
+      lastSeenAt: new Date(),
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await setStatus(serverId, "error", `Provisioning error: ${message}`).catch(() => {});

@@ -1,3 +1,4 @@
+import type { DesiredDomain, ProxyStatus } from "@basse/shared";
 import type { SshConnection } from "./ssh";
 import { withTunnel } from "./ssh";
 
@@ -34,6 +35,55 @@ async function getJson<T>(ctx: AgentCallContext, path: string, authed: boolean):
   }
 
   return response.json() as Promise<T>;
+}
+
+async function postJson<T>(
+  ctx: AgentCallContext,
+  path: string,
+  body: unknown,
+  timeoutMs: number,
+): Promise<T> {
+  const response = await fetch(`${ctx.baseUrl}${path}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${ctx.token}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+
+  if (!response.ok) {
+    const detail = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(detail?.error ?? `agent ${path} returned ${response.status}`);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+/**
+ * Brings up Caddy on the server (idempotent). Opens a tunnel and calls
+ * /v1/proxy/ensure with a generous timeout (image pull + container start +
+ * admin wait). Throws on failure.
+ */
+export async function ensureProxy(conn: SshConnection, token: string): Promise<ProxyStatus> {
+  return withTunnel(
+    conn,
+    AGENT_PORT,
+    (baseUrl) => postJson<ProxyStatus>({ baseUrl, token }, "/v1/proxy/ensure", {}, 170_000),
+    { timeoutMs: 20_000 },
+  );
+}
+
+/** Pushes the full desired domain set to the server's Caddy. Throws on failure. */
+export async function syncDomains(
+  conn: SshConnection,
+  token: string,
+  domains: DesiredDomain[],
+): Promise<void> {
+  await withTunnel(conn, AGENT_PORT, (baseUrl) =>
+    postJson({ baseUrl, token }, "/v1/proxy/sync", { domains }, 30_000),
+  );
 }
 
 /**
