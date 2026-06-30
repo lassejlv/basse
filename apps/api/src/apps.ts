@@ -3,7 +3,10 @@ import type {
   App,
   AppBuildMode,
   AppBuildRunner,
+  AppKind,
   AppConsoleResult,
+  DatabaseConnectionInfo,
+  DatabaseKind,
   AppLogs,
   AppMetrics,
   AppSourceType,
@@ -20,7 +23,7 @@ import {
   getAppLogs as getAgentAppLogs,
   getAppMetrics as getAgentAppMetrics,
 } from "./agent-client";
-import { decryptSecret } from "./crypto";
+import { decryptSecret, encryptSecret } from "./crypto";
 import { connectionFromServer } from "./server-connection";
 import { runScript } from "./ssh";
 import { resolveActiveWorkspace } from "./workspace";
@@ -29,7 +32,11 @@ type AppRow = typeof app.$inferSelect;
 
 const BUILD_MODES: AppBuildMode[] = ["auto", "dockerfile", "railpack"];
 const BUILD_RUNNERS: AppBuildRunner[] = ["depot", "server"];
+const APP_KINDS: AppKind[] = ["service", "database"];
 const SOURCE_TYPES: AppSourceType[] = ["repository", "image"];
+const DATABASE_KINDS: DatabaseKind[] = ["postgres"];
+const DEFAULT_POSTGRES_VERSION = "18";
+const POSTGRES_PORT = 5432;
 
 function slugify(value: string) {
   return value
@@ -37,6 +44,57 @@ function slugify(value: string) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function databaseIdentifier(value: string, fallback: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return normalized || fallback;
+}
+
+function databasePassword(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  return Buffer.from(bytes).toString("base64url");
+}
+
+function databaseInternalHost(appId: string): string {
+  return `basse-app-${appId}`;
+}
+
+function databaseImage(kind: DatabaseKind, version: string): string {
+  return kind === "postgres" ? `postgres:${version}` : "";
+}
+
+function validateDatabaseVersion(version: string): string | null {
+  if (!version) return "databaseVersion is required";
+  if (version.length > 32 || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(version)) {
+    return "databaseVersion must be a valid Docker tag";
+  }
+  return null;
+}
+
+function validatePublicPort(port: number | null): string | null {
+  if (port === null) return null;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return "databasePublicPort must be a valid port";
+  }
+  return null;
+}
+
+function postgresUri(input: {
+  user: string;
+  password: string;
+  host: string;
+  port: number;
+  database: string;
+}): string {
+  const user = encodeURIComponent(input.user);
+  const password = encodeURIComponent(input.password);
+  const database = encodeURIComponent(input.database);
+  return `postgresql://${user}:${password}@${input.host}:${input.port}/${database}`;
 }
 
 // Public https git URL with no embedded credentials (no userinfo '@').
@@ -111,6 +169,20 @@ function toApp(
   serverIds: string[] = row.serverId ? [row.serverId] : [],
   latestDeploymentStatus: DeploymentStatus | null = null,
 ): App {
+  const database =
+    row.appKind === "database"
+      ? {
+          kind: row.databaseKind ?? "postgres",
+          version: row.databaseVersion ?? DEFAULT_POSTGRES_VERSION,
+          name: row.databaseName ?? "postgres",
+          user: row.databaseUser ?? "postgres",
+          internalHost: databaseInternalHost(row.id),
+          internalPort: POSTGRES_PORT,
+          publicEnabled: row.databasePublicEnabled,
+          publicPort: row.databasePublicPort,
+        }
+      : null;
+
   return {
     id: row.id,
     environmentId: row.environmentId,
@@ -123,9 +195,11 @@ function toApp(
     port: row.port,
     buildMode: row.buildMode,
     buildRunner: row.buildRunner,
+    appKind: row.appKind,
     sourceType: row.sourceType,
     imageRef: row.imageRef,
     volumes: parseVolumes(row.volumes),
+    database,
     latestDeploymentStatus,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -302,6 +376,49 @@ apps.get("/:id", async (c) => {
   });
 });
 
+apps.get("/:id/database/connection", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const appId = c.req.param("id");
+  const row = await ownedApp(appId, organizationId);
+  if (!row) return c.json({ error: "App not found" }, 404);
+  if (row.appKind !== "database" || row.databaseKind !== "postgres" || !row.databasePassword) {
+    return c.json({ error: "Database app not found" }, 404);
+  }
+
+  const password = await decryptSecret(row.databasePassword);
+  const database = row.databaseName ?? "postgres";
+  const user = row.databaseUser ?? "postgres";
+  const internalUri = postgresUri({
+    user,
+    password,
+    host: databaseInternalHost(row.id),
+    port: POSTGRES_PORT,
+    database,
+  });
+
+  const [target] = await db
+    .select({ server })
+    .from(appServer)
+    .innerJoin(server, eq(appServer.serverId, server.id))
+    .where(eq(appServer.appId, row.id))
+    .limit(1);
+
+  const publicUri =
+    row.databasePublicEnabled && row.databasePublicPort && target?.server.sshHost
+      ? postgresUri({
+          user,
+          password,
+          host: target.server.sshHost,
+          port: row.databasePublicPort,
+          database,
+        })
+      : null;
+
+  return c.json({ internalUri, publicUri } satisfies DatabaseConnectionInfo);
+});
+
 apps.get("/:id/metrics", async (c) => {
   const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
   if (organizationId instanceof Response) return organizationId;
@@ -400,29 +517,81 @@ apps.post("/", async (c) => {
   const body = (await c.req.json().catch(() => null)) as Partial<CreateAppInput> | null;
   const environmentId = typeof body?.environmentId === "string" ? body.environmentId : "";
   const name = typeof body?.name === "string" ? body.name.trim() : "";
-  const repositoryUrl = typeof body?.repositoryUrl === "string" ? body.repositoryUrl.trim() : "";
-  const imageRef = typeof body?.imageRef === "string" ? body.imageRef.trim() : "";
-  const sourceType = SOURCE_TYPES.includes(body?.sourceType as AppSourceType)
-    ? (body?.sourceType as AppSourceType)
-    : "repository";
+  const appKind = APP_KINDS.includes(body?.appKind as AppKind)
+    ? (body?.appKind as AppKind)
+    : "service";
+  const databaseKind = DATABASE_KINDS.includes(body?.databaseKind as DatabaseKind)
+    ? (body?.databaseKind as DatabaseKind)
+    : "postgres";
+  const databaseVersion =
+    typeof body?.databaseVersion === "string" && body.databaseVersion.trim()
+      ? body.databaseVersion.trim()
+      : DEFAULT_POSTGRES_VERSION;
+  const defaultDatabaseIdentifier = databaseIdentifier(slugify(name).replaceAll("-", "_"), "app");
+  const databaseName = databaseIdentifier(
+    typeof body?.databaseName === "string" ? body.databaseName : "",
+    defaultDatabaseIdentifier,
+  );
+  const databaseUser = databaseIdentifier(
+    typeof body?.databaseUser === "string" ? body.databaseUser : "",
+    "postgres",
+  );
+  const databasePlainPassword =
+    typeof body?.databasePassword === "string" && body.databasePassword
+      ? body.databasePassword
+      : databasePassword();
+  const databasePublicEnabled = body?.databasePublicEnabled === true;
+  const requestedPublicPort =
+    typeof body?.databasePublicPort === "number" ? body.databasePublicPort : null;
+  const databasePublicPort = databasePublicEnabled ? (requestedPublicPort ?? POSTGRES_PORT) : null;
+  const repositoryUrl =
+    appKind === "database"
+      ? ""
+      : typeof body?.repositoryUrl === "string"
+        ? body.repositoryUrl.trim()
+        : "";
+  const sourceType =
+    appKind === "database"
+      ? "image"
+      : SOURCE_TYPES.includes(body?.sourceType as AppSourceType)
+        ? (body?.sourceType as AppSourceType)
+        : "repository";
+  const imageRef =
+    appKind === "database"
+      ? databaseImage(databaseKind, databaseVersion)
+      : typeof body?.imageRef === "string"
+        ? body.imageRef.trim()
+        : "";
   const branch =
     typeof body?.branch === "string" && body.branch.trim() ? body.branch.trim() : "main";
-  const port = typeof body?.port === "number" ? body.port : 3000;
+  const port =
+    appKind === "database" ? POSTGRES_PORT : typeof body?.port === "number" ? body.port : 3000;
   const buildMode = BUILD_MODES.includes(body?.buildMode as AppBuildMode)
     ? (body?.buildMode as AppBuildMode)
     : "auto";
-  const buildRunner = BUILD_RUNNERS.includes(body?.buildRunner as AppBuildRunner)
-    ? (body?.buildRunner as AppBuildRunner)
-    : "depot";
+  const buildRunner =
+    appKind === "database"
+      ? "server"
+      : BUILD_RUNNERS.includes(body?.buildRunner as AppBuildRunner)
+        ? (body?.buildRunner as AppBuildRunner)
+        : "depot";
   const serverIds = normalizeServerIds(body) ?? [];
   const serverId = serverIds[0] ?? null;
-  const volumes = normalizeVolumes(body?.volumes ?? []) ?? [];
+  const volumes = appKind === "database" ? [] : (normalizeVolumes(body?.volumes ?? []) ?? []);
 
   if (!(await ownedEnvironmentId(environmentId, organizationId))) {
     return c.json({ error: "Environment not found" }, 404);
   }
   if (!name) return c.json({ error: "name is required" }, 400);
-  if (sourceType === "repository") {
+  if (appKind === "database") {
+    const versionError = validateDatabaseVersion(databaseVersion);
+    if (versionError) return c.json({ error: versionError }, 400);
+    const publicPortError = validatePublicPort(databasePublicPort);
+    if (publicPortError) return c.json({ error: publicPortError }, 400);
+    if (serverIds.length !== 1) {
+      return c.json({ error: "Database apps require exactly one server" }, 400);
+    }
+  } else if (sourceType === "repository") {
     const repoError = validateRepositoryUrl(repositoryUrl);
     if (repoError) return c.json({ error: repoError }, 400);
   } else {
@@ -437,6 +606,9 @@ apps.post("/", async (c) => {
   if (!(await validateServersInOrg(serverIds, organizationId))) {
     return c.json({ error: "Server not found" }, 404);
   }
+
+  const encryptedDatabasePassword =
+    appKind === "database" ? await encryptSecret(databasePlainPassword) : null;
 
   const now = new Date();
   try {
@@ -456,7 +628,15 @@ apps.post("/", async (c) => {
           port,
           buildMode,
           buildRunner,
+          appKind,
           volumes: JSON.stringify(volumes),
+          databaseKind: appKind === "database" ? databaseKind : null,
+          databaseVersion: appKind === "database" ? databaseVersion : null,
+          databaseName: appKind === "database" ? databaseName : null,
+          databaseUser: appKind === "database" ? databaseUser : null,
+          databasePassword: encryptedDatabasePassword,
+          databasePublicEnabled,
+          databasePublicPort,
           createdAt: now,
           updatedAt: now,
         })
@@ -525,7 +705,35 @@ apps.patch("/:id", async (c) => {
   if (BUILD_RUNNERS.includes(body?.buildRunner as AppBuildRunner)) {
     updates.buildRunner = body?.buildRunner as AppBuildRunner;
   }
+  if (existing.appKind === "database") {
+    if (typeof body?.databaseVersion === "string" && body.databaseVersion.trim()) {
+      const version = body.databaseVersion.trim();
+      const versionError = validateDatabaseVersion(version);
+      if (versionError) return c.json({ error: versionError }, 400);
+      updates.databaseVersion = version;
+      updates.imageRef = databaseImage(existing.databaseKind ?? "postgres", version);
+    }
+    if (typeof body?.databasePublicEnabled === "boolean") {
+      updates.databasePublicEnabled = body.databasePublicEnabled;
+      if (body.databasePublicEnabled && !(body && "databasePublicPort" in body)) {
+        updates.databasePublicPort = existing.databasePublicPort ?? POSTGRES_PORT;
+      }
+      if (!body.databasePublicEnabled) {
+        updates.databasePublicPort = null;
+      }
+    }
+    if (body && "databasePublicPort" in body) {
+      const publicPort =
+        typeof body.databasePublicPort === "number" ? body.databasePublicPort : null;
+      const publicPortError = validatePublicPort(publicPort);
+      if (publicPortError) return c.json({ error: publicPortError }, 400);
+      updates.databasePublicPort = publicPort;
+    }
+  }
   if (body && "volumes" in body) {
+    if (existing.appKind === "database") {
+      return c.json({ error: "Database volumes are managed by Basse" }, 400);
+    }
     const volumes = normalizeVolumes(body.volumes);
     if (!volumes) return c.json({ error: "volumes must be an array" }, 400);
     const volumeError = validateVolumes(volumes);
@@ -542,6 +750,9 @@ apps.patch("/:id", async (c) => {
   }
   const serverIds = normalizeServerIds(body);
   if (serverIds) {
+    if (existing.appKind === "database" && serverIds.length !== 1) {
+      return c.json({ error: "Database apps require exactly one server" }, 400);
+    }
     if (!(await validateServersInOrg(serverIds, organizationId))) {
       return c.json({ error: "Server not found" }, 404);
     }

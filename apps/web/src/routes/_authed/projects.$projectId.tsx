@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ArrowLeftIcon, BoxIcon, ChevronRightIcon, PlusIcon, TrashIcon } from "lucide-react";
 import { FormEvent, useState } from "react";
-import type { App, AppBuildRunner, AppSourceType } from "@basse/shared";
+import type { App, AppBuildRunner, AppKind, AppSourceType } from "@basse/shared";
 import { DeployStatusBadge, StatusDot } from "@/components/deploy-status";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -38,6 +38,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
 import { createApp, listApps } from "@/lib/apps";
+import { triggerDeploy } from "@/lib/deployments";
 import { createEnvironment, listEnvironments } from "@/lib/environments";
 import { relativeTime } from "@/lib/format";
 import { deleteProject, getProject } from "@/lib/projects";
@@ -196,7 +197,12 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
 }
 
 function AppRow({ app }: { app: App }) {
-  const source = app.sourceType === "image" ? app.imageRef : app.repositoryUrl;
+  const source =
+    app.appKind === "database"
+      ? `Postgres ${app.database?.version ?? "18"}`
+      : app.sourceType === "image"
+        ? app.imageRef
+        : app.repositoryUrl;
   return (
     <Link
       className="group flex items-center gap-4 px-4 py-3.5 transition hover:bg-accent/40"
@@ -209,6 +215,11 @@ function AppRow({ app }: { app: App }) {
         <p className="truncate font-mono text-muted-foreground text-xs">{source}</p>
       </div>
       <div className="hidden shrink-0 items-center gap-2 sm:flex">
+        {app.appKind === "database" ? (
+          <Badge size="sm" variant="outline">
+            database
+          </Badge>
+        ) : null}
         <DeployStatusBadge size="sm" status={app.latestDeploymentStatus} />
         <Badge size="sm" variant="outline">
           :{app.port}
@@ -296,6 +307,7 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
   const servers = useQuery({ queryKey: ["servers", "for-apps"], queryFn: listServers });
 
   const [name, setName] = useState("");
+  const [appKind, setAppKind] = useState<AppKind>("service");
   const [sourceType, setSourceType] = useState<AppSourceType>("repository");
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [imageRef, setImageRef] = useState("");
@@ -303,10 +315,17 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
   const [port, setPort] = useState("3000");
   const [serverIds, setServerIds] = useState<string[]>([]);
   const [buildRunner, setBuildRunner] = useState<AppBuildRunner>("depot");
+  const [databaseVersion, setDatabaseVersion] = useState("18");
+  const [databaseName, setDatabaseName] = useState("");
+  const [databaseUser, setDatabaseUser] = useState("postgres");
+  const [databasePassword, setDatabasePassword] = useState("");
+  const [databasePublicEnabled, setDatabasePublicEnabled] = useState(false);
+  const [databasePublicPort, setDatabasePublicPort] = useState("5432");
   const [error, setError] = useState<string | null>(null);
 
   function reset() {
     setName("");
+    setAppKind("service");
     setSourceType("repository");
     setRepositoryUrl("");
     setImageRef("");
@@ -314,13 +333,39 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
     setPort("3000");
     setServerIds([]);
     setBuildRunner("depot");
+    setDatabaseVersion("18");
+    setDatabaseName("");
+    setDatabaseUser("postgres");
+    setDatabasePassword("");
+    setDatabasePublicEnabled(false);
+    setDatabasePublicPort("5432");
     setError(null);
   }
 
-  const localBuildInvalid = buildRunner === "server" && serverIds.length !== 1;
+  const localBuildInvalid =
+    appKind === "service" && buildRunner === "server" && serverIds.length !== 1;
+  const databaseServerInvalid = appKind === "database" && serverIds.length !== 1;
   const add = useMutation({
-    mutationFn: () =>
-      createApp({
+    mutationFn: async () => {
+      if (appKind === "database") {
+        const created = await createApp({
+          environmentId,
+          name,
+          appKind: "database",
+          serverIds,
+          databaseKind: "postgres",
+          databaseVersion,
+          databaseName,
+          databaseUser,
+          databasePassword: databasePassword || undefined,
+          databasePublicEnabled,
+          databasePublicPort: databasePublicEnabled ? Number(databasePublicPort) : null,
+        });
+        await triggerDeploy(created.id);
+        return created;
+      }
+
+      return createApp({
         environmentId,
         name,
         sourceType,
@@ -330,7 +375,8 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
         port: Number(port),
         serverIds,
         buildRunner,
-      }),
+      });
+    },
     onSuccess: async () => {
       reset();
       setOpen(false);
@@ -345,14 +391,22 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
       setError("Selected-server builds require exactly one server.");
       return;
     }
+    if (databaseServerInvalid) {
+      setError("Databases require exactly one server.");
+      return;
+    }
     add.mutate();
   }
 
   function toggleServer(serverId: string, checked: boolean) {
     setServerIds((current) =>
-      checked
-        ? [...new Set([...current, serverId])]
-        : current.filter((selectedServerId) => selectedServerId !== serverId),
+      appKind === "database"
+        ? checked
+          ? [serverId]
+          : []
+        : checked
+          ? [...new Set([...current, serverId])]
+          : current.filter((selectedServerId) => selectedServerId !== serverId),
     );
   }
 
@@ -378,7 +432,9 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
         <form onSubmit={handleSubmit}>
           <DialogHeader>
             <DialogTitle>New app</DialogTitle>
-            <DialogDescription>Deploy from a Git repository or a Docker image.</DialogDescription>
+            <DialogDescription>
+              Deploy an application or create a managed Postgres database.
+            </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-4">
             <div className="space-y-2">
@@ -393,78 +449,166 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
               />
             </div>
             <div className="space-y-2">
-              <Label>Source</Label>
+              <Label>Type</Label>
               <Select
-                value={sourceType}
-                onValueChange={(value) => setSourceType((value ?? "repository") as AppSourceType)}
+                value={appKind}
+                onValueChange={(value) => {
+                  setAppKind((value ?? "service") as AppKind);
+                  setServerIds([]);
+                }}
               >
                 <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Source">
-                    {(value: AppSourceType) =>
-                      value === "image" ? "Prebuilt Docker image" : "Git repository"
+                  <SelectValue placeholder="Type">
+                    {(value: AppKind) =>
+                      value === "database" ? "Postgres database" : "Application"
                     }
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup>
-                  <SelectItem value="repository">Git repository</SelectItem>
-                  <SelectItem value="image">Prebuilt Docker image</SelectItem>
+                  <SelectItem value="service">Application</SelectItem>
+                  <SelectItem value="database">Postgres database</SelectItem>
                 </SelectPopup>
               </Select>
             </div>
-            {sourceType === "repository" ? (
+            {appKind === "service" ? (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="app-repo">Repository URL</Label>
-                  <Input
-                    id="app-repo"
-                    onChange={(event) => setRepositoryUrl(event.currentTarget.value)}
-                    placeholder="https://github.com/user/repo"
-                    required
-                    value={repositoryUrl}
-                  />
+                  <Label>Source</Label>
+                  <Select
+                    value={sourceType}
+                    onValueChange={(value) =>
+                      setSourceType((value ?? "repository") as AppSourceType)
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="Source">
+                        {(value: AppSourceType) =>
+                          value === "image" ? "Prebuilt Docker image" : "Git repository"
+                        }
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectPopup>
+                      <SelectItem value="repository">Git repository</SelectItem>
+                      <SelectItem value="image">Prebuilt Docker image</SelectItem>
+                    </SelectPopup>
+                  </Select>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
-                  <div className="space-y-2">
-                    <Label htmlFor="app-branch">Branch</Label>
-                    <Input
-                      id="app-branch"
-                      onChange={(event) => setBranch(event.currentTarget.value)}
-                      value={branch}
-                    />
+                {sourceType === "repository" ? (
+                  <>
+                    <div className="space-y-2">
+                      <Label htmlFor="app-repo">Repository URL</Label>
+                      <Input
+                        id="app-repo"
+                        onChange={(event) => setRepositoryUrl(event.currentTarget.value)}
+                        placeholder="https://github.com/user/repo"
+                        required
+                        value={repositoryUrl}
+                      />
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
+                      <div className="space-y-2">
+                        <Label htmlFor="app-branch">Branch</Label>
+                        <Input
+                          id="app-branch"
+                          onChange={(event) => setBranch(event.currentTarget.value)}
+                          value={branch}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="app-port">Port</Label>
+                        <Input
+                          id="app-port"
+                          onChange={(event) => setPort(event.currentTarget.value)}
+                          type="number"
+                          value={port}
+                        />
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
+                    <div className="space-y-2">
+                      <Label htmlFor="app-image">Docker image</Label>
+                      <Input
+                        id="app-image"
+                        onChange={(event) => setImageRef(event.currentTarget.value)}
+                        placeholder="nginx:alpine"
+                        required
+                        value={imageRef}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="app-image-port">Port</Label>
+                      <Input
+                        id="app-image-port"
+                        onChange={(event) => setPort(event.currentTarget.value)}
+                        type="number"
+                        value={port}
+                      />
+                    </div>
                   </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="app-port">Port</Label>
-                    <Input
-                      id="app-port"
-                      onChange={(event) => setPort(event.currentTarget.value)}
-                      type="number"
-                      value={port}
-                    />
-                  </div>
-                </div>
+                )}
               </>
             ) : (
-              <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
-                <div className="space-y-2">
-                  <Label htmlFor="app-image">Docker image</Label>
-                  <Input
-                    id="app-image"
-                    onChange={(event) => setImageRef(event.currentTarget.value)}
-                    placeholder="nginx:alpine"
-                    required
-                    value={imageRef}
-                  />
+              <>
+                <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
+                  <div className="space-y-2">
+                    <Label htmlFor="database-name">Database name</Label>
+                    <Input
+                      id="database-name"
+                      onChange={(event) => setDatabaseName(event.currentTarget.value)}
+                      placeholder={name || "app"}
+                      value={databaseName}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="database-version">Version</Label>
+                    <Input
+                      id="database-version"
+                      onChange={(event) => setDatabaseVersion(event.currentTarget.value)}
+                      value={databaseVersion}
+                    />
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="app-image-port">Port</Label>
-                  <Input
-                    id="app-image-port"
-                    onChange={(event) => setPort(event.currentTarget.value)}
-                    type="number"
-                    value={port}
-                  />
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="database-user">User</Label>
+                    <Input
+                      id="database-user"
+                      onChange={(event) => setDatabaseUser(event.currentTarget.value)}
+                      value={databaseUser}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="database-password">Password</Label>
+                    <Input
+                      id="database-password"
+                      onChange={(event) => setDatabasePassword(event.currentTarget.value)}
+                      placeholder="Generate"
+                      type="password"
+                      value={databasePassword}
+                    />
+                  </div>
                 </div>
-              </div>
+                <label className="flex items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={databasePublicEnabled}
+                    onCheckedChange={(value) => setDatabasePublicEnabled(value === true)}
+                  />
+                  <span>Enable public TCP access</span>
+                </label>
+                {databasePublicEnabled ? (
+                  <div className="max-w-40 space-y-2">
+                    <Label htmlFor="database-public-port">Public port</Label>
+                    <Input
+                      id="database-public-port"
+                      onChange={(event) => setDatabasePublicPort(event.currentTarget.value)}
+                      type="number"
+                      value={databasePublicPort}
+                    />
+                  </div>
+                ) : null}
+              </>
             )}
             <div className="space-y-2">
               <Label>Servers</Label>
@@ -498,7 +642,7 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
                 </div>
               )}
             </div>
-            {sourceType === "repository" ? (
+            {appKind === "service" && sourceType === "repository" ? (
               <div className="space-y-2">
                 <Label>Build location</Label>
                 <Select
@@ -525,16 +669,21 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
                 ) : null}
               </div>
             ) : null}
+            {databaseServerInvalid ? (
+              <p className="text-warning-foreground text-sm">
+                Databases require exactly one server.
+              </p>
+            ) : null}
             {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
           </DialogPanel>
           <DialogFooter>
             <DialogClose render={<Button variant="outline">Cancel</Button>} />
             <Button
-              disabled={!name.trim() || localBuildInvalid}
+              disabled={!name.trim() || localBuildInvalid || databaseServerInvalid}
               loading={add.isPending}
               type="submit"
             >
-              Create app
+              {appKind === "database" ? "Create database" : "Create app"}
             </Button>
           </DialogFooter>
         </form>

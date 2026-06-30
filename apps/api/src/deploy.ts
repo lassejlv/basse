@@ -29,6 +29,8 @@ type DeploymentRow = typeof deployment.$inferSelect;
 type AppVolume = { hostPath: string; containerPath: string; readOnly: boolean };
 
 const NON_TERMINAL: DeploymentRow["status"][] = ["queued", "building", "deploying"];
+const DEFAULT_POSTGRES_VERSION = "18";
+const POSTGRES_PORT = 5432;
 
 async function setStatus(
   id: string,
@@ -103,6 +105,20 @@ function parseVolumes(value: string): AppVolume[] {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function databaseImage(appRow: typeof app.$inferSelect): string {
+  return appRow.databaseKind === "postgres"
+    ? `postgres:${appRow.databaseVersion ?? DEFAULT_POSTGRES_VERSION}`
+    : "";
+}
+
+function databaseVolume(appId: string): AppVolume {
+  return {
+    hostPath: `basse-postgres-${appId}`,
+    containerPath: "/var/lib/postgresql/data",
+    readOnly: false,
+  };
 }
 
 async function resolveDepotRegistryForImage(
@@ -204,6 +220,13 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       return;
     }
 
+    if (appRow.appKind === "database" && targetServers.length !== 1) {
+      log.line("Database apps require exactly one attached server.");
+      await log.done();
+      await setStatus(deploymentId, "failed");
+      return;
+    }
+
     if (
       appRow.sourceType === "repository" &&
       appRow.buildRunner === "server" &&
@@ -226,6 +249,21 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       imageRef = dep.imageRef;
       registry = await resolveDepotRegistryForImage(appRow, imageRef);
       log.line(`Using saved deployment image ${imageRef}.`);
+    } else if (appRow.appKind === "database") {
+      if (appRow.databaseKind !== "postgres") {
+        log.line("Only Postgres database apps are supported right now.");
+        await log.done();
+        await setStatus(deploymentId, "failed");
+        return;
+      }
+      imageRef = appRow.imageRef || databaseImage(appRow);
+      if (!imageRef) {
+        log.line("No database image configured for this app.");
+        await log.done();
+        await setStatus(deploymentId, "failed");
+        return;
+      }
+      log.line(`Using managed Postgres image ${imageRef}.`);
     } else if (appRow.sourceType === "image") {
       if (!appRow.imageRef) {
         log.line("No Docker image configured for this app.");
@@ -323,14 +361,30 @@ export async function runDeployment(deploymentId: string): Promise<void> {
     for (const v of vars) {
       envMap[v.key] = await decryptSecret(v.value);
     }
-    const volumes = parseVolumes(appRow.volumes);
+    if (appRow.appKind === "database") {
+      if (!appRow.databasePassword) {
+        log.line("Database credentials are missing.");
+        await log.done();
+        await setStatus(deploymentId, "failed");
+        return;
+      }
+      envMap.POSTGRES_DB = appRow.databaseName ?? "postgres";
+      envMap.POSTGRES_USER = appRow.databaseUser ?? "postgres";
+      envMap.POSTGRES_PASSWORD = await decryptSecret(appRow.databasePassword);
+    }
+    const volumes =
+      appRow.appKind === "database"
+        ? [databaseVolume(appRow.id), ...parseVolumes(appRow.volumes)]
+        : parseVolumes(appRow.volumes);
 
     let allRunning = true;
     for (const srv of targetServers) {
       log.line(`Deploying to ${srv.name}…`);
       const connection = await connectionFromServer(srv);
       const agentToken = await decryptSecret(srv.agentToken!);
-      await ensureProxy(connection, agentToken);
+      if (appRow.appKind !== "database") {
+        await ensureProxy(connection, agentToken);
+      }
       if (appRow.sourceType === "image") {
         log.line(`Pulling ${imageRef} on ${srv.name}…`);
         const pull = await runScript(connection, `docker pull ${shellQuote(imageRef)}`, {
@@ -349,6 +403,10 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         registry,
         pullImage,
         volumes,
+        publicPort:
+          appRow.appKind === "database" && appRow.databasePublicEnabled
+            ? (appRow.databasePublicPort ?? POSTGRES_PORT)
+            : undefined,
       });
 
       log.line(

@@ -1,6 +1,7 @@
 import type {
   App,
   AppConsoleResult,
+  DatabaseConnectionInfo,
   AppLogs,
   AppMetrics,
   CreateAppInput,
@@ -51,6 +52,14 @@ export async function updateApp(id: string, input: UpdateAppInput): Promise<App>
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<App>;
+}
+
+export async function getDatabaseConnectionInfo(id: string): Promise<DatabaseConnectionInfo> {
+  const response = await fetch(`${apiBaseUrl}/api/apps/${id}/database/connection`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<DatabaseConnectionInfo>;
 }
 
 export async function getAppMetrics(id: string, serverId?: string): Promise<AppMetrics> {

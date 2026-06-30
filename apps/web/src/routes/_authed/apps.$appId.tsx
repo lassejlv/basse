@@ -42,6 +42,7 @@ import { Textarea } from "@/components/ui/textarea";
 import type { App } from "@/lib/apps";
 import {
   getApp,
+  getDatabaseConnectionInfo,
   getAppLogs,
   getAppMetrics,
   deleteApp,
@@ -86,8 +87,12 @@ function AppDetailRoute() {
   const list = deployments.data ?? [];
   const status = list[0]?.status ?? data.latestDeploymentStatus ?? null;
   const canDeploy =
-    data.serverIds.length > 0 &&
-    (data.sourceType === "image" || data.buildRunner !== "server" || data.serverIds.length === 1);
+    data.appKind === "database"
+      ? data.serverIds.length === 1
+      : data.serverIds.length > 0 &&
+        (data.sourceType === "image" ||
+          data.buildRunner !== "server" ||
+          data.serverIds.length === 1);
 
   return (
     <section className="flex flex-1 flex-col p-4 md:p-6">
@@ -98,38 +103,52 @@ function AppDetailRoute() {
         <Tabs defaultValue="deployments">
           <TabsList variant="underline" className="w-full justify-start overflow-x-auto">
             <TabsTab value="deployments">Deployments</TabsTab>
+            {data.appKind === "database" ? <TabsTab value="connection">Connection</TabsTab> : null}
             <TabsTab value="runtime">Runtime</TabsTab>
-            <TabsTab value="variables">Variables</TabsTab>
-            <TabsTab value="domains">Domains</TabsTab>
+            {data.appKind === "service" ? <TabsTab value="variables">Variables</TabsTab> : null}
+            {data.appKind === "service" ? <TabsTab value="domains">Domains</TabsTab> : null}
             <TabsTab value="settings">Settings</TabsTab>
           </TabsList>
 
           <TabsPanel className="pt-5" value="deployments">
             <DeploymentsPanel appId={appId} deployments={list} isPending={deployments.isPending} />
           </TabsPanel>
+          {data.appKind === "database" ? (
+            <TabsPanel className="pt-5" value="connection">
+              <DatabaseConnectionCard app={data} />
+            </TabsPanel>
+          ) : null}
           <TabsPanel className="pt-5" value="runtime">
             <RuntimeCard app={data} />
           </TabsPanel>
-          <TabsPanel className="pt-5" value="variables">
-            <EnvVarsCard appId={appId} />
-          </TabsPanel>
-          <TabsPanel className="pt-5" value="domains">
-            {data.serverIds.length === 1 ? (
-              <AppDomainsSection app={data} serverId={data.serverIds[0]!} />
-            ) : data.serverIds.length > 1 ? (
-              <DisabledDomainsSection />
-            ) : (
-              <Card className="p-6">
-                <p className="text-muted-foreground text-sm">
-                  Attach a server to this app to route a domain to it.
-                </p>
-              </Card>
-            )}
-          </TabsPanel>
+          {data.appKind === "service" ? (
+            <TabsPanel className="pt-5" value="variables">
+              <EnvVarsCard appId={appId} />
+            </TabsPanel>
+          ) : null}
+          {data.appKind === "service" ? (
+            <TabsPanel className="pt-5" value="domains">
+              {data.serverIds.length === 1 ? (
+                <AppDomainsSection app={data} serverId={data.serverIds[0]!} />
+              ) : data.serverIds.length > 1 ? (
+                <DisabledDomainsSection />
+              ) : (
+                <Card className="p-6">
+                  <p className="text-muted-foreground text-sm">
+                    Attach a server to this app to route a domain to it.
+                  </p>
+                </Card>
+              )}
+            </TabsPanel>
+          ) : null}
           <TabsPanel className="flex flex-col gap-6 pt-5" value="settings">
-            <BuildSettingsCard app={data} />
+            {data.appKind === "database" ? (
+              <DatabaseSettingsCard app={data} />
+            ) : (
+              <BuildSettingsCard app={data} />
+            )}
             <ServerCard app={data} />
-            <VolumesCard app={data} />
+            {data.appKind === "service" ? <VolumesCard app={data} /> : null}
             <DeleteAppCard app={data} />
           </TabsPanel>
         </Tabs>
@@ -237,6 +256,7 @@ function AppHeader({
 }) {
   const repoHost = app.repositoryUrl.replace(/^https?:\/\//, "");
   const liveUrl = useLiveUrl(app);
+  const database = app.database;
 
   return (
     <Card className="gap-5 p-6">
@@ -250,7 +270,15 @@ function AppHeader({
       </div>
 
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-muted-foreground text-xs">
-        {app.sourceType === "image" ? (
+        {database ? (
+          <>
+            <span className="text-foreground/80">Postgres {database.version}</span>
+            <SpecDivider />
+            <span>
+              {database.internalHost}:{database.internalPort}
+            </span>
+          </>
+        ) : app.sourceType === "image" ? (
           <span className="text-foreground/80">{app.imageRef}</span>
         ) : (
           <a
@@ -263,15 +291,15 @@ function AppHeader({
             <ExternalLinkIcon className="size-3 opacity-70" />
           </a>
         )}
-        <SpecDivider />
-        {app.sourceType === "repository" ? (
+        {database ? null : <SpecDivider />}
+        {!database && app.sourceType === "repository" ? (
           <>
             <span>{app.branch}</span>
             <SpecDivider />
           </>
         ) : null}
-        <span>:{app.port}</span>
-        {app.sourceType === "repository" ? (
+        {!database ? <span>:{app.port}</span> : null}
+        {!database && app.sourceType === "repository" ? (
           <>
             <SpecDivider />
             <span>{app.buildRunner}</span>
@@ -280,7 +308,13 @@ function AppHeader({
       </div>
 
       <div className="flex flex-wrap items-center gap-3 border-t pt-4 text-sm">
-        {liveUrl ? (
+        {database ? (
+          <span className="text-muted-foreground">
+            {database.publicEnabled && database.publicPort
+              ? `Public TCP enabled on port ${database.publicPort}`
+              : "Private internal database"}
+          </span>
+        ) : liveUrl ? (
           <a
             className="inline-flex items-center gap-1.5 font-medium text-foreground underline-offset-4 hover:underline"
             href={liveUrl}
@@ -430,6 +464,157 @@ function DeploymentsPanel({
   );
 }
 
+function DatabaseConnectionCard({ app }: { app: App }) {
+  const { copiedId, copy } = useClipboard();
+  const connection = useQuery({
+    queryKey: ["database-connection", app.id],
+    queryFn: () => getDatabaseConnectionInfo(app.id),
+    enabled: app.appKind === "database",
+  });
+
+  const internalUri = connection.data?.internalUri ?? "";
+  const publicUri = connection.data?.publicUri ?? "";
+
+  return (
+    <Card className="p-6">
+      <h2 className="font-semibold text-lg">Connection</h2>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Use the internal URI from other Basse apps on the same server.
+      </p>
+      <div className="mt-4 flex flex-col gap-4">
+        <ConnectionValue
+          copied={copiedId === "internal"}
+          label="Internal URI"
+          loading={connection.isPending}
+          onCopy={() => copy("internal", internalUri)}
+          value={internalUri}
+        />
+        {app.database?.publicEnabled ? (
+          <ConnectionValue
+            copied={copiedId === "public"}
+            label="Public URI"
+            loading={connection.isPending}
+            onCopy={() => copy("public", publicUri)}
+            value={publicUri || "Redeploy after enabling public access."}
+          />
+        ) : null}
+      </div>
+      {connection.isError ? (
+        <p className="mt-3 text-destructive-foreground text-sm">{connection.error.message}</p>
+      ) : null}
+    </Card>
+  );
+}
+
+function ConnectionValue({
+  copied,
+  label,
+  loading,
+  onCopy,
+  value,
+}: {
+  copied: boolean;
+  label: string;
+  loading: boolean;
+  onCopy: () => void;
+  value: string;
+}) {
+  return (
+    <div className="space-y-2">
+      <Label>{label}</Label>
+      <div className="flex min-w-0 items-center gap-2">
+        <code className="min-w-0 flex-1 truncate rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs">
+          {loading ? "Loading..." : value}
+        </code>
+        <Button disabled={!value || loading} onClick={onCopy} size="icon" variant="outline">
+          {copied ? <CheckIcon /> : <CopyIcon />}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function DatabaseSettingsCard({ app }: { app: App }) {
+  const queryClient = useQueryClient();
+  const database = app.database;
+  const [version, setVersion] = useState(database?.version ?? "18");
+  const [publicEnabled, setPublicEnabled] = useState(database?.publicEnabled ?? false);
+  const [publicPort, setPublicPort] = useState(String(database?.publicPort ?? 5432));
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setVersion(database?.version ?? "18");
+    setPublicEnabled(database?.publicEnabled ?? false);
+    setPublicPort(String(database?.publicPort ?? 5432));
+  }, [database]);
+
+  const update = useMutation({
+    mutationFn: async () => {
+      await updateApp(app.id, {
+        databaseVersion: version,
+        databasePublicEnabled: publicEnabled,
+        databasePublicPort: publicEnabled ? Number(publicPort) : null,
+      });
+      return triggerDeploy(app.id);
+    },
+    onSuccess: async () => {
+      setError(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["app", app.id] }),
+        queryClient.invalidateQueries({ queryKey: ["deployments", app.id] }),
+        queryClient.invalidateQueries({ queryKey: ["database-connection", app.id] }),
+      ]);
+    },
+    onError: (mutationError: Error) => setError(mutationError.message),
+  });
+
+  return (
+    <Card className="p-6">
+      <h2 className="font-semibold text-lg">Database</h2>
+      <p className="mt-1 text-muted-foreground text-sm">Managed standalone Postgres settings.</p>
+      <form
+        className="mt-4 space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          update.mutate();
+        }}
+      >
+        <div className="grid gap-3 sm:grid-cols-[1fr_140px]">
+          <div className="space-y-2">
+            <Label htmlFor="database-version">Postgres version</Label>
+            <Input
+              id="database-version"
+              onChange={(event) => setVersion(event.currentTarget.value)}
+              value={version}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="database-public-port">Public port</Label>
+            <Input
+              disabled={!publicEnabled}
+              id="database-public-port"
+              onChange={(event) => setPublicPort(event.currentTarget.value)}
+              type="number"
+              value={publicPort}
+            />
+          </div>
+        </div>
+        <label className="flex items-center gap-2 text-sm">
+          <Checkbox
+            checked={publicEnabled}
+            onCheckedChange={(value) => setPublicEnabled(value === true)}
+          />
+          <span>Enable public TCP access</span>
+        </label>
+        {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+        <Button loading={update.isPending} type="submit">
+          Save and redeploy database
+        </Button>
+      </form>
+    </Card>
+  );
+}
+
 function ServerCard({ app }: { app: App }) {
   const queryClient = useQueryClient();
   const servers = useQuery({ queryKey: ["servers", "for-apps"], queryFn: listServers });
@@ -443,11 +628,16 @@ function ServerCard({ app }: { app: App }) {
 
   const serverList = servers.data ?? [];
   const selectedServerIds = app.serverIds;
+  const databaseApp = app.appKind === "database";
 
   function toggleServer(serverId: string, checked: boolean) {
-    const next = checked
-      ? [...new Set([...selectedServerIds, serverId])]
-      : selectedServerIds.filter((id) => id !== serverId);
+    const next = databaseApp
+      ? checked
+        ? [serverId]
+        : []
+      : checked
+        ? [...new Set([...selectedServerIds, serverId])]
+        : selectedServerIds.filter((id) => id !== serverId);
     setServers.mutate(next);
   }
 
@@ -455,7 +645,9 @@ function ServerCard({ app }: { app: App }) {
     <Card className="p-6">
       <h2 className="font-semibold text-lg">Servers</h2>
       <p className="mt-1 text-muted-foreground text-sm">
-        The servers this app deploys to. Only active servers can run deployments.
+        {databaseApp
+          ? "The server this standalone database deploys to."
+          : "The servers this app deploys to. Only active servers can run deployments."}
       </p>
       <div className="mt-4">
         {servers.isPending ? (

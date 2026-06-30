@@ -113,6 +113,11 @@ export const app = pgTable(
     })
       .notNull()
       .default("depot"),
+    appKind: text("app_kind", {
+      enum: ["service", "database"],
+    })
+      .notNull()
+      .default("service"),
     sourceType: text("source_type", {
       enum: ["repository", "image"],
     })
@@ -120,6 +125,15 @@ export const app = pgTable(
       .default("repository"),
     imageRef: text("image_ref"),
     volumes: text("volumes").notNull().default("[]"),
+    databaseKind: text("database_kind", {
+      enum: ["postgres"],
+    }),
+    databaseVersion: text("database_version"),
+    databaseName: text("database_name"),
+    databaseUser: text("database_user"),
+    databasePassword: text("database_password"),
+    databasePublicEnabled: boolean("database_public_enabled").notNull().default(false),
+    databasePublicPort: integer("database_public_port"),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },

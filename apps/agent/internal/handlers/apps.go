@@ -26,12 +26,13 @@ func containerName(appID string) string {
 }
 
 type deployRequest struct {
-	AppID     string            `json:"appId"`
-	Image     string            `json:"image"`
-	Port      int               `json:"port"`
-	Env       map[string]string `json:"env"`
-	PullImage bool              `json:"pullImage"`
-	Volumes   []struct {
+	AppID      string            `json:"appId"`
+	Image      string            `json:"image"`
+	Port       int               `json:"port"`
+	Env        map[string]string `json:"env"`
+	PullImage  bool              `json:"pullImage"`
+	PublicPort int               `json:"publicPort"`
+	Volumes    []struct {
 		HostPath      string `json:"hostPath"`
 		ContainerPath string `json:"containerPath"`
 		ReadOnly      bool   `json:"readOnly"`
@@ -60,6 +61,10 @@ func (a Apps) Deploy(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AppID == "" || req.Image == "" || req.Port < 1 || req.Port > 65535 {
 		httpx.Error(w, http.StatusBadRequest, "appId, image and a valid port are required")
+		return
+	}
+	if req.PublicPort < 0 || req.PublicPort > 65535 {
+		httpx.Error(w, http.StatusBadRequest, "publicPort must be a valid port")
 		return
 	}
 
@@ -100,6 +105,12 @@ func (a Apps) Deploy(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(env)
 
 	port := fmt.Sprintf("%d/tcp", req.Port)
+	portBindings := map[string][]dockerx.PortBinding(nil)
+	if req.PublicPort > 0 {
+		portBindings = map[string][]dockerx.PortBinding{
+			port: []dockerx.PortBinding{{HostIP: "0.0.0.0", HostPort: strconv.Itoa(req.PublicPort)}},
+		}
+	}
 	binds := make([]string, 0, len(req.Volumes))
 	for _, volume := range req.Volumes {
 		if volume.HostPath == "" || volume.ContainerPath == "" {
@@ -120,8 +131,10 @@ func (a Apps) Deploy(w http.ResponseWriter, r *http.Request) {
 			port: {},
 		},
 		HostConfig: dockerx.HostConfig{
-			// No PortBindings — traffic arrives via Caddy on the basse network.
+			// Services usually route via Caddy on the basse network; databases can
+			// opt into direct TCP exposure through PortBindings.
 			NetworkMode:   a.Cfg.ProxyNetwork,
+			PortBindings:  portBindings,
 			RestartPolicy: dockerx.RestartPolicy{Name: "unless-stopped"},
 			Binds:         binds,
 		},

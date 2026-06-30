@@ -38,12 +38,25 @@ export type CreateEnvironmentInput = {
 
 export type AppBuildMode = "auto" | "dockerfile" | "railpack";
 export type AppBuildRunner = "depot" | "server";
+export type AppKind = "service" | "database";
 export type AppSourceType = "repository" | "image";
+export type DatabaseKind = "postgres";
 
 export type AppVolume = {
   hostPath: string;
   containerPath: string;
   readOnly: boolean;
+};
+
+export type AppDatabase = {
+  kind: DatabaseKind;
+  version: string;
+  name: string;
+  user: string;
+  internalHost: string;
+  internalPort: number;
+  publicEnabled: boolean;
+  publicPort: number | null;
 };
 
 export type App = {
@@ -58,9 +71,11 @@ export type App = {
   port: number;
   buildMode: AppBuildMode;
   buildRunner: AppBuildRunner;
+  appKind: AppKind;
   sourceType: AppSourceType;
   imageRef: string | null;
   volumes: AppVolume[];
+  database: AppDatabase | null;
   createdAt: string;
   updatedAt: string;
   // Status of the most recent deployment, for at-a-glance health. Present on
@@ -75,16 +90,24 @@ export type App = {
 export type CreateAppInput = {
   environmentId: string;
   name: string;
-  repositoryUrl: string;
+  repositoryUrl?: string;
   branch?: string;
   port?: number;
   buildMode?: AppBuildMode;
   buildRunner?: AppBuildRunner;
+  appKind?: AppKind;
   sourceType?: AppSourceType;
   imageRef?: string | null;
   volumes?: AppVolume[];
   serverId?: string;
   serverIds?: string[];
+  databaseKind?: DatabaseKind;
+  databaseVersion?: string;
+  databaseName?: string;
+  databaseUser?: string;
+  databasePassword?: string;
+  databasePublicEnabled?: boolean;
+  databasePublicPort?: number | null;
 };
 
 export type UpdateAppInput = {
@@ -94,11 +117,20 @@ export type UpdateAppInput = {
   port?: number;
   buildMode?: AppBuildMode;
   buildRunner?: AppBuildRunner;
+  appKind?: AppKind;
   sourceType?: AppSourceType;
   imageRef?: string | null;
   volumes?: AppVolume[];
   serverId?: string | null;
   serverIds?: string[];
+  databaseVersion?: string;
+  databasePublicEnabled?: boolean;
+  databasePublicPort?: number | null;
+};
+
+export type DatabaseConnectionInfo = {
+  internalUri: string;
+  publicUri: string | null;
 };
 
 // Env var with the value masked (last-4 only), returned by the list endpoint.
