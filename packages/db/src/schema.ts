@@ -126,7 +126,7 @@ export const app = pgTable(
     imageRef: text("image_ref"),
     volumes: text("volumes").notNull().default("[]"),
     databaseKind: text("database_kind", {
-      enum: ["postgres"],
+      enum: ["postgres", "redis"],
     }),
     databaseVersion: text("database_version"),
     databaseName: text("database_name"),

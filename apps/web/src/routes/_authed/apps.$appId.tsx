@@ -17,7 +17,13 @@ import {
   TrashIcon,
 } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
-import type { AppBuildRunner, AppSourceType, AppVolume, Deployment } from "@basse/shared";
+import type {
+  AppBuildRunner,
+  AppSourceType,
+  AppVolume,
+  DatabaseKind,
+  Deployment,
+} from "@basse/shared";
 import { chartCssVars } from "@/components/charts/chart-context";
 import { Grid } from "@/components/charts/grid";
 import { Line, LineChart } from "@/components/charts/line-chart";
@@ -272,7 +278,9 @@ function AppHeader({
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-muted-foreground text-xs">
         {database ? (
           <>
-            <span className="text-foreground/80">Postgres {database.version}</span>
+            <span className="text-foreground/80">
+              {databaseEngineLabel(database.kind)} {database.version}
+            </span>
             <SpecDivider />
             <span>
               {database.internalHost}:{database.internalPort}
@@ -344,6 +352,14 @@ function SpecDivider() {
       ·
     </span>
   );
+}
+
+function databaseEngineLabel(kind: DatabaseKind) {
+  return kind === "redis" ? "Redis" : "Postgres";
+}
+
+function databaseDefaultPort(kind: DatabaseKind) {
+  return kind === "redis" ? 6379 : 5432;
 }
 
 /** First active domain for this app on its single attached server, if any. */
@@ -537,16 +553,22 @@ function ConnectionValue({
 function DatabaseSettingsCard({ app }: { app: App }) {
   const queryClient = useQueryClient();
   const database = app.database;
-  const [version, setVersion] = useState(database?.version ?? "18");
+  const databaseKind = database?.kind ?? "postgres";
+  const engineLabel = databaseEngineLabel(databaseKind);
+  const [version, setVersion] = useState(
+    database?.version ?? (databaseKind === "redis" ? "8" : "18"),
+  );
   const [publicEnabled, setPublicEnabled] = useState(database?.publicEnabled ?? false);
-  const [publicPort, setPublicPort] = useState(String(database?.publicPort ?? 5432));
+  const [publicPort, setPublicPort] = useState(
+    String(database?.publicPort ?? databaseDefaultPort(databaseKind)),
+  );
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setVersion(database?.version ?? "18");
+    setVersion(database?.version ?? (databaseKind === "redis" ? "8" : "18"));
     setPublicEnabled(database?.publicEnabled ?? false);
-    setPublicPort(String(database?.publicPort ?? 5432));
-  }, [database]);
+    setPublicPort(String(database?.publicPort ?? databaseDefaultPort(databaseKind)));
+  }, [database, databaseKind]);
 
   const update = useMutation({
     mutationFn: async () => {
@@ -571,7 +593,9 @@ function DatabaseSettingsCard({ app }: { app: App }) {
   return (
     <Card className="p-6">
       <h2 className="font-semibold text-lg">Database</h2>
-      <p className="mt-1 text-muted-foreground text-sm">Managed standalone Postgres settings.</p>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Managed standalone {engineLabel} settings.
+      </p>
       <form
         className="mt-4 space-y-4"
         onSubmit={(event) => {
@@ -581,7 +605,7 @@ function DatabaseSettingsCard({ app }: { app: App }) {
       >
         <div className="grid gap-3 sm:grid-cols-[1fr_140px]">
           <div className="space-y-2">
-            <Label htmlFor="database-version">Postgres version</Label>
+            <Label htmlFor="database-version">{engineLabel} version</Label>
             <Input
               id="database-version"
               onChange={(event) => setVersion(event.currentTarget.value)}

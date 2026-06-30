@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ArrowLeftIcon, BoxIcon, ChevronRightIcon, PlusIcon, TrashIcon } from "lucide-react";
 import { FormEvent, useState } from "react";
-import type { App, AppBuildRunner, AppKind, AppSourceType } from "@basse/shared";
+import type { App, AppBuildRunner, AppKind, AppSourceType, DatabaseKind } from "@basse/shared";
 import { DeployStatusBadge, StatusDot } from "@/components/deploy-status";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -199,7 +199,7 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
 function AppRow({ app }: { app: App }) {
   const source =
     app.appKind === "database"
-      ? `Postgres ${app.database?.version ?? "18"}`
+      ? `${app.database?.kind === "redis" ? "Redis" : "Postgres"} ${app.database?.version ?? ""}`
       : app.sourceType === "image"
         ? app.imageRef
         : app.repositoryUrl;
@@ -308,6 +308,7 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
 
   const [name, setName] = useState("");
   const [appKind, setAppKind] = useState<AppKind>("service");
+  const [databaseKind, setDatabaseKind] = useState<DatabaseKind>("postgres");
   const [sourceType, setSourceType] = useState<AppSourceType>("repository");
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [imageRef, setImageRef] = useState("");
@@ -326,6 +327,7 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
   function reset() {
     setName("");
     setAppKind("service");
+    setDatabaseKind("postgres");
     setSourceType("repository");
     setRepositoryUrl("");
     setImageRef("");
@@ -353,10 +355,10 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
           name,
           appKind: "database",
           serverIds,
-          databaseKind: "postgres",
+          databaseKind,
           databaseVersion,
-          databaseName,
-          databaseUser,
+          databaseName: databaseKind === "postgres" ? databaseName : undefined,
+          databaseUser: databaseKind === "postgres" ? databaseUser : undefined,
           databasePassword: databasePassword || undefined,
           databasePublicEnabled,
           databasePublicPort: databasePublicEnabled ? Number(databasePublicPort) : null,
@@ -412,6 +414,20 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
 
   const serverList = servers.data ?? [];
 
+  function updateDatabaseKind(kind: DatabaseKind) {
+    setDatabaseKind(kind);
+    if (kind === "postgres") {
+      setDatabaseVersion("18");
+      setDatabaseUser("postgres");
+      setDatabasePublicPort("5432");
+    } else {
+      setDatabaseVersion("8");
+      setDatabaseName("");
+      setDatabaseUser("");
+      setDatabasePublicPort("6379");
+    }
+  }
+
   return (
     <Dialog
       open={open}
@@ -433,7 +449,7 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
           <DialogHeader>
             <DialogTitle>New app</DialogTitle>
             <DialogDescription>
-              Deploy an application or create a managed Postgres database.
+              Deploy an application or create a managed database.
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-4">
@@ -460,13 +476,13 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Type">
                     {(value: AppKind) =>
-                      value === "database" ? "Postgres database" : "Application"
+                      value === "database" ? "Managed database" : "Application"
                     }
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup>
                   <SelectItem value="service">Application</SelectItem>
-                  <SelectItem value="database">Postgres database</SelectItem>
+                  <SelectItem value="database">Managed database</SelectItem>
                 </SelectPopup>
               </Select>
             </div>
@@ -551,16 +567,37 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
               </>
             ) : (
               <>
+                <div className="space-y-2">
+                  <Label>Engine</Label>
+                  <Select
+                    value={databaseKind}
+                    onValueChange={(value) =>
+                      updateDatabaseKind((value ?? "postgres") as DatabaseKind)
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="Engine">
+                        {(value: DatabaseKind) => (value === "redis" ? "Redis" : "Postgres")}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectPopup>
+                      <SelectItem value="postgres">Postgres</SelectItem>
+                      <SelectItem value="redis">Redis</SelectItem>
+                    </SelectPopup>
+                  </Select>
+                </div>
                 <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
-                  <div className="space-y-2">
-                    <Label htmlFor="database-name">Database name</Label>
-                    <Input
-                      id="database-name"
-                      onChange={(event) => setDatabaseName(event.currentTarget.value)}
-                      placeholder={name || "app"}
-                      value={databaseName}
-                    />
-                  </div>
+                  {databaseKind === "postgres" ? (
+                    <div className="space-y-2">
+                      <Label htmlFor="database-name">Database name</Label>
+                      <Input
+                        id="database-name"
+                        onChange={(event) => setDatabaseName(event.currentTarget.value)}
+                        placeholder={name || "app"}
+                        value={databaseName}
+                      />
+                    </div>
+                  ) : null}
                   <div className="space-y-2">
                     <Label htmlFor="database-version">Version</Label>
                     <Input
@@ -571,14 +608,16 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
                   </div>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="space-y-2">
-                    <Label htmlFor="database-user">User</Label>
-                    <Input
-                      id="database-user"
-                      onChange={(event) => setDatabaseUser(event.currentTarget.value)}
-                      value={databaseUser}
-                    />
-                  </div>
+                  {databaseKind === "postgres" ? (
+                    <div className="space-y-2">
+                      <Label htmlFor="database-user">User</Label>
+                      <Input
+                        id="database-user"
+                        onChange={(event) => setDatabaseUser(event.currentTarget.value)}
+                        value={databaseUser}
+                      />
+                    </div>
+                  ) : null}
                   <div className="space-y-2">
                     <Label htmlFor="database-password">Password</Label>
                     <Input

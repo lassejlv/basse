@@ -28,6 +28,7 @@ func containerName(appID string) string {
 type deployRequest struct {
 	AppID      string            `json:"appId"`
 	Image      string            `json:"image"`
+	Cmd        []string          `json:"cmd"`
 	Port       int               `json:"port"`
 	Env        map[string]string `json:"env"`
 	PullImage  bool              `json:"pullImage"`
@@ -125,6 +126,7 @@ func (a Apps) Deploy(w http.ResponseWriter, r *http.Request) {
 	}
 	spec := dockerx.ContainerSpec{
 		Image:  req.Image,
+		Cmd:    req.Cmd,
 		Env:    env,
 		Labels: map[string]string{"basse.managed": "true", "basse.app": req.AppID},
 		ExposedPorts: map[string]struct{}{

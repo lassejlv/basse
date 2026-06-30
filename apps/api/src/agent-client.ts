@@ -112,6 +112,7 @@ export async function syncDomains(
 export type DeployAppInput = {
   appId: string;
   image: string;
+  cmd?: string[];
   port: number;
   env: Record<string, string>;
   registry?: { host: string; user: string; token: string };
