@@ -105,6 +105,38 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+async function resolveDepotRegistryForImage(
+  appRow: typeof app.$inferSelect,
+  imageRef: string,
+): Promise<{ host: string; user: string; token: string } | undefined> {
+  const [env] = await db
+    .select()
+    .from(environment)
+    .where(eq(environment.id, appRow.environmentId))
+    .limit(1);
+  const [proj] = env
+    ? await db.select().from(project).where(eq(project.id, env.projectId)).limit(1)
+    : [];
+  const [depot] = proj
+    ? await db
+        .select()
+        .from(depotConnection)
+        .where(eq(depotConnection.organizationId, proj.organizationId))
+        .limit(1)
+    : [];
+
+  if (!depot || !depot.orgId || !imageRef.startsWith(`${depot.orgId}.registry.depot.dev/`)) {
+    return undefined;
+  }
+
+  const depotToken = await decryptSecret(depot.token);
+  return {
+    host: `${depot.orgId}.registry.depot.dev`,
+    user: "x-token",
+    token: await mintPullToken(depotToken, depot.projectId),
+  };
+}
+
 /**
  * Builds and deploys a deployment. Idempotent-ish and NEVER throws — every
  * failure lands the deployment in a terminal status with logs. The deployment
@@ -190,7 +222,11 @@ export async function runDeployment(deploymentId: string): Promise<void> {
     let registry: { host: string; user: string; token: string } | undefined;
     let pullImage = false;
 
-    if (appRow.sourceType === "image") {
+    if (dep.imageRef) {
+      imageRef = dep.imageRef;
+      registry = await resolveDepotRegistryForImage(appRow, imageRef);
+      log.line(`Using saved deployment image ${imageRef}.`);
+    } else if (appRow.sourceType === "image") {
       if (!appRow.imageRef) {
         log.line("No Docker image configured for this app.");
         await log.done();

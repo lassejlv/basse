@@ -85,6 +85,13 @@
       "when": 1782788242839,
       "tag": "0011_hard_scarlet_spider",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1782828667494,
+      "tag": "0012_mature_inertia",
+      "breakpoints": true
     }
   ]
 }

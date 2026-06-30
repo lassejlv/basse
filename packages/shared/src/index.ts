@@ -141,6 +141,21 @@ export type Deployment = {
   updatedAt: string;
 };
 
+export type RollbackDeploymentInput = {
+  deploymentId: string;
+};
+
+export type WorkspaceSettings = {
+  organizationId: string;
+  imageRetentionDays: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type UpdateWorkspaceSettingsInput = {
+  imageRetentionDays: number;
+};
+
 export type AppMetrics = {
   timestamp: string;
   cpuPercent: number;

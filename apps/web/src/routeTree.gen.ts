@@ -10,7 +10,6 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SignupRouteImport } from './routes/signup'
-import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as AuthedRouteImport } from './routes/_authed'
 import { Route as IndexRouteImport } from './routes/index'
@@ -26,11 +25,6 @@ import { Route as AuthedAppsAppIdRouteImport } from './routes/_authed/apps.$appI
 const SignupRoute = SignupRouteImport.update({
   id: '/signup',
   path: '/signup',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const PricingRoute = PricingRouteImport.update({
-  id: '/pricing',
-  path: '/pricing',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -91,7 +85,6 @@ const AuthedAppsAppIdRoute = AuthedAppsAppIdRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
-  '/pricing': typeof PricingRoute
   '/signup': typeof SignupRoute
   '/dashboard': typeof AuthedDashboardRoute
   '/secrets': typeof AuthedSecretsRoute
@@ -105,7 +98,6 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
-  '/pricing': typeof PricingRoute
   '/signup': typeof SignupRoute
   '/dashboard': typeof AuthedDashboardRoute
   '/secrets': typeof AuthedSecretsRoute
@@ -121,7 +113,6 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/_authed': typeof AuthedRouteWithChildren
   '/login': typeof LoginRoute
-  '/pricing': typeof PricingRoute
   '/signup': typeof SignupRoute
   '/_authed/dashboard': typeof AuthedDashboardRoute
   '/_authed/secrets': typeof AuthedSecretsRoute
@@ -137,7 +128,6 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/login'
-    | '/pricing'
     | '/signup'
     | '/dashboard'
     | '/secrets'
@@ -151,7 +141,6 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/login'
-    | '/pricing'
     | '/signup'
     | '/dashboard'
     | '/secrets'
@@ -166,7 +155,6 @@ export interface FileRouteTypes {
     | '/'
     | '/_authed'
     | '/login'
-    | '/pricing'
     | '/signup'
     | '/_authed/dashboard'
     | '/_authed/secrets'
@@ -182,7 +170,6 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AuthedRoute: typeof AuthedRouteWithChildren
   LoginRoute: typeof LoginRoute
-  PricingRoute: typeof PricingRoute
   SignupRoute: typeof SignupRoute
 }
 
@@ -193,13 +180,6 @@ declare module '@tanstack/react-router' {
       path: '/signup'
       fullPath: '/signup'
       preLoaderRoute: typeof SignupRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/pricing': {
-      id: '/pricing'
-      path: '/pricing'
-      fullPath: '/pricing'
-      preLoaderRoute: typeof PricingRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -311,7 +291,6 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuthedRoute: AuthedRouteWithChildren,
   LoginRoute: LoginRoute,
-  PricingRoute: PricingRoute,
   SignupRoute: SignupRoute,
 }
 export const routeTree = rootRouteImport

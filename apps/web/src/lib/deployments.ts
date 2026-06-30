@@ -33,3 +33,14 @@ export async function triggerDeploy(appId: string): Promise<Deployment> {
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<Deployment>;
 }
+
+export async function rollbackDeployment(deploymentId: string): Promise<Deployment> {
+  const response = await fetch(`${apiBaseUrl}/api/deployments/rollback`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ deploymentId }),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<Deployment>;
+}

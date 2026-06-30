@@ -194,6 +194,15 @@ export const deployment = pgTable("deployment", {
   updatedAt: timestamp("updated_at").notNull(),
 });
 
+export const workspaceSettings = pgTable("workspace_settings", {
+  organizationId: text("organization_id")
+    .primaryKey()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  imageRetentionDays: integer("image_retention_days").notNull().default(30),
+  createdAt: timestamp("created_at").notNull(),
+  updatedAt: timestamp("updated_at").notNull(),
+});
+
 export const projectRelations = relations(project, ({ one, many }) => ({
   organization: one(organization, {
     fields: [project.organizationId],
@@ -217,6 +226,13 @@ export const serverRelations = relations(server, ({ one, many }) => ({
   }),
   apps: many(app),
   appServers: many(appServer),
+}));
+
+export const workspaceSettingsRelations = relations(workspaceSettings, ({ one }) => ({
+  organization: one(organization, {
+    fields: [workspaceSettings.organizationId],
+    references: [organization.id],
+  }),
 }));
 
 export const appRelations = relations(app, ({ one, many }) => ({

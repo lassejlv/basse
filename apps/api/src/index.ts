@@ -16,6 +16,7 @@ import { reconcileProvisioningServers } from "./queue/reconcile";
 import { startWorker } from "./queue/worker";
 import { servers } from "./servers";
 import { sshKeys } from "./ssh-keys";
+import { workspaceSettingsRoutes } from "./workspace-settings";
 
 const app = new Hono();
 const webDist = Bun.env.WEB_DIST ?? "./apps/web/dist";
@@ -47,6 +48,7 @@ app.route("/api/ssh-keys", sshKeys);
 app.route("/api/depot", depot);
 app.route("/api/servers", servers);
 app.route("/api/domains", domains);
+app.route("/api/workspace", workspaceSettingsRoutes);
 
 app.get("/health", (c) =>
   c.json({

@@ -12,6 +12,7 @@ import {
   EyeOffIcon,
   PencilIcon,
   PlusIcon,
+  RotateCcwIcon,
   RocketIcon,
   TrashIcon,
 } from "lucide-react";
@@ -47,7 +48,7 @@ import {
   stopAppContainer,
   updateApp,
 } from "@/lib/apps";
-import { listDeployments, triggerDeploy } from "@/lib/deployments";
+import { listDeployments, rollbackDeployment, triggerDeploy } from "@/lib/deployments";
 import { createDomain, deleteDomain, listDomains } from "@/lib/domains";
 import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
 import { listEnvVars, revealEnvVars, setEnvVars } from "@/lib/env-vars";
@@ -103,7 +104,7 @@ function AppDetailRoute() {
           </TabsList>
 
           <TabsPanel className="pt-5" value="deployments">
-            <DeploymentsPanel deployments={list} isPending={deployments.isPending} />
+            <DeploymentsPanel appId={appId} deployments={list} isPending={deployments.isPending} />
           </TabsPanel>
           <TabsPanel className="pt-5" value="runtime">
             <RuntimeCard app={data} />
@@ -297,13 +298,27 @@ function DeployButton({ appId, canDeploy }: { appId: string; canDeploy: boolean 
 }
 
 function DeploymentsPanel({
+  appId,
   deployments,
   isPending,
 }: {
+  appId: string;
   deployments: Deployment[];
   isPending: boolean;
 }) {
+  const queryClient = useQueryClient();
   const latest = deployments[0];
+  const [rollbackError, setRollbackError] = useState<string | null>(null);
+
+  const rollback = useMutation({
+    mutationFn: (deploymentId: string) => rollbackDeployment(deploymentId),
+    onSuccess: async () => {
+      setRollbackError(null);
+      await queryClient.invalidateQueries({ queryKey: ["deployments", appId] });
+      await queryClient.invalidateQueries({ queryKey: ["app", appId] });
+    },
+    onError: (error: Error) => setRollbackError(error.message),
+  });
 
   return (
     <div className="flex flex-col gap-5">
@@ -335,10 +350,29 @@ function DeploymentsPanel({
                   {deployment.commitSha ? ` · ${deployment.commitSha.slice(0, 7)}` : ""}
                 </span>
                 <DeployStatusBadge size="sm" status={deployment.status} />
+                <Button
+                  disabled={
+                    rollback.isPending ||
+                    deployment.id === latest?.id ||
+                    !deployment.imageRef ||
+                    !["healthy", "superseded"].includes(deployment.status)
+                  }
+                  loading={rollback.isPending && rollback.variables === deployment.id}
+                  onClick={() => rollback.mutate(deployment.id)}
+                  size="sm"
+                  title="Roll back to this deployment"
+                  variant="outline"
+                >
+                  <RotateCcwIcon />
+                  Rollback
+                </Button>
               </div>
             ))}
           </Card>
         )}
+        {rollbackError ? (
+          <p className="mt-2 text-destructive-foreground text-sm">{rollbackError}</p>
+        ) : null}
       </div>
     </div>
   );
@@ -1104,8 +1138,8 @@ function EnvVarsCard({ appId }: { appId: string }) {
           />
           <p className="text-muted-foreground text-xs">
             One <code className="font-mono">KEY=value</code> per line. Quote values with spaces, use{" "}
-            <code className="font-mono">\n</code> for newlines, <code className="font-mono">#</code> for
-            comments. Saving replaces the whole set.
+            <code className="font-mono">\n</code> for newlines, <code className="font-mono">#</code>{" "}
+            for comments. Saving replaces the whole set.
           </p>
           {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
           <div className="flex gap-2">

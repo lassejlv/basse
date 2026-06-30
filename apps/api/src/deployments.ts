@@ -1,6 +1,7 @@
 import { appServer, db, deployment } from "@basse/db";
+import type { RollbackDeploymentInput } from "@basse/shared";
 import type { Deployment } from "@basse/shared";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { ownedApp } from "./apps";
 import { enqueueAction } from "./queue/queue";
@@ -92,6 +93,64 @@ deployments.post("/", async (c) => {
       .set({ status: "failed", logs: "Could not queue the deployment.", updatedAt: new Date() })
       .where(eq(deployment.id, created.id));
     return c.json({ error: "Could not queue the deployment" }, 503);
+  }
+
+  return c.json(toDeployment(created), 201);
+});
+
+deployments.post("/rollback", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const body = (await c.req.json().catch(() => null)) as RollbackDeploymentInput | null;
+  const deploymentId = typeof body?.deploymentId === "string" ? body.deploymentId : "";
+
+  const target = await ownedDeployment(deploymentId, organizationId);
+  if (!target) return c.json({ error: "Deployment not found" }, 404);
+  if (!target.imageRef) {
+    return c.json({ error: "Deployment does not have a saved image to roll back to" }, 400);
+  }
+  if (!["healthy", "superseded"].includes(target.status)) {
+    return c.json({ error: "Only healthy or superseded deployments can be rolled back" }, 400);
+  }
+
+  const targetServers = await db
+    .select({ serverId: appServer.serverId })
+    .from(appServer)
+    .where(eq(appServer.appId, target.appId));
+  if (targetServers.length === 0) {
+    return c.json({ error: "Attach at least one server to the app before rolling back" }, 400);
+  }
+
+  const now = new Date();
+  const [created] = await db
+    .insert(deployment)
+    .values({
+      id: crypto.randomUUID(),
+      appId: target.appId,
+      status: "queued",
+      commitSha: target.commitSha,
+      imageRef: target.imageRef,
+      logs: `Rolling back to deployment ${target.id} (${target.imageRef}).\n`,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+
+  if (!created) return c.json({ error: "Failed to create rollback deployment" }, 500);
+
+  try {
+    await enqueueAction("deploy-app", created.id);
+  } catch {
+    await db
+      .update(deployment)
+      .set({
+        status: "failed",
+        logs: `${created.logs ?? ""}Could not queue the rollback.\n`,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(deployment.id, created.id), eq(deployment.status, "queued")));
+    return c.json({ error: "Could not queue the rollback" }, 503);
   }
 
   return c.json(toDeployment(created), 201);
