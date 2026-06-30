@@ -28,6 +28,7 @@ const DEPLOY_STATUS_VARIANT: Record<
   building: "info",
   deploying: "info",
   healthy: "success",
+  superseded: "secondary",
   failed: "error",
   cancelled: "secondary",
 };

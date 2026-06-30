@@ -84,6 +84,7 @@ export type DeploymentStatus =
   | "building"
   | "deploying"
   | "healthy"
+  | "superseded"
   | "failed"
   | "cancelled";
 

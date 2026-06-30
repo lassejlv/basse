@@ -224,6 +224,18 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 
     await log.done();
     await setStatus(deploymentId, allRunning ? "healthy" : "failed");
+    if (allRunning) {
+      await db
+        .update(deployment)
+        .set({ status: "superseded", updatedAt: new Date() })
+        .where(
+          and(
+            eq(deployment.appId, appRow.id),
+            ne(deployment.id, deploymentId),
+            eq(deployment.status, "healthy"),
+          ),
+        );
+    }
   } catch (error) {
     log.line(`Error: ${error instanceof Error ? error.message : String(error)}`);
     await log.done().catch(() => {});

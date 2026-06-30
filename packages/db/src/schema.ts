@@ -160,7 +160,7 @@ export const deployment = pgTable("deployment", {
     .notNull()
     .references(() => app.id, { onDelete: "cascade" }),
   status: text("status", {
-    enum: ["queued", "building", "deploying", "healthy", "failed", "cancelled"],
+    enum: ["queued", "building", "deploying", "healthy", "superseded", "failed", "cancelled"],
   })
     .notNull()
     .default("queued"),
