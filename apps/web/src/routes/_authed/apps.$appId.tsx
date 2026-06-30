@@ -1,8 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
-import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "@xterm/xterm";
-import "@xterm/xterm/css/xterm.css";
 import {
   ArrowLeftIcon,
   CheckIcon,
@@ -44,6 +41,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Sheet,
+  SheetDescription,
+  SheetHeader,
+  SheetPanel,
+  SheetPopup,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import type { App } from "@/lib/apps";
@@ -53,8 +58,6 @@ import {
   getAppLogs,
   getAppMetrics,
   deleteApp,
-  runAppConsoleCommand,
-  stopAppContainer,
   updateApp,
 } from "@/lib/apps";
 import { listDeployments, rollbackDeployment, triggerDeploy } from "@/lib/deployments";
@@ -111,23 +114,19 @@ function AppDetailRoute() {
           <TabsList variant="underline" className="w-full justify-start overflow-x-auto">
             <TabsTab value="deployments">Deployments</TabsTab>
             {data.appKind === "database" ? <TabsTab value="connection">Connection</TabsTab> : null}
-            <TabsTab value="runtime">Runtime</TabsTab>
             {data.appKind === "service" ? <TabsTab value="variables">Variables</TabsTab> : null}
             {data.appKind === "service" ? <TabsTab value="domains">Domains</TabsTab> : null}
             <TabsTab value="settings">Settings</TabsTab>
           </TabsList>
 
           <TabsPanel className="pt-5" value="deployments">
-            <DeploymentsPanel appId={appId} deployments={list} isPending={deployments.isPending} />
+            <DeploymentsPanel app={data} deployments={list} isPending={deployments.isPending} />
           </TabsPanel>
           {data.appKind === "database" ? (
             <TabsPanel className="pt-5" value="connection">
               <DatabaseConnectionCard app={data} />
             </TabsPanel>
           ) : null}
-          <TabsPanel className="pt-5" value="runtime">
-            <RuntimeCard app={data} />
-          </TabsPanel>
           {data.appKind === "service" ? (
             <TabsPanel className="pt-5" value="variables">
               <EnvVarsCard appId={appId} />
@@ -400,44 +399,44 @@ function DeployButton({ appId, canDeploy }: { appId: string; canDeploy: boolean 
 }
 
 function DeploymentsPanel({
-  appId,
+  app,
   deployments,
   isPending,
 }: {
-  appId: string;
+  app: App;
   deployments: Deployment[];
   isPending: boolean;
 }) {
   const queryClient = useQueryClient();
   const latest = deployments[0];
+  const [selectedDeploymentId, setSelectedDeploymentId] = useState<string | null>(null);
   const [rollbackError, setRollbackError] = useState<string | null>(null);
+  const selectedDeployment =
+    deployments.find((deployment) => deployment.id === selectedDeploymentId) ?? null;
 
   const rollback = useMutation({
     mutationFn: (deploymentId: string) => rollbackDeployment(deploymentId),
     onSuccess: async () => {
       setRollbackError(null);
-      await queryClient.invalidateQueries({ queryKey: ["deployments", appId] });
-      await queryClient.invalidateQueries({ queryKey: ["app", appId] });
+      await queryClient.invalidateQueries({ queryKey: ["deployments", app.id] });
+      await queryClient.invalidateQueries({ queryKey: ["app", app.id] });
     },
     onError: (error: Error) => setRollbackError(error.message),
   });
 
   return (
     <div className="flex flex-col gap-5">
-      <Card className="overflow-hidden p-0">
-        <div className="flex items-center justify-between gap-3 border-b px-5 py-3">
-          <h2 className="font-medium text-sm">Latest build log</h2>
-          {latest ? <DeployStatusBadge size="sm" status={latest.status} /> : null}
-        </div>
-        <pre className="max-h-80 overflow-auto bg-muted/30 p-4 font-mono text-xs leading-relaxed">
-          {latest ? (latest.logs ?? "Waiting for logs…") : "No deployments yet."}
-        </pre>
-      </Card>
-
       <div>
-        <h2 className="mb-2 font-medium text-muted-foreground text-xs uppercase tracking-wider">
-          History
-        </h2>
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <h2 className="font-medium text-muted-foreground text-xs uppercase tracking-wider">
+            History
+          </h2>
+          {latest ? (
+            <span className="text-muted-foreground text-xs">
+              Click a deployment for build logs and runtime data.
+            </span>
+          ) : null}
+        </div>
         {isPending ? (
           <p className="text-muted-foreground text-sm">Loading…</p>
         ) : deployments.length === 0 ? (
@@ -446,11 +445,22 @@ function DeploymentsPanel({
           <Card className="divide-y overflow-hidden p-0">
             {deployments.map((deployment) => (
               <div key={deployment.id} className="flex items-center gap-3 px-4 py-3">
-                <StatusDot status={deployment.status} />
-                <span className="flex-1 font-mono text-muted-foreground text-xs">
-                  {new Date(deployment.createdAt).toLocaleString()}
-                  {deployment.commitSha ? ` · ${deployment.commitSha.slice(0, 7)}` : ""}
-                </span>
+                <button
+                  className="-m-2 flex min-w-0 flex-1 items-center gap-3 rounded-md p-2 text-left transition hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => setSelectedDeploymentId(deployment.id)}
+                  type="button"
+                >
+                  <StatusDot className="size-2.5" status={deployment.status} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-mono text-muted-foreground text-xs">
+                      {new Date(deployment.createdAt).toLocaleString()}
+                      {deployment.commitSha ? ` · ${deployment.commitSha.slice(0, 7)}` : ""}
+                    </span>
+                    <span className="block truncate text-muted-foreground/75 text-xs">
+                      {deployment.imageRef ?? deployment.buildId ?? "No image recorded yet"}
+                    </span>
+                  </span>
+                </button>
                 <DeployStatusBadge size="sm" status={deployment.status} />
                 <Button
                   disabled={
@@ -476,8 +486,311 @@ function DeploymentsPanel({
           <p className="mt-2 text-destructive-foreground text-sm">{rollbackError}</p>
         ) : null}
       </div>
+
+      <DeploymentDetailSheet
+        app={app}
+        deployment={selectedDeployment}
+        onOpenChange={(open) => {
+          if (!open) setSelectedDeploymentId(null);
+        }}
+        open={Boolean(selectedDeployment)}
+      />
     </div>
   );
+}
+
+function DeploymentDetailSheet({
+  app,
+  deployment,
+  open,
+  onOpenChange,
+}: {
+  app: App;
+  deployment: Deployment | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Sheet onOpenChange={onOpenChange} open={open}>
+      <SheetPopup className="max-w-4xl" side="right">
+        <SheetHeader>
+          <SheetTitle>{deployment ? "Deployment details" : "Deployment"}</SheetTitle>
+          <SheetDescription>
+            {deployment
+              ? `${new Date(deployment.createdAt).toLocaleString()}${
+                  deployment.commitSha ? ` · ${deployment.commitSha.slice(0, 7)}` : ""
+                }`
+              : "Build logs and runtime data for the selected deployment."}
+          </SheetDescription>
+        </SheetHeader>
+        <SheetPanel className="space-y-6">
+          {deployment ? (
+            <>
+              <DeploymentSummary deployment={deployment} />
+              <DeploymentBuildLog deployment={deployment} />
+              <DeploymentRuntimeSection app={app} deployment={deployment} />
+            </>
+          ) : null}
+        </SheetPanel>
+      </SheetPopup>
+    </Sheet>
+  );
+}
+
+function DeploymentSummary({ deployment }: { deployment: Deployment }) {
+  return (
+    <div className="grid gap-3 text-sm sm:grid-cols-3">
+      <div className="rounded-md border p-3">
+        <p className="text-muted-foreground">Status</p>
+        <div className="mt-2">
+          <DeployStatusBadge status={deployment.status} />
+        </div>
+      </div>
+      <div className="rounded-md border p-3">
+        <p className="text-muted-foreground">Image</p>
+        <p className="mt-2 truncate font-mono text-xs">
+          {deployment.imageRef ?? "No image recorded"}
+        </p>
+      </div>
+      <div className="rounded-md border p-3">
+        <p className="text-muted-foreground">Updated</p>
+        <p className="mt-2 font-mono text-xs">{new Date(deployment.updatedAt).toLocaleString()}</p>
+      </div>
+    </div>
+  );
+}
+
+function DeploymentBuildLog({ deployment }: { deployment: Deployment }) {
+  return (
+    <section className="rounded-md border">
+      <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
+        <h3 className="font-medium text-sm">Build logs</h3>
+        <span className="font-mono text-muted-foreground text-xs">
+          {deployment.buildId ?? deployment.id.slice(0, 8)}
+        </span>
+      </div>
+      <pre className="max-h-80 overflow-auto bg-muted/35 p-4 font-mono text-xs leading-relaxed">
+        {deployment.logs?.trim() ? deployment.logs : "Waiting for logs…"}
+      </pre>
+    </section>
+  );
+}
+
+function DeploymentRuntimeSection({ app, deployment }: { app: App; deployment: Deployment }) {
+  const servers = useQuery({ queryKey: ["servers", "deployment-runtime"], queryFn: listServers });
+  const targetServers = (servers.data ?? []).filter((server) => app.serverIds.includes(server.id));
+  const [serverId, setServerId] = useState(app.serverIds[0] ?? "");
+  const [samples, setSamples] = useState<
+    { date: Date; cpuPercent: number; memoryPercent: number }[]
+  >([]);
+  const runtimeAvailable = deployment.status === "healthy";
+
+  useEffect(() => {
+    if (!serverId || !app.serverIds.includes(serverId)) {
+      setServerId(app.serverIds[0] ?? "");
+      setSamples([]);
+    }
+  }, [app.serverIds, serverId]);
+
+  useEffect(() => {
+    setSamples([]);
+  }, [deployment.id, serverId]);
+
+  const metrics = useQuery({
+    queryKey: ["app-metrics", app.id, serverId],
+    queryFn: () => getAppMetrics(app.id, serverId),
+    enabled: runtimeAvailable && Boolean(serverId),
+    refetchInterval: 5000,
+  });
+
+  const logs = useQuery({
+    queryKey: ["app-logs", app.id, serverId],
+    queryFn: () => getAppLogs(app.id, serverId),
+    enabled: runtimeAvailable && Boolean(serverId),
+    refetchInterval: 5000,
+  });
+
+  useEffect(() => {
+    if (!metrics.data) return;
+    setSamples((current) => [
+      ...current.slice(-29),
+      {
+        date: new Date(metrics.data.timestamp),
+        cpuPercent: Number(metrics.data.cpuPercent.toFixed(2)),
+        memoryPercent: Number(metrics.data.memoryPercent.toFixed(2)),
+      },
+    ]);
+  }, [metrics.data]);
+
+  if (app.serverIds.length === 0) {
+    return (
+      <section className="rounded-md border p-4">
+        <h3 className="font-medium text-sm">Runtime</h3>
+        <p className="mt-2 text-muted-foreground text-sm">
+          Attach a server before runtime metrics and logs are available.
+        </p>
+      </section>
+    );
+  }
+
+  if (!runtimeAvailable) {
+    return (
+      <section className="rounded-md border p-4">
+        <h3 className="font-medium text-sm">Runtime</h3>
+        <p className="mt-2 text-muted-foreground text-sm">
+          Runtime metrics are only available for the active healthy deployment. This deployment is{" "}
+          <span className="font-medium text-foreground">{deployment.status}</span>.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-md border p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="font-medium text-sm">Runtime</h3>
+          <p className="mt-1 text-muted-foreground text-sm">
+            Live metrics and container logs for this deployment.
+          </p>
+        </div>
+        {targetServers.length > 1 ? (
+          <Select value={serverId} onValueChange={(value) => setServerId(value ?? "")}>
+            <SelectTrigger className="w-48">
+              <SelectValue placeholder="Select server">
+                {(value: string) =>
+                  targetServers.find((server) => server.id === value)?.name ?? "Select server"
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup>
+              {targetServers.map((server) => (
+                <SelectItem key={server.id} value={server.id}>
+                  {server.name}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        ) : null}
+      </div>
+
+      <div className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
+        <MetricTile
+          label="CPU"
+          value={metrics.data ? `${metrics.data.cpuPercent.toFixed(1)}%` : "Collecting"}
+        />
+        <MetricTile
+          label="Memory"
+          value={
+            metrics.data
+              ? `${formatBytes(metrics.data.memoryBytes)} / ${formatBytes(
+                  metrics.data.memoryLimitBytes,
+                )}`
+              : "Collecting"
+          }
+        />
+        <MetricTile
+          label="Memory load"
+          value={metrics.data ? `${metrics.data.memoryPercent.toFixed(1)}%` : "Collecting"}
+        />
+      </div>
+
+      <div className="mt-4 h-64 overflow-hidden rounded-md border bg-muted/20 p-3">
+        {samples.length > 1 ? (
+          <LineChart
+            animationDuration={700}
+            aspectRatio={undefined}
+            className="h-full"
+            data={samples}
+            margin={{ bottom: 28, left: 28, right: 20, top: 18 }}
+            xDataKey="date"
+          >
+            <Grid horizontal />
+            <Line dataKey="cpuPercent" stroke={chartCssVars.linePrimary} strokeWidth={2.5} />
+            <Line dataKey="memoryPercent" stroke={chartCssVars.lineSecondary} strokeWidth={2.5} />
+            <XAxis />
+            <ChartTooltip
+              rows={(point) => [
+                {
+                  color: chartCssVars.linePrimary,
+                  label: "CPU",
+                  value: `${Number(point.cpuPercent).toFixed(1)}%`,
+                },
+                {
+                  color: chartCssVars.lineSecondary,
+                  label: "Memory",
+                  value: `${Number(point.memoryPercent).toFixed(1)}%`,
+                },
+              ]}
+            />
+          </LineChart>
+        ) : (
+          <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
+            {metrics.isError ? "Metrics unavailable." : "Collecting metrics…"}
+          </div>
+        )}
+      </div>
+      <div className="mt-2 flex gap-4 text-muted-foreground text-xs">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="size-2 rounded-full" style={{ background: chartCssVars.linePrimary }} />
+          CPU
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <span
+            className="size-2 rounded-full"
+            style={{ background: chartCssVars.lineSecondary }}
+          />
+          Memory
+        </span>
+      </div>
+
+      <div className="mt-5 border-t pt-5">
+        <div className="flex items-center justify-between gap-3">
+          <Label>Runtime logs</Label>
+          <Button
+            disabled={!serverId || logs.isFetching}
+            onClick={() => void logs.refetch()}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            Refresh
+          </Button>
+        </div>
+        <pre className="mt-2 max-h-72 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
+          {logs.isError
+            ? "Logs unavailable."
+            : logs.data?.logs?.trim()
+              ? logs.data.logs
+              : "No logs yet."}
+        </pre>
+      </div>
+    </section>
+  );
+}
+
+function MetricTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border bg-background p-3">
+      <p className="text-muted-foreground">{label}</p>
+      <p className="mt-1 truncate font-mono text-sm">{value}</p>
+    </div>
+  );
+}
+
+function formatBytes(value: number | null | undefined): string {
+  if (!value || !Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unitIndex = 0;
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const precision = size >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${size.toFixed(precision)} ${units[unitIndex]}`;
 }
 
 function DatabaseConnectionCard({ app }: { app: App }) {
@@ -982,302 +1295,6 @@ function VolumesCard({ app }: { app: App }) {
         </Button>
       </form>
     </Card>
-  );
-}
-
-function RuntimeCard({ app }: { app: App }) {
-  const queryClient = useQueryClient();
-  const servers = useQuery({ queryKey: ["servers", "runtime"], queryFn: listServers });
-  const targetServers = (servers.data ?? []).filter((server) => app.serverIds.includes(server.id));
-  const [serverId, setServerId] = useState(app.serverIds[0] ?? "");
-  const [stopError, setStopError] = useState<string | null>(null);
-  const [samples, setSamples] = useState<
-    { date: Date; cpuPercent: number; memoryPercent: number }[]
-  >([]);
-
-  useEffect(() => {
-    if (!serverId || !app.serverIds.includes(serverId)) {
-      setServerId(app.serverIds[0] ?? "");
-      setSamples([]);
-    }
-  }, [app.serverIds, serverId]);
-
-  const metrics = useQuery({
-    queryKey: ["app-metrics", app.id, serverId],
-    queryFn: () => getAppMetrics(app.id, serverId),
-    enabled: Boolean(serverId),
-    refetchInterval: 5000,
-  });
-
-  const logs = useQuery({
-    queryKey: ["app-logs", app.id, serverId],
-    queryFn: () => getAppLogs(app.id, serverId),
-    enabled: Boolean(serverId),
-    refetchInterval: 5000,
-  });
-
-  useEffect(() => {
-    if (!metrics.data) return;
-    setSamples((current) => [
-      ...current.slice(-29),
-      {
-        date: new Date(metrics.data.timestamp),
-        cpuPercent: Number(metrics.data.cpuPercent.toFixed(2)),
-        memoryPercent: Number(metrics.data.memoryPercent.toFixed(2)),
-      },
-    ]);
-  }, [metrics.data]);
-
-  const stop = useMutation({
-    mutationFn: () => stopAppContainer(app.id, { serverId }),
-    onSuccess: async () => {
-      setStopError(null);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["app-metrics", app.id, serverId] }),
-        queryClient.invalidateQueries({ queryKey: ["app-logs", app.id, serverId] }),
-        queryClient.invalidateQueries({ queryKey: ["deployments", app.id] }),
-      ]);
-    },
-    onError: (error: Error) => setStopError(error.message),
-  });
-
-  return (
-    <Card className="p-6">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="font-semibold text-lg">Runtime</h2>
-          <p className="mt-1 text-muted-foreground text-sm">
-            Live container metrics, logs, and command console for the selected server.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {targetServers.length > 1 ? (
-            <Select value={serverId} onValueChange={(value) => setServerId(value ?? "")}>
-              <SelectTrigger className="w-48">
-                <SelectValue placeholder="Select server">
-                  {(value: string) =>
-                    targetServers.find((server) => server.id === value)?.name ?? "Select server"
-                  }
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup>
-                {targetServers.map((server) => (
-                  <SelectItem key={server.id} value={server.id}>
-                    {server.name}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          ) : null}
-          <Button
-            disabled={!serverId}
-            loading={stop.isPending}
-            onClick={() => stop.mutate()}
-            size="sm"
-            variant="destructive-outline"
-          >
-            Stop
-          </Button>
-        </div>
-      </div>
-      {stopError ? <p className="mt-2 text-destructive-foreground text-sm">{stopError}</p> : null}
-
-      {app.serverIds.length === 0 ? (
-        <p className="mt-5 text-muted-foreground text-sm">
-          Select a server before using runtime tools.
-        </p>
-      ) : (
-        <>
-          <div className="mt-5 h-64 overflow-hidden rounded-md border bg-muted/20 p-3">
-            {samples.length > 1 ? (
-              <LineChart
-                animationDuration={700}
-                aspectRatio={undefined}
-                className="h-full"
-                data={samples}
-                margin={{ bottom: 28, left: 28, right: 20, top: 18 }}
-                xDataKey="date"
-              >
-                <Grid horizontal />
-                <Line dataKey="cpuPercent" stroke={chartCssVars.linePrimary} strokeWidth={2.5} />
-                <Line
-                  dataKey="memoryPercent"
-                  stroke={chartCssVars.lineSecondary}
-                  strokeWidth={2.5}
-                />
-                <XAxis />
-                <ChartTooltip
-                  rows={(point) => [
-                    {
-                      color: chartCssVars.linePrimary,
-                      label: "CPU",
-                      value: `${Number(point.cpuPercent).toFixed(1)}%`,
-                    },
-                    {
-                      color: chartCssVars.lineSecondary,
-                      label: "Memory",
-                      value: `${Number(point.memoryPercent).toFixed(1)}%`,
-                    },
-                  ]}
-                />
-              </LineChart>
-            ) : (
-              <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
-                {metrics.isError ? "Metrics unavailable." : "Collecting metrics…"}
-              </div>
-            )}
-          </div>
-          <div className="mt-2 flex gap-4 text-muted-foreground text-xs">
-            <span className="inline-flex items-center gap-1.5">
-              <span
-                className="size-2 rounded-full"
-                style={{ background: chartCssVars.linePrimary }}
-              />
-              CPU
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <span
-                className="size-2 rounded-full"
-                style={{ background: chartCssVars.lineSecondary }}
-              />
-              Memory
-            </span>
-          </div>
-
-          <div className="mt-6 border-t pt-6">
-            <div className="flex items-center justify-between gap-3">
-              <Label>Logs</Label>
-              <Button
-                disabled={!serverId || logs.isFetching}
-                onClick={() => void logs.refetch()}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                Refresh
-              </Button>
-            </div>
-            <pre className="mt-2 max-h-72 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
-              {logs.isError
-                ? "Logs unavailable."
-                : logs.data?.logs?.trim()
-                  ? logs.data.logs
-                  : "No logs yet."}
-            </pre>
-          </div>
-
-          <AppConsoleTerminal appId={app.id} serverId={serverId} />
-        </>
-      )}
-    </Card>
-  );
-}
-
-function AppConsoleTerminal({ appId, serverId }: { appId: string; serverId: string }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const terminalRef = useRef<Terminal | null>(null);
-  const commandRef = useRef("");
-  const runningRef = useRef(false);
-
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    commandRef.current = "";
-    runningRef.current = false;
-
-    const terminal = new Terminal({
-      allowProposedApi: false,
-      convertEol: true,
-      cursorBlink: true,
-      disableStdin: !serverId,
-      fontFamily: '"Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace',
-      fontSize: 12,
-      scrollback: 1000,
-      theme: {
-        background: "#0f1115",
-        foreground: "#e5e7eb",
-        cursor: "#e5e7eb",
-        selectionBackground: "#334155",
-      },
-    });
-    const fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
-    terminal.open(container);
-    terminalRef.current = terminal;
-
-    const fit = () => {
-      try {
-        fitAddon.fit();
-      } catch {
-        // xterm can throw if the container has not been measured yet.
-      }
-    };
-    fit();
-    const resizeObserver = new ResizeObserver(fit);
-    resizeObserver.observe(container);
-
-    const writePrompt = () => terminal.write("\r\n$ ");
-    terminal.write(serverId ? "$ " : "Select a server first.");
-
-    const dataDisposable = terminal.onData((data) => {
-      if (!serverId || runningRef.current) return;
-
-      if (data === "\r") {
-        const command = commandRef.current.trim();
-        terminal.write("\r\n");
-        commandRef.current = "";
-        if (!command) {
-          terminal.write("$ ");
-          return;
-        }
-
-        runningRef.current = true;
-        void runAppConsoleCommand(appId, { command, serverId })
-          .then((result) => {
-            const output = result.output || "(no output)";
-            terminal.write(output.endsWith("\n") ? output : `${output}\r\n`);
-            terminal.write(`exit ${result.exitCode}`);
-          })
-          .catch((error: Error) => {
-            terminal.write(`Error: ${error.message}`);
-          })
-          .finally(() => {
-            runningRef.current = false;
-            writePrompt();
-          });
-        return;
-      }
-
-      if (data === "\u007F") {
-        if (commandRef.current.length > 0) {
-          commandRef.current = commandRef.current.slice(0, -1);
-          terminal.write("\b \b");
-        }
-        return;
-      }
-
-      if (data >= " " && data !== "\u007F") {
-        commandRef.current += data;
-        terminal.write(data);
-      }
-    });
-
-    return () => {
-      dataDisposable.dispose();
-      resizeObserver.disconnect();
-      terminal.dispose();
-      terminalRef.current = null;
-    };
-  }, [appId, serverId]);
-
-  return (
-    <div className="mt-6 border-t pt-6">
-      <Label>Console</Label>
-      <div className="mt-2 overflow-hidden rounded-md border bg-[#0f1115] p-2">
-        <div ref={containerRef} className="h-72" />
-      </div>
-    </div>
   );
 }
 
