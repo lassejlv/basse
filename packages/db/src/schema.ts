@@ -1,5 +1,6 @@
 import { relations } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   index,
   integer,
@@ -125,6 +126,8 @@ export const app = pgTable(
       .default("repository"),
     imageRef: text("image_ref"),
     volumes: text("volumes").notNull().default("[]"),
+    cpuLimitMillicores: integer("cpu_limit_millicores"),
+    memoryLimitBytes: bigint("memory_limit_bytes", { mode: "number" }),
     databaseKind: text("database_kind", {
       enum: ["postgres", "redis"],
     }),

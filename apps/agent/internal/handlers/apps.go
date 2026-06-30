@@ -33,6 +33,8 @@ type deployRequest struct {
 	Env        map[string]string `json:"env"`
 	PullImage  bool              `json:"pullImage"`
 	PublicPort int               `json:"publicPort"`
+	CPU        int               `json:"cpuLimitMillicores"`
+	Memory     int64             `json:"memoryLimitBytes"`
 	Volumes    []struct {
 		HostPath      string `json:"hostPath"`
 		ContainerPath string `json:"containerPath"`
@@ -149,6 +151,14 @@ func (a Apps) Deploy(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "publicPort must be a valid port")
 		return
 	}
+	if req.CPU < 0 {
+		httpx.Error(w, http.StatusBadRequest, "cpuLimitMillicores must be non-negative")
+		return
+	}
+	if req.Memory < 0 {
+		httpx.Error(w, http.StatusBadRequest, "memoryLimitBytes must be non-negative")
+		return
+	}
 
 	ctx := r.Context()
 	name := containerName(req.AppID)
@@ -216,6 +226,8 @@ func (a Apps) Deploy(w http.ResponseWriter, r *http.Request) {
 		HostConfig: dockerx.HostConfig{
 			// Services usually route via Caddy on the basse network; databases can
 			// opt into direct TCP exposure through PortBindings.
+			Memory:        req.Memory,
+			NanoCPUs:      int64(req.CPU) * 1_000_000,
 			NetworkMode:   a.Cfg.ProxyNetwork,
 			PortBindings:  portBindings,
 			RestartPolicy: dockerx.RestartPolicy{Name: "unless-stopped"},

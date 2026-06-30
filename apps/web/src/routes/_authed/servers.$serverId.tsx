@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
 import { createDomain, deleteDomain, listDomains, resyncProxy } from "@/lib/domains";
+import { formatBytes } from "@/lib/format";
 import {
   checkServerConnection,
   checkAgentUpdate,
@@ -198,7 +199,13 @@ function ServerDetailRoute() {
 function AgentSection({ serverId, enabled }: { serverId: string; enabled: boolean }) {
   const queryClient = useQueryClient();
   const [samples, setSamples] = useState<
-    { date: Date; cpuPercent: number; memoryPercent: number }[]
+    {
+      date: Date;
+      cpuPercent: number;
+      memoryPercent: number;
+      memoryBytes: number;
+      memoryLimitBytes: number;
+    }[]
   >([]);
 
   const info = useQuery({
@@ -230,6 +237,8 @@ function AgentSection({ serverId, enabled }: { serverId: string; enabled: boolea
         date: new Date(metrics.data.timestamp),
         cpuPercent: Number(metrics.data.cpuPercent.toFixed(2)),
         memoryPercent: Number(metrics.data.memoryPercent.toFixed(2)),
+        memoryBytes: metrics.data.memoryBytes,
+        memoryLimitBytes: metrics.data.memoryLimitBytes,
       },
     ]);
   }, [metrics.data]);
@@ -314,7 +323,9 @@ function AgentSection({ serverId, enabled }: { serverId: string; enabled: boolea
                     {
                       color: chartCssVars.lineSecondary,
                       label: "Memory",
-                      value: `${Number(point.memoryPercent).toFixed(1)}%`,
+                      value: `${formatBytes(Number(point.memoryBytes))} / ${formatBytes(
+                        Number(point.memoryLimitBytes),
+                      )}`,
                     },
                   ]}
                 />

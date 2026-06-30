@@ -269,6 +269,10 @@ function toApp(
     sourceType: row.sourceType,
     imageRef: row.imageRef,
     volumes: parseVolumes(row.volumes),
+    resourceLimits: {
+      cpuMillicores: row.cpuLimitMillicores,
+      memoryBytes: row.memoryLimitBytes,
+    },
     database,
     latestDeploymentStatus,
     createdAt: row.createdAt.toISOString(),
@@ -324,6 +328,36 @@ function normalizeServerIds(
   }
   if (typeof body?.serverId === "string" && body.serverId) return [body.serverId];
   if (body && "serverId" in body && body.serverId === null) return [];
+  return null;
+}
+
+function normalizeCpuLimit(value: unknown): number | null | undefined {
+  if (value === null) return null;
+  if (typeof value === "undefined") return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value)) return undefined;
+  return value;
+}
+
+function normalizeMemoryLimit(value: unknown): number | null | undefined {
+  if (value === null) return null;
+  if (typeof value === "undefined") return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value)) return undefined;
+  return value;
+}
+
+function validateCpuLimit(value: number | null | undefined): string | null {
+  if (value == null) return null;
+  if (value < 50 || value > 256_000) {
+    return "CPU limit must be between 0.05 and 256 CPU cores";
+  }
+  return null;
+}
+
+function validateMemoryLimit(value: number | null | undefined): string | null {
+  if (value == null) return null;
+  if (value < 16 * 1024 * 1024 || value > Number.MAX_SAFE_INTEGER) {
+    return "Memory limit must be at least 16 MB";
+  }
   return null;
 }
 
@@ -525,6 +559,8 @@ apps.post("/import-container", async (c) => {
         buildRunner: "server",
         appKind: "service",
         volumes: JSON.stringify(volumes),
+        cpuLimitMillicores: null,
+        memoryLimitBytes: null,
         databaseKind: null,
         databaseVersion: null,
         databaseName: null,
@@ -811,6 +847,16 @@ apps.post("/", async (c) => {
       : BUILD_RUNNERS.includes(body?.buildRunner as AppBuildRunner)
         ? (body?.buildRunner as AppBuildRunner)
         : "depot";
+  const cpuLimitMillicores =
+    body && "cpuLimitMillicores" in body ? normalizeCpuLimit(body.cpuLimitMillicores) : null;
+  if (typeof cpuLimitMillicores === "undefined") {
+    return c.json({ error: "CPU limit must be a whole number of millicores or null" }, 400);
+  }
+  const memoryLimitBytes =
+    body && "memoryLimitBytes" in body ? normalizeMemoryLimit(body.memoryLimitBytes) : null;
+  if (typeof memoryLimitBytes === "undefined") {
+    return c.json({ error: "Memory limit must be bytes or null" }, 400);
+  }
   const serverIds = normalizeServerIds(body) ?? [];
   const serverId = serverIds[0] ?? null;
   const volumes = appKind === "database" ? [] : (normalizeVolumes(body?.volumes ?? []) ?? []);
@@ -839,6 +885,10 @@ apps.post("/", async (c) => {
   }
   const volumeError = validateVolumes(volumes);
   if (volumeError) return c.json({ error: volumeError }, 400);
+  const cpuLimitError = validateCpuLimit(cpuLimitMillicores);
+  if (cpuLimitError) return c.json({ error: cpuLimitError }, 400);
+  const memoryLimitError = validateMemoryLimit(memoryLimitBytes);
+  if (memoryLimitError) return c.json({ error: memoryLimitError }, 400);
   if (!(await validateServersInOrg(serverIds, organizationId))) {
     return c.json({ error: "Server not found" }, 404);
   }
@@ -866,6 +916,8 @@ apps.post("/", async (c) => {
           buildRunner,
           appKind,
           volumes: JSON.stringify(volumes),
+          cpuLimitMillicores,
+          memoryLimitBytes,
           databaseKind: appKind === "database" ? databaseKind : null,
           databaseVersion: appKind === "database" ? databaseVersion : null,
           databaseName: appKind === "database" ? databaseName : null,
@@ -977,6 +1029,24 @@ apps.patch("/:id", async (c) => {
     const volumeError = validateVolumes(volumes);
     if (volumeError) return c.json({ error: volumeError }, 400);
     updates.volumes = JSON.stringify(volumes);
+  }
+  if (body && "cpuLimitMillicores" in body) {
+    const cpuLimit = normalizeCpuLimit(body.cpuLimitMillicores);
+    if (typeof cpuLimit === "undefined") {
+      return c.json({ error: "CPU limit must be a whole number of millicores or null" }, 400);
+    }
+    const cpuLimitError = validateCpuLimit(cpuLimit);
+    if (cpuLimitError) return c.json({ error: cpuLimitError }, 400);
+    updates.cpuLimitMillicores = cpuLimit;
+  }
+  if (body && "memoryLimitBytes" in body) {
+    const memoryLimit = normalizeMemoryLimit(body.memoryLimitBytes);
+    if (typeof memoryLimit === "undefined") {
+      return c.json({ error: "Memory limit must be bytes or null" }, 400);
+    }
+    const memoryLimitError = validateMemoryLimit(memoryLimit);
+    if (memoryLimitError) return c.json({ error: memoryLimitError }, 400);
+    updates.memoryLimitBytes = memoryLimit;
   }
   if ((updates.sourceType ?? existing.sourceType) === "repository") {
     const repoError = validateRepositoryUrl(updates.repositoryUrl ?? existing.repositoryUrl);

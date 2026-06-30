@@ -64,7 +64,8 @@ import { listDeployments, rollbackDeployment, triggerDeploy } from "@/lib/deploy
 import { createDomain, deleteDomain, listDomains } from "@/lib/domains";
 import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
 import { listEnvVars, revealEnvVars, setEnvVars } from "@/lib/env-vars";
-import { listServers } from "@/lib/servers";
+import { formatBytes } from "@/lib/format";
+import { getAgentInfo, listServers } from "@/lib/servers";
 
 export const Route = createFileRoute("/_authed/apps/$appId")({
   component: AppDetailRoute,
@@ -154,6 +155,7 @@ function AppDetailRoute() {
               <BuildSettingsCard app={data} />
             )}
             <ServerCard app={data} />
+            <ResourceLimitsCard app={data} />
             {data.appKind === "service" ? <VolumesCard app={data} /> : null}
             <DeleteAppCard app={data} />
           </TabsPanel>
@@ -581,7 +583,13 @@ function DeploymentRuntimeSection({ app, deployment }: { app: App; deployment: D
   const targetServers = (servers.data ?? []).filter((server) => app.serverIds.includes(server.id));
   const [serverId, setServerId] = useState(app.serverIds[0] ?? "");
   const [samples, setSamples] = useState<
-    { date: Date; cpuPercent: number; memoryPercent: number }[]
+    {
+      date: Date;
+      cpuPercent: number;
+      memoryPercent: number;
+      memoryBytes: number;
+      memoryLimitBytes: number;
+    }[]
   >([]);
   const runtimeAvailable = deployment.status === "healthy";
 
@@ -618,6 +626,8 @@ function DeploymentRuntimeSection({ app, deployment }: { app: App; deployment: D
         date: new Date(metrics.data.timestamp),
         cpuPercent: Number(metrics.data.cpuPercent.toFixed(2)),
         memoryPercent: Number(metrics.data.memoryPercent.toFixed(2)),
+        memoryBytes: metrics.data.memoryBytes,
+        memoryLimitBytes: metrics.data.memoryLimitBytes,
       },
     ]);
   }, [metrics.data]);
@@ -644,6 +654,17 @@ function DeploymentRuntimeSection({ app, deployment }: { app: App; deployment: D
       </section>
     );
   }
+
+  const cpuLimitMillicores = app.resourceLimits.cpuMillicores;
+  const effectiveMemoryLimit = metrics.data?.memoryLimitBytes || app.resourceLimits.memoryBytes;
+  const cpuProgress =
+    metrics.data && cpuLimitMillicores
+      ? Math.min(100, metrics.data.cpuPercent / (cpuLimitMillicores / 1000))
+      : null;
+  const memoryProgress =
+    metrics.data && effectiveMemoryLimit
+      ? Math.min(100, (metrics.data.memoryBytes / effectiveMemoryLimit) * 100)
+      : null;
 
   return (
     <section className="rounded-md border p-4">
@@ -675,23 +696,31 @@ function DeploymentRuntimeSection({ app, deployment }: { app: App; deployment: D
       </div>
 
       <div className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
-        <MetricTile
+        <UsageMetricTile
           label="CPU"
           value={metrics.data ? `${metrics.data.cpuPercent.toFixed(1)}%` : "Collecting"}
+          detail={
+            cpuLimitMillicores ? `Limit ${formatCpuCores(cpuLimitMillicores)}` : "No app CPU limit"
+          }
+          progress={cpuProgress}
         />
-        <MetricTile
+        <UsageMetricTile
           label="Memory"
           value={
             metrics.data
-              ? `${formatBytes(metrics.data.memoryBytes)} / ${formatBytes(
-                  metrics.data.memoryLimitBytes,
-                )}`
+              ? `${formatBytes(metrics.data.memoryBytes)} / ${formatBytes(effectiveMemoryLimit)}`
               : "Collecting"
           }
+          detail={
+            app.resourceLimits.memoryBytes
+              ? `Limit ${formatBytes(app.resourceLimits.memoryBytes)}`
+              : "No app memory limit"
+          }
+          progress={memoryProgress}
         />
         <MetricTile
-          label="Memory load"
-          value={metrics.data ? `${metrics.data.memoryPercent.toFixed(1)}%` : "Collecting"}
+          label="Memory limit"
+          value={effectiveMemoryLimit ? formatBytes(effectiveMemoryLimit) : "Collecting"}
         />
       </div>
 
@@ -719,7 +748,9 @@ function DeploymentRuntimeSection({ app, deployment }: { app: App; deployment: D
                 {
                   color: chartCssVars.lineSecondary,
                   label: "Memory",
-                  value: `${Number(point.memoryPercent).toFixed(1)}%`,
+                  value: `${formatBytes(Number(point.memoryBytes))} / ${formatBytes(
+                    Number(point.memoryLimitBytes),
+                  )}`,
                 },
               ]}
             />
@@ -778,19 +809,54 @@ function MetricTile({ label, value }: { label: string; value: string }) {
   );
 }
 
-function formatBytes(value: number | null | undefined): string {
-  if (!value || !Number.isFinite(value) || value <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let size = value;
-  let unitIndex = 0;
+function UsageMetricTile({
+  label,
+  value,
+  detail,
+  progress,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  progress: number | null;
+}) {
+  return (
+    <div className="rounded-md border bg-background p-3">
+      <p className="text-muted-foreground">{label}</p>
+      <p className="mt-1 truncate font-mono text-sm">{value}</p>
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full bg-primary transition-all"
+          style={{ width: `${progress ?? 0}%` }}
+        />
+      </div>
+      <p className="mt-1 truncate text-muted-foreground text-xs">{detail}</p>
+    </div>
+  );
+}
 
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
-  }
+function formatCpuCores(millicores: number): string {
+  const cores = millicores / 1000;
+  return `${Number.isInteger(cores) ? cores.toFixed(0) : cores.toFixed(2)} CPU`;
+}
 
-  const precision = size >= 10 || unitIndex === 0 ? 0 : 1;
-  return `${size.toFixed(precision)} ${units[unitIndex]}`;
+function formatCpuInput(millicores: number): string {
+  const cores = millicores / 1000;
+  return Number.isInteger(cores) ? cores.toFixed(0) : cores.toFixed(2);
+}
+
+function parseCpuLimit(value: string): number | null | undefined {
+  if (!value.trim()) return null;
+  const cores = Number(value);
+  if (!Number.isFinite(cores) || cores <= 0) return undefined;
+  return Math.round(cores * 1000);
+}
+
+function parseMemoryLimit(value: string): number | null | undefined {
+  if (!value.trim()) return null;
+  const megabytes = Number(value);
+  if (!Number.isFinite(megabytes) || megabytes <= 0) return undefined;
+  return Math.round(megabytes * 1024 * 1024);
 }
 
 function DatabaseConnectionCard({ app }: { app: App }) {
@@ -1175,6 +1241,169 @@ function BuildSettingsCard({ app }: { app: App }) {
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
         <Button loading={update.isPending} type="submit">
           Save build settings
+        </Button>
+      </form>
+    </Card>
+  );
+}
+
+function ResourceLimitsCard({ app }: { app: App }) {
+  const queryClient = useQueryClient();
+  const [cpuCores, setCpuCores] = useState(
+    app.resourceLimits.cpuMillicores ? formatCpuInput(app.resourceLimits.cpuMillicores) : "",
+  );
+  const [memoryMb, setMemoryMb] = useState(
+    app.resourceLimits.memoryBytes
+      ? String(Math.round(app.resourceLimits.memoryBytes / 1048576))
+      : "",
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setCpuCores(
+      app.resourceLimits.cpuMillicores ? formatCpuInput(app.resourceLimits.cpuMillicores) : "",
+    );
+    setMemoryMb(
+      app.resourceLimits.memoryBytes
+        ? String(Math.round(app.resourceLimits.memoryBytes / 1048576))
+        : "",
+    );
+  }, [app.resourceLimits.cpuMillicores, app.resourceLimits.memoryBytes]);
+
+  const specs = useQuery({
+    queryKey: ["app-resource-specs", app.id, app.serverIds],
+    queryFn: async () =>
+      Promise.all(
+        app.serverIds.map(async (serverId) => {
+          try {
+            return { serverId, info: await getAgentInfo(serverId), error: null };
+          } catch (fetchError) {
+            return {
+              serverId,
+              info: null,
+              error: fetchError instanceof Error ? fetchError.message : "Could not fetch specs",
+            };
+          }
+        }),
+      ),
+    enabled: app.serverIds.length > 0,
+  });
+
+  const machineSpecs = (specs.data ?? []).flatMap((entry) =>
+    entry.info?.docker
+      ? [
+          {
+            serverId: entry.serverId,
+            cpuMillicores: entry.info.docker.ncpu * 1000,
+            memoryBytes: entry.info.docker.memTotal,
+          },
+        ]
+      : [],
+  );
+  const cpuCap = machineSpecs.length
+    ? Math.min(...machineSpecs.map((spec) => spec.cpuMillicores))
+    : null;
+  const memoryCap = machineSpecs.length
+    ? Math.min(...machineSpecs.map((spec) => spec.memoryBytes))
+    : null;
+
+  const save = useMutation({
+    mutationFn: () => {
+      const cpuLimitMillicores = parseCpuLimit(cpuCores);
+      const memoryLimitBytes = parseMemoryLimit(memoryMb);
+
+      if (cpuLimitMillicores === undefined) {
+        throw new Error("CPU limit must be a number of cores.");
+      }
+      if (memoryLimitBytes === undefined) {
+        throw new Error("Memory limit must be a number of MB.");
+      }
+      if (cpuCap && cpuLimitMillicores && cpuLimitMillicores > cpuCap) {
+        throw new Error(`CPU limit cannot exceed ${formatCpuCores(cpuCap)} on the attached host.`);
+      }
+      if (memoryCap && memoryLimitBytes && memoryLimitBytes > memoryCap) {
+        throw new Error(
+          `Memory limit cannot exceed ${formatBytes(memoryCap)} on the attached host.`,
+        );
+      }
+
+      return updateApp(app.id, { cpuLimitMillicores, memoryLimitBytes });
+    },
+    onSuccess: async () => {
+      setError(null);
+      await queryClient.invalidateQueries({ queryKey: ["app", app.id] });
+    },
+    onError: (saveError: Error) => setError(saveError.message),
+  });
+
+  return (
+    <Card className="p-6">
+      <h2 className="font-semibold text-lg">Resource limits</h2>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Cap the container on the next deployment. Leave a field empty to use the host default.
+      </p>
+
+      <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+        <div className="rounded-md border p-3">
+          <p className="text-muted-foreground">Host CPU</p>
+          <p className="mt-1 font-mono">
+            {specs.isPending && app.serverIds.length > 0
+              ? "Loading..."
+              : cpuCap
+                ? formatCpuCores(cpuCap)
+                : "Unavailable"}
+          </p>
+        </div>
+        <div className="rounded-md border p-3">
+          <p className="text-muted-foreground">Host memory</p>
+          <p className="mt-1 font-mono">
+            {specs.isPending && app.serverIds.length > 0
+              ? "Loading..."
+              : memoryCap
+                ? formatBytes(memoryCap)
+                : "Unavailable"}
+          </p>
+        </div>
+      </div>
+
+      <form
+        className="mt-4 space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          save.mutate();
+        }}
+      >
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="resource-cpu">CPU cores</Label>
+            <Input
+              id="resource-cpu"
+              inputMode="decimal"
+              min="0.05"
+              onChange={(event) => setCpuCores(event.currentTarget.value)}
+              placeholder={cpuCap ? `Up to ${formatCpuCores(cpuCap)}` : "Unlimited"}
+              step="0.05"
+              type="number"
+              value={cpuCores}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="resource-memory">Memory MB</Label>
+            <Input
+              id="resource-memory"
+              inputMode="numeric"
+              min="16"
+              onChange={(event) => setMemoryMb(event.currentTarget.value)}
+              placeholder={memoryCap ? `Up to ${formatBytes(memoryCap)}` : "Unlimited"}
+              step="16"
+              type="number"
+              value={memoryMb}
+            />
+          </div>
+        </div>
+        {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+        <Button loading={save.isPending} type="submit">
+          Save resource limits
         </Button>
       </form>
     </Card>

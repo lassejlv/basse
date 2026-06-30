@@ -48,6 +48,11 @@ export type AppVolume = {
   readOnly: boolean;
 };
 
+export type AppResourceLimits = {
+  cpuMillicores: number | null;
+  memoryBytes: number | null;
+};
+
 export type AppDatabase = {
   kind: DatabaseKind;
   version: string;
@@ -75,6 +80,7 @@ export type App = {
   sourceType: AppSourceType;
   imageRef: string | null;
   volumes: AppVolume[];
+  resourceLimits: AppResourceLimits;
   database: AppDatabase | null;
   createdAt: string;
   updatedAt: string;
@@ -99,6 +105,8 @@ export type CreateAppInput = {
   sourceType?: AppSourceType;
   imageRef?: string | null;
   volumes?: AppVolume[];
+  cpuLimitMillicores?: number | null;
+  memoryLimitBytes?: number | null;
   serverId?: string;
   serverIds?: string[];
   databaseKind?: DatabaseKind;
@@ -147,6 +155,8 @@ export type UpdateAppInput = {
   sourceType?: AppSourceType;
   imageRef?: string | null;
   volumes?: AppVolume[];
+  cpuLimitMillicores?: number | null;
+  memoryLimitBytes?: number | null;
   serverId?: string | null;
   serverIds?: string[];
   databaseVersion?: string;

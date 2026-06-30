@@ -30,6 +30,8 @@ type RestartPolicy struct {
 // HostConfig is the subset of the Engine API HostConfig we set.
 type HostConfig struct {
 	Binds         []string                 `json:"Binds,omitempty"`
+	Memory        int64                    `json:"Memory,omitempty"`
+	NanoCPUs      int64                    `json:"NanoCpus,omitempty"`
 	PortBindings  map[string][]PortBinding `json:"PortBindings,omitempty"`
 	NetworkMode   string                   `json:"NetworkMode,omitempty"`
 	RestartPolicy RestartPolicy            `json:"RestartPolicy"`

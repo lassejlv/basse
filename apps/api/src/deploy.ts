@@ -122,9 +122,7 @@ function databasePort(kind: DatabaseKind): number {
 
 function postgresDataPath(version: string | null): string {
   const major = Number.parseInt(version ?? DEFAULT_POSTGRES_VERSION, 10);
-  return Number.isFinite(major) && major >= 18
-    ? "/var/lib/postgresql"
-    : "/var/lib/postgresql/data";
+  return Number.isFinite(major) && major >= 18 ? "/var/lib/postgresql" : "/var/lib/postgresql/data";
 }
 
 function databaseVolume(appId: string, kind: DatabaseKind, version: string | null): AppVolume {
@@ -460,6 +458,8 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         registry,
         pullImage,
         volumes,
+        cpuLimitMillicores: appRow.cpuLimitMillicores ?? undefined,
+        memoryLimitBytes: appRow.memoryLimitBytes ?? undefined,
         publicPort:
           appRow.appKind === "database" && appRow.databasePublicEnabled
             ? (appRow.databasePublicPort ?? databasePort(databaseKind))
