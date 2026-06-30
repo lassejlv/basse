@@ -260,7 +260,7 @@ async function upsertMonitor(
     method: "GET",
     path: input.healthCheckPath,
     port: 80,
-    expected_codes: "200-499",
+    expected_codes: "2xx",
     follow_redirects: true,
     allow_insecure: false,
     interval: 60,
