@@ -6,6 +6,7 @@ COPY package.json bun.lock bunfig.toml ./
 COPY apps/api/package.json ./apps/api/
 COPY apps/web/package.json ./apps/web/
 COPY packages/db/package.json ./packages/db/
+COPY packages/emails/package.json ./packages/emails/
 COPY packages/shared/package.json ./packages/shared/
 RUN bun install --frozen-lockfile
 
