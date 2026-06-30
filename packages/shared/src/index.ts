@@ -187,6 +187,33 @@ export type SetEnvVarsInput = {
   vars: { key: string; value: string }[];
 };
 
+export type SharedEnvVarScope = "shared" | "env";
+
+export type SharedEnvVarMasked = {
+  key: string;
+  valueHint: string;
+  updatedAt: string;
+};
+
+export type SharedEnvVarPlain = {
+  key: string;
+  value: string;
+};
+
+export type SetSharedEnvVarsInput = {
+  vars: { key: string; value: string }[];
+};
+
+export type EnvReferenceSuggestion = {
+  scope: SharedEnvVarScope;
+  key: string;
+  insertText: string;
+  label: string;
+  valueHint: string;
+  environmentId?: string;
+  environmentName?: string;
+};
+
 // ── Staged ("uncommitted") changes ───────────────────────────────────────────
 // A Railway-style staging area: edits to an app's config or env vars are held
 // here until the user applies them (which commits them and triggers a deploy)
@@ -211,6 +238,61 @@ export type StagedChange = {
   // or null when the change creates something new.
   previousValue: string | null;
   createdAt: string;
+};
+
+export type StagedChangeHistoryOutcome = "applied" | "discarded";
+
+export type StagedChangeHistoryItem = {
+  id: string;
+  batchId: string;
+  appId: string;
+  deploymentId: string | null;
+  outcome: StagedChangeHistoryOutcome;
+  resource: StagedChangeResource;
+  action: StagedChangeAction;
+  field: string;
+  value: string | null;
+  previousValue: string | null;
+  stagedAt: string;
+  createdAt: string;
+};
+
+export type StagedChangeHistoryEntry = {
+  id: string;
+  appId: string;
+  deploymentId: string | null;
+  outcome: StagedChangeHistoryOutcome;
+  createdAt: string;
+  changes: StagedChangeHistoryItem[];
+};
+
+export type ProjectStagedChange = StagedChange & {
+  appName: string;
+  appId: string;
+  environmentId: string;
+  environmentName: string;
+};
+
+export type ProjectStagedChanges = {
+  changes: ProjectStagedChange[];
+};
+
+export type ProjectStagedChangesResult = {
+  changes: ProjectStagedChange[];
+};
+
+export type ProjectApplyStagedChangesResult = {
+  deployments: {
+    appId: string;
+    appName: string;
+    deployment: Deployment | null;
+  }[];
+};
+
+export type ProjectStagedChangeHistoryEntry = StagedChangeHistoryEntry & {
+  appName: string;
+  environmentId: string;
+  environmentName: string;
 };
 
 // The full staged state for an app: the list of pending changes plus the draft

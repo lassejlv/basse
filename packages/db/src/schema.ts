@@ -183,6 +183,45 @@ export const envVar = pgTable(
   ],
 );
 
+// Project-wide variables that apps can reference as {{shared.KEY}}. Values are
+// encrypted at rest and resolved into app env values during deploy.
+export const projectEnvVar = pgTable(
+  "project_env_var",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    value: text("value").notNull(),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("project_env_var_projectId_idx").on(table.projectId),
+    uniqueIndex("project_env_var_projectId_key_uidx").on(table.projectId, table.key),
+  ],
+);
+
+// Environment-specific variables that apps can reference as {{env.KEY}}.
+export const environmentEnvVar = pgTable(
+  "environment_env_var",
+  {
+    id: text("id").primaryKey(),
+    environmentId: text("environment_id")
+      .notNull()
+      .references(() => environment.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    value: text("value").notNull(),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("environment_env_var_environmentId_idx").on(table.environmentId),
+    uniqueIndex("environment_env_var_environmentId_key_uidx").on(table.environmentId, table.key),
+  ],
+);
+
 export const deployment = pgTable("deployment", {
   id: text("id").primaryKey(),
   appId: text("app_id")
@@ -250,6 +289,35 @@ export const stagedChange = pgTable(
   ],
 );
 
+// Immutable display snapshots of staged changes after they are applied or
+// discarded. Env values are already masked before insertion; do not store
+// plaintext secrets here.
+export const stagedChangeHistory = pgTable(
+  "staged_change_history",
+  {
+    id: text("id").primaryKey(),
+    batchId: text("batch_id").notNull(),
+    appId: text("app_id")
+      .notNull()
+      .references(() => app.id, { onDelete: "cascade" }),
+    deploymentId: text("deployment_id").references(() => deployment.id, { onDelete: "set null" }),
+    outcome: text("outcome", { enum: ["applied", "discarded"] }).notNull(),
+    resource: text("resource", { enum: ["app", "env_var"] }).notNull(),
+    action: text("action", { enum: ["create", "update", "delete"] }).notNull(),
+    field: text("field").notNull(),
+    value: text("value"),
+    previousValue: text("previous_value"),
+    stagedAt: timestamp("staged_at").notNull(),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("staged_change_history_appId_idx").on(table.appId),
+    index("staged_change_history_batchId_idx").on(table.batchId),
+    index("staged_change_history_deploymentId_idx").on(table.deploymentId),
+  ],
+);
+
 export const workspaceSettings = pgTable("workspace_settings", {
   organizationId: text("organization_id")
     .primaryKey()
@@ -265,6 +333,7 @@ export const projectRelations = relations(project, ({ one, many }) => ({
     references: [organization.id],
   }),
   environments: many(environment),
+  envVars: many(projectEnvVar),
 }));
 
 export const environmentRelations = relations(environment, ({ one, many }) => ({
@@ -273,6 +342,7 @@ export const environmentRelations = relations(environment, ({ one, many }) => ({
     references: [project.id],
   }),
   apps: many(app),
+  envVars: many(environmentEnvVar),
 }));
 
 export const serverRelations = relations(server, ({ one, many }) => ({
@@ -304,6 +374,7 @@ export const appRelations = relations(app, ({ one, many }) => ({
   envVars: many(envVar),
   appServers: many(appServer),
   stagedChanges: many(stagedChange),
+  stagedChangeHistory: many(stagedChangeHistory),
 }));
 
 export const appServerRelations = relations(appServer, ({ one }) => ({
@@ -324,6 +395,20 @@ export const envVarRelations = relations(envVar, ({ one }) => ({
   }),
 }));
 
+export const projectEnvVarRelations = relations(projectEnvVar, ({ one }) => ({
+  project: one(project, {
+    fields: [projectEnvVar.projectId],
+    references: [project.id],
+  }),
+}));
+
+export const environmentEnvVarRelations = relations(environmentEnvVar, ({ one }) => ({
+  environment: one(environment, {
+    fields: [environmentEnvVar.environmentId],
+    references: [environment.id],
+  }),
+}));
+
 export const deploymentRelations = relations(deployment, ({ one }) => ({
   app: one(app, {
     fields: [deployment.appId],
@@ -335,6 +420,17 @@ export const stagedChangeRelations = relations(stagedChange, ({ one }) => ({
   app: one(app, {
     fields: [stagedChange.appId],
     references: [app.id],
+  }),
+}));
+
+export const stagedChangeHistoryRelations = relations(stagedChangeHistory, ({ one }) => ({
+  app: one(app, {
+    fields: [stagedChangeHistory.appId],
+    references: [app.id],
+  }),
+  deployment: one(deployment, {
+    fields: [stagedChangeHistory.deploymentId],
+    references: [deployment.id],
   }),
 }));
 

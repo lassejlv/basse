@@ -1,13 +1,30 @@
-import { app, appServer, db, envVar, stagedChange } from "@basse/db";
+import {
+  app,
+  appServer,
+  db,
+  envVar,
+  environment,
+  project,
+  stagedChange,
+  stagedChangeHistory,
+} from "@basse/db";
 import type {
   AppStagedChanges,
   AppVolume,
+  ApplyStagedChangesResult,
   EnvVarPlain,
+  ProjectApplyStagedChangesResult,
+  ProjectStagedChange,
+  ProjectStagedChangeHistoryEntry,
+  ProjectStagedChanges,
   SetEnvVarsInput,
   StagedChange,
+  StagedChangeHistoryEntry,
+  StagedChangeHistoryItem,
+  StagedChangeHistoryOutcome,
   UpdateAppInput,
 } from "@basse/shared";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { buildAppUpdates, loadAppServerIds, ownedApp, slugify, toApp } from "./apps";
@@ -17,6 +34,8 @@ import { resolveActiveWorkspace } from "./workspace";
 
 type AppRow = typeof app.$inferSelect;
 type StagedChangeRow = typeof stagedChange.$inferSelect;
+type StagedChangeHistoryRow = typeof stagedChangeHistory.$inferSelect;
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 /** Last-4 masked hint for an encrypted env value; never returns plaintext. */
 async function maskedValue(encrypted: string): Promise<string> {
@@ -95,11 +114,412 @@ async function respondWithChanges(c: Context, existing: AppRow): Promise<Respons
   return c.json({ changes, draft } satisfies AppStagedChanges);
 }
 
+function toHistoryItem(row: StagedChangeHistoryRow): StagedChangeHistoryItem {
+  return {
+    id: row.id,
+    batchId: row.batchId,
+    appId: row.appId,
+    deploymentId: row.deploymentId,
+    outcome: row.outcome,
+    resource: row.resource,
+    action: row.action,
+    field: row.field,
+    value: row.value,
+    previousValue: row.previousValue,
+    stagedAt: row.stagedAt.toISOString(),
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+function toHistoryEntries(rows: StagedChangeHistoryRow[]): StagedChangeHistoryEntry[] {
+  const entries = new Map<string, StagedChangeHistoryEntry>();
+
+  for (const row of rows) {
+    const item = toHistoryItem(row);
+    const existing = entries.get(row.batchId);
+    if (existing) {
+      existing.changes.push(item);
+      continue;
+    }
+
+    entries.set(row.batchId, {
+      id: row.batchId,
+      appId: row.appId,
+      deploymentId: row.deploymentId,
+      outcome: row.outcome,
+      createdAt: row.createdAt.toISOString(),
+      changes: [item],
+    });
+  }
+
+  return [...entries.values()];
+}
+
+async function insertChangeHistory(
+  tx: DbTransaction,
+  rows: StagedChangeRow[],
+  outcome: StagedChangeHistoryOutcome,
+  now: Date,
+): Promise<string | null> {
+  if (rows.length === 0) return null;
+
+  const batchId = crypto.randomUUID();
+  const displayRows = await Promise.all(rows.map(toStagedChange));
+  await tx.insert(stagedChangeHistory).values(
+    displayRows.map((change, index) => {
+      const row = rows[index]!;
+      return {
+        id: crypto.randomUUID(),
+        batchId,
+        appId: row.appId,
+        deploymentId: null,
+        outcome,
+        resource: change.resource,
+        action: change.action,
+        field: change.field,
+        value: change.value,
+        previousValue: change.previousValue,
+        stagedAt: row.createdAt,
+        createdAt: now,
+        updatedAt: now,
+      };
+    }),
+  );
+
+  return batchId;
+}
+
+async function applyStagedChangesForApp(
+  existing: AppRow,
+  organizationId: string,
+): Promise<
+  | { ok: true; result: ApplyStagedChangesResult }
+  | { ok: false; error: string; status: 400 | 404 | 409 | 500 }
+> {
+  const rows = await loadStagedRows(existing.id);
+  if (rows.length === 0) return { ok: false, error: "No changes to deploy", status: 400 };
+
+  // Reconstruct the patch body from the staged app rows and re-validate it
+  // through the SAME builder PATCH uses.
+  const body: UpdateAppInput = {};
+  for (const row of rows) {
+    if (row.resource !== "app" || row.value === null) continue;
+    const parsed = JSON.parse(row.value) as unknown;
+    if (row.field === "serverIds") {
+      body.serverIds = parsed as string[];
+    } else if (row.field === "volumes") {
+      // The volumes column is itself a JSON string, so the staged value is
+      // double-encoded: parse once to the column string, then to the array.
+      body.volumes = JSON.parse(parsed as string) as AppVolume[];
+    } else {
+      (body as Record<string, unknown>)[row.field] = parsed;
+    }
+  }
+
+  const result = await buildAppUpdates(existing, body, organizationId);
+  if (!result.ok) return { ok: false, error: result.error, status: result.status };
+  const updates = result.updates;
+  const serverIds = result.serverIds;
+
+  const envRows = rows.filter((row) => row.resource === "env_var");
+  const stagedIds = rows.map((row) => row.id);
+  const now = new Date();
+  let historyBatchId: string | null = null;
+
+  try {
+    await db.transaction(async (tx) => {
+      if (Object.keys(updates).length > 0) {
+        await tx
+          .update(app)
+          .set({ ...updates, updatedAt: now })
+          .where(eq(app.id, existing.id));
+      }
+      if (serverIds) {
+        await tx.delete(appServer).where(eq(appServer.appId, existing.id));
+        if (serverIds.length > 0) {
+          await tx
+            .insert(appServer)
+            .values(
+              serverIds.map((serverId) => ({ appId: existing.id, serverId, createdAt: now })),
+            );
+        }
+      }
+      for (const row of envRows) {
+        if (row.action === "delete") {
+          await tx
+            .delete(envVar)
+            .where(and(eq(envVar.appId, existing.id), eq(envVar.key, row.field)));
+          continue;
+        }
+        if (!row.value) continue;
+        await tx
+          .insert(envVar)
+          .values({
+            id: crypto.randomUUID(),
+            appId: existing.id,
+            key: row.field,
+            value: row.value,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .onConflictDoUpdate({
+            target: [envVar.appId, envVar.key],
+            set: { value: row.value, updatedAt: now },
+          });
+      }
+      historyBatchId = await insertChangeHistory(tx, rows, "applied", now);
+      // Clear only the rows we actually applied; anything staged concurrently
+      // (between the read above and this commit) survives to be applied later.
+      await tx.delete(stagedChange).where(inArray(stagedChange.id, stagedIds));
+    });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      return {
+        ok: false,
+        error: "An app with that name already exists in this environment",
+        status: 409,
+      };
+    }
+    throw error;
+  }
+
+  const deployResult = await enqueueDeploy(existing.id);
+  const deployment = "deployment" in deployResult ? toDeployment(deployResult.deployment) : null;
+  if (historyBatchId && deployment) {
+    await db
+      .update(stagedChangeHistory)
+      .set({ deploymentId: deployment.id, updatedAt: new Date() })
+      .where(eq(stagedChangeHistory.batchId, historyBatchId));
+  }
+
+  return { ok: true, result: { deployment } };
+}
+
+async function loadProjectApps(projectId: string, organizationId: string) {
+  return db
+    .select({
+      app,
+      environmentId: environment.id,
+      environmentName: environment.name,
+    })
+    .from(app)
+    .innerJoin(environment, eq(app.environmentId, environment.id))
+    .innerJoin(project, eq(environment.projectId, project.id))
+    .where(and(eq(project.id, projectId), eq(project.organizationId, organizationId)))
+    .orderBy(asc(environment.createdAt), asc(app.createdAt));
+}
+
+async function ownedProject(projectId: string, organizationId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: project.id })
+    .from(project)
+    .where(and(eq(project.id, projectId), eq(project.organizationId, organizationId)))
+    .limit(1);
+  return Boolean(row);
+}
+
+async function loadProjectStagedChanges(
+  projectId: string,
+  organizationId: string,
+): Promise<ProjectStagedChange[]> {
+  const appRows = await loadProjectApps(projectId, organizationId);
+  if (appRows.length === 0) return [];
+
+  const appContext = new Map(appRows.map((row) => [row.app.id, row]));
+  const rows = await db
+    .select()
+    .from(stagedChange)
+    .where(
+      inArray(
+        stagedChange.appId,
+        appRows.map((row) => row.app.id),
+      ),
+    )
+    .orderBy(asc(stagedChange.createdAt));
+
+  const changes = await Promise.all(rows.map(toStagedChange));
+  return changes.flatMap((change): ProjectStagedChange[] => {
+    const context = appContext.get(change.appId);
+    if (!context) return [];
+    return [
+      {
+        ...change,
+        appName: context.app.name,
+        environmentId: context.environmentId,
+        environmentName: context.environmentName,
+      },
+    ];
+  });
+}
+
+async function loadProjectHistory(
+  projectId: string,
+  organizationId: string,
+): Promise<ProjectStagedChangeHistoryEntry[]> {
+  const appRows = await loadProjectApps(projectId, organizationId);
+  if (appRows.length === 0) return [];
+
+  const appContext = new Map(appRows.map((row) => [row.app.id, row]));
+  const rows = await db
+    .select()
+    .from(stagedChangeHistory)
+    .where(
+      inArray(
+        stagedChangeHistory.appId,
+        appRows.map((row) => row.app.id),
+      ),
+    )
+    .orderBy(desc(stagedChangeHistory.createdAt), asc(stagedChangeHistory.stagedAt))
+    .limit(300);
+
+  return toHistoryEntries(rows).flatMap((entry): ProjectStagedChangeHistoryEntry[] => {
+    const context = appContext.get(entry.appId);
+    if (!context) return [];
+    return [
+      {
+        ...entry,
+        appName: context.app.name,
+        environmentId: context.environmentId,
+        environmentName: context.environmentName,
+      },
+    ];
+  });
+}
+
 function jsonEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
 export const changes = new Hono();
+export const projectChanges = new Hono();
+
+projectChanges.get("/:id/changes", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const projectId = c.req.param("id");
+  if (!(await ownedProject(projectId, organizationId))) {
+    return c.json({ error: "Project not found" }, 404);
+  }
+
+  const changes = await loadProjectStagedChanges(projectId, organizationId);
+  return c.json({ changes } satisfies ProjectStagedChanges);
+});
+
+projectChanges.get("/:id/changes/history", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const projectId = c.req.param("id");
+  if (!(await ownedProject(projectId, organizationId))) {
+    return c.json({ error: "Project not found" }, 404);
+  }
+
+  return c.json(await loadProjectHistory(projectId, organizationId));
+});
+
+projectChanges.post("/:id/changes/apply", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const projectId = c.req.param("id");
+  if (!(await ownedProject(projectId, organizationId))) {
+    return c.json({ error: "Project not found" }, 404);
+  }
+
+  const appRows = await loadProjectApps(projectId, organizationId);
+  const pending = await loadProjectStagedChanges(projectId, organizationId);
+  if (pending.length === 0) return c.json({ error: "No changes to deploy" }, 400);
+
+  const appIds = [...new Set(pending.map((change) => change.appId))];
+  const deployments: ProjectApplyStagedChangesResult["deployments"] = [];
+  for (const appId of appIds) {
+    const context = appRows.find((row) => row.app.id === appId);
+    if (!context) continue;
+    const result = await applyStagedChangesForApp(context.app, organizationId);
+    if (!result.ok) {
+      return c.json({ error: `${context.app.name}: ${result.error}` }, result.status);
+    }
+    deployments.push({
+      appId: context.app.id,
+      appName: context.app.name,
+      deployment: result.result.deployment,
+    });
+  }
+
+  return c.json({ deployments } satisfies ProjectApplyStagedChangesResult);
+});
+
+projectChanges.post("/:id/changes/discard", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const projectId = c.req.param("id");
+  if (!(await ownedProject(projectId, organizationId))) {
+    return c.json({ error: "Project not found" }, 404);
+  }
+
+  const appRows = await loadProjectApps(projectId, organizationId);
+  const appIds = appRows.map((row) => row.app.id);
+  if (appIds.length === 0) {
+    return c.json({ changes: [] } satisfies ProjectStagedChanges);
+  }
+
+  const rows = await db
+    .select()
+    .from(stagedChange)
+    .where(inArray(stagedChange.appId, appIds))
+    .orderBy(asc(stagedChange.createdAt));
+  if (rows.length > 0) {
+    const now = new Date();
+    await db.transaction(async (tx) => {
+      for (const appId of appIds) {
+        const appChangeRows = rows.filter((row) => row.appId === appId);
+        await insertChangeHistory(tx, appChangeRows, "discarded", now);
+      }
+      await tx.delete(stagedChange).where(inArray(stagedChange.appId, appIds));
+    });
+  }
+
+  const changes = await loadProjectStagedChanges(projectId, organizationId);
+  return c.json({ changes } satisfies ProjectStagedChanges);
+});
+
+projectChanges.delete("/:id/changes/:changeId", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const projectId = c.req.param("id");
+  if (!(await ownedProject(projectId, organizationId))) {
+    return c.json({ error: "Project not found" }, 404);
+  }
+
+  const [row] = await db
+    .select({ stagedChange })
+    .from(stagedChange)
+    .innerJoin(app, eq(stagedChange.appId, app.id))
+    .innerJoin(environment, eq(app.environmentId, environment.id))
+    .innerJoin(project, eq(environment.projectId, project.id))
+    .where(
+      and(
+        eq(stagedChange.id, c.req.param("changeId")),
+        eq(project.id, projectId),
+        eq(project.organizationId, organizationId),
+      ),
+    )
+    .limit(1);
+
+  if (row) {
+    const now = new Date();
+    await db.transaction(async (tx) => {
+      await insertChangeHistory(tx, [row.stagedChange], "discarded", now);
+      await tx.delete(stagedChange).where(eq(stagedChange.id, row.stagedChange.id));
+    });
+  }
+
+  const changes = await loadProjectStagedChanges(projectId, organizationId);
+  return c.json({ changes } satisfies ProjectStagedChanges);
+});
 
 // GET /api/apps/:id/changes — the pending changes plus the draft app.
 changes.get("/:id/changes", async (c) => {
@@ -110,6 +530,24 @@ changes.get("/:id/changes", async (c) => {
   if (!existing) return c.json({ error: "App not found" }, 404);
 
   return respondWithChanges(c, existing);
+});
+
+// GET /api/apps/:id/changes/history — recent applied/discarded staged batches.
+changes.get("/:id/changes/history", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const existing = await ownedApp(c.req.param("id"), organizationId);
+  if (!existing) return c.json({ error: "App not found" }, 404);
+
+  const rows = await db
+    .select()
+    .from(stagedChangeHistory)
+    .where(eq(stagedChangeHistory.appId, existing.id))
+    .orderBy(desc(stagedChangeHistory.createdAt), asc(stagedChangeHistory.stagedAt))
+    .limit(200);
+
+  return c.json(toHistoryEntries(rows));
 });
 
 // GET /api/apps/:id/changes/env-draft — draft env (current ⊕ staged) plaintext,
@@ -296,93 +734,9 @@ changes.post("/:id/changes/apply", async (c) => {
   const existing = await ownedApp(c.req.param("id"), organizationId);
   if (!existing) return c.json({ error: "App not found" }, 404);
 
-  const rows = await loadStagedRows(existing.id);
-  if (rows.length === 0) return c.json({ error: "No changes to deploy" }, 400);
-
-  // Reconstruct the patch body from the staged app rows and re-validate it
-  // through the SAME builder PATCH uses. A partially-discarded set (e.g.
-  // sourceType=image with its imageRef row removed) is rejected here instead of
-  // persisting an invalid/undeployable config, and slug/imageRef/server checks
-  // stay identical to stage time.
-  const body: UpdateAppInput = {};
-  for (const row of rows) {
-    if (row.resource !== "app" || row.value === null) continue;
-    const parsed = JSON.parse(row.value) as unknown;
-    if (row.field === "serverIds") {
-      body.serverIds = parsed as string[];
-    } else if (row.field === "volumes") {
-      // The volumes column is itself a JSON string, so the staged value is
-      // double-encoded: parse once to the column string, then to the array.
-      body.volumes = JSON.parse(parsed as string) as AppVolume[];
-    } else {
-      (body as Record<string, unknown>)[row.field] = parsed;
-    }
-  }
-
-  const result = await buildAppUpdates(existing, body, organizationId);
+  const result = await applyStagedChangesForApp(existing, organizationId);
   if (!result.ok) return c.json({ error: result.error }, result.status);
-  const updates = result.updates;
-  const serverIds = result.serverIds;
-
-  const envRows = rows.filter((row) => row.resource === "env_var");
-  const stagedIds = rows.map((row) => row.id);
-  const now = new Date();
-
-  try {
-    await db.transaction(async (tx) => {
-      if (Object.keys(updates).length > 0) {
-        await tx
-          .update(app)
-          .set({ ...updates, updatedAt: now })
-          .where(eq(app.id, existing.id));
-      }
-      if (serverIds) {
-        await tx.delete(appServer).where(eq(appServer.appId, existing.id));
-        if (serverIds.length > 0) {
-          await tx
-            .insert(appServer)
-            .values(
-              serverIds.map((serverId) => ({ appId: existing.id, serverId, createdAt: now })),
-            );
-        }
-      }
-      for (const row of envRows) {
-        if (row.action === "delete") {
-          await tx
-            .delete(envVar)
-            .where(and(eq(envVar.appId, existing.id), eq(envVar.key, row.field)));
-          continue;
-        }
-        if (!row.value) continue;
-        await tx
-          .insert(envVar)
-          .values({
-            id: crypto.randomUUID(),
-            appId: existing.id,
-            key: row.field,
-            value: row.value,
-            createdAt: now,
-            updatedAt: now,
-          })
-          .onConflictDoUpdate({
-            target: [envVar.appId, envVar.key],
-            set: { value: row.value, updatedAt: now },
-          });
-      }
-      // Clear only the rows we actually applied; anything staged concurrently
-      // (between the read above and this commit) survives to be applied later.
-      await tx.delete(stagedChange).where(inArray(stagedChange.id, stagedIds));
-    });
-  } catch (error) {
-    if (isUniqueViolation(error)) {
-      return c.json({ error: "An app with that name already exists in this environment" }, 409);
-    }
-    throw error;
-  }
-
-  const deployResult = await enqueueDeploy(existing.id);
-  const deployment = "deployment" in deployResult ? toDeployment(deployResult.deployment) : null;
-  return c.json({ deployment });
+  return c.json(result.result);
 });
 
 // POST /api/apps/:id/changes/discard — drop every staged change for the app.
@@ -393,7 +747,14 @@ changes.post("/:id/changes/discard", async (c) => {
   const existing = await ownedApp(c.req.param("id"), organizationId);
   if (!existing) return c.json({ error: "App not found" }, 404);
 
-  await db.delete(stagedChange).where(eq(stagedChange.appId, existing.id));
+  const rows = await loadStagedRows(existing.id);
+  if (rows.length > 0) {
+    const now = new Date();
+    await db.transaction(async (tx) => {
+      await insertChangeHistory(tx, rows, "discarded", now);
+      await tx.delete(stagedChange).where(eq(stagedChange.appId, existing.id));
+    });
+  }
   return respondWithChanges(c, existing);
 });
 
@@ -405,14 +766,24 @@ changes.delete("/:id/changes/:changeId", async (c) => {
   const existing = await ownedApp(c.req.param("id"), organizationId);
   if (!existing) return c.json({ error: "App not found" }, 404);
 
-  await db
-    .delete(stagedChange)
-    .where(and(eq(stagedChange.id, c.req.param("changeId")), eq(stagedChange.appId, existing.id)));
+  const [row] = await db
+    .select()
+    .from(stagedChange)
+    .where(and(eq(stagedChange.id, c.req.param("changeId")), eq(stagedChange.appId, existing.id)))
+    .limit(1);
+
+  if (row) {
+    const now = new Date();
+    await db.transaction(async (tx) => {
+      await insertChangeHistory(tx, [row], "discarded", now);
+      await tx.delete(stagedChange).where(eq(stagedChange.id, row.id));
+    });
+  }
   return respondWithChanges(c, existing);
 });
 
 function upsertAppChange(
-  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  tx: DbTransaction,
   appId: string,
   field: string,
   value: string,

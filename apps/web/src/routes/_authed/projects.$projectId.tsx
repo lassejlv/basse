@@ -5,6 +5,7 @@ import {
   BoxIcon,
   ChevronRightIcon,
   DownloadIcon,
+  PencilIcon,
   PlusIcon,
   RefreshCwIcon,
   TrashIcon,
@@ -24,6 +25,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  ProjectStagedChangesBar,
+  ProjectStagedChangesHistory,
+} from "@/components/staged-changes-bar";
 import {
   Dialog,
   DialogClose,
@@ -53,15 +58,28 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import {
   createApp,
   importDockerContainer,
   listApps,
   listImportableDockerContainers,
 } from "@/lib/apps";
+import { getProjectChangeHistory, getProjectChanges } from "@/lib/changes";
 import { triggerDeploy } from "@/lib/deployments";
 import { createEnvironment, listEnvironments } from "@/lib/environments";
+import {
+  listEnvironmentSharedEnvVars,
+  listProjectSharedEnvVars,
+  revealEnvironmentSharedEnvVars,
+  revealProjectSharedEnvVars,
+  setEnvironmentSharedEnvVars,
+  setProjectSharedEnvVars,
+  type SharedEnvVarMasked,
+  type SharedEnvVarPlain,
+} from "@/lib/env-vars";
 import { relativeTime } from "@/lib/format";
+import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
 import { deleteProject, getProject } from "@/lib/projects";
 import { listServers } from "@/lib/servers";
 import { toast } from "@/lib/toast";
@@ -84,6 +102,14 @@ function ProjectDetailRoute() {
   const environments = useQuery({
     queryKey: ["environments", projectId],
     queryFn: () => listEnvironments(projectId),
+  });
+  const projectChanges = useQuery({
+    queryKey: ["project-changes", projectId],
+    queryFn: () => getProjectChanges(projectId),
+  });
+  const projectChangeHistory = useQuery({
+    queryKey: ["project-change-history", projectId],
+    queryFn: () => getProjectChangeHistory(projectId),
   });
 
   const envList = environments.data ?? [];
@@ -180,8 +206,159 @@ function ProjectDetailRoute() {
         <NewEnvironmentDialog projectId={projectId} />
       </div>
 
+      {selectedEnv ? (
+        <div className="grid gap-4 xl:grid-cols-2">
+          <SharedEnvVarsCard
+            description="Available to every app in this project as {{shared.KEY}}."
+            listQueryKey={["project-shared-env-vars", projectId]}
+            listVars={() => listProjectSharedEnvVars(projectId)}
+            revealVars={() => revealProjectSharedEnvVars(projectId)}
+            saveVars={(vars) => setProjectSharedEnvVars(projectId, vars)}
+            title="Shared variables"
+          />
+          <SharedEnvVarsCard
+            description="Available to apps in the selected environment as {{env.KEY}}."
+            listQueryKey={["environment-shared-env-vars", selectedEnv]}
+            listVars={() => listEnvironmentSharedEnvVars(selectedEnv)}
+            revealVars={() => revealEnvironmentSharedEnvVars(selectedEnv)}
+            saveVars={(vars) => setEnvironmentSharedEnvVars(selectedEnv, vars)}
+            title={`${envList.find((env) => env.id === selectedEnv)?.name ?? "Environment"} variables`}
+          />
+        </div>
+      ) : null}
+
       {selectedEnv ? <EnvironmentApps environmentId={selectedEnv} /> : null}
+
+      <ProjectStagedChangesHistory
+        entries={projectChangeHistory.data ?? []}
+        isPending={projectChangeHistory.isPending}
+      />
+      <ProjectStagedChangesBar
+        projectId={projectId}
+        changes={projectChanges.data?.changes ?? []}
+      />
     </section>
+  );
+}
+
+function SharedEnvVarsCard({
+  title,
+  description,
+  listQueryKey,
+  listVars,
+  revealVars,
+  saveVars,
+}: {
+  title: string;
+  description: string;
+  listQueryKey: unknown[];
+  listVars: () => Promise<SharedEnvVarMasked[]>;
+  revealVars: () => Promise<SharedEnvVarPlain[]>;
+  saveVars: (vars: { key: string; value: string }[]) => Promise<void>;
+}) {
+  const queryClient = useQueryClient();
+  const vars = useQuery({ queryKey: listQueryKey, queryFn: listVars });
+  const [editing, setEditing] = useState(false);
+  const [preparing, setPreparing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const list = vars.data ?? [];
+
+  const save = useMutation({
+    mutationFn: () => saveVars(parseDotenv(draft)),
+    onSuccess: async () => {
+      setError(null);
+      setEditing(false);
+      toast.success("Shared variables saved");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: listQueryKey }),
+        queryClient.invalidateQueries({ queryKey: ["env-references"] }),
+      ]);
+    },
+    onError: (mutationError: Error) => setError(mutationError.message),
+  });
+
+  async function startEdit() {
+    setError(null);
+    setPreparing(true);
+    try {
+      setDraft(serializeDotenv(await revealVars()));
+      setEditing(true);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Could not load variables.");
+    } finally {
+      setPreparing(false);
+    }
+  }
+
+  return (
+    <Card className="p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="font-semibold text-base">{title}</h2>
+          <p className="mt-1 text-muted-foreground text-sm">{description}</p>
+        </div>
+        {!editing ? (
+          <Button loading={preparing} onClick={startEdit} size="sm" variant="outline">
+            <PencilIcon />
+            Edit
+          </Button>
+        ) : null}
+      </div>
+
+      {editing ? (
+        <form
+          className="mt-4 space-y-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            save.mutate();
+          }}
+        >
+          <Textarea
+            autoFocus
+            className="min-h-40 font-mono text-xs leading-relaxed"
+            onChange={(event) => setDraft(event.currentTarget.value)}
+            spellCheck={false}
+            value={draft}
+          />
+          <p className="text-muted-foreground text-xs">
+            One <code className="font-mono">KEY=value</code> per line. App variables can reference
+            these values with the tokens shown above.
+          </p>
+          {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+          <div className="flex gap-2">
+            <Button loading={save.isPending} type="submit">
+              Save variables
+            </Button>
+            <Button
+              onClick={() => {
+                setEditing(false);
+                setError(null);
+              }}
+              type="button"
+              variant="outline"
+            >
+              Cancel
+            </Button>
+          </div>
+        </form>
+      ) : vars.isPending ? (
+        <p className="mt-4 text-muted-foreground text-sm">Loading…</p>
+      ) : list.length === 0 ? (
+        <p className="mt-4 text-muted-foreground text-sm">No variables set.</p>
+      ) : (
+        <ul className="mt-4 divide-y rounded-md border">
+          {list.map((item) => (
+            <li key={item.key} className="flex items-center justify-between gap-3 px-3 py-2">
+              <span className="min-w-0 truncate font-mono text-sm">{item.key}</span>
+              <span className="shrink-0 font-mono text-muted-foreground text-xs">
+                {item.valueHint}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }
 

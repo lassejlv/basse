@@ -5,7 +5,6 @@ import {
   deployment,
   depotConnection,
   environment,
-  envVar,
   project,
   server,
 } from "@basse/db";
@@ -23,6 +22,7 @@ import {
   resolveBuildKind,
 } from "./builder";
 import { decryptSecret } from "./crypto";
+import { loadResolvedEnvMap } from "./env-resolver";
 import { connectionFromServer } from "./server-connection";
 import { runScript, type SshConnection } from "./ssh";
 
@@ -399,12 +399,16 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 
     await setStatus(deploymentId, "deploying", { imageRef, buildId });
 
-    // Decrypt the app's runtime env vars.
-    const vars = await db.select().from(envVar).where(eq(envVar.appId, appRow.id));
-    const envMap: Record<string, string> = {};
+    // Decrypt app env vars and resolve {{shared.KEY}} / {{env.KEY}} references.
+    let envMap: Record<string, string>;
     let databasePasswordPlain: string | null = null;
-    for (const v of vars) {
-      envMap[v.key] = await decryptSecret(v.value);
+    try {
+      envMap = await loadResolvedEnvMap(appRow);
+    } catch (error) {
+      log.line(error instanceof Error ? error.message : "Could not resolve environment variables.");
+      await log.done();
+      await setStatus(deploymentId, "failed");
+      return;
     }
     if (appRow.appKind === "database") {
       if (!appRow.databasePassword) {

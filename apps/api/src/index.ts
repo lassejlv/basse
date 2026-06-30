@@ -4,7 +4,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { apps } from "./apps";
 import { auth } from "./auth";
-import { changes } from "./changes";
+import { changes, projectChanges } from "./changes";
 import { reconcileInflightDeployments } from "./deploy";
 import { deployments } from "./deployments";
 import { depot } from "./depot";
@@ -17,6 +17,11 @@ import { actionsQueue } from "./queue/queue";
 import { reconcileProvisioningServers } from "./queue/reconcile";
 import { startWorker } from "./queue/worker";
 import { servers } from "./servers";
+import {
+  appEnvReferences,
+  environmentSharedEnvVars,
+  projectSharedEnvVars,
+} from "./shared-env-vars";
 import { sshKeys } from "./ssh-keys";
 import { workspaceSettingsRoutes } from "./workspace-settings";
 
@@ -42,9 +47,13 @@ app.use(
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
 app.route("/api/projects", projects);
+app.route("/api/projects", projectChanges);
+app.route("/api/projects", projectSharedEnvVars);
 app.route("/api/environments", environments);
+app.route("/api/environments", environmentSharedEnvVars);
 app.route("/api/apps", apps);
 app.route("/api/apps", envVars);
+app.route("/api/apps", appEnvReferences);
 app.route("/api/apps", changes);
 app.route("/api/deployments", deployments);
 app.route("/api/ssh-keys", sshKeys);

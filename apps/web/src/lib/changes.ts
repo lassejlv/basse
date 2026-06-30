@@ -2,12 +2,24 @@ import type {
   AppStagedChanges,
   ApplyStagedChangesResult,
   EnvVarPlain,
+  ProjectApplyStagedChangesResult,
+  ProjectStagedChangeHistoryEntry,
+  ProjectStagedChanges,
   StageAppChangesInput,
   StageEnvVarsInput,
   StagedChange,
+  StagedChangeHistoryEntry,
 } from "@basse/shared";
 
-export type { AppStagedChanges, ApplyStagedChangesResult, StagedChange };
+export type {
+  AppStagedChanges,
+  ApplyStagedChangesResult,
+  ProjectApplyStagedChangesResult,
+  ProjectStagedChangeHistoryEntry,
+  ProjectStagedChanges,
+  StagedChange,
+  StagedChangeHistoryEntry,
+};
 
 const apiBaseUrl = import.meta.env.VITE_API_URL ?? "";
 
@@ -22,6 +34,64 @@ export async function getChanges(appId: string): Promise<AppStagedChanges> {
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<AppStagedChanges>;
+}
+
+export async function getChangeHistory(appId: string): Promise<StagedChangeHistoryEntry[]> {
+  const response = await fetch(`${apiBaseUrl}/api/apps/${appId}/changes/history`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<StagedChangeHistoryEntry[]>;
+}
+
+export async function getProjectChanges(projectId: string): Promise<ProjectStagedChanges> {
+  const response = await fetch(`${apiBaseUrl}/api/projects/${projectId}/changes`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<ProjectStagedChanges>;
+}
+
+export async function getProjectChangeHistory(
+  projectId: string,
+): Promise<ProjectStagedChangeHistoryEntry[]> {
+  const response = await fetch(`${apiBaseUrl}/api/projects/${projectId}/changes/history`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<ProjectStagedChangeHistoryEntry[]>;
+}
+
+export async function applyProjectChanges(
+  projectId: string,
+): Promise<ProjectApplyStagedChangesResult> {
+  const response = await fetch(`${apiBaseUrl}/api/projects/${projectId}/changes/apply`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<ProjectApplyStagedChangesResult>;
+}
+
+export async function discardProjectChanges(projectId: string): Promise<ProjectStagedChanges> {
+  const response = await fetch(`${apiBaseUrl}/api/projects/${projectId}/changes/discard`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<ProjectStagedChanges>;
+}
+
+export async function discardProjectChange(
+  projectId: string,
+  changeId: string,
+): Promise<ProjectStagedChanges> {
+  const response = await fetch(`${apiBaseUrl}/api/projects/${projectId}/changes/${changeId}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<ProjectStagedChanges>;
 }
 
 export async function stageAppChanges(

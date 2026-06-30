@@ -54,7 +54,12 @@ import {
 } from "@/components/ui/sheet";
 import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { StagedChangesBar } from "@/components/staged-changes-bar";
+import {
+  ProjectStagedChangesBar,
+  ProjectStagedChangesHistory,
+  StagedChangesBar,
+  StagedChangesHistory,
+} from "@/components/staged-changes-bar";
 import type { App } from "@/lib/apps";
 import {
   getApp,
@@ -64,11 +69,19 @@ import {
   deleteApp,
 } from "@/lib/apps";
 import type { StagedChange } from "@/lib/changes";
-import { getChanges, getEnvDraft, stageAppChanges, stageEnvVars } from "@/lib/changes";
+import {
+  getChangeHistory,
+  getChanges,
+  getEnvDraft,
+  getProjectChangeHistory,
+  getProjectChanges,
+  stageAppChanges,
+  stageEnvVars,
+} from "@/lib/changes";
 import { listDeployments, rollbackDeployment, triggerDeploy } from "@/lib/deployments";
 import { createDomain, deleteDomain, listDomains } from "@/lib/domains";
 import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
-import { listEnvVars, revealEnvVars } from "@/lib/env-vars";
+import { listEnvReferences, listEnvVars, revealEnvVars } from "@/lib/env-vars";
 import { formatBytes } from "@/lib/format";
 import {
   createManagedLoadBalancer,
@@ -104,6 +117,20 @@ function AppDetailRoute() {
   // survive reloads. `draft` is the live app with the staged config overlaid —
   // settings forms seed from it, while the header/deployments show live state.
   const changes = useQuery({ queryKey: ["changes", appId], queryFn: () => getChanges(appId) });
+  const changeHistory = useQuery({
+    queryKey: ["change-history", appId],
+    queryFn: () => getChangeHistory(appId),
+  });
+  const projectChanges = useQuery({
+    queryKey: ["project-changes", app.data?.projectId],
+    queryFn: () => getProjectChanges(app.data!.projectId!),
+    enabled: Boolean(app.data?.projectId),
+  });
+  const projectChangeHistory = useQuery({
+    queryKey: ["project-change-history", app.data?.projectId],
+    queryFn: () => getProjectChangeHistory(app.data!.projectId!),
+    enabled: Boolean(app.data?.projectId),
+  });
 
   if (app.isPending) {
     return <p className="p-4 text-muted-foreground text-sm md:p-6">Loading…</p>;
@@ -115,6 +142,10 @@ function AppDetailRoute() {
   const data = app.data;
   const draft = changes.data?.draft ?? data;
   const stagedChanges = changes.data?.changes ?? [];
+  const projectStagedChanges = projectChanges.data?.changes ?? [];
+  const hasStagedChanges = data.projectId
+    ? (projectChanges.data?.changes.length ?? stagedChanges.length) > 0
+    : stagedChanges.length > 0;
   const list = deployments.data ?? [];
   const status = list[0]?.status ?? data.latestDeploymentStatus ?? null;
   const canDeploy =
@@ -133,7 +164,7 @@ function AppDetailRoute() {
           app={data}
           appId={appId}
           canDeploy={canDeploy}
-          hasStagedChanges={stagedChanges.length > 0}
+          hasStagedChanges={hasStagedChanges}
           status={status}
         />
 
@@ -143,6 +174,7 @@ function AppDetailRoute() {
             {data.appKind === "database" ? <TabsTab value="connection">Connection</TabsTab> : null}
             {data.appKind === "service" ? <TabsTab value="variables">Variables</TabsTab> : null}
             {data.appKind === "service" ? <TabsTab value="domains">Domains</TabsTab> : null}
+            <TabsTab value="changes">Changes</TabsTab>
             <TabsTab value="settings">Settings</TabsTab>
           </TabsList>
 
@@ -174,6 +206,19 @@ function AppDetailRoute() {
               )}
             </TabsPanel>
           ) : null}
+          <TabsPanel className="pt-5" value="changes">
+            {data.projectId ? (
+              <ProjectStagedChangesHistory
+                entries={projectChangeHistory.data ?? []}
+                isPending={projectChangeHistory.isPending}
+              />
+            ) : (
+              <StagedChangesHistory
+                entries={changeHistory.data ?? []}
+                isPending={changeHistory.isPending}
+              />
+            )}
+          </TabsPanel>
           <TabsPanel className="flex flex-col gap-6 pt-5" value="settings">
             {data.appKind === "database" ? (
               <DatabaseSettingsCard app={draft} />
@@ -187,7 +232,11 @@ function AppDetailRoute() {
           </TabsPanel>
         </Tabs>
 
-        <StagedChangesBar appId={appId} changes={stagedChanges} />
+        {data.projectId ? (
+          <ProjectStagedChangesBar projectId={data.projectId} changes={projectStagedChanges} />
+        ) : (
+          <StagedChangesBar appId={appId} changes={stagedChanges} />
+        )}
       </div>
     </section>
   );
@@ -1666,16 +1715,24 @@ function EnvVarsCard({ appId, stagedChanges }: { appId: string; stagedChanges: S
   const queryClient = useQueryClient();
   const maskedKey = ["env-vars", appId];
   const revealKey = ["env-vars-reveal", appId];
+  const referencesKey = ["env-references", appId];
   const stagedEnvCount = stagedChanges.filter((change) => change.resource === "env_var").length;
 
   const [editing, setEditing] = useState(false);
   const [revealed, setRevealed] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const [draft, setDraft] = useState("");
+  const [referenceQuery, setReferenceQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const { copiedId, copy } = useClipboard();
 
   const vars = useQuery({ queryKey: maskedKey, queryFn: () => listEnvVars(appId) });
+  const references = useQuery({
+    queryKey: referencesKey,
+    queryFn: () => listEnvReferences(appId),
+    enabled: editing,
+  });
   const reveal = useQuery({
     queryKey: revealKey,
     queryFn: () => revealEnvVars(appId),
@@ -1684,9 +1741,44 @@ function EnvVarsCard({ appId, stagedChanges }: { appId: string; stagedChanges: S
 
   const list = vars.data ?? [];
   const revealedMap = new Map((reveal.data ?? []).map((v) => [v.key, v.value]));
+  const referenceSuggestions = (references.data ?? [])
+    .filter((item) => {
+      if (!referenceQuery) return true;
+      const query = referenceQuery.toLowerCase();
+      return item.label.toLowerCase().includes(query) || item.key.toLowerCase().includes(query);
+    })
+    .slice(0, 8);
 
   function ensureRevealed() {
     return queryClient.fetchQuery({ queryKey: revealKey, queryFn: () => revealEnvVars(appId) });
+  }
+
+  function updateReferenceQuery(value: string, cursor: number) {
+    const beforeCursor = value.slice(0, cursor);
+    const match = beforeCursor.match(/\{\{\s*(?:shared|env)?\.?([A-Za-z0-9_]*)$/);
+    setReferenceQuery(match ? (match[1] ?? "").toLowerCase() : "");
+  }
+
+  function insertReference(insertText: string) {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      setDraft((value) => `${value}${insertText}`);
+      return;
+    }
+
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const beforeCursor = draft.slice(0, start);
+    const openToken = beforeCursor.match(/\{\{\s*(?:shared|env)?\.?[A-Za-z0-9_]*$/);
+    const replaceFrom = openToken ? start - openToken[0].length : start;
+    const next = `${draft.slice(0, replaceFrom)}${insertText}${draft.slice(end)}`;
+    const cursor = replaceFrom + insertText.length;
+    setDraft(next);
+    setReferenceQuery("");
+    requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(cursor, cursor);
+    });
   }
 
   const save = useMutation({
@@ -1696,6 +1788,7 @@ function EnvVarsCard({ appId, stagedChanges }: { appId: string; stagedChanges: S
       setEditing(false);
       toast.success("Variables staged");
       queryClient.setQueryData(["changes", appId], data);
+      void queryClient.invalidateQueries({ queryKey: ["project-changes"] });
     },
     onError: (e: Error) => setError(e.message),
   });
@@ -1776,14 +1869,44 @@ function EnvVarsCard({ appId, stagedChanges }: { appId: string; stagedChanges: S
           <Textarea
             autoFocus
             className="min-h-56 font-mono text-xs leading-relaxed"
-            onChange={(event) => setDraft(event.currentTarget.value)}
+            onChange={(event) => {
+              setDraft(event.currentTarget.value);
+              updateReferenceQuery(
+                event.currentTarget.value,
+                event.currentTarget.selectionStart,
+              );
+            }}
+            onKeyUp={(event) =>
+              updateReferenceQuery(event.currentTarget.value, event.currentTarget.selectionStart)
+            }
+            ref={textareaRef}
             spellCheck={false}
             value={draft}
           />
+          {referenceSuggestions.length > 0 ? (
+            <div className="rounded-md border bg-muted/20 p-3">
+              <div className="flex flex-wrap gap-2">
+                {referenceSuggestions.map((item) => (
+                  <Button
+                    key={item.insertText}
+                    onClick={() => insertReference(item.insertText)}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    <span className="font-mono">{item.label}</span>
+                    <span className="text-muted-foreground">{item.valueHint}</span>
+                  </Button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <p className="text-muted-foreground text-xs">
             One <code className="font-mono">KEY=value</code> per line. Quote values with spaces, use{" "}
             <code className="font-mono">\n</code> for newlines, <code className="font-mono">#</code>{" "}
-            for comments. Staging replaces the whole set; deploy from the bar to apply.
+            for comments. Reference shared values with{" "}
+            <code className="font-mono">{"{{shared.KEY}}"}</code> or{" "}
+            <code className="font-mono">{"{{env.KEY}}"}</code>.
           </p>
           {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
           <div className="flex gap-2">

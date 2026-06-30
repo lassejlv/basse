@@ -50,6 +50,9 @@ Checked against the current repo on 2026-06-30.
 - [x] Added Cloudflare Load Balancers creation/sync with token validation, zone discovery, monitors, pools, proxied hostnames, and target tracking.
 - [x] Relaxed domain uniqueness to allow the same host on multiple target servers behind a managed load balancer.
 - [x] Added dashboard flows to connect Hetzner or Cloudflare and attach a managed load balancer to multi-server service apps.
+- [x] Added staged change history so applied and discarded config/env changes remain visible after the pending set is cleared.
+- [x] Made staged changes project-wide, with project-level review, apply, discard, and history across apps and environments.
+- [x] Added project shared and environment shared variables with `{{shared.KEY}}` / `{{env.KEY}}` references, autocomplete, and deploy-time resolution.
 
 ### Current Validation
 
