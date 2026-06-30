@@ -20,6 +20,7 @@ import type {
   AppVolume,
   DatabaseKind,
   Deployment,
+  ManagedLoadBalancer,
 } from "@basse/shared";
 import { chartCssVars } from "@/components/charts/chart-context";
 import { Grid } from "@/components/charts/grid";
@@ -41,6 +42,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Slider } from "@/components/ui/slider";
 import {
   Sheet,
   SheetDescription,
@@ -51,6 +53,7 @@ import {
 } from "@/components/ui/sheet";
 import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { StagedChangesBar } from "@/components/staged-changes-bar";
 import type { App } from "@/lib/apps";
 import {
   getApp,
@@ -58,14 +61,23 @@ import {
   getAppLogs,
   getAppMetrics,
   deleteApp,
-  updateApp,
 } from "@/lib/apps";
+import type { StagedChange } from "@/lib/changes";
+import { getChanges, getEnvDraft, stageAppChanges, stageEnvVars } from "@/lib/changes";
 import { listDeployments, rollbackDeployment, triggerDeploy } from "@/lib/deployments";
 import { createDomain, deleteDomain, listDomains } from "@/lib/domains";
 import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
-import { listEnvVars, revealEnvVars, setEnvVars } from "@/lib/env-vars";
+import { listEnvVars, revealEnvVars } from "@/lib/env-vars";
 import { formatBytes } from "@/lib/format";
+import {
+  createManagedLoadBalancer,
+  deleteManagedLoadBalancer,
+  listLoadBalancerIntegrations,
+  listManagedLoadBalancers,
+  syncManagedLoadBalancer,
+} from "@/lib/load-balancers";
 import { getAgentInfo, listServers } from "@/lib/servers";
+import { toast, toMessage } from "@/lib/toast";
 
 export const Route = createFileRoute("/_authed/apps/$appId")({
   component: AppDetailRoute,
@@ -87,6 +99,11 @@ function AppDetailRoute() {
     },
   });
 
+  // Staged ("uncommitted") changes for this app, persisted server-side so they
+  // survive reloads. `draft` is the live app with the staged config overlaid —
+  // settings forms seed from it, while the header/deployments show live state.
+  const changes = useQuery({ queryKey: ["changes", appId], queryFn: () => getChanges(appId) });
+
   if (app.isPending) {
     return <p className="p-4 text-muted-foreground text-sm md:p-6">Loading…</p>;
   }
@@ -95,6 +112,8 @@ function AppDetailRoute() {
   }
 
   const data = app.data;
+  const draft = changes.data?.draft ?? data;
+  const stagedChanges = changes.data?.changes ?? [];
   const list = deployments.data ?? [];
   const status = list[0]?.status ?? data.latestDeploymentStatus ?? null;
   const canDeploy =
@@ -109,7 +128,13 @@ function AppDetailRoute() {
     <section className="flex flex-1 flex-col p-4 md:p-6">
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-6">
         <Breadcrumb app={data} />
-        <AppHeader app={data} appId={appId} canDeploy={canDeploy} status={status} />
+        <AppHeader
+          app={data}
+          appId={appId}
+          canDeploy={canDeploy}
+          hasStagedChanges={stagedChanges.length > 0}
+          status={status}
+        />
 
         <Tabs defaultValue="deployments">
           <TabsList variant="underline" className="w-full justify-start overflow-x-auto">
@@ -130,7 +155,7 @@ function AppDetailRoute() {
           ) : null}
           {data.appKind === "service" ? (
             <TabsPanel className="pt-5" value="variables">
-              <EnvVarsCard appId={appId} />
+              <EnvVarsCard appId={appId} stagedChanges={stagedChanges} />
             </TabsPanel>
           ) : null}
           {data.appKind === "service" ? (
@@ -138,7 +163,7 @@ function AppDetailRoute() {
               {data.serverIds.length === 1 ? (
                 <AppDomainsSection app={data} serverId={data.serverIds[0]!} />
               ) : data.serverIds.length > 1 ? (
-                <DisabledDomainsSection />
+                <ManagedLoadBalancerSection app={data} />
               ) : (
                 <Card className="p-6">
                   <p className="text-muted-foreground text-sm">
@@ -150,16 +175,18 @@ function AppDetailRoute() {
           ) : null}
           <TabsPanel className="flex flex-col gap-6 pt-5" value="settings">
             {data.appKind === "database" ? (
-              <DatabaseSettingsCard app={data} />
+              <DatabaseSettingsCard app={draft} />
             ) : (
-              <BuildSettingsCard app={data} />
+              <BuildSettingsCard app={draft} />
             )}
-            <ServerCard app={data} />
-            <ResourceLimitsCard app={data} />
-            {data.appKind === "service" ? <VolumesCard app={data} /> : null}
+            <ServerCard app={draft} />
+            <ResourceLimitsCard app={draft} />
+            {data.appKind === "service" ? <VolumesCard app={draft} /> : null}
             <DeleteAppCard app={data} />
           </TabsPanel>
         </Tabs>
+
+        <StagedChangesBar appId={appId} changes={stagedChanges} />
       </div>
     </section>
   );
@@ -174,6 +201,7 @@ function DeleteAppCard({ app }: { app: App }) {
     mutationFn: () => deleteApp(app.id),
     onSuccess: async () => {
       setError(null);
+      toast.success("App deleted");
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["app", app.id] }),
         queryClient.invalidateQueries({ queryKey: ["apps", app.environmentId] }),
@@ -256,11 +284,13 @@ function AppHeader({
   appId,
   canDeploy,
   status,
+  hasStagedChanges,
 }: {
   app: App;
   appId: string;
   canDeploy: boolean;
   status: Deployment["status"] | null;
+  hasStagedChanges: boolean;
 }) {
   const repoHost = app.repositoryUrl.replace(/^https?:\/\//, "");
   const liveUrl = useLiveUrl(app);
@@ -274,7 +304,7 @@ function AppHeader({
           <h1 className="truncate font-semibold text-2xl tracking-tight">{app.name}</h1>
           <DeployStatusBadge status={status} />
         </div>
-        <DeployButton appId={appId} canDeploy={canDeploy} />
+        <DeployButton appId={appId} canDeploy={canDeploy} hasStagedChanges={hasStagedChanges} />
       </div>
 
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-muted-foreground text-xs">
@@ -376,7 +406,15 @@ function useLiveUrl(app: App): string | null {
   return active ? `https://${active.host}` : null;
 }
 
-function DeployButton({ appId, canDeploy }: { appId: string; canDeploy: boolean }) {
+function DeployButton({
+  appId,
+  canDeploy,
+  hasStagedChanges,
+}: {
+  appId: string;
+  canDeploy: boolean;
+  hasStagedChanges: boolean;
+}) {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
 
@@ -384,6 +422,7 @@ function DeployButton({ appId, canDeploy }: { appId: string; canDeploy: boolean 
     mutationFn: () => triggerDeploy(appId),
     onSuccess: async () => {
       setError(null);
+      toast.success("Deployment queued");
       await queryClient.invalidateQueries({ queryKey: ["deployments", appId] });
     },
     onError: (mutationError: Error) => setError(mutationError.message),
@@ -391,11 +430,27 @@ function DeployButton({ appId, canDeploy }: { appId: string; canDeploy: boolean 
 
   return (
     <div className="flex flex-col items-end gap-1">
-      <Button disabled={!canDeploy} loading={deploy.isPending} onClick={() => deploy.mutate()}>
+      {/* While changes are staged, deploying goes through the staged-changes bar
+          (apply + deploy); this button would otherwise ship the live config and
+          silently skip the staged edits. */}
+      <Button
+        disabled={!canDeploy || hasStagedChanges}
+        loading={deploy.isPending}
+        onClick={() => deploy.mutate()}
+        title={
+          hasStagedChanges
+            ? "You have unsaved changes — deploy them from the bar below"
+            : undefined
+        }
+      >
         <RocketIcon />
         Deploy
       </Button>
-      {error ? <p className="text-destructive-foreground text-xs">{error}</p> : null}
+      {hasStagedChanges ? (
+        <p className="text-muted-foreground text-xs">Deploy staged changes from the bar below.</p>
+      ) : error ? (
+        <p className="text-destructive-foreground text-xs">{error}</p>
+      ) : null}
     </div>
   );
 }
@@ -420,6 +475,7 @@ function DeploymentsPanel({
     mutationFn: (deploymentId: string) => rollbackDeployment(deploymentId),
     onSuccess: async () => {
       setRollbackError(null);
+      toast.success("Rollback started");
       await queryClient.invalidateQueries({ queryKey: ["deployments", app.id] });
       await queryClient.invalidateQueries({ queryKey: ["app", app.id] });
     },
@@ -845,6 +901,14 @@ function formatCpuInput(millicores: number): string {
   return Number.isInteger(cores) ? cores.toFixed(0) : cores.toFixed(2);
 }
 
+function sliderToCpuInput(millicores: number): string {
+  return millicores <= 0 ? "" : formatCpuInput(millicores);
+}
+
+function sliderToMemoryInput(megabytes: number): string {
+  return megabytes <= 0 ? "" : String(megabytes);
+}
+
 function parseCpuLimit(value: string): number | null | undefined {
   if (!value.trim()) return null;
   const cores = Number(value);
@@ -947,24 +1011,19 @@ function DatabaseSettingsCard({ app }: { app: App }) {
     setVersion(database?.version ?? (databaseKind === "redis" ? "8" : "18"));
     setPublicEnabled(database?.publicEnabled ?? false);
     setPublicPort(String(database?.publicPort ?? databaseDefaultPort(databaseKind)));
-  }, [database, databaseKind]);
+  }, [database?.version, database?.publicEnabled, database?.publicPort, databaseKind]);
 
   const update = useMutation({
-    mutationFn: async () => {
-      await updateApp(app.id, {
+    mutationFn: () =>
+      stageAppChanges(app.id, {
         databaseVersion: version,
         databasePublicEnabled: publicEnabled,
         databasePublicPort: publicEnabled ? Number(publicPort) : null,
-      });
-      return triggerDeploy(app.id);
-    },
-    onSuccess: async () => {
+      }),
+    onSuccess: (data) => {
       setError(null);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["app", app.id] }),
-        queryClient.invalidateQueries({ queryKey: ["deployments", app.id] }),
-        queryClient.invalidateQueries({ queryKey: ["database-connection", app.id] }),
-      ]);
+      toast.success("Database change staged");
+      queryClient.setQueryData(["changes", app.id], data);
     },
     onError: (mutationError: Error) => setError(mutationError.message),
   });
@@ -1014,7 +1073,7 @@ function DatabaseSettingsCard({ app }: { app: App }) {
         </label>
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
         <Button loading={update.isPending} type="submit">
-          Save and redeploy database
+          Stage database changes
         </Button>
       </form>
     </Card>
@@ -1026,10 +1085,13 @@ function ServerCard({ app }: { app: App }) {
   const servers = useQuery({ queryKey: ["servers", "for-apps"], queryFn: listServers });
 
   const setServers = useMutation({
-    mutationFn: (serverIds: string[]) => updateApp(app.id, { serverIds }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["app", app.id] });
+    mutationFn: (serverIds: string[]) => stageAppChanges(app.id, { serverIds }),
+    onSuccess: (data) => {
+      toast.success("Server change staged");
+      queryClient.setQueryData(["changes", app.id], data);
     },
+    onError: (error: Error) =>
+      toast.error("Couldn't stage servers", { description: toMessage(error) }),
   });
 
   const serverList = servers.data ?? [];
@@ -1097,13 +1159,16 @@ function BuildSettingsCard({ app }: { app: App }) {
   const [port, setPort] = useState(String(app.port));
   const [error, setError] = useState<string | null>(null);
 
+  // Re-seed only when the underlying draft values change, not on every draft
+  // object rebuild — otherwise staging an unrelated field (e.g. the build
+  // location below) would wipe text the user is still typing here.
   useEffect(() => {
     setSourceType(app.sourceType);
     setRepositoryUrl(app.repositoryUrl);
     setImageRef(app.imageRef ?? "");
     setBranch(app.branch);
     setPort(String(app.port));
-  }, [app]);
+  }, [app.sourceType, app.repositoryUrl, app.imageRef, app.branch, app.port]);
 
   const update = useMutation({
     mutationFn: (input: {
@@ -1113,10 +1178,11 @@ function BuildSettingsCard({ app }: { app: App }) {
       branch?: string;
       port?: number;
       buildRunner?: AppBuildRunner;
-    }) => updateApp(app.id, input),
-    onSuccess: async () => {
+    }) => stageAppChanges(app.id, input),
+    onSuccess: (data) => {
       setError(null);
-      await queryClient.invalidateQueries({ queryKey: ["app", app.id] });
+      toast.success("Build change staged");
+      queryClient.setQueryData(["changes", app.id], data);
     },
     onError: (e: Error) => setError(e.message),
   });
@@ -1240,7 +1306,7 @@ function BuildSettingsCard({ app }: { app: App }) {
         ) : null}
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
         <Button loading={update.isPending} type="submit">
-          Save build settings
+          Stage build changes
         </Button>
       </form>
     </Card>
@@ -1306,6 +1372,11 @@ function ResourceLimitsCard({ app }: { app: App }) {
   const memoryCap = machineSpecs.length
     ? Math.min(...machineSpecs.map((spec) => spec.memoryBytes))
     : null;
+  const memoryCapMb = memoryCap ? Math.floor(memoryCap / 1048576) : null;
+  const cpuSliderValue =
+    cpuCores.trim() && Number.isFinite(Number(cpuCores)) ? Math.round(Number(cpuCores) * 1000) : 0;
+  const memorySliderValue =
+    memoryMb.trim() && Number.isFinite(Number(memoryMb)) ? Number(memoryMb) : 0;
 
   const save = useMutation({
     mutationFn: () => {
@@ -1327,11 +1398,12 @@ function ResourceLimitsCard({ app }: { app: App }) {
         );
       }
 
-      return updateApp(app.id, { cpuLimitMillicores, memoryLimitBytes });
+      return stageAppChanges(app.id, { cpuLimitMillicores, memoryLimitBytes });
     },
-    onSuccess: async () => {
+    onSuccess: (data) => {
       setError(null);
-      await queryClient.invalidateQueries({ queryKey: ["app", app.id] });
+      toast.success("Resource limits staged");
+      queryClient.setQueryData(["changes", app.id], data);
     },
     onError: (saveError: Error) => setError(saveError.message),
   });
@@ -1373,37 +1445,83 @@ function ResourceLimitsCard({ app }: { app: App }) {
           save.mutate();
         }}
       >
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="space-y-5">
           <div className="space-y-2">
-            <Label htmlFor="resource-cpu">CPU cores</Label>
-            <Input
-              id="resource-cpu"
-              inputMode="decimal"
-              min="0.05"
-              onChange={(event) => setCpuCores(event.currentTarget.value)}
-              placeholder={cpuCap ? `Up to ${formatCpuCores(cpuCap)}` : "Unlimited"}
-              step="0.05"
-              type="number"
-              value={cpuCores}
-            />
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="resource-cpu">CPU cores</Label>
+              <span className="font-mono text-muted-foreground text-sm">
+                {cpuCores.trim() ? formatCpuCores(Math.round(Number(cpuCores) * 1000)) : "Unlimited"}
+              </span>
+            </div>
+            {cpuCap ? (
+              <Slider
+                aria-label="CPU cores"
+                max={cpuCap}
+                min={0}
+                onValueChange={(value) =>
+                  setCpuCores(sliderToCpuInput(Array.isArray(value) ? (value[0] ?? 0) : value))
+                }
+                step={50}
+                value={cpuSliderValue}
+              />
+            ) : (
+              <Input
+                id="resource-cpu"
+                inputMode="decimal"
+                min="0.05"
+                onChange={(event) => setCpuCores(event.currentTarget.value)}
+                placeholder="Unlimited"
+                step="0.05"
+                type="number"
+                value={cpuCores}
+              />
+            )}
+            <p className="text-muted-foreground text-xs">
+              {cpuCap
+                ? `Drag up to ${formatCpuCores(cpuCap)}. Slide to 0 for the host default.`
+                : "Attach a server to cap CPU with a slider."}
+            </p>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="resource-memory">Memory MB</Label>
-            <Input
-              id="resource-memory"
-              inputMode="numeric"
-              min="16"
-              onChange={(event) => setMemoryMb(event.currentTarget.value)}
-              placeholder={memoryCap ? `Up to ${formatBytes(memoryCap)}` : "Unlimited"}
-              step="16"
-              type="number"
-              value={memoryMb}
-            />
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="resource-memory">Memory</Label>
+              <span className="font-mono text-muted-foreground text-sm">
+                {memoryMb.trim() ? formatBytes(Number(memoryMb) * 1048576) : "Unlimited"}
+              </span>
+            </div>
+            {memoryCapMb ? (
+              <Slider
+                aria-label="Memory limit"
+                max={memoryCapMb}
+                min={0}
+                onValueChange={(value) =>
+                  setMemoryMb(sliderToMemoryInput(Array.isArray(value) ? (value[0] ?? 0) : value))
+                }
+                step={16}
+                value={memorySliderValue}
+              />
+            ) : (
+              <Input
+                id="resource-memory"
+                inputMode="numeric"
+                min="16"
+                onChange={(event) => setMemoryMb(event.currentTarget.value)}
+                placeholder="Unlimited"
+                step="16"
+                type="number"
+                value={memoryMb}
+              />
+            )}
+            <p className="text-muted-foreground text-xs">
+              {memoryCapMb
+                ? `Drag up to ${formatBytes(memoryCapMb * 1048576)}. Slide to 0 for the host default.`
+                : "Attach a server to cap memory with a slider."}
+            </p>
           </div>
         </div>
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
         <Button loading={save.isPending} type="submit">
-          Save resource limits
+          Stage resource limits
         </Button>
       </form>
     </Card>
@@ -1421,12 +1539,13 @@ function VolumesCard({ app }: { app: App }) {
 
   const save = useMutation({
     mutationFn: () =>
-      updateApp(app.id, {
+      stageAppChanges(app.id, {
         volumes: volumes.filter((volume) => volume.hostPath.trim() || volume.containerPath.trim()),
       }),
-    onSuccess: async () => {
+    onSuccess: (data) => {
       setError(null);
-      await queryClient.invalidateQueries({ queryKey: ["app", app.id] });
+      toast.success("Volumes staged");
+      queryClient.setQueryData(["changes", app.id], data);
     },
     onError: (e: Error) => setError(e.message),
   });
@@ -1520,7 +1639,7 @@ function VolumesCard({ app }: { app: App }) {
         </Button>
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
         <Button loading={save.isPending} type="submit">
-          Save volumes
+          Stage volume changes
         </Button>
       </form>
     </Card>
@@ -1542,10 +1661,11 @@ function useClipboard() {
   return { copiedId, copy };
 }
 
-function EnvVarsCard({ appId }: { appId: string }) {
+function EnvVarsCard({ appId, stagedChanges }: { appId: string; stagedChanges: StagedChange[] }) {
   const queryClient = useQueryClient();
   const maskedKey = ["env-vars", appId];
   const revealKey = ["env-vars-reveal", appId];
+  const stagedEnvCount = stagedChanges.filter((change) => change.resource === "env_var").length;
 
   const [editing, setEditing] = useState(false);
   const [revealed, setRevealed] = useState(false);
@@ -1569,14 +1689,12 @@ function EnvVarsCard({ appId }: { appId: string }) {
   }
 
   const save = useMutation({
-    mutationFn: () => setEnvVars(appId, parseDotenv(draft)),
-    onSuccess: async () => {
+    mutationFn: () => stageEnvVars(appId, { vars: parseDotenv(draft) }),
+    onSuccess: (data) => {
       setError(null);
       setEditing(false);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: maskedKey }),
-        queryClient.invalidateQueries({ queryKey: revealKey }),
-      ]);
+      toast.success("Variables staged");
+      queryClient.setQueryData(["changes", appId], data);
     },
     onError: (e: Error) => setError(e.message),
   });
@@ -1585,7 +1703,9 @@ function EnvVarsCard({ appId }: { appId: string }) {
     setError(null);
     setPreparing(true);
     try {
-      setDraft(serializeDotenv(await ensureRevealed()));
+      // Seed from the draft (live env overlaid with staged edits) so the user
+      // keeps building on what is already staged.
+      setDraft(serializeDotenv(await getEnvDraft(appId)));
       setEditing(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not load variables.");
@@ -1617,8 +1737,14 @@ function EnvVarsCard({ appId }: { appId: string }) {
         <div>
           <h2 className="font-semibold text-lg">Environment variables</h2>
           <p className="mt-1 text-muted-foreground text-sm">
-            Runtime variables, encrypted at rest. Changes apply on the next deploy.
+            Runtime variables, encrypted at rest. Edits are staged until you deploy.
           </p>
+          {stagedEnvCount > 0 ? (
+            <p className="mt-1 text-primary text-sm">
+              {stagedEnvCount} variable change{stagedEnvCount === 1 ? "" : "s"} staged — review in
+              the bar below.
+            </p>
+          ) : null}
         </div>
         {!editing && list.length > 0 ? (
           <div className="flex items-center gap-2">
@@ -1656,12 +1782,12 @@ function EnvVarsCard({ appId }: { appId: string }) {
           <p className="text-muted-foreground text-xs">
             One <code className="font-mono">KEY=value</code> per line. Quote values with spaces, use{" "}
             <code className="font-mono">\n</code> for newlines, <code className="font-mono">#</code>{" "}
-            for comments. Saving replaces the whole set.
+            for comments. Staging replaces the whole set; deploy from the bar to apply.
           </p>
           {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
           <div className="flex gap-2">
             <Button loading={save.isPending} type="submit">
-              Save variables
+              Stage variables
             </Button>
             <Button
               onClick={() => {
@@ -1742,6 +1868,7 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
     onSuccess: async () => {
       setHost("");
       setError(null);
+      toast.success("Domain added");
       await queryClient.invalidateQueries({ queryKey });
     },
     onError: (e: Error) => setError(e.message),
@@ -1750,8 +1877,10 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
   const remove = useMutation({
     mutationFn: (id: string) => deleteDomain(id),
     onSuccess: async () => {
+      toast.success("Domain removed");
       await queryClient.invalidateQueries({ queryKey });
     },
+    onError: (e: Error) => toast.error("Couldn't remove domain", { description: toMessage(e) }),
   });
 
   const addPreview = useMutation({
@@ -1762,6 +1891,7 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
     },
     onSuccess: async () => {
       setError(null);
+      toast.success("Preview domain created");
       await queryClient.invalidateQueries({ queryKey });
     },
     onError: (e: Error) => setError(e.message),
@@ -1864,14 +1994,336 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
   );
 }
 
-function DisabledDomainsSection() {
+const LOAD_BALANCER_STATUS_VARIANT = {
+  pending: "outline",
+  syncing: "warning",
+  active: "success",
+  error: "error",
+} as const;
+
+function ManagedLoadBalancerSection({ app }: { app: App }) {
+  const queryClient = useQueryClient();
+  const integrationsKey = ["load-balancer-integrations"];
+  const loadBalancersKey = ["load-balancers", app.id];
+  const integrations = useQuery({
+    queryKey: integrationsKey,
+    queryFn: listLoadBalancerIntegrations,
+  });
+  const loadBalancers = useQuery({
+    queryKey: loadBalancersKey,
+    queryFn: () => listManagedLoadBalancers(app.id),
+  });
+  const [integrationId, setIntegrationId] = useState("");
+  const [host, setHost] = useState("");
+  const [location, setLocation] = useState("fsn1");
+  const [loadBalancerType, setLoadBalancerType] = useState("lb11");
+  const [healthCheckPath, setHealthCheckPath] = useState("/");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const firstIntegration = integrations.data?.[0]?.id ?? "";
+    if (!integrationId && firstIntegration) {
+      setIntegrationId(firstIntegration);
+    }
+  }, [integrationId, integrations.data]);
+
+  const create = useMutation({
+    mutationFn: () =>
+      createManagedLoadBalancer({
+        appId: app.id,
+        integrationId,
+        host,
+        location,
+        loadBalancerType,
+        healthCheckPath,
+      }),
+    onSuccess: async (created) => {
+      setError(null);
+      setHost("");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: loadBalancersKey }),
+        ...app.serverIds.map((serverId) =>
+          queryClient.invalidateQueries({ queryKey: ["domains", serverId] }),
+        ),
+      ]);
+      if (created.status === "error") {
+        toast.error("Load balancer saved but sync failed", {
+          description: created.statusMessage ?? "Open the load balancer card and sync again.",
+        });
+      } else {
+        toast.success("Load balancer created");
+      }
+    },
+    onError: (createError: Error) => setError(createError.message),
+  });
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    create.mutate();
+  }
+
+  const integrationList = integrations.data ?? [];
+  const existing = loadBalancers.data ?? [];
+
   return (
-    <Card className="p-6 opacity-70">
-      <h2 className="font-semibold text-lg">Domains</h2>
-      <p className="mt-1 text-muted-foreground text-sm">
-        Domain management is disabled while this app deploys to multiple servers. Select one target
-        server, or add a load balancer/shared ingress before attaching domains here.
-      </p>
+    <Card className="p-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="font-semibold text-lg">Managed load balancer</h2>
+          <p className="mt-1 text-muted-foreground text-sm">
+            Basse keeps the same domain route on every attached server, then points a provider load
+            balancer at those servers for 80/443 traffic.
+          </p>
+        </div>
+        <Badge variant="outline">{app.serverIds.length} targets</Badge>
+      </div>
+
+      {integrations.isPending || loadBalancers.isPending ? (
+        <p className="mt-5 text-muted-foreground text-sm">Loading…</p>
+      ) : integrationList.length === 0 ? (
+        <div className="mt-5 rounded-md border border-dashed p-5">
+          <p className="text-muted-foreground text-sm">
+            Connect Hetzner in Settings before creating a managed load balancer.
+          </p>
+          <Button className="mt-3" render={<Link to="/settings" />} size="sm" variant="outline">
+            Open settings
+          </Button>
+        </div>
+      ) : existing.length > 0 ? (
+        <div className="mt-5 flex flex-col gap-3">
+          {existing.map((loadBalancer) => (
+            <ManagedLoadBalancerCard
+              app={app}
+              key={loadBalancer.id}
+              loadBalancer={loadBalancer}
+              queryKey={loadBalancersKey}
+            />
+          ))}
+        </div>
+      ) : (
+        <form className="mt-5 space-y-4" onSubmit={handleSubmit}>
+          <div className="grid gap-3 sm:grid-cols-[1fr_150px]">
+            <div className="space-y-2">
+              <Label htmlFor="load-balancer-host">Domain</Label>
+              <Input
+                id="load-balancer-host"
+                onChange={(event) => setHost(event.currentTarget.value)}
+                placeholder="app.example.com"
+                required
+                value={host}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Provider</Label>
+              <Select value={integrationId} onValueChange={(value) => setIntegrationId(value ?? "")}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Provider">
+                    {(value: string) =>
+                      integrationList.find((integration) => integration.id === value)?.name ??
+                      "Provider"
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup>
+                  {integrationList.map((integration) => (
+                    <SelectItem key={integration.id} value={integration.id}>
+                      {integration.name}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            </div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="space-y-2">
+              <Label htmlFor="load-balancer-location">Hetzner location</Label>
+              <Input
+                id="load-balancer-location"
+                onChange={(event) => setLocation(event.currentTarget.value)}
+                value={location}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="load-balancer-type">Type</Label>
+              <Input
+                id="load-balancer-type"
+                onChange={(event) => setLoadBalancerType(event.currentTarget.value)}
+                value={loadBalancerType}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="load-balancer-health">Health path</Label>
+              <Input
+                id="load-balancer-health"
+                onChange={(event) => setHealthCheckPath(event.currentTarget.value)}
+                value={healthCheckPath}
+              />
+            </div>
+          </div>
+          <p className="text-muted-foreground text-xs">
+            Hetzner v0 creates a Basse-owned load balancer with TCP passthrough on 80 and 443, so
+            each target server's Caddy keeps handling TLS and app routing.
+          </p>
+          {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+          <Button disabled={!integrationId || !host.trim()} loading={create.isPending} type="submit">
+            <PlusIcon />
+            Create load balancer
+          </Button>
+        </form>
+      )}
     </Card>
+  );
+}
+
+function ManagedLoadBalancerCard({
+  app,
+  loadBalancer,
+  queryKey,
+}: {
+  app: App;
+  loadBalancer: ManagedLoadBalancer;
+  queryKey: unknown[];
+}) {
+  const queryClient = useQueryClient();
+  const sync = useMutation({
+    mutationFn: () => syncManagedLoadBalancer(loadBalancer.id),
+    onSuccess: async (updated) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey }),
+        ...app.serverIds.map((serverId) =>
+          queryClient.invalidateQueries({ queryKey: ["domains", serverId] }),
+        ),
+      ]);
+      if (updated.status === "error") {
+        toast.error("Load balancer sync failed", {
+          description: updated.statusMessage ?? "Check provider settings and server targets.",
+        });
+      } else {
+        toast.success("Load balancer synced");
+      }
+    },
+    onError: (syncError: Error) =>
+      toast.error("Couldn't sync load balancer", { description: syncError.message }),
+  });
+  const remove = useMutation({
+    mutationFn: () => deleteManagedLoadBalancer(loadBalancer.id),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey }),
+        ...app.serverIds.map((serverId) =>
+          queryClient.invalidateQueries({ queryKey: ["domains", serverId] }),
+        ),
+      ]);
+      toast.success("Load balancer deleted");
+    },
+    onError: (removeError: Error) =>
+      toast.error("Couldn't delete load balancer", { description: removeError.message }),
+  });
+
+  function confirmDelete() {
+    if (!window.confirm(`Delete ${loadBalancer.name} and its provider resource?`)) return;
+    remove.mutate();
+  }
+
+  return (
+    <div className="rounded-md border p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h3 className="truncate font-medium">{loadBalancer.host}</h3>
+            <Badge variant={LOAD_BALANCER_STATUS_VARIANT[loadBalancer.status]}>
+              {loadBalancer.status}
+            </Badge>
+          </div>
+          <p className="mt-1 truncate font-mono text-muted-foreground text-xs">
+            {loadBalancer.provider} · {loadBalancer.loadBalancerType} · {loadBalancer.location}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            loading={sync.isPending}
+            onClick={() => sync.mutate()}
+            size="sm"
+            variant="outline"
+          >
+            <RotateCcwIcon />
+            Sync
+          </Button>
+          <Button
+            aria-label={`Delete ${loadBalancer.host}`}
+            loading={remove.isPending}
+            onClick={confirmDelete}
+            size="icon"
+            variant="outline"
+          >
+            <TrashIcon />
+          </Button>
+        </div>
+      </div>
+
+      {loadBalancer.statusMessage ? (
+        <p className="mt-3 text-destructive-foreground text-sm">{loadBalancer.statusMessage}</p>
+      ) : null}
+
+      <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+        <DnsRecord label="A record" value={loadBalancer.endpointIpv4} host={loadBalancer.host} />
+        <DnsRecord label="AAAA record" value={loadBalancer.endpointIpv6} host={loadBalancer.host} />
+      </div>
+
+      <div className="mt-4">
+        <p className="font-medium text-sm">Targets</p>
+        {loadBalancer.targets.length === 0 ? (
+          <p className="mt-1 text-muted-foreground text-sm">No targets synced yet.</p>
+        ) : (
+          <ul className="mt-2 flex flex-col gap-2">
+            {loadBalancer.targets.map((target) => (
+              <li
+                key={target.id}
+                className="flex items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-sm"
+              >
+                <span className="min-w-0 truncate font-mono text-xs">{target.address}</span>
+                <Badge
+                  size="sm"
+                  variant={
+                    target.status === "active"
+                      ? "success"
+                      : target.status === "error"
+                        ? "error"
+                        : "outline"
+                  }
+                >
+                  {target.status}
+                </Badge>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {loadBalancer.lastSyncedAt ? (
+        <p className="mt-4 text-muted-foreground text-xs">
+          Last synced {new Date(loadBalancer.lastSyncedAt).toLocaleString()}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function DnsRecord({
+  label,
+  value,
+  host,
+}: {
+  label: string;
+  value: string | null;
+  host: string;
+}) {
+  return (
+    <div className="rounded-md border bg-background p-3">
+      <p className="text-muted-foreground">{label}</p>
+      <p className="mt-1 truncate font-mono text-xs">
+        {value ? `${host} -> ${value}` : "Waiting for provider endpoint"}
+      </p>
+    </div>
   );
 }

@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { authClient } from "@/lib/auth-client";
 import { disconnectDepot, getDepotConnection, saveDepotConnection } from "@/lib/depot";
+import { toast, toMessage } from "@/lib/toast";
 import { createSshKey, deleteSshKey, listSshKeys } from "@/lib/ssh-keys";
 
 export const Route = createFileRoute("/_authed/secrets")({
@@ -52,6 +53,7 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
       setName("");
       setPublicKey("");
       setError(null);
+      toast.success("SSH key added");
       await queryClient.invalidateQueries({ queryKey });
     },
     onError: (mutationError: Error) => setError(mutationError.message),
@@ -60,8 +62,10 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
   const removeKey = useMutation({
     mutationFn: (id: string) => deleteSshKey(id),
     onSuccess: async () => {
+      toast.success("Key removed");
       await queryClient.invalidateQueries({ queryKey });
     },
+    onError: (error) => toast.error("Couldn't remove key", { description: toMessage(error) }),
   });
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -165,6 +169,7 @@ function DepotSection({ organizationId }: { organizationId?: string }) {
       setProjectId("");
       setOrgId("");
       setError(null);
+      toast.success("Depot token saved");
       await queryClient.invalidateQueries({ queryKey });
     },
     onError: (mutationError: Error) => setError(mutationError.message),
@@ -173,8 +178,10 @@ function DepotSection({ organizationId }: { organizationId?: string }) {
   const disconnect = useMutation({
     mutationFn: disconnectDepot,
     onSuccess: async () => {
+      toast.success("Depot disconnected");
       await queryClient.invalidateQueries({ queryKey });
     },
+    onError: (error) => toast.error("Couldn't disconnect Depot", { description: toMessage(error) }),
   });
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {

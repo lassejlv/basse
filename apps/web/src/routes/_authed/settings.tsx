@@ -1,10 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { TrashIcon } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
+import {
+  deleteLoadBalancerIntegration,
+  listLoadBalancerIntegrations,
+  saveLoadBalancerIntegration,
+} from "@/lib/load-balancers";
+import { toast } from "@/lib/toast";
 import { getWorkspaceSettings, updateWorkspaceSettings } from "@/lib/workspace-settings";
 
 export const Route = createFileRoute("/_authed/settings")({
@@ -39,6 +46,7 @@ function SettingsRoute() {
     onSuccess: async () => {
       setSettingsError(null);
       await queryClient.invalidateQueries({ queryKey: ["workspace-settings"] });
+      toast.success("Image settings saved");
     },
     onError: (error: Error) => setSettingsError(error.message),
   });
@@ -98,6 +106,8 @@ function SettingsRoute() {
         </form>
       </div>
 
+      <LoadBalancerIntegrationsCard />
+
       <div className="max-w-2xl rounded-lg border bg-card p-6">
         <h2 className="text-lg font-semibold">Account</h2>
         <dl className="mt-4 grid grid-cols-[8rem_1fr] gap-y-3 text-sm">
@@ -116,5 +126,121 @@ function SettingsRoute() {
         </Button>
       </div>
     </section>
+  );
+}
+
+function LoadBalancerIntegrationsCard() {
+  const queryClient = useQueryClient();
+  const queryKey = ["load-balancer-integrations"];
+  const integrations = useQuery({
+    queryKey,
+    queryFn: listLoadBalancerIntegrations,
+  });
+  const [name, setName] = useState("Hetzner");
+  const [token, setToken] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const save = useMutation({
+    mutationFn: () => saveLoadBalancerIntegration({ provider: "hetzner", name, token }),
+    onSuccess: async () => {
+      setToken("");
+      setError(null);
+      await queryClient.invalidateQueries({ queryKey });
+      toast.success("Hetzner connected");
+    },
+    onError: (saveError: Error) => setError(saveError.message),
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) => deleteLoadBalancerIntegration(id),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey });
+      toast.success("Traffic provider removed");
+    },
+    onError: (removeError: Error) =>
+      toast.error("Couldn't remove provider", { description: removeError.message }),
+  });
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    save.mutate();
+  }
+
+  const list = integrations.data ?? [];
+
+  return (
+    <div className="max-w-2xl rounded-lg border bg-card p-6">
+      <h2 className="text-lg font-semibold">Traffic providers</h2>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Connect provider APIs so Basse can create and sync managed load balancers for multi-server
+        apps.
+      </p>
+
+      <div className="mt-5">
+        {integrations.isPending ? (
+          <p className="text-muted-foreground text-sm">Loading providers…</p>
+        ) : list.length === 0 ? (
+          <p className="text-muted-foreground text-sm">No traffic providers connected.</p>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {list.map((integration) => (
+              <li
+                key={integration.id}
+                className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-sm">{integration.name}</p>
+                  <p className="truncate font-mono text-muted-foreground text-xs">
+                    {integration.provider}
+                    {integration.tokenHint ? ` · token ends ${integration.tokenHint}` : ""}
+                    {integration.statusMessage ? ` · ${integration.statusMessage}` : ""}
+                  </p>
+                </div>
+                <Button
+                  aria-label={`Delete ${integration.name}`}
+                  loading={remove.isPending && remove.variables === integration.id}
+                  onClick={() => remove.mutate(integration.id)}
+                  size="icon"
+                  variant="outline"
+                >
+                  <TrashIcon />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <form className="mt-6 space-y-4 border-t pt-6" onSubmit={handleSubmit}>
+        <div className="grid gap-3 sm:grid-cols-[150px_1fr]">
+          <div className="space-y-2">
+            <Label htmlFor="traffic-provider-name">Name</Label>
+            <Input
+              id="traffic-provider-name"
+              onChange={(event) => setName(event.currentTarget.value)}
+              value={name}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="traffic-provider-token">Hetzner API token</Label>
+            <Input
+              id="traffic-provider-token"
+              onChange={(event) => setToken(event.currentTarget.value)}
+              placeholder="hcloud token"
+              type="password"
+              value={token}
+            />
+          </div>
+        </div>
+        <p className="text-muted-foreground text-xs">
+          The token is validated against Hetzner Cloud and stored encrypted. Cloudflare will plug
+          into the same provider model later.
+        </p>
+        {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+        <Button disabled={!token.trim()} loading={save.isPending} type="submit">
+          Connect Hetzner
+        </Button>
+      </form>
+    </div>
   );
 }

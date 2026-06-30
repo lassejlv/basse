@@ -23,6 +23,48 @@ export function toDeployment(row: DeploymentRow): Deployment {
   };
 }
 
+/**
+ * Creates a queued deployment for an app and enqueues the build/deploy job.
+ * Returns the created row, or a structured error (no server attached, or the
+ * queue is unavailable). Shared by POST / and the staged-changes apply route.
+ */
+export async function enqueueDeploy(
+  appId: string,
+): Promise<{ deployment: DeploymentRow } | { error: string; status: 400 | 503 }> {
+  const targetServers = await db
+    .select({ serverId: appServer.serverId })
+    .from(appServer)
+    .where(eq(appServer.appId, appId));
+  if (targetServers.length === 0) {
+    return { error: "Attach at least one server to the app before deploying", status: 400 };
+  }
+
+  const now = new Date();
+  const [created] = await db
+    .insert(deployment)
+    .values({
+      id: crypto.randomUUID(),
+      appId,
+      status: "queued",
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+  if (!created) return { error: "Failed to create deployment", status: 503 };
+
+  try {
+    await enqueueAction("deploy-app", created.id);
+  } catch {
+    await db
+      .update(deployment)
+      .set({ status: "failed", logs: "Could not queue the deployment.", updatedAt: new Date() })
+      .where(eq(deployment.id, created.id));
+    return { error: "Could not queue the deployment", status: 503 };
+  }
+
+  return { deployment: created };
+}
+
 /** Loads a deployment only if its app belongs to the active workspace. */
 async function ownedDeployment(
   deploymentId: string,
@@ -63,39 +105,11 @@ deployments.post("/", async (c) => {
 
   const appRow = await ownedApp(appId, organizationId);
   if (!appRow) return c.json({ error: "App not found" }, 404);
-  const targetServers = await db
-    .select({ serverId: appServer.serverId })
-    .from(appServer)
-    .where(eq(appServer.appId, appRow.id));
-  if (targetServers.length === 0) {
-    return c.json({ error: "Attach at least one server to the app before deploying" }, 400);
-  }
 
-  const now = new Date();
-  const [created] = await db
-    .insert(deployment)
-    .values({
-      id: crypto.randomUUID(),
-      appId: appRow.id,
-      status: "queued",
-      createdAt: now,
-      updatedAt: now,
-    })
-    .returning();
+  const result = await enqueueDeploy(appRow.id);
+  if ("error" in result) return c.json({ error: result.error }, result.status);
 
-  if (!created) return c.json({ error: "Failed to create deployment" }, 500);
-
-  try {
-    await enqueueAction("deploy-app", created.id);
-  } catch {
-    await db
-      .update(deployment)
-      .set({ status: "failed", logs: "Could not queue the deployment.", updatedAt: new Date() })
-      .where(eq(deployment.id, created.id));
-    return c.json({ error: "Could not queue the deployment" }, 503);
-  }
-
-  return c.json(toDeployment(created), 201);
+  return c.json(toDeployment(result.deployment), 201);
 });
 
 deployments.post("/rollback", async (c) => {

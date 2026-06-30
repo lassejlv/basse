@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { authClient } from "@/lib/auth-client";
 import { createServer, listServers } from "@/lib/servers";
+import { toast } from "@/lib/toast";
 
 type KeySource = "generate" | "paste";
 
@@ -53,6 +54,7 @@ function ServersRoute() {
       setPrivateKey("");
       setError(null);
       await queryClient.invalidateQueries({ queryKey });
+      toast.success("Server added");
     },
     onError: (mutationError: Error) => setError(mutationError.message),
   });

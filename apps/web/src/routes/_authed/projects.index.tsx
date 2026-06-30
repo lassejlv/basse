@@ -29,6 +29,7 @@ import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
 import { relativeTime } from "@/lib/format";
 import { createProject, listProjects } from "@/lib/projects";
+import { toast } from "@/lib/toast";
 
 export const Route = createFileRoute("/_authed/projects/")({
   component: ProjectsRoute,
@@ -141,6 +142,7 @@ function CreateProjectDialog({ organizationId }: { organizationId: string | unde
       setError(null);
       setOpen(false);
       await queryClient.invalidateQueries({ queryKey: ["projects", organizationId] });
+      toast.success("Project created");
     },
     onError: (mutationError: Error) => setError(mutationError.message),
   });

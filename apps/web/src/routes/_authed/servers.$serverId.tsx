@@ -26,6 +26,7 @@ import {
   provisionServer,
   updateAgent,
 } from "@/lib/servers";
+import { toast, toMessage } from "@/lib/toast";
 
 export const Route = createFileRoute("/_authed/servers/$serverId")({
   component: ServerDetailRoute,
@@ -52,14 +53,26 @@ function ServerDetailRoute() {
     mutationFn: () => deleteServer(serverId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["servers", activeOrganization?.id] });
+      toast.success("Server removed");
       navigate({ to: "/servers" });
+    },
+    onError: (error) => {
+      toast.error("Couldn't remove server", { description: toMessage(error) });
     },
   });
 
   const test = useMutation({
     mutationFn: () => checkServerConnection(serverId),
-    onSuccess: async () => {
+    onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ["server", serverId] });
+      if (result.ok) {
+        toast.success("Connection OK");
+      } else {
+        toast.error("Couldn't connect", { description: result.error ?? "Server unreachable" });
+      }
+    },
+    onError: (error) => {
+      toast.error("Couldn't test connection", { description: toMessage(error) });
     },
   });
 
@@ -67,6 +80,7 @@ function ServerDetailRoute() {
     mutationFn: () => provisionServer(serverId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["server", serverId] });
+      toast.success("Provisioning started");
     },
   });
 
@@ -243,12 +257,21 @@ function AgentSection({ serverId, enabled }: { serverId: string; enabled: boolea
     ]);
   }, [metrics.data]);
 
-  const checkUpdate = useMutation({ mutationFn: () => checkAgentUpdate(serverId) });
+  const checkUpdate = useMutation({
+    mutationFn: () => checkAgentUpdate(serverId),
+    onSuccess: (result) => {
+      toast.success(result.updateAvailable ? "Update available" : "Agent is up to date");
+    },
+  });
   const runUpdate = useMutation({
     mutationFn: () => updateAgent(serverId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["server", serverId] });
       await queryClient.invalidateQueries({ queryKey: ["agent-info", serverId] });
+      toast.success("Agent updated");
+    },
+    onError: (error) => {
+      toast.error("Couldn't update agent", { description: toMessage(error) });
     },
   });
 
@@ -398,6 +421,7 @@ function DomainsSection({ serverId, sshHost }: { serverId: string; sshHost: stri
       setUpstream("");
       setError(null);
       await queryClient.invalidateQueries({ queryKey });
+      toast.success("Domain added");
     },
     onError: (mutationError: Error) => setError(mutationError.message),
   });
@@ -406,6 +430,10 @@ function DomainsSection({ serverId, sshHost }: { serverId: string; sshHost: stri
     mutationFn: (id: string) => deleteDomain(id),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey });
+      toast.success("Domain removed");
+    },
+    onError: (error) => {
+      toast.error("Couldn't remove domain", { description: toMessage(error) });
     },
   });
 
@@ -413,6 +441,10 @@ function DomainsSection({ serverId, sshHost }: { serverId: string; sshHost: stri
     mutationFn: () => resyncProxy(serverId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey });
+      toast.success("Proxy resynced");
+    },
+    onError: (error) => {
+      toast.error("Couldn't resync proxy", { description: toMessage(error) });
     },
   });
 

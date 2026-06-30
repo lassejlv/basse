@@ -187,6 +187,53 @@ export type SetEnvVarsInput = {
   vars: { key: string; value: string }[];
 };
 
+// ── Staged ("uncommitted") changes ───────────────────────────────────────────
+// A Railway-style staging area: edits to an app's config or env vars are held
+// here until the user applies them (which commits them and triggers a deploy)
+// or discards them. They are persisted server-side, so they survive reloads.
+
+export type StagedChangeResource = "app" | "env_var";
+export type StagedChangeAction = "create" | "update" | "delete";
+
+export type StagedChange = {
+  id: string;
+  appId: string;
+  resource: StagedChangeResource;
+  action: StagedChangeAction;
+  // For "app": the app field name (e.g. "port", "serverIds"). For "env_var": the
+  // variable key.
+  field: string;
+  // Display-safe representation of the new value. For "app" rows it is the
+  // JSON-encoded column value; for "env_var" rows it is a masked hint (never
+  // plaintext) or null on delete.
+  value: string | null;
+  // Display-safe representation of the prior value (same encoding as `value`),
+  // or null when the change creates something new.
+  previousValue: string | null;
+  createdAt: string;
+};
+
+// The full staged state for an app: the list of pending changes plus the draft
+// App (current config overlaid with the staged app-config changes) so config
+// forms can seed their fields from what the user will deploy.
+export type AppStagedChanges = {
+  changes: StagedChange[];
+  draft: App;
+};
+
+// Stage a partial set of app-config edits (same shape as a PATCH body); the
+// server diffs them against the live app and records only what actually differs.
+export type StageAppChangesInput = UpdateAppInput;
+
+// Stage the full desired env-var set; the server diffs it against the live vars.
+export type StageEnvVarsInput = SetEnvVarsInput;
+
+// Result of applying staged changes: the deployment that was triggered, or null
+// when the app has no server attached and could not be deployed.
+export type ApplyStagedChangesResult = {
+  deployment: Deployment | null;
+};
+
 export type DeploymentStatus =
   | "queued"
   | "building"
@@ -377,4 +424,70 @@ export type ProxyStatus = {
   running: boolean;
   adminReachable: boolean;
   caddyVersion?: string;
+};
+
+export type LoadBalancerProvider = "hetzner" | "cloudflare";
+export type LoadBalancerIntegrationStatus = "active" | "error";
+
+export type LoadBalancerIntegration = {
+  id: string;
+  organizationId: string;
+  provider: LoadBalancerProvider;
+  name: string;
+  tokenHint: string | null;
+  status: LoadBalancerIntegrationStatus;
+  statusMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateLoadBalancerIntegrationInput = {
+  provider: LoadBalancerProvider;
+  name: string;
+  token: string;
+};
+
+export type ManagedLoadBalancerStatus = "pending" | "syncing" | "active" | "error";
+
+export type ManagedLoadBalancerTarget = {
+  id: string;
+  serverId: string;
+  address: string;
+  providerTargetId: string | null;
+  status: "pending" | "active" | "error";
+  statusMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ManagedLoadBalancer = {
+  id: string;
+  organizationId: string;
+  integrationId: string;
+  appId: string;
+  provider: LoadBalancerProvider;
+  name: string;
+  host: string;
+  location: string;
+  loadBalancerType: string;
+  healthCheckPath: string;
+  providerResourceId: string | null;
+  endpointIpv4: string | null;
+  endpointIpv6: string | null;
+  status: ManagedLoadBalancerStatus;
+  statusMessage: string | null;
+  lastSyncedAt: string | null;
+  targets: ManagedLoadBalancerTarget[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateManagedLoadBalancerInput = {
+  appId: string;
+  integrationId: string;
+  host: string;
+  name?: string;
+  location?: string;
+  loadBalancerType?: string;
+  healthCheckPath?: string;
 };

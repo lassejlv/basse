@@ -4,12 +4,14 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { apps } from "./apps";
 import { auth } from "./auth";
+import { changes } from "./changes";
 import { reconcileInflightDeployments } from "./deploy";
 import { deployments } from "./deployments";
 import { depot } from "./depot";
 import { domains } from "./domains";
 import { environments } from "./environments";
 import { envVars } from "./env-vars";
+import { loadBalancers } from "./load-balancers";
 import { projects } from "./projects";
 import { actionsQueue } from "./queue/queue";
 import { reconcileProvisioningServers } from "./queue/reconcile";
@@ -43,11 +45,13 @@ app.route("/api/projects", projects);
 app.route("/api/environments", environments);
 app.route("/api/apps", apps);
 app.route("/api/apps", envVars);
+app.route("/api/apps", changes);
 app.route("/api/deployments", deployments);
 app.route("/api/ssh-keys", sshKeys);
 app.route("/api/depot", depot);
 app.route("/api/servers", servers);
 app.route("/api/domains", domains);
+app.route("/api/load-balancers", loadBalancers);
 app.route("/api/workspace", workspaceSettingsRoutes);
 
 app.get("/health", (c) =>

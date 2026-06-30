@@ -44,7 +44,7 @@ const DEFAULT_REDIS_VERSION = "8";
 const POSTGRES_PORT = 5432;
 const REDIS_PORT = 6379;
 
-function slugify(value: string) {
+export function slugify(value: string) {
   return value
     .trim()
     .toLowerCase()
@@ -233,7 +233,7 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-function toApp(
+export function toApp(
   row: AppRow,
   serverIds: string[] = row.serverId ? [row.serverId] : [],
   latestDeploymentStatus: DeploymentStatus | null = null,
@@ -300,7 +300,7 @@ async function loadLatestDeploymentStatus(
   return map;
 }
 
-async function loadAppServerIds(appIds: string[]): Promise<Map<string, string[]>> {
+export async function loadAppServerIds(appIds: string[]): Promise<Map<string, string[]>> {
   const ids = [...new Set(appIds)];
   const map = new Map<string, string[]>();
   for (const id of ids) map.set(id, []);
@@ -387,7 +387,10 @@ export async function ownedApp(appId: string, organizationId: string): Promise<A
   return row?.app ?? null;
 }
 
-async function validateServersInOrg(serverIds: string[], organizationId: string): Promise<boolean> {
+export async function validateServersInOrg(
+  serverIds: string[],
+  organizationId: string,
+): Promise<boolean> {
   if (serverIds.length === 0) return true;
   const rows = await db
     .select({ id: server.id })
@@ -434,6 +437,138 @@ async function requireAgentTarget(appId: string, requestedServerId?: string) {
   const connection = await connectionFromServer(resolved.server);
   const token = await decryptSecret(resolved.server.agentToken);
   return { server: resolved.server, connection, token };
+}
+
+export type BuildAppUpdatesResult =
+  | { ok: true; updates: Partial<AppRow>; serverIds: string[] | null }
+  | { ok: false; error: string; status: 400 | 404 };
+
+/**
+ * Validates and normalizes a partial app-config patch against the existing row,
+ * returning the `Partial<AppRow>` to write (without `updatedAt`) plus the
+ * resolved server set (or null when servers were not part of the patch). Shared
+ * by PATCH /:id (immediate write) and the staged-changes router (stage + apply)
+ * so both run identical validation and field derivation. Never throws.
+ */
+export async function buildAppUpdates(
+  existing: AppRow,
+  body: UpdateAppInput | null,
+  organizationId: string,
+): Promise<BuildAppUpdatesResult> {
+  const updates: Partial<AppRow> = {};
+
+  if (typeof body?.name === "string" && body.name.trim()) {
+    updates.name = body.name.trim();
+    updates.slug = slugify(body.name);
+  }
+  if (typeof body?.repositoryUrl === "string") {
+    const repoError = validateRepositoryUrl(body.repositoryUrl.trim());
+    if (repoError) return { ok: false, error: repoError, status: 400 };
+    updates.repositoryUrl = body.repositoryUrl.trim();
+  }
+  if (SOURCE_TYPES.includes(body?.sourceType as AppSourceType)) {
+    updates.sourceType = body?.sourceType as AppSourceType;
+  }
+  if (typeof body?.imageRef === "string" || body?.imageRef === null) {
+    const imageRef = typeof body.imageRef === "string" ? body.imageRef.trim() : "";
+    if ((updates.sourceType ?? existing.sourceType) === "image") {
+      const imageError = validateImageRef(imageRef);
+      if (imageError) return { ok: false, error: imageError, status: 400 };
+    }
+    updates.imageRef = imageRef || null;
+  }
+  if (typeof body?.branch === "string" && body.branch.trim()) updates.branch = body.branch.trim();
+  if (typeof body?.port === "number") {
+    if (!Number.isInteger(body.port) || body.port < 1 || body.port > 65535) {
+      return { ok: false, error: "port must be a valid port", status: 400 };
+    }
+    updates.port = body.port;
+  }
+  if (BUILD_MODES.includes(body?.buildMode as AppBuildMode)) {
+    updates.buildMode = body?.buildMode as AppBuildMode;
+  }
+  if (BUILD_RUNNERS.includes(body?.buildRunner as AppBuildRunner)) {
+    updates.buildRunner = body?.buildRunner as AppBuildRunner;
+  }
+  if (existing.appKind === "database") {
+    const existingDatabaseKind = (existing.databaseKind ?? "postgres") as DatabaseKind;
+    if (typeof body?.databaseVersion === "string" && body.databaseVersion.trim()) {
+      const version = body.databaseVersion.trim();
+      const versionError = validateDatabaseVersion(version);
+      if (versionError) return { ok: false, error: versionError, status: 400 };
+      updates.databaseVersion = version;
+      updates.imageRef = databaseImage(existingDatabaseKind, version);
+    }
+    if (typeof body?.databasePublicEnabled === "boolean") {
+      updates.databasePublicEnabled = body.databasePublicEnabled;
+      if (body.databasePublicEnabled && !(body && "databasePublicPort" in body)) {
+        updates.databasePublicPort =
+          existing.databasePublicPort ?? databasePort(existingDatabaseKind);
+      }
+      if (!body.databasePublicEnabled) {
+        updates.databasePublicPort = null;
+      }
+    }
+    if (body && "databasePublicPort" in body) {
+      const publicPort =
+        typeof body.databasePublicPort === "number" ? body.databasePublicPort : null;
+      const publicPortError = validatePublicPort(publicPort);
+      if (publicPortError) return { ok: false, error: publicPortError, status: 400 };
+      updates.databasePublicPort = publicPort;
+    }
+  }
+  if (body && "volumes" in body) {
+    if (existing.appKind === "database") {
+      return { ok: false, error: "Database volumes are managed by Basse", status: 400 };
+    }
+    const volumes = normalizeVolumes(body.volumes);
+    if (!volumes) return { ok: false, error: "volumes must be an array", status: 400 };
+    const volumeError = validateVolumes(volumes);
+    if (volumeError) return { ok: false, error: volumeError, status: 400 };
+    updates.volumes = JSON.stringify(volumes);
+  }
+  if (body && "cpuLimitMillicores" in body) {
+    const cpuLimit = normalizeCpuLimit(body.cpuLimitMillicores);
+    if (typeof cpuLimit === "undefined") {
+      return {
+        ok: false,
+        error: "CPU limit must be a whole number of millicores or null",
+        status: 400,
+      };
+    }
+    const cpuLimitError = validateCpuLimit(cpuLimit);
+    if (cpuLimitError) return { ok: false, error: cpuLimitError, status: 400 };
+    updates.cpuLimitMillicores = cpuLimit;
+  }
+  if (body && "memoryLimitBytes" in body) {
+    const memoryLimit = normalizeMemoryLimit(body.memoryLimitBytes);
+    if (typeof memoryLimit === "undefined") {
+      return { ok: false, error: "Memory limit must be bytes or null", status: 400 };
+    }
+    const memoryLimitError = validateMemoryLimit(memoryLimit);
+    if (memoryLimitError) return { ok: false, error: memoryLimitError, status: 400 };
+    updates.memoryLimitBytes = memoryLimit;
+  }
+  if ((updates.sourceType ?? existing.sourceType) === "repository") {
+    const repoError = validateRepositoryUrl(updates.repositoryUrl ?? existing.repositoryUrl);
+    if (repoError) return { ok: false, error: repoError, status: 400 };
+  }
+  if ((updates.sourceType ?? existing.sourceType) === "image") {
+    const imageError = validateImageRef(updates.imageRef ?? existing.imageRef ?? "");
+    if (imageError) return { ok: false, error: imageError, status: 400 };
+  }
+  const serverIds = normalizeServerIds(body);
+  if (serverIds) {
+    if (existing.appKind === "database" && serverIds.length !== 1) {
+      return { ok: false, error: "Database apps require exactly one server", status: 400 };
+    }
+    if (!(await validateServersInOrg(serverIds, organizationId))) {
+      return { ok: false, error: "Server not found", status: 404 };
+    }
+    updates.serverId = serverIds[0] ?? null;
+  }
+
+  return { ok: true, updates, serverIds };
 }
 
 export const apps = new Hono();
@@ -958,114 +1093,11 @@ apps.patch("/:id", async (c) => {
   if (!existing) return c.json({ error: "App not found" }, 404);
 
   const body = (await c.req.json().catch(() => null)) as UpdateAppInput | null;
-  const updates: Partial<AppRow> = { updatedAt: new Date() };
+  const result = await buildAppUpdates(existing, body, organizationId);
+  if (!result.ok) return c.json({ error: result.error }, result.status);
 
-  if (typeof body?.name === "string" && body.name.trim()) {
-    updates.name = body.name.trim();
-    updates.slug = slugify(body.name);
-  }
-  if (typeof body?.repositoryUrl === "string") {
-    const repoError = validateRepositoryUrl(body.repositoryUrl.trim());
-    if (repoError) return c.json({ error: repoError }, 400);
-    updates.repositoryUrl = body.repositoryUrl.trim();
-  }
-  if (SOURCE_TYPES.includes(body?.sourceType as AppSourceType)) {
-    updates.sourceType = body?.sourceType as AppSourceType;
-  }
-  if (typeof body?.imageRef === "string" || body?.imageRef === null) {
-    const imageRef = typeof body.imageRef === "string" ? body.imageRef.trim() : "";
-    if ((updates.sourceType ?? existing.sourceType) === "image") {
-      const imageError = validateImageRef(imageRef);
-      if (imageError) return c.json({ error: imageError }, 400);
-    }
-    updates.imageRef = imageRef || null;
-  }
-  if (typeof body?.branch === "string" && body.branch.trim()) updates.branch = body.branch.trim();
-  if (typeof body?.port === "number") {
-    if (!Number.isInteger(body.port) || body.port < 1 || body.port > 65535) {
-      return c.json({ error: "port must be a valid port" }, 400);
-    }
-    updates.port = body.port;
-  }
-  if (BUILD_MODES.includes(body?.buildMode as AppBuildMode)) {
-    updates.buildMode = body?.buildMode as AppBuildMode;
-  }
-  if (BUILD_RUNNERS.includes(body?.buildRunner as AppBuildRunner)) {
-    updates.buildRunner = body?.buildRunner as AppBuildRunner;
-  }
-  if (existing.appKind === "database") {
-    const existingDatabaseKind = (existing.databaseKind ?? "postgres") as DatabaseKind;
-    if (typeof body?.databaseVersion === "string" && body.databaseVersion.trim()) {
-      const version = body.databaseVersion.trim();
-      const versionError = validateDatabaseVersion(version);
-      if (versionError) return c.json({ error: versionError }, 400);
-      updates.databaseVersion = version;
-      updates.imageRef = databaseImage(existingDatabaseKind, version);
-    }
-    if (typeof body?.databasePublicEnabled === "boolean") {
-      updates.databasePublicEnabled = body.databasePublicEnabled;
-      if (body.databasePublicEnabled && !(body && "databasePublicPort" in body)) {
-        updates.databasePublicPort =
-          existing.databasePublicPort ?? databasePort(existingDatabaseKind);
-      }
-      if (!body.databasePublicEnabled) {
-        updates.databasePublicPort = null;
-      }
-    }
-    if (body && "databasePublicPort" in body) {
-      const publicPort =
-        typeof body.databasePublicPort === "number" ? body.databasePublicPort : null;
-      const publicPortError = validatePublicPort(publicPort);
-      if (publicPortError) return c.json({ error: publicPortError }, 400);
-      updates.databasePublicPort = publicPort;
-    }
-  }
-  if (body && "volumes" in body) {
-    if (existing.appKind === "database") {
-      return c.json({ error: "Database volumes are managed by Basse" }, 400);
-    }
-    const volumes = normalizeVolumes(body.volumes);
-    if (!volumes) return c.json({ error: "volumes must be an array" }, 400);
-    const volumeError = validateVolumes(volumes);
-    if (volumeError) return c.json({ error: volumeError }, 400);
-    updates.volumes = JSON.stringify(volumes);
-  }
-  if (body && "cpuLimitMillicores" in body) {
-    const cpuLimit = normalizeCpuLimit(body.cpuLimitMillicores);
-    if (typeof cpuLimit === "undefined") {
-      return c.json({ error: "CPU limit must be a whole number of millicores or null" }, 400);
-    }
-    const cpuLimitError = validateCpuLimit(cpuLimit);
-    if (cpuLimitError) return c.json({ error: cpuLimitError }, 400);
-    updates.cpuLimitMillicores = cpuLimit;
-  }
-  if (body && "memoryLimitBytes" in body) {
-    const memoryLimit = normalizeMemoryLimit(body.memoryLimitBytes);
-    if (typeof memoryLimit === "undefined") {
-      return c.json({ error: "Memory limit must be bytes or null" }, 400);
-    }
-    const memoryLimitError = validateMemoryLimit(memoryLimit);
-    if (memoryLimitError) return c.json({ error: memoryLimitError }, 400);
-    updates.memoryLimitBytes = memoryLimit;
-  }
-  if ((updates.sourceType ?? existing.sourceType) === "repository") {
-    const repoError = validateRepositoryUrl(updates.repositoryUrl ?? existing.repositoryUrl);
-    if (repoError) return c.json({ error: repoError }, 400);
-  }
-  if ((updates.sourceType ?? existing.sourceType) === "image") {
-    const imageError = validateImageRef(updates.imageRef ?? existing.imageRef ?? "");
-    if (imageError) return c.json({ error: imageError }, 400);
-  }
-  const serverIds = normalizeServerIds(body);
-  if (serverIds) {
-    if (existing.appKind === "database" && serverIds.length !== 1) {
-      return c.json({ error: "Database apps require exactly one server" }, 400);
-    }
-    if (!(await validateServersInOrg(serverIds, organizationId))) {
-      return c.json({ error: "Server not found" }, 404);
-    }
-    updates.serverId = serverIds[0] ?? null;
-  }
+  const updates: Partial<AppRow> = { ...result.updates, updatedAt: new Date() };
+  const serverIds = result.serverIds;
 
   const updated = await db.transaction(async (tx) => {
     const [row] = await tx.update(app).set(updates).where(eq(app.id, existing.id)).returning();

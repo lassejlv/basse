@@ -64,6 +64,7 @@ import { createEnvironment, listEnvironments } from "@/lib/environments";
 import { relativeTime } from "@/lib/format";
 import { deleteProject, getProject } from "@/lib/projects";
 import { listServers } from "@/lib/servers";
+import { toast } from "@/lib/toast";
 
 export const Route = createFileRoute("/_authed/projects/$projectId")({
   component: ProjectDetailRoute,
@@ -94,6 +95,7 @@ function ProjectDetailRoute() {
       setDeleteError(null);
       await queryClient.invalidateQueries({ queryKey: ["projects"] });
       await navigate({ to: "/projects" });
+      toast.success("Project deleted");
     },
     onError: (mutationError: Error) => setDeleteError(mutationError.message),
   });
@@ -334,6 +336,7 @@ function ImportContainerDialog({ environmentId }: { environmentId: string }) {
       reset();
       setOpen(false);
       await queryClient.invalidateQueries({ queryKey: ["apps", environmentId] });
+      toast.success("Container imported");
     },
     onError: (mutationError: Error) => setError(mutationError.message),
   });
@@ -519,6 +522,7 @@ function NewEnvironmentDialog({ projectId }: { projectId: string }) {
       setError(null);
       setOpen(false);
       await queryClient.invalidateQueries({ queryKey: ["environments", projectId] });
+      toast.success("Environment created");
     },
     onError: (mutationError: Error) => setError(mutationError.message),
   });
@@ -656,9 +660,11 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
       });
     },
     onSuccess: async () => {
+      const kind = appKind;
       reset();
       setOpen(false);
       await queryClient.invalidateQueries({ queryKey: ["apps", environmentId] });
+      toast.success(kind === "database" ? "Database created" : "App created");
     },
     onError: (mutationError: Error) => setError(mutationError.message),
   });

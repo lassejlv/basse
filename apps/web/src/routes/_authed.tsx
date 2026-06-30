@@ -1,6 +1,5 @@
 import { Link, Outlet, createFileRoute, redirect, useLocation } from "@tanstack/react-router";
 import {
-  CloudIcon,
   FolderIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
@@ -99,9 +98,6 @@ function AuthedLayout() {
                 size="lg"
                 tooltip="Basse"
               >
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-sidebar-border bg-sidebar-primary text-sidebar-primary-foreground">
-                  <CloudIcon className="size-4" />
-                </span>
                 <span className="flex min-w-0 flex-col">
                   <span className="truncate font-semibold">Basse</span>
                   <span className="truncate text-muted-foreground text-xs">Personal cloud</span>

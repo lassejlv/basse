@@ -211,6 +211,45 @@ export const deployment = pgTable("deployment", {
   updatedAt: timestamp("updated_at").notNull(),
 });
 
+// Railway-style staged ("uncommitted") changes for an app. Each row is one
+// pending edit to the app's config or env vars, not yet applied to the live
+// `app`/`env_var` tables. They survive page reloads and are applied as a batch
+// (then a deploy is triggered) or discarded. Workspace-scoped transitively via
+// the app (app->environment->project->organizationId).
+export const stagedChange = pgTable(
+  "staged_change",
+  {
+    id: text("id").primaryKey(),
+    appId: text("app_id")
+      .notNull()
+      .references(() => app.id, { onDelete: "cascade" }),
+    // What the change targets. "app" = a column on the app row; "env_var" = a
+    // runtime environment variable.
+    resource: text("resource", { enum: ["app", "env_var"] }).notNull(),
+    // For "app" this is always "update". For "env_var" it is create/update/delete.
+    action: text("action", { enum: ["create", "update", "delete"] }).notNull(),
+    // For "app": the app DB column name (e.g. "port", "serverIds"). For
+    // "env_var": the variable key.
+    field: text("field").notNull(),
+    // New value. For "app" rows: JSON-encoded column value. For "env_var" rows:
+    // the new value, AES-encrypted at rest (null for a delete).
+    value: text("value"),
+    // Snapshot of the prior value (same encoding as `value`) for diff display;
+    // null when the change creates something that did not exist.
+    previousValue: text("previous_value"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("staged_change_appId_idx").on(table.appId),
+    uniqueIndex("staged_change_appId_resource_field_uidx").on(
+      table.appId,
+      table.resource,
+      table.field,
+    ),
+  ],
+);
+
 export const workspaceSettings = pgTable("workspace_settings", {
   organizationId: text("organization_id")
     .primaryKey()
@@ -264,6 +303,7 @@ export const appRelations = relations(app, ({ one, many }) => ({
   deployments: many(deployment),
   envVars: many(envVar),
   appServers: many(appServer),
+  stagedChanges: many(stagedChange),
 }));
 
 export const appServerRelations = relations(appServer, ({ one }) => ({
@@ -291,6 +331,13 @@ export const deploymentRelations = relations(deployment, ({ one }) => ({
   }),
 }));
 
+export const stagedChangeRelations = relations(stagedChange, ({ one }) => ({
+  app: one(app, {
+    fields: [stagedChange.appId],
+    references: [app.id],
+  }),
+}));
+
 // A custom domain routed by the server's Caddy proxy to an upstream
 // (container:port or host:port). Workspace-scoped transitively via its server —
 // there is NO organizationId column, so every API path MUST join domain->server.
@@ -313,7 +360,7 @@ export const domain = pgTable(
   },
   (table) => [
     index("domain_serverId_idx").on(table.serverId),
-    uniqueIndex("domain_host_uidx").on(table.host),
+    uniqueIndex("domain_serverId_host_uidx").on(table.serverId, table.host),
   ],
 );
 
@@ -358,6 +405,102 @@ export const depotConnection = pgTable("depot_connection", {
   updatedAt: timestamp("updated_at").notNull(),
 });
 
+// Workspace-level credentials for third-party traffic providers. Tokens are
+// encrypted by the API before they reach this table.
+export const loadBalancerIntegration = pgTable(
+  "load_balancer_integration",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    provider: text("provider", { enum: ["hetzner", "cloudflare"] }).notNull(),
+    name: text("name").notNull(),
+    token: text("token").notNull(),
+    tokenHint: text("token_hint"),
+    status: text("status", { enum: ["active", "error"] }).notNull().default("active"),
+    statusMessage: text("status_message"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("load_balancer_integration_organizationId_idx").on(table.organizationId),
+    uniqueIndex("load_balancer_integration_organizationId_provider_uidx").on(
+      table.organizationId,
+      table.provider,
+    ),
+  ],
+);
+
+// Basse-owned load balancer resources. The provider-specific resource id is
+// intentionally opaque; sync code owns translating this row into provider API calls.
+export const loadBalancer = pgTable(
+  "load_balancer",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    integrationId: text("integration_id")
+      .notNull()
+      .references(() => loadBalancerIntegration.id, { onDelete: "cascade" }),
+    appId: text("app_id")
+      .notNull()
+      .references(() => app.id, { onDelete: "cascade" }),
+    provider: text("provider", { enum: ["hetzner", "cloudflare"] }).notNull(),
+    name: text("name").notNull(),
+    host: text("host").notNull(),
+    location: text("location").notNull().default("fsn1"),
+    loadBalancerType: text("load_balancer_type").notNull().default("lb11"),
+    healthCheckPath: text("health_check_path").notNull().default("/"),
+    providerResourceId: text("provider_resource_id"),
+    endpointIpv4: text("endpoint_ipv4"),
+    endpointIpv6: text("endpoint_ipv6"),
+    status: text("status", { enum: ["pending", "syncing", "active", "error"] })
+      .notNull()
+      .default("pending"),
+    statusMessage: text("status_message"),
+    lastSyncedAt: timestamp("last_synced_at"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("load_balancer_organizationId_idx").on(table.organizationId),
+    index("load_balancer_integrationId_idx").on(table.integrationId),
+    uniqueIndex("load_balancer_appId_uidx").on(table.appId),
+    uniqueIndex("load_balancer_organizationId_host_uidx").on(table.organizationId, table.host),
+  ],
+);
+
+export const loadBalancerTarget = pgTable(
+  "load_balancer_target",
+  {
+    id: text("id").primaryKey(),
+    loadBalancerId: text("load_balancer_id")
+      .notNull()
+      .references(() => loadBalancer.id, { onDelete: "cascade" }),
+    serverId: text("server_id")
+      .notNull()
+      .references(() => server.id, { onDelete: "cascade" }),
+    address: text("address").notNull(),
+    providerTargetId: text("provider_target_id"),
+    status: text("status", { enum: ["pending", "active", "error"] })
+      .notNull()
+      .default("pending"),
+    statusMessage: text("status_message"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("load_balancer_target_loadBalancerId_idx").on(table.loadBalancerId),
+    index("load_balancer_target_serverId_idx").on(table.serverId),
+    uniqueIndex("load_balancer_target_loadBalancerId_serverId_uidx").on(
+      table.loadBalancerId,
+      table.serverId,
+    ),
+  ],
+);
+
 export const sshKeyRelations = relations(sshKey, ({ one }) => ({
   organization: one(organization, {
     fields: [sshKey.organizationId],
@@ -369,5 +512,43 @@ export const depotConnectionRelations = relations(depotConnection, ({ one }) => 
   organization: one(organization, {
     fields: [depotConnection.organizationId],
     references: [organization.id],
+  }),
+}));
+
+export const loadBalancerIntegrationRelations = relations(
+  loadBalancerIntegration,
+  ({ one, many }) => ({
+    organization: one(organization, {
+      fields: [loadBalancerIntegration.organizationId],
+      references: [organization.id],
+    }),
+    loadBalancers: many(loadBalancer),
+  }),
+);
+
+export const loadBalancerRelations = relations(loadBalancer, ({ one, many }) => ({
+  organization: one(organization, {
+    fields: [loadBalancer.organizationId],
+    references: [organization.id],
+  }),
+  integration: one(loadBalancerIntegration, {
+    fields: [loadBalancer.integrationId],
+    references: [loadBalancerIntegration.id],
+  }),
+  app: one(app, {
+    fields: [loadBalancer.appId],
+    references: [app.id],
+  }),
+  targets: many(loadBalancerTarget),
+}));
+
+export const loadBalancerTargetRelations = relations(loadBalancerTarget, ({ one }) => ({
+  loadBalancer: one(loadBalancer, {
+    fields: [loadBalancerTarget.loadBalancerId],
+    references: [loadBalancer.id],
+  }),
+  server: one(server, {
+    fields: [loadBalancerTarget.serverId],
+    references: [server.id],
   }),
 }));

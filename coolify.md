@@ -44,14 +44,25 @@ Checked against the current repo on 2026-06-30.
 - [x] Added user avatar, name, and email in the bottom of the dashboard sidebar.
 - [x] Reduced dashboard content to a simple overview heading and description.
 - [x] Kept the public root `/` redirecting to `/dashboard`.
+- [x] Added workspace traffic-provider integrations for managed load balancers, starting with Hetzner Cloud.
+- [x] Added managed load balancer and load balancer target records in `packages/db`.
+- [x] Added Hetzner Cloud load balancer creation/sync with 80/443 passthrough services, health checks, endpoint capture, and target tracking.
+- [x] Relaxed domain uniqueness to allow the same host on multiple target servers behind a managed load balancer.
+- [x] Added dashboard flows to connect Hetzner and attach a managed load balancer to multi-server service apps.
 
 ### Current Validation
 
 - [x] `bun run check`
 - [x] `bun run lint`
+- [x] `bun run --cwd apps/web build`
+- [x] `git diff --check`
 
 ### Next Implementation Targets
 
+- [ ] Add Cloudflare Load Balancers as a second traffic-provider adapter.
+- [ ] Add automatic managed load balancer resync when app server assignments change.
+- [ ] Add provider DNS automation once Basse owns authoritative DNS settings.
+- [ ] Add load balancer action history and health telemetry.
 - [ ] Add real dashboard data fetching through TanStack Query.
 - [ ] Add API routes for projects, servers, apps, and deployments.
 - [ ] Add authenticated API middleware.
@@ -204,9 +215,9 @@ Features:
 
 Basse parity:
 
-- v0: one domain per app, Caddy route generation.
-- v1: multiple domains, TLS automation, redirects.
-- later: wildcard domains, custom headers, middleware, proxy logs UI.
+- v0: one domain per single-server app, Caddy route generation, managed Hetzner load balancers for multi-server service apps.
+- v1: multiple domains, TLS automation, redirects, Cloudflare load balancer support.
+- later: wildcard domains, custom headers, middleware, proxy logs UI, provider DNS automation.
 
 ## Environment Variables And Secrets
 
