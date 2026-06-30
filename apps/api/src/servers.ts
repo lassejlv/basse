@@ -220,6 +220,32 @@ servers.post("/:id/provision", async (c) => {
   return c.body(null, 202);
 });
 
+servers.post("/:id/proxy/resync", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+
+  if (organizationId instanceof Response) {
+    return organizationId;
+  }
+
+  const [row] = await db
+    .select({ id: server.id })
+    .from(server)
+    .where(and(eq(server.id, c.req.param("id")), eq(server.organizationId, organizationId)))
+    .limit(1);
+
+  if (!row) {
+    return c.json({ error: "Server not found" }, 404);
+  }
+
+  try {
+    await enqueueAction("sync-domains", row.id);
+  } catch {
+    return c.json({ error: "Could not queue resync" }, 503);
+  }
+
+  return c.body(null, 202);
+});
+
 servers.post("/:id/check-connection", async (c) => {
   const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
 

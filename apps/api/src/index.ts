@@ -4,6 +4,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { auth } from "./auth";
 import { depot } from "./depot";
+import { domains } from "./domains";
 import { projects } from "./projects";
 import { actionsQueue } from "./queue/queue";
 import { reconcileProvisioningServers } from "./queue/reconcile";
@@ -36,6 +37,7 @@ app.route("/api/projects", projects);
 app.route("/api/ssh-keys", sshKeys);
 app.route("/api/depot", depot);
 app.route("/api/servers", servers);
+app.route("/api/domains", domains);
 
 app.get("/health", (c) =>
   c.json({

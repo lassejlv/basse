@@ -1,10 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
-import { ArrowLeftIcon } from "lucide-react";
-import { useState } from "react";
+import { ArrowLeftIcon, TrashIcon } from "lucide-react";
+import { FormEvent, useState } from "react";
 import { ServerStatusBadge } from "@/components/server-status-badge";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
+import {
+  createDomain,
+  deleteDomain,
+  listDomains,
+  resyncProxy,
+} from "@/lib/domains";
 import {
   checkServerConnection,
   deleteServer,
@@ -155,6 +164,8 @@ function ServerDetailRoute() {
         </div>
       </div>
 
+      <DomainsSection serverId={serverId} sshHost={data.sshHost} />
+
       <div className="max-w-2xl rounded-lg border border-destructive/24 bg-card p-6">
         <h2 className="text-lg font-semibold">Danger zone</h2>
         <p className="mt-1 text-muted-foreground text-sm">
@@ -171,5 +182,140 @@ function ServerDetailRoute() {
         </Button>
       </div>
     </section>
+  );
+}
+
+const DOMAIN_STATUS_VARIANT = {
+  pending: "outline",
+  active: "success",
+  error: "error",
+} as const;
+
+function DomainsSection({ serverId, sshHost }: { serverId: string; sshHost: string }) {
+  const queryClient = useQueryClient();
+  const queryKey = ["domains", serverId];
+  const [host, setHost] = useState("");
+  const [upstream, setUpstream] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const domains = useQuery({
+    queryKey,
+    queryFn: () => listDomains(serverId),
+    // Poll while any domain is mid-sync.
+    refetchInterval: (query) =>
+      (query.state.data ?? []).some((d) => d.status === "pending") ? 2000 : false,
+  });
+
+  const add = useMutation({
+    mutationFn: () => createDomain(serverId, { host, upstream }),
+    onSuccess: async () => {
+      setHost("");
+      setUpstream("");
+      setError(null);
+      await queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (mutationError: Error) => setError(mutationError.message),
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) => deleteDomain(id),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey });
+    },
+  });
+
+  const resync = useMutation({
+    mutationFn: () => resyncProxy(serverId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey });
+    },
+  });
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    add.mutate();
+  }
+
+  const domainList = domains.data ?? [];
+
+  return (
+    <div className="max-w-2xl rounded-lg border bg-card p-6">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-lg font-semibold">Domains</h2>
+        <Button loading={resync.isPending} onClick={() => resync.mutate()} size="sm" variant="outline">
+          Resync proxy
+        </Button>
+      </div>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Point each domain's DNS A record at <code className="font-mono">{sshHost}</code>, then it is
+        routed to its upstream with automatic HTTPS.
+      </p>
+
+      <div className="mt-5">
+        {domains.isPending ? (
+          <p className="text-muted-foreground text-sm">Loading…</p>
+        ) : domainList.length === 0 ? (
+          <p className="text-muted-foreground text-sm">No domains yet.</p>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {domainList.map((d) => (
+              <li
+                key={d.id}
+                className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="truncate font-medium text-sm">{d.host}</p>
+                    <Badge variant={DOMAIN_STATUS_VARIANT[d.status]}>{d.status}</Badge>
+                  </div>
+                  <p className="truncate font-mono text-muted-foreground text-xs">
+                    → {d.upstream}
+                    {d.statusMessage ? ` · ${d.statusMessage}` : ""}
+                  </p>
+                </div>
+                <Button
+                  aria-label={`Delete ${d.host}`}
+                  loading={remove.isPending && remove.variables === d.id}
+                  onClick={() => remove.mutate(d.id)}
+                  size="icon"
+                  variant="outline"
+                >
+                  <TrashIcon />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <form className="mt-6 space-y-4 border-t pt-6" onSubmit={handleSubmit}>
+        <div className="space-y-2">
+          <Label htmlFor="domain-host">Domain</Label>
+          <Input
+            id="domain-host"
+            onChange={(event) => setHost(event.currentTarget.value)}
+            placeholder="app.example.com"
+            required
+            value={host}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="domain-upstream">Upstream</Label>
+          <Input
+            id="domain-upstream"
+            onChange={(event) => setUpstream(event.currentTarget.value)}
+            placeholder="my-container:3000"
+            required
+            value={upstream}
+          />
+        </div>
+
+        {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+
+        <Button loading={add.isPending} type="submit">
+          Add domain
+        </Button>
+      </form>
+    </div>
   );
 }
