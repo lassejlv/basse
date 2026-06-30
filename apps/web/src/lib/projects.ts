@@ -16,6 +16,18 @@ export async function listProjects(): Promise<Project[]> {
   return response.json() as Promise<Project[]>;
 }
 
+export async function getProject(id: string): Promise<Project> {
+  const response = await fetch(`${apiBaseUrl}/api/projects/${id}`, {
+    credentials: "include",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Project request failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<Project>;
+}
+
 export async function createProject(name: string): Promise<Project> {
   const response = await fetch(`${apiBaseUrl}/api/projects`, {
     method: "POST",

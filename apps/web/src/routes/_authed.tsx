@@ -1,6 +1,7 @@
 import { Link, Outlet, createFileRoute, redirect, useLocation } from "@tanstack/react-router";
 import {
   CloudIcon,
+  FolderIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
   ServerIcon,
@@ -52,11 +53,13 @@ function AuthedLayout() {
   const pathname = useLocation({ select: (location) => location.pathname });
   const pageTitle = pathname.startsWith("/servers")
     ? "Servers"
-    : pathname === "/secrets"
-      ? "Secrets"
-      : pathname === "/settings"
-        ? "Settings"
-        : "Overview";
+    : pathname.startsWith("/projects") || pathname.startsWith("/apps")
+      ? "Projects"
+      : pathname === "/secrets"
+        ? "Secrets"
+        : pathname === "/settings"
+          ? "Settings"
+          : "Overview";
   const user = session.user;
   const displayName = user.name || user.email;
   const initials = getInitials(displayName);
@@ -150,6 +153,16 @@ function AuthedLayout() {
             <SidebarGroupLabel>Infrastructure</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    isActive={pathname.startsWith("/projects") || pathname.startsWith("/apps")}
+                    render={<Link to="/projects" />}
+                    tooltip="Projects"
+                  >
+                    <FolderIcon />
+                    <span>Projects</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
                 <SidebarMenuItem>
                   <SidebarMenuButton
                     isActive={pathname.startsWith("/servers")}

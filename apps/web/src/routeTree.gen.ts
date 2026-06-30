@@ -17,7 +17,10 @@ import { Route as AuthedSettingsRouteImport } from './routes/_authed/settings'
 import { Route as AuthedSecretsRouteImport } from './routes/_authed/secrets'
 import { Route as AuthedDashboardRouteImport } from './routes/_authed/dashboard'
 import { Route as AuthedServersIndexRouteImport } from './routes/_authed/servers.index'
+import { Route as AuthedProjectsIndexRouteImport } from './routes/_authed/projects.index'
 import { Route as AuthedServersServerIdRouteImport } from './routes/_authed/servers.$serverId'
+import { Route as AuthedProjectsProjectIdRouteImport } from './routes/_authed/projects.$projectId'
+import { Route as AuthedAppsAppIdRouteImport } from './routes/_authed/apps.$appId'
 
 const SignupRoute = SignupRouteImport.update({
   id: '/signup',
@@ -58,9 +61,24 @@ const AuthedServersIndexRoute = AuthedServersIndexRouteImport.update({
   path: '/servers/',
   getParentRoute: () => AuthedRoute,
 } as any)
+const AuthedProjectsIndexRoute = AuthedProjectsIndexRouteImport.update({
+  id: '/projects/',
+  path: '/projects/',
+  getParentRoute: () => AuthedRoute,
+} as any)
 const AuthedServersServerIdRoute = AuthedServersServerIdRouteImport.update({
   id: '/servers/$serverId',
   path: '/servers/$serverId',
+  getParentRoute: () => AuthedRoute,
+} as any)
+const AuthedProjectsProjectIdRoute = AuthedProjectsProjectIdRouteImport.update({
+  id: '/projects/$projectId',
+  path: '/projects/$projectId',
+  getParentRoute: () => AuthedRoute,
+} as any)
+const AuthedAppsAppIdRoute = AuthedAppsAppIdRouteImport.update({
+  id: '/apps/$appId',
+  path: '/apps/$appId',
   getParentRoute: () => AuthedRoute,
 } as any)
 
@@ -71,7 +89,10 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof AuthedDashboardRoute
   '/secrets': typeof AuthedSecretsRoute
   '/settings': typeof AuthedSettingsRoute
+  '/apps/$appId': typeof AuthedAppsAppIdRoute
+  '/projects/$projectId': typeof AuthedProjectsProjectIdRoute
   '/servers/$serverId': typeof AuthedServersServerIdRoute
+  '/projects/': typeof AuthedProjectsIndexRoute
   '/servers/': typeof AuthedServersIndexRoute
 }
 export interface FileRoutesByTo {
@@ -81,7 +102,10 @@ export interface FileRoutesByTo {
   '/dashboard': typeof AuthedDashboardRoute
   '/secrets': typeof AuthedSecretsRoute
   '/settings': typeof AuthedSettingsRoute
+  '/apps/$appId': typeof AuthedAppsAppIdRoute
+  '/projects/$projectId': typeof AuthedProjectsProjectIdRoute
   '/servers/$serverId': typeof AuthedServersServerIdRoute
+  '/projects': typeof AuthedProjectsIndexRoute
   '/servers': typeof AuthedServersIndexRoute
 }
 export interface FileRoutesById {
@@ -93,7 +117,10 @@ export interface FileRoutesById {
   '/_authed/dashboard': typeof AuthedDashboardRoute
   '/_authed/secrets': typeof AuthedSecretsRoute
   '/_authed/settings': typeof AuthedSettingsRoute
+  '/_authed/apps/$appId': typeof AuthedAppsAppIdRoute
+  '/_authed/projects/$projectId': typeof AuthedProjectsProjectIdRoute
   '/_authed/servers/$serverId': typeof AuthedServersServerIdRoute
+  '/_authed/projects/': typeof AuthedProjectsIndexRoute
   '/_authed/servers/': typeof AuthedServersIndexRoute
 }
 export interface FileRouteTypes {
@@ -105,7 +132,10 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/secrets'
     | '/settings'
+    | '/apps/$appId'
+    | '/projects/$projectId'
     | '/servers/$serverId'
+    | '/projects/'
     | '/servers/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -115,7 +145,10 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/secrets'
     | '/settings'
+    | '/apps/$appId'
+    | '/projects/$projectId'
     | '/servers/$serverId'
+    | '/projects'
     | '/servers'
   id:
     | '__root__'
@@ -126,7 +159,10 @@ export interface FileRouteTypes {
     | '/_authed/dashboard'
     | '/_authed/secrets'
     | '/_authed/settings'
+    | '/_authed/apps/$appId'
+    | '/_authed/projects/$projectId'
     | '/_authed/servers/$serverId'
+    | '/_authed/projects/'
     | '/_authed/servers/'
   fileRoutesById: FileRoutesById
 }
@@ -195,11 +231,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedServersIndexRouteImport
       parentRoute: typeof AuthedRoute
     }
+    '/_authed/projects/': {
+      id: '/_authed/projects/'
+      path: '/projects'
+      fullPath: '/projects/'
+      preLoaderRoute: typeof AuthedProjectsIndexRouteImport
+      parentRoute: typeof AuthedRoute
+    }
     '/_authed/servers/$serverId': {
       id: '/_authed/servers/$serverId'
       path: '/servers/$serverId'
       fullPath: '/servers/$serverId'
       preLoaderRoute: typeof AuthedServersServerIdRouteImport
+      parentRoute: typeof AuthedRoute
+    }
+    '/_authed/projects/$projectId': {
+      id: '/_authed/projects/$projectId'
+      path: '/projects/$projectId'
+      fullPath: '/projects/$projectId'
+      preLoaderRoute: typeof AuthedProjectsProjectIdRouteImport
+      parentRoute: typeof AuthedRoute
+    }
+    '/_authed/apps/$appId': {
+      id: '/_authed/apps/$appId'
+      path: '/apps/$appId'
+      fullPath: '/apps/$appId'
+      preLoaderRoute: typeof AuthedAppsAppIdRouteImport
       parentRoute: typeof AuthedRoute
     }
   }
@@ -209,7 +266,10 @@ interface AuthedRouteChildren {
   AuthedDashboardRoute: typeof AuthedDashboardRoute
   AuthedSecretsRoute: typeof AuthedSecretsRoute
   AuthedSettingsRoute: typeof AuthedSettingsRoute
+  AuthedAppsAppIdRoute: typeof AuthedAppsAppIdRoute
+  AuthedProjectsProjectIdRoute: typeof AuthedProjectsProjectIdRoute
   AuthedServersServerIdRoute: typeof AuthedServersServerIdRoute
+  AuthedProjectsIndexRoute: typeof AuthedProjectsIndexRoute
   AuthedServersIndexRoute: typeof AuthedServersIndexRoute
 }
 
@@ -217,7 +277,10 @@ const AuthedRouteChildren: AuthedRouteChildren = {
   AuthedDashboardRoute: AuthedDashboardRoute,
   AuthedSecretsRoute: AuthedSecretsRoute,
   AuthedSettingsRoute: AuthedSettingsRoute,
+  AuthedAppsAppIdRoute: AuthedAppsAppIdRoute,
+  AuthedProjectsProjectIdRoute: AuthedProjectsProjectIdRoute,
   AuthedServersServerIdRoute: AuthedServersServerIdRoute,
+  AuthedProjectsIndexRoute: AuthedProjectsIndexRoute,
   AuthedServersIndexRoute: AuthedServersIndexRoute,
 }
 
