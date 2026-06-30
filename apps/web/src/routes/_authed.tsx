@@ -117,7 +117,11 @@ function AuthedLayout() {
                 className="h-9 w-full min-w-0 bg-background"
                 disabled={!workspaceList.length}
               >
-                <SelectValue placeholder="Select workspace" />
+                <SelectValue placeholder="Select workspace">
+                  {(value: string) =>
+                    workspaceList.find((o) => o.id === value)?.name ?? "Select workspace"
+                  }
+                </SelectValue>
               </SelectButton>
               <SelectPopup>
                 {workspaceList.map((organization) => (

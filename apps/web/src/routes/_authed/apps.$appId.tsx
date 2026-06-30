@@ -105,7 +105,12 @@ function ServerCard({ app }: { app: App }) {
             }}
           >
             <SelectButton className="w-full max-w-sm">
-              <SelectValue placeholder="Select a server" />
+              <SelectValue placeholder="Select a server">
+                {(value: string) => {
+                  const s = serverList.find((x) => x.id === value);
+                  return s ? `${s.name} (${s.status})` : "Select a server";
+                }}
+              </SelectValue>
             </SelectButton>
             <SelectPopup>
               {serverList.map((s) => (

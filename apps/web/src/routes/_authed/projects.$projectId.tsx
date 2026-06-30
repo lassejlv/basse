@@ -247,7 +247,11 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
           ) : (
             <Select value={serverId} onValueChange={(v) => setServerId(v ?? "")}>
               <SelectButton className="w-full">
-                <SelectValue placeholder="Select a server" />
+                <SelectValue placeholder="Select a server">
+                  {(value: string) =>
+                    serverList.find((s) => s.id === value)?.name ?? "Select a server"
+                  }
+                </SelectValue>
               </SelectButton>
               <SelectPopup>
                 {serverList.map((s) => (
