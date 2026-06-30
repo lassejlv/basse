@@ -14,7 +14,7 @@ import { and, eq, inArray, ne } from "drizzle-orm";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deployApp, ensureProxy } from "./agent-client";
+import { deployApp, ensureProxy, execAppCommand } from "./agent-client";
 import {
   buildImage,
   buildImageOnServer,
@@ -24,7 +24,7 @@ import {
 } from "./builder";
 import { decryptSecret } from "./crypto";
 import { connectionFromServer } from "./server-connection";
-import { runScript } from "./ssh";
+import { runScript, type SshConnection } from "./ssh";
 
 type DeploymentRow = typeof deployment.$inferSelect;
 type AppVolume = { hostPath: string; containerPath: string; readOnly: boolean };
@@ -140,6 +140,27 @@ function databaseVolume(appId: string, kind: DatabaseKind, version: string | nul
     containerPath: postgresDataPath(version),
     readOnly: false,
   };
+}
+
+async function verifyRedisAuth(
+  connection: SshConnection,
+  agentToken: string,
+  appId: string,
+  password: string,
+): Promise<{ ok: boolean; output: string }> {
+  const passwordArg = shellQuote(password);
+  const command = `
+last=''
+for attempt in 1 2 3 4 5; do
+  last=$(redis-cli --no-auth-warning --user default -a ${passwordArg} PING 2>&1)
+  [ "$last" = "PONG" ] && exit 0
+  sleep 1
+done
+printf "%s" "$last"
+exit 1
+`.trim();
+  const result = await execAppCommand(connection, agentToken, appId, command);
+  return { ok: result.exitCode === 0, output: result.output.trim() };
 }
 
 async function resolveDepotRegistryForImage(
@@ -383,6 +404,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
     // Decrypt the app's runtime env vars.
     const vars = await db.select().from(envVar).where(eq(envVar.appId, appRow.id));
     const envMap: Record<string, string> = {};
+    let databasePasswordPlain: string | null = null;
     for (const v of vars) {
       envMap[v.key] = await decryptSecret(v.value);
     }
@@ -394,6 +416,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         return;
       }
       const password = await decryptSecret(appRow.databasePassword);
+      databasePasswordPlain = password;
       if (databaseKind === "postgres") {
         envMap.POSTGRES_DB = appRow.databaseName ?? "postgres";
         envMap.POSTGRES_USER = appRow.databaseUser ?? "postgres";
@@ -448,6 +471,30 @@ export async function runDeployment(deploymentId: string): Promise<void> {
           ? `Container is running on ${srv.name}.`
           : `Container did not start on ${srv.name}.`,
       );
+      if (
+        result.running &&
+        appRow.appKind === "database" &&
+        databaseKind === "redis" &&
+        databasePasswordPlain
+      ) {
+        log.line("Verifying Redis authentication…");
+        const auth = await verifyRedisAuth(
+          connection,
+          agentToken,
+          appRow.id,
+          databasePasswordPlain,
+        );
+        if (!auth.ok) {
+          log.line(
+            auth.output
+              ? `Redis authentication failed: ${auth.output}`
+              : "Redis authentication failed.",
+          );
+        } else {
+          log.line("Redis authentication verified.");
+        }
+        allRunning &&= auth.ok;
+      }
       allRunning &&= result.running;
     }
 

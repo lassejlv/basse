@@ -115,7 +115,7 @@ function redisUri(input: {
 }): string {
   const password = encodeURIComponent(input.password);
   const database = encodeURIComponent(input.database);
-  return `redis://:${password}@${input.host}:${input.port}/${database}`;
+  return `redis://default:${password}@${input.host}:${input.port}/${database}`;
 }
 
 function databaseUri(
