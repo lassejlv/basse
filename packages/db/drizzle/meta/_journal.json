@@ -141,6 +141,13 @@
       "when": 1782849207934,
       "tag": "0019_thick_hemingway",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1782859480678,
+      "tag": "0020_simple_puck",
+      "breakpoints": true
     }
   ]
 }

@@ -578,6 +578,7 @@ export const sshKey = pgTable(
       .references(() => organization.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     publicKey: text("public_key").notNull(),
+    privateKey: text("private_key"),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },

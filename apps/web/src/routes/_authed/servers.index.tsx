@@ -5,12 +5,14 @@ import { ServerStatusBadge } from "@/components/server-status-badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { authClient } from "@/lib/auth-client";
 import { createServer, listServers } from "@/lib/servers";
+import { listSshKeys } from "@/lib/ssh-keys";
 import { toast } from "@/lib/toast";
 
-type KeySource = "generate" | "paste";
+type KeySource = "generate" | "saved" | "paste";
 
 export const Route = createFileRoute("/_authed/servers/")({
   component: ServersRoute,
@@ -27,12 +29,19 @@ function ServersRoute() {
   const [sshUser, setSshUser] = useState("root");
   const [sshPort, setSshPort] = useState("22");
   const [keySource, setKeySource] = useState<KeySource>("generate");
+  const [sshKeyId, setSshKeyId] = useState("");
   const [privateKey, setPrivateKey] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const servers = useQuery({
     queryKey,
     queryFn: listServers,
+    enabled: Boolean(organizationId),
+  });
+
+  const sshKeys = useQuery({
+    queryKey: ["ssh-keys", organizationId],
+    queryFn: listSshKeys,
     enabled: Boolean(organizationId),
   });
 
@@ -43,6 +52,7 @@ function ServersRoute() {
         sshHost,
         sshUser,
         sshPort: Number(sshPort),
+        sshKeyId: keySource === "saved" ? sshKeyId : undefined,
         privateKey: keySource === "paste" ? privateKey : undefined,
       }),
     onSuccess: async () => {
@@ -51,6 +61,7 @@ function ServersRoute() {
       setSshUser("root");
       setSshPort("22");
       setKeySource("generate");
+      setSshKeyId("");
       setPrivateKey("");
       setError(null);
       await queryClient.invalidateQueries({ queryKey });
@@ -65,6 +76,7 @@ function ServersRoute() {
   }
 
   const serverList = servers.data ?? [];
+  const storedKeys = (sshKeys.data ?? []).filter((key) => key.hasPrivateKey);
 
   return (
     <section className="flex flex-1 flex-col gap-8 p-4 md:p-6">
@@ -168,6 +180,25 @@ function ServersRoute() {
             </label>
             <label className="flex items-start gap-2 text-sm">
               <input
+                checked={keySource === "saved"}
+                className="mt-0.5"
+                disabled={storedKeys.length === 0}
+                name="key-source"
+                onChange={() => {
+                  setKeySource("saved");
+                  setSshKeyId((current) => current || storedKeys[0]?.id || "");
+                }}
+                type="radio"
+              />
+              <span>
+                <span className="font-medium">Use a saved key</span>
+                <span className="block text-muted-foreground text-xs">
+                  Select a private key saved in Secrets.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm">
+              <input
                 checked={keySource === "paste"}
                 className="mt-0.5"
                 name="key-source"
@@ -182,6 +213,31 @@ function ServersRoute() {
               </span>
             </label>
           </div>
+          {keySource === "saved" ? (
+            <div className="space-y-2">
+              <Select value={sshKeyId} onValueChange={(value) => setSshKeyId(value ?? "")}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Select SSH key">
+                    {(value: string) =>
+                      storedKeys.find((key) => key.id === value)?.name ?? "Select SSH key"
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup>
+                  {storedKeys.map((key) => (
+                    <SelectItem key={key.id} value={key.id}>
+                      {key.name}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+              {storedKeys.length === 0 ? (
+                <p className="text-muted-foreground text-xs">
+                  Add a private SSH key in Secrets before using this option.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           {keySource === "paste" ? (
             <Textarea
               aria-label="Private key"
@@ -197,7 +253,11 @@ function ServersRoute() {
 
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
 
-        <Button disabled={!organizationId} loading={add.isPending} type="submit">
+        <Button
+          disabled={!organizationId || (keySource === "saved" && !sshKeyId)}
+          loading={add.isPending}
+          type="submit"
+        >
           Add server
         </Button>
       </form>

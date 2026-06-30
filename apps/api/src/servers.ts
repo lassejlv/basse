@@ -1,4 +1,4 @@
-import { db, server } from "@basse/db";
+import { db, server, sshKey } from "@basse/db";
 import type {
   AgentInfo,
   AgentLogs,
@@ -353,6 +353,7 @@ servers.post("/", async (c) => {
   const sshPort = typeof body?.sshPort === "number" ? body.sshPort : 22;
   const sshUser =
     typeof body?.sshUser === "string" && body.sshUser.trim() ? body.sshUser.trim() : "root";
+  const sshKeyId = typeof body?.sshKeyId === "string" && body.sshKeyId.trim() ? body.sshKeyId.trim() : null;
   const providedPrivateKey =
     typeof body?.privateKey === "string" && body.privateKey.trim() ? body.privateKey.trim() : null;
 
@@ -368,6 +369,10 @@ servers.post("/", async (c) => {
     return c.json({ error: "sshPort must be a valid port" }, 400);
   }
 
+  if (sshKeyId && providedPrivateKey) {
+    return c.json({ error: "Choose a saved SSH key or paste a private key, not both" }, 400);
+  }
+
   const id = crypto.randomUUID();
 
   // Either reuse a pasted private key (deriving its public half) or generate a
@@ -375,7 +380,24 @@ servers.post("/", async (c) => {
   let publicKey: string;
   let privateKey: string;
 
-  if (providedPrivateKey) {
+  if (sshKeyId) {
+    const [storedKey] = await db
+      .select()
+      .from(sshKey)
+      .where(and(eq(sshKey.id, sshKeyId), eq(sshKey.organizationId, organizationId)))
+      .limit(1);
+
+    if (!storedKey) {
+      return c.json({ error: "SSH key not found" }, 404);
+    }
+
+    if (!storedKey.privateKey) {
+      return c.json({ error: "Selected SSH key does not have a stored private key" }, 400);
+    }
+
+    publicKey = storedKey.publicKey;
+    privateKey = await decryptSecret(storedKey.privateKey);
+  } else if (providedPrivateKey) {
     try {
       publicKey = await derivePublicKey(providedPrivateKey);
       privateKey = providedPrivateKey;

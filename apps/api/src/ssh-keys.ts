@@ -2,21 +2,22 @@ import { db, sshKey } from "@basse/db";
 import type { CreateSshKeyInput } from "@basse/shared";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
+import { encryptSecret } from "./crypto";
+import { derivePublicKey } from "./server-keys";
 import { resolveActiveWorkspace } from "./workspace";
 
-const SSH_KEY_PREFIXES = [
-  "ssh-rsa",
-  "ssh-ed25519",
-  "ssh-dss",
-  "ecdsa-sha2-nistp256",
-  "ecdsa-sha2-nistp384",
-  "ecdsa-sha2-nistp521",
-  "sk-ssh-ed25519@openssh.com",
-  "sk-ecdsa-sha2-nistp256@openssh.com",
-];
+type SshKeyRow = typeof sshKey.$inferSelect;
 
-function isValidPublicKey(value: string): boolean {
-  return SSH_KEY_PREFIXES.some((prefix) => value.startsWith(`${prefix} `));
+function sanitizeSshKey(row: SshKeyRow) {
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    name: row.name,
+    publicKey: row.publicKey,
+    hasPrivateKey: Boolean(row.privateKey),
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
 }
 
 export const sshKeys = new Hono();
@@ -34,7 +35,7 @@ sshKeys.get("/", async (c) => {
     .where(eq(sshKey.organizationId, organizationId))
     .orderBy(sshKey.createdAt);
 
-  return c.json(rows);
+  return c.json(rows.map(sanitizeSshKey));
 });
 
 sshKeys.post("/", async (c) => {
@@ -46,14 +47,21 @@ sshKeys.post("/", async (c) => {
 
   const body = (await c.req.json().catch(() => null)) as Partial<CreateSshKeyInput> | null;
   const name = typeof body?.name === "string" ? body.name.trim() : "";
-  const publicKey = typeof body?.publicKey === "string" ? body.publicKey.trim() : "";
+  const privateKey = typeof body?.privateKey === "string" ? body.privateKey.trim() : "";
 
   if (!name) {
     return c.json({ error: "name is required" }, 400);
   }
 
-  if (!isValidPublicKey(publicKey)) {
-    return c.json({ error: "publicKey must be a valid SSH public key" }, 400);
+  if (!privateKey) {
+    return c.json({ error: "privateKey is required" }, 400);
+  }
+
+  let publicKey: string;
+  try {
+    publicKey = await derivePublicKey(privateKey);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Invalid private key" }, 400);
   }
 
   const now = new Date();
@@ -64,12 +72,17 @@ sshKeys.post("/", async (c) => {
       organizationId,
       name,
       publicKey,
+      privateKey: await encryptSecret(privateKey),
       createdAt: now,
       updatedAt: now,
     })
     .returning();
 
-  return c.json(created, 201);
+  if (!created) {
+    return c.json({ error: "Failed to create SSH key" }, 500);
+  }
+
+  return c.json(sanitizeSshKey(created), 201);
 });
 
 sshKeys.delete("/:id", async (c) => {

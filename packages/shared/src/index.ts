@@ -422,13 +422,14 @@ export type SshKey = {
   organizationId: string;
   name: string;
   publicKey: string;
+  hasPrivateKey: boolean;
   createdAt: string;
   updatedAt: string;
 };
 
 export type CreateSshKeyInput = {
   name: string;
-  publicKey: string;
+  privateKey: string;
 };
 
 export type DepotConnection = {
@@ -515,6 +516,7 @@ export type CreateServerInput = {
   sshHost: string;
   sshPort?: number;
   sshUser?: string;
+  sshKeyId?: string;
   // Optional: paste an existing private key to reuse one already trusted on the
   // server. When omitted, Basse generates a new per-server keypair.
   privateKey?: string;

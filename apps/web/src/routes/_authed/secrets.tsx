@@ -38,7 +38,7 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
   const queryClient = useQueryClient();
   const queryKey = ["ssh-keys", organizationId];
   const [name, setName] = useState("");
-  const [publicKey, setPublicKey] = useState("");
+  const [privateKey, setPrivateKey] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const keys = useQuery({
@@ -48,10 +48,10 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
   });
 
   const addKey = useMutation({
-    mutationFn: () => createSshKey({ name, publicKey }),
+    mutationFn: () => createSshKey({ name, privateKey }),
     onSuccess: async () => {
       setName("");
-      setPublicKey("");
+      setPrivateKey("");
       setError(null);
       toast.success("SSH key added");
       await queryClient.invalidateQueries({ queryKey });
@@ -79,7 +79,7 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
     <div className="max-w-2xl rounded-lg border bg-card p-6">
       <h2 className="text-lg font-semibold">SSH Keys</h2>
       <p className="mt-1 text-muted-foreground text-sm">
-        Public keys granted access to this workspace.
+        Private keys Basse can use when connecting to servers in this workspace.
       </p>
 
       <div className="mt-5">
@@ -97,7 +97,7 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
                 <div className="min-w-0">
                   <p className="truncate font-medium text-sm">{key.name}</p>
                   <p className="truncate font-mono text-muted-foreground text-xs">
-                    {key.publicKey}
+                    {key.publicKey} {key.hasPrivateKey ? "" : " · public key only"}
                   </p>
                 </div>
                 <Button
@@ -127,15 +127,19 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
           />
         </div>
         <div className="space-y-2">
-          <Label htmlFor="ssh-key-public">Public key</Label>
+          <Label htmlFor="ssh-key-private">Private key</Label>
           <Textarea
-            id="ssh-key-public"
-            value={publicKey}
-            onChange={(event) => setPublicKey(event.currentTarget.value)}
-            placeholder="ssh-ed25519 AAAA… user@host"
-            rows={3}
+            id="ssh-key-private"
+            value={privateKey}
+            onChange={(event) => setPrivateKey(event.currentTarget.value)}
+            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+            rows={6}
+            className="font-mono text-xs"
             required
           />
+          <p className="text-muted-foreground text-xs">
+            Basse stores it encrypted and derives the public key automatically.
+          </p>
         </div>
 
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
