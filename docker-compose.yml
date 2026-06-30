@@ -24,16 +24,40 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
       BETTER_AUTH_URL: https://${DOMAIN}
       WEB_ORIGIN: https://${DOMAIN}
+      REDIS_URL: redis://redis:6379
       API_HOST: 0.0.0.0
       API_PORT: "3000"
     expose:
       - "3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Give the in-process worker time to finish an in-flight provision on stop.
+    stop_grace_period: 120s
+    networks:
+      - basse
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # appendonly persistence so queued jobs survive a restart. noeviction
+    # (the default) is required — any eviction policy silently corrupts BullMQ.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    # No published ports — internal to the basse network only.
     networks:
       - basse
 
 volumes:
   caddy_data:
   caddy_config:
+  redis_data:
 
 networks:
   basse:
