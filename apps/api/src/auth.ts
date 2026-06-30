@@ -2,7 +2,8 @@ import { db, ensurePersonalWorkspace } from "@basse/db";
 import * as schema from "@basse/db/schema";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { organization } from "better-auth/plugins";
+import { emailOTP, organization } from "better-auth/plugins";
+import { sendOtpEmail } from "./email";
 
 const trustedOrigins = [
   "http://localhost:5173",
@@ -26,8 +27,18 @@ export const auth = betterAuth({
   },
   emailAndPassword: {
     enabled: true,
+    requireEmailVerification: true,
   },
-  plugins: [organization()],
+  plugins: [
+    emailOTP({
+      // Verify email addresses with a one-time code instead of a magic link.
+      overrideDefaultEmailVerification: true,
+      async sendVerificationOTP({ email, otp, type }) {
+        await sendOtpEmail({ email, otp, type });
+      },
+    }),
+    organization(),
+  ],
   secret: Bun.env.BETTER_AUTH_SECRET,
   baseURL: Bun.env.BETTER_AUTH_URL ?? "http://localhost:3000",
   trustedOrigins,

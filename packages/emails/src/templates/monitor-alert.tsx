@@ -1,4 +1,5 @@
-import { Button, Section, Text } from "@react-email/components";
+import { Button, Column, Row, Section, Text } from "@react-email/components";
+import type { CSSProperties } from "react";
 import { EmailHeading, EmailShell, EmailText } from "./base";
 
 export type MonitorAlertEmailProps = {
@@ -9,10 +10,15 @@ export type MonitorAlertEmailProps = {
   alertsUrl?: string | null;
 };
 
-const SEVERITY_COLOR: Record<MonitorAlertEmailProps["severity"], string> = {
-  info: "#2563eb",
-  warning: "#b45309",
-  critical: "#dc2626",
+type SeverityStyle = {
+  label: string;
+  accent: string;
+};
+
+const SEVERITY: Record<MonitorAlertEmailProps["severity"], SeverityStyle> = {
+  info: { label: "Information", accent: "#3b82f6" },
+  warning: { label: "Warning", accent: "#f59e0b" },
+  critical: { label: "Critical", accent: "#ef4444" },
 };
 
 export function MonitorAlertEmail({
@@ -22,78 +28,115 @@ export function MonitorAlertEmail({
   code,
   alertsUrl,
 }: MonitorAlertEmailProps) {
-  const preview = `${severity.toUpperCase()}: ${title}`;
+  const tone = SEVERITY[severity];
+  const preview = `${tone.label} alert · ${title}`;
 
   return (
-    <EmailShell preview={preview}>
-      <Text
-        style={{
-          ...pill,
-          color: SEVERITY_COLOR[severity],
-          borderColor: SEVERITY_COLOR[severity],
-        }}
-      >
-        {severity}
-      </Text>
-      <EmailHeading>{title}</EmailHeading>
-      <EmailText>{message}</EmailText>
-      <Section style={details}>
-        <Text style={detailLabel}>Alert code</Text>
-        <Text style={detailValue}>{code}</Text>
+    <EmailShell preview={preview} accent={tone.accent}>
+      <Section style={content}>
+        <Row style={eyebrowRow}>
+          <Column style={dotCell}>
+            <span style={{ ...dot, backgroundColor: tone.accent }} />
+          </Column>
+          <Column style={eyebrowCell}>
+            <Text style={{ ...eyebrow, color: tone.accent }}>{tone.label} alert</Text>
+          </Column>
+        </Row>
+
+        <EmailHeading>{title}</EmailHeading>
+        <EmailText>{message}</EmailText>
+
+        <Section style={detail}>
+          <Text style={detailLabel}>Alert code</Text>
+          <Text style={detailValue}>{code}</Text>
+        </Section>
+
+        {alertsUrl ? (
+          <Section style={buttonRow}>
+            <Button href={alertsUrl} style={button}>
+              Open alerts &rarr;
+            </Button>
+          </Section>
+        ) : null}
       </Section>
-      {alertsUrl ? (
-        <Button href={alertsUrl} style={button}>
-          Open alerts
-        </Button>
-      ) : null}
     </EmailShell>
   );
 }
 
-const pill = {
-  border: "1px solid",
-  borderRadius: "999px",
+const mono =
+  '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+
+const content: CSSProperties = {
+  padding: "28px 28px 30px",
+};
+
+const eyebrowRow: CSSProperties = {
+  marginBottom: "2px",
+};
+
+const dotCell: CSSProperties = {
+  width: "14px",
+  verticalAlign: "middle",
+};
+
+const eyebrowCell: CSSProperties = {
+  verticalAlign: "middle",
+};
+
+const dot: CSSProperties = {
   display: "inline-block",
+  width: "8px",
+  height: "8px",
+  borderRadius: "9999px",
+};
+
+const eyebrow: CSSProperties = {
   fontSize: "12px",
   fontWeight: "700",
+  letterSpacing: "0.06em",
   lineHeight: "16px",
-  margin: "0 0 14px",
-  padding: "4px 10px",
-  textTransform: "uppercase" as const,
+  textTransform: "uppercase",
+  margin: "0",
 };
 
-const details = {
-  backgroundColor: "#ffffff",
-  border: "1px solid #e5e7eb",
-  borderRadius: "8px",
-  margin: "18px 0",
-  padding: "14px",
+const detail: CSSProperties = {
+  backgroundColor: "#0f0f0f",
+  border: "1px solid #262626",
+  borderRadius: "10px",
+  margin: "22px 0 24px",
+  padding: "14px 16px",
 };
 
-const detailLabel = {
-  color: "#6b7280",
-  fontSize: "12px",
-  lineHeight: "18px",
-  margin: "0 0 4px",
+const detailLabel: CSSProperties = {
+  color: "#737373",
+  fontSize: "11px",
+  fontWeight: "600",
+  letterSpacing: "0.06em",
+  lineHeight: "16px",
+  textTransform: "uppercase",
+  margin: "0 0 6px",
 };
 
-const detailValue = {
-  color: "#111827",
-  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+const detailValue: CSSProperties = {
+  color: "#fafafa",
+  fontFamily: mono,
   fontSize: "13px",
   lineHeight: "20px",
   margin: "0",
 };
 
-const button = {
-  backgroundColor: "#111827",
+const buttonRow: CSSProperties = {
+  marginTop: "2px",
+};
+
+const button: CSSProperties = {
+  backgroundColor: "#fafafa",
   borderRadius: "8px",
-  color: "#ffffff",
+  color: "#0a0a0a",
   display: "inline-block",
   fontSize: "14px",
   fontWeight: "600",
   lineHeight: "20px",
-  marginTop: "4px",
-  padding: "10px 14px",
+  padding: "11px 18px",
   textDecoration: "none",
 };

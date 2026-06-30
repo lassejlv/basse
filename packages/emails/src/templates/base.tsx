@@ -1,32 +1,58 @@
 import {
   Body,
+  Column,
   Container,
   Head,
   Heading,
   Html,
   Preview,
+  Row,
   Section,
   Text,
 } from "@react-email/components";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 export type EmailShellProps = {
   preview: string;
+  /** Optional severity/brand color rendered as a thin bar across the top of the card. */
+  accent?: string;
+  /** Contextual footer note. Defaults to the monitoring opt-in line. */
+  footnote?: ReactNode;
   children: ReactNode;
 };
 
-export function EmailShell({ preview, children }: EmailShellProps) {
+export function EmailShell({ preview, accent, footnote, children }: EmailShellProps) {
   return (
-    <Html>
-      <Head />
+    <Html lang="en">
+      <Head>
+        <meta name="color-scheme" content="dark" />
+        <meta name="supported-color-schemes" content="dark" />
+      </Head>
       <Preview>{preview}</Preview>
       <Body style={body}>
         <Container style={container}>
-          <Section style={brandBar}>
-            <Text style={brand}>Basse</Text>
+          <Section style={brandRow}>
+            <Row>
+              <Column style={brandMarkCell}>
+                <div style={logoMark}>B</div>
+              </Column>
+              <Column style={brandNameCell}>
+                <Text style={wordmark}>Basse</Text>
+              </Column>
+            </Row>
           </Section>
-          {children}
-          <Text style={footer}>Sent by Basse monitoring.</Text>
+
+          <Section style={accent ? { ...card, borderTop: `3px solid ${accent}` } : card}>
+            {children}
+          </Section>
+
+          <Section style={footerWrap}>
+            <Text style={footerText}>
+              {footnote ??
+                "You’re receiving this because monitoring is enabled for your Basse workspace."}
+            </Text>
+            <Text style={footerBrand}>Basse &middot; self-hosted deployments</Text>
+          </Section>
         </Container>
       </Body>
     </Html>
@@ -41,53 +67,93 @@ export function EmailText({ children }: { children: ReactNode }) {
   return <Text style={text}>{children}</Text>;
 }
 
-const body = {
+const sans =
+  '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+
+const body: CSSProperties = {
   margin: "0",
-  backgroundColor: "#f6f8fb",
-  fontFamily:
-    '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+  padding: "32px 16px",
+  backgroundColor: "#0a0a0a",
+  fontFamily: sans,
 };
 
-const container = {
+const container: CSSProperties = {
   width: "100%",
-  maxWidth: "560px",
+  maxWidth: "600px",
   margin: "0 auto",
-  padding: "32px 20px",
 };
 
-const brandBar = {
-  borderBottom: "1px solid #e6e9ef",
-  marginBottom: "24px",
-  paddingBottom: "16px",
+const brandRow: CSSProperties = {
+  padding: "0 4px 18px",
 };
 
-const brand = {
-  color: "#111827",
-  fontSize: "16px",
+const brandMarkCell: CSSProperties = {
+  width: "30px",
+  verticalAlign: "middle",
+};
+
+const brandNameCell: CSSProperties = {
+  verticalAlign: "middle",
+  paddingLeft: "10px",
+};
+
+const logoMark: CSSProperties = {
+  width: "28px",
+  height: "28px",
+  borderRadius: "7px",
+  backgroundColor: "#fafafa",
+  color: "#0a0a0a",
+  fontSize: "15px",
   fontWeight: "700",
+  lineHeight: "28px",
+  textAlign: "center",
+};
+
+const wordmark: CSSProperties = {
+  color: "#fafafa",
+  fontSize: "16px",
+  fontWeight: "600",
+  letterSpacing: "-0.01em",
   margin: "0",
 };
 
-const heading = {
-  color: "#111827",
-  fontSize: "24px",
+const card: CSSProperties = {
+  backgroundColor: "#161616",
+  border: "1px solid #262626",
+  borderRadius: "14px",
+  overflow: "hidden",
+};
+
+const heading: CSSProperties = {
+  color: "#fafafa",
+  fontSize: "22px",
   fontWeight: "700",
-  lineHeight: "32px",
-  margin: "0 0 12px",
+  lineHeight: "30px",
+  letterSpacing: "-0.01em",
+  margin: "14px 0 10px",
 };
 
-const text = {
-  color: "#374151",
-  fontSize: "14px",
-  lineHeight: "22px",
-  margin: "0 0 12px",
+const text: CSSProperties = {
+  color: "#a3a3a3",
+  fontSize: "15px",
+  lineHeight: "24px",
+  margin: "0 0 8px",
 };
 
-const footer = {
-  borderTop: "1px solid #e6e9ef",
-  color: "#6b7280",
+const footerWrap: CSSProperties = {
+  padding: "20px 4px 0",
+};
+
+const footerText: CSSProperties = {
+  color: "#737373",
   fontSize: "12px",
   lineHeight: "18px",
-  margin: "24px 0 0",
-  paddingTop: "16px",
+  margin: "0 0 4px",
+};
+
+const footerBrand: CSSProperties = {
+  color: "#525252",
+  fontSize: "12px",
+  lineHeight: "18px",
+  margin: "0",
 };

@@ -1,5 +1,5 @@
 import { db, member, user } from "@basse/db";
-import { renderMonitorAlertEmail } from "@basse/emails";
+import { type LoginOtpType, renderLoginOtpEmail, renderMonitorAlertEmail } from "@basse/emails";
 import { createEmailClient, type EmailClient } from "@opencoredev/email-sdk";
 import { cloudflare } from "@opencoredev/email-sdk/cloudflare";
 import { observabilityPlugin } from "@opencoredev/email-sdk/plugins/observability";
@@ -48,6 +48,43 @@ function getEmailClient(): EmailClient | null {
     ],
   });
   return emailClient;
+}
+
+const OTP_SUBJECT: Record<LoginOtpType, string> = {
+  "sign-in": "Your Basse sign-in code",
+  "email-verification": "Verify your Basse email",
+  "forget-password": "Reset your Basse password",
+  "change-email": "Confirm your new Basse email",
+};
+
+export async function sendOtpEmail(params: {
+  email: string;
+  otp: string;
+  type: LoginOtpType;
+}): Promise<void> {
+  const { email, otp, type } = params;
+  const client = getEmailClient();
+
+  if (!client) {
+    // Without an email provider configured (e.g. local dev), fall back to logging
+    // so the code is still retrievable and the OTP flow remains testable.
+    console.warn(`[email] OTP delivery disabled; code for ${email} (${type}): ${otp}`);
+    return;
+  }
+
+  const rendered = await renderLoginOtpEmail({ otp, type });
+  await client.send(
+    {
+      from: Bun.env.EMAIL_FROM!,
+      to: email,
+      subject: OTP_SUBJECT[type],
+      text: rendered.text,
+      html: rendered.html,
+    },
+    {
+      metadata: { kind: "otp", type },
+    },
+  );
 }
 
 async function organizationRecipients(organizationId: string): Promise<string[]> {

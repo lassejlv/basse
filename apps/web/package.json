@@ -38,7 +38,8 @@
     "tailwind-merge": "latest",
     "tailwindcss": "latest",
     "tw-animate-css": "latest",
-    "vite": "latest"
+    "vite": "latest",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/vite": "latest",
