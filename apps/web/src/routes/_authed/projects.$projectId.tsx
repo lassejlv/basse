@@ -84,7 +84,7 @@ import { listGitHubRepositories } from "@/lib/github";
 import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
 import { deleteProject, getProject } from "@/lib/projects";
 import { listServers } from "@/lib/servers";
-import { toast } from "@/lib/toast";
+import { toast, toMessage } from "@/lib/toast";
 
 export const Route = createFileRoute("/_authed/projects/$projectId")({
   component: ProjectDetailRoute,
@@ -987,6 +987,12 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
                         repositories={githubRepoList}
                         value={repositoryUrl}
                       />
+                    ) : null}
+                    {githubRepositories.isError ? (
+                      <p className="text-destructive-foreground text-sm">
+                        Couldn't load installed GitHub repositories:{" "}
+                        {toMessage(githubRepositories.error)}
+                      </p>
                     ) : null}
                     <div className="space-y-2">
                       <Label htmlFor="app-repo">Repository URL</Label>

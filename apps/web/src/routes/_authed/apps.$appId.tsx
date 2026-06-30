@@ -1296,6 +1296,11 @@ function BuildSettingsCard({ app }: { app: App }) {
                 value={repositoryUrl}
               />
             ) : null}
+            {githubRepositories.isError ? (
+              <p className="text-destructive-foreground text-sm">
+                Couldn't load installed GitHub repositories: {toMessage(githubRepositories.error)}
+              </p>
+            ) : null}
             <div className="space-y-2">
               <Label htmlFor="app-source-repo">Repository URL</Label>
               <Input
