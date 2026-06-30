@@ -17,20 +17,22 @@ import (
 // Client talks to the Docker daemon over its unix socket.
 type Client struct {
 	http *http.Client
+	// stream has no client-level timeout — long/streaming ops (image pull) bound
+	// themselves with a context deadline instead, so the 10s cap doesn't kill them.
+	stream *http.Client
 }
 
 // New returns a Client that dials the given unix socket path.
 func New(socketPath string) *Client {
-	return &Client{
-		http: &http.Client{
-			Timeout: 10 * time.Second,
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					var d net.Dialer
-					return d.DialContext(ctx, "unix", socketPath)
-				},
-			},
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socketPath)
 		},
+	}
+	return &Client{
+		http:   &http.Client{Timeout: 10 * time.Second, Transport: transport},
+		stream: &http.Client{Transport: transport},
 	}
 }
 

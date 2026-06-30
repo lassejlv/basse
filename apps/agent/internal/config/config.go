@@ -16,14 +16,40 @@ type Config struct {
 	Token string
 	// DockerHost is the Docker Engine API socket path.
 	DockerHost string
+
+	// Proxy (Caddy) settings.
+	CaddyImage     string // image the agent runs as the proxy
+	CaddyContainer string // container name
+	ProxyNetwork   string // shared Docker network Caddy joins to reach upstreams
+	DataVolume     string // named volume for ACME certs/state (NEVER removed)
+	AdminVolume    string // named volume holding the admin unix socket + init.json
+	// AdminDir is where AdminVolume is mounted in BOTH the agent and Caddy. The
+	// admin socket lives at AdminDir/admin.sock; the boot config at AdminDir/init.json.
+	AdminDir string
+}
+
+// AdminSocketPath is the unix socket the agent dials to drive Caddy's admin API.
+func (c Config) AdminSocketPath() string {
+	return c.AdminDir + "/admin.sock"
+}
+
+// InitConfigPath is the boot config Caddy starts from (admin socket + empty http).
+func (c Config) InitConfigPath() string {
+	return c.AdminDir + "/init.json"
 }
 
 // Load reads configuration from the environment and validates it.
 func Load() (Config, error) {
 	cfg := Config{
-		Port:       envOr("BASSE_AGENT_PORT", "8888"),
-		Token:      os.Getenv("BASSE_AGENT_TOKEN"),
-		DockerHost: envOr("BASSE_DOCKER_SOCKET", "/var/run/docker.sock"),
+		Port:           envOr("BASSE_AGENT_PORT", "8888"),
+		Token:          os.Getenv("BASSE_AGENT_TOKEN"),
+		DockerHost:     envOr("BASSE_DOCKER_SOCKET", "/var/run/docker.sock"),
+		CaddyImage:     envOr("BASSE_CADDY_IMAGE", "caddy:2"),
+		CaddyContainer: envOr("BASSE_CADDY_CONTAINER", "basse-caddy"),
+		ProxyNetwork:   envOr("BASSE_PROXY_NETWORK", "basse"),
+		DataVolume:     envOr("BASSE_CADDY_DATA_VOLUME", "basse_caddy_data"),
+		AdminVolume:    envOr("BASSE_CADDY_ADMIN_VOLUME", "basse_caddy_admin"),
+		AdminDir:       envOr("BASSE_CADDY_ADMIN_DIR", "/run/caddy-admin"),
 	}
 
 	if cfg.Token == "" {

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/lassejlv/basse/apps/agent/internal/caddyx"
 	"github.com/lassejlv/basse/apps/agent/internal/config"
 	"github.com/lassejlv/basse/apps/agent/internal/dockerx"
 	"github.com/lassejlv/basse/apps/agent/internal/handlers"
@@ -20,9 +21,11 @@ import (
 // Run builds the router and serves until interrupted, then shuts down gracefully.
 func Run(cfg config.Config, version string) error {
 	docker := dockerx.New(cfg.DockerHost)
+	caddy := caddyx.New(cfg.AdminSocketPath())
 
 	health := handlers.Health{Docker: docker}
 	system := handlers.System{Docker: docker, Version: version}
+	proxy := handlers.Proxy{Docker: docker, Caddy: caddy, Cfg: cfg}
 
 	mux := http.NewServeMux()
 
@@ -33,6 +36,9 @@ func Run(cfg config.Config, version string) error {
 	// Authenticated API.
 	mux.Handle("GET /v1/info", middleware.Bearer(cfg.Token, http.HandlerFunc(system.Info)))
 	mux.Handle("GET /v1/version", middleware.Bearer(cfg.Token, http.HandlerFunc(system.VersionInfo)))
+	mux.Handle("POST /v1/proxy/ensure", middleware.Bearer(cfg.Token, http.HandlerFunc(proxy.Ensure)))
+	mux.Handle("GET /v1/proxy/status", middleware.Bearer(cfg.Token, http.HandlerFunc(proxy.Status)))
+	mux.Handle("POST /v1/proxy/sync", middleware.Bearer(cfg.Token, http.HandlerFunc(proxy.Sync)))
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
