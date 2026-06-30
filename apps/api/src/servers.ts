@@ -78,13 +78,28 @@ async function requireAgent(row: ServerRow) {
 function parseDockerStatsLine(line: string): Omit<AgentMetrics, "timestamp"> {
   const trimmed = line.trim();
   if (!trimmed) {
-    throw new Error("docker stats returned no data");
+    return emptyAgentMetrics();
   }
-  const parsed = JSON.parse(trimmed) as {
+  const jsonLine = trimmed
+    .split("\n")
+    .map((candidate) => candidate.trim())
+    .find((candidate) => candidate.startsWith("{"));
+  if (!jsonLine) return emptyAgentMetrics();
+
+  let parsed: {
     CPUPerc?: string;
     MemUsage?: string;
     MemPerc?: string;
   };
+  try {
+    parsed = JSON.parse(jsonLine) as {
+      CPUPerc?: string;
+      MemUsage?: string;
+      MemPerc?: string;
+    };
+  } catch {
+    return emptyAgentMetrics();
+  }
   const cpuPercent = Number((parsed.CPUPerc ?? "0").replace("%", ""));
   const memoryPercent = Number((parsed.MemPerc ?? "0").replace("%", ""));
   const [memoryValue, memoryLimit] = (parsed.MemUsage ?? "0B / 0B").split("/").map((v) => v.trim());
@@ -93,6 +108,15 @@ function parseDockerStatsLine(line: string): Omit<AgentMetrics, "timestamp"> {
     memoryBytes: parseByteSize(memoryValue ?? "0B"),
     memoryLimitBytes: parseByteSize(memoryLimit ?? "0B"),
     memoryPercent: Number.isFinite(memoryPercent) ? memoryPercent : 0,
+  };
+}
+
+function emptyAgentMetrics(): Omit<AgentMetrics, "timestamp"> {
+  return {
+    cpuPercent: 0,
+    memoryBytes: 0,
+    memoryLimitBytes: 0,
+    memoryPercent: 0,
   };
 }
 
@@ -242,12 +266,9 @@ servers.get("/:id/agent/metrics", async (c) => {
 
   const result = await runScript(
     await connectionFromServer(row),
-    `docker stats --no-stream --format '{{json .}}' basse-agent`,
+    `docker stats --no-stream --format '{{json .}}' basse-agent 2>/dev/null || true`,
     { timeoutMs: 30_000 },
   );
-  if (result.exitCode !== 0) {
-    return c.json({ error: "Could not read agent metrics" }, 502);
-  }
   return c.json({
     timestamp: new Date().toISOString(),
     ...parseDockerStatsLine(result.output),
