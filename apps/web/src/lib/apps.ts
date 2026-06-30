@@ -86,6 +86,20 @@ export async function runAppConsoleCommand(
   return response.json() as Promise<AppConsoleResult>;
 }
 
+export async function stopAppContainer(
+  id: string,
+  input: { serverId?: string },
+): Promise<{ ok: true }> {
+  const response = await fetch(`${apiBaseUrl}/api/apps/${id}/stop`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<{ ok: true }>;
+}
+
 export async function deleteApp(id: string): Promise<void> {
   const response = await fetch(`${apiBaseUrl}/api/apps/${id}`, {
     method: "DELETE",

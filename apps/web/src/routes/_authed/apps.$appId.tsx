@@ -25,7 +25,14 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import type { App } from "@/lib/apps";
-import { getApp, getAppLogs, getAppMetrics, runAppConsoleCommand, updateApp } from "@/lib/apps";
+import {
+  getApp,
+  getAppLogs,
+  getAppMetrics,
+  runAppConsoleCommand,
+  stopAppContainer,
+  updateApp,
+} from "@/lib/apps";
 import { listDeployments, triggerDeploy } from "@/lib/deployments";
 import { createDomain, deleteDomain, listDomains } from "@/lib/domains";
 import { listEnvVars, setEnvVars } from "@/lib/env-vars";
@@ -432,9 +439,11 @@ function VolumesCard({ app }: { app: App }) {
 }
 
 function RuntimeCard({ app }: { app: App }) {
+  const queryClient = useQueryClient();
   const servers = useQuery({ queryKey: ["servers", "runtime"], queryFn: listServers });
   const targetServers = (servers.data ?? []).filter((server) => app.serverIds.includes(server.id));
   const [serverId, setServerId] = useState(app.serverIds[0] ?? "");
+  const [stopError, setStopError] = useState<string | null>(null);
   const [samples, setSamples] = useState<
     { date: Date; cpuPercent: number; memoryPercent: number }[]
   >([]);
@@ -472,6 +481,18 @@ function RuntimeCard({ app }: { app: App }) {
     ]);
   }, [metrics.data]);
 
+  const stop = useMutation({
+    mutationFn: () => stopAppContainer(app.id, { serverId }),
+    onSuccess: async () => {
+      setStopError(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["app-metrics", app.id, serverId] }),
+        queryClient.invalidateQueries({ queryKey: ["app-logs", app.id, serverId] }),
+      ]);
+    },
+    onError: (error: Error) => setStopError(error.message),
+  });
+
   return (
     <div className="max-w-2xl rounded-lg border bg-card p-6">
       <div className="flex items-start justify-between gap-3">
@@ -481,25 +502,37 @@ function RuntimeCard({ app }: { app: App }) {
             Live container metrics, logs, and command console for the selected server.
           </p>
         </div>
-        {targetServers.length > 1 ? (
-          <Select value={serverId} onValueChange={(value) => setServerId(value ?? "")}>
-            <SelectTrigger className="w-48">
-              <SelectValue placeholder="Select server">
-                {(value: string) =>
-                  targetServers.find((server) => server.id === value)?.name ?? "Select server"
-                }
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup>
-              {targetServers.map((server) => (
-                <SelectItem key={server.id} value={server.id}>
-                  {server.name}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
-        ) : null}
+        <div className="flex items-center gap-2">
+          {targetServers.length > 1 ? (
+            <Select value={serverId} onValueChange={(value) => setServerId(value ?? "")}>
+              <SelectTrigger className="w-48">
+                <SelectValue placeholder="Select server">
+                  {(value: string) =>
+                    targetServers.find((server) => server.id === value)?.name ?? "Select server"
+                  }
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup>
+                {targetServers.map((server) => (
+                  <SelectItem key={server.id} value={server.id}>
+                    {server.name}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          ) : null}
+          <Button
+            disabled={!serverId}
+            loading={stop.isPending}
+            onClick={() => stop.mutate()}
+            size="sm"
+            variant="destructive-outline"
+          >
+            Stop
+          </Button>
+        </div>
       </div>
+      {stopError ? <p className="mt-2 text-destructive-foreground text-sm">{stopError}</p> : null}
 
       {app.serverIds.length === 0 ? (
         <p className="mt-5 text-muted-foreground text-sm">Select a server before using runtime tools.</p>

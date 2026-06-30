@@ -20,6 +20,7 @@ import {
 } from "./agent-client";
 import { decryptSecret } from "./crypto";
 import { connectionFromServer } from "./server-connection";
+import { runScript } from "./ssh";
 import { resolveActiveWorkspace } from "./workspace";
 
 type AppRow = typeof app.$inferSelect;
@@ -97,6 +98,10 @@ function parseVolumes(value: string): AppVolume[] {
   } catch {
     return [];
   }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function toApp(row: AppRow, serverIds: string[] = row.serverId ? [row.serverId] : []): App {
@@ -300,6 +305,32 @@ apps.post("/:id/console", async (c) => {
 
   const result = await execAppCommand(target.connection!, target.token!, appId, command);
   return c.json(result satisfies AppConsoleResult);
+});
+
+apps.post("/:id/stop", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const appId = c.req.param("id");
+  const row = await ownedApp(appId, organizationId);
+  if (!row) return c.json({ error: "App not found" }, 404);
+
+  const body = (await c.req.json().catch(() => null)) as { serverId?: unknown } | null;
+  const target = await requireAgentTarget(
+    appId,
+    typeof body?.serverId === "string" ? body.serverId : undefined,
+  );
+  if (!target.server) return c.json({ error: target.error }, 400);
+
+  const container = `basse-app-${appId}`;
+  const result = await runScript(
+    target.connection!,
+    `docker stop --time 10 ${shellQuote(container)} >/dev/null 2>&1 || true`,
+    { timeoutMs: 30_000 },
+  );
+  if (result.exitCode !== 0) return c.json({ error: "Could not stop container" }, 502);
+
+  return c.json({ ok: true });
 });
 
 apps.post("/", async (c) => {
