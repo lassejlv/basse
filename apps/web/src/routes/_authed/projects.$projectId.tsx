@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, createFileRoute } from "@tanstack/react-router";
-import { ArrowLeftIcon, BoxIcon, ChevronRightIcon, PlusIcon } from "lucide-react";
+import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
+import { ArrowLeftIcon, BoxIcon, ChevronRightIcon, PlusIcon, TrashIcon } from "lucide-react";
 import { FormEvent, useState } from "react";
 import type { App, AppBuildRunner, AppSourceType } from "@basse/shared";
 import { DeployStatusBadge, StatusDot } from "@/components/deploy-status";
@@ -40,7 +40,7 @@ import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
 import { createApp, listApps } from "@/lib/apps";
 import { createEnvironment, listEnvironments } from "@/lib/environments";
 import { relativeTime } from "@/lib/format";
-import { getProject } from "@/lib/projects";
+import { deleteProject, getProject } from "@/lib/projects";
 import { listServers } from "@/lib/servers";
 
 export const Route = createFileRoute("/_authed/projects/$projectId")({
@@ -49,7 +49,10 @@ export const Route = createFileRoute("/_authed/projects/$projectId")({
 
 function ProjectDetailRoute() {
   const { projectId } = Route.useParams();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [activeEnv, setActiveEnv] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -62,6 +65,28 @@ function ProjectDetailRoute() {
 
   const envList = environments.data ?? [];
   const selectedEnv = activeEnv ?? envList[0]?.id ?? null;
+
+  const removeProject = useMutation({
+    mutationFn: () => deleteProject(projectId),
+    onSuccess: async () => {
+      setDeleteError(null);
+      await queryClient.invalidateQueries({ queryKey: ["projects"] });
+      await navigate({ to: "/projects" });
+    },
+    onError: (mutationError: Error) => setDeleteError(mutationError.message),
+  });
+
+  function confirmDeleteProject() {
+    const name = project.data?.name ?? "this project";
+    if (
+      !window.confirm(
+        `Delete ${name}? This removes its environments, apps, and running app containers.`,
+      )
+    ) {
+      return;
+    }
+    removeProject.mutate();
+  }
 
   if (project.isPending) {
     return <p className="p-4 text-muted-foreground text-sm md:p-6">Loading…</p>;
@@ -92,8 +117,21 @@ function ProjectDetailRoute() {
               {project.data.slug} · created {relativeTime(project.data.createdAt)}
             </p>
           </div>
-          {selectedEnv ? <CreateAppDialog environmentId={selectedEnv} /> : null}
+          <div className="flex items-center gap-2">
+            <Button
+              loading={removeProject.isPending}
+              onClick={confirmDeleteProject}
+              variant="destructive-outline"
+            >
+              <TrashIcon />
+              Delete
+            </Button>
+            {selectedEnv ? <CreateAppDialog environmentId={selectedEnv} /> : null}
+          </div>
         </div>
+        {deleteError ? (
+          <p className="mt-3 text-destructive-foreground text-sm">{deleteError}</p>
+        ) : null}
       </div>
 
       <div className="flex flex-wrap items-center gap-2">

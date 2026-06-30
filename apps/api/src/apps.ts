@@ -14,6 +14,7 @@ import type {
 } from "@basse/shared";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
+import { removeAppContainers } from "./app-cleanup";
 import {
   execAppCommand,
   getAppLogs as getAgentAppLogs,
@@ -575,6 +576,7 @@ apps.delete("/:id", async (c) => {
   const existing = await ownedApp(c.req.param("id"), organizationId);
   if (!existing) return c.json({ error: "App not found" }, 404);
 
+  await removeAppContainers([existing.id]);
   await db.delete(app).where(eq(app.id, existing.id));
   return c.body(null, 204);
 });

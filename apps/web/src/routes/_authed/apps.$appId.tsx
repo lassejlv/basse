@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
@@ -44,6 +44,7 @@ import {
   getApp,
   getAppLogs,
   getAppMetrics,
+  deleteApp,
   runAppConsoleCommand,
   stopAppContainer,
   updateApp,
@@ -129,10 +130,61 @@ function AppDetailRoute() {
             <BuildSettingsCard app={data} />
             <ServerCard app={data} />
             <VolumesCard app={data} />
+            <DeleteAppCard app={data} />
           </TabsPanel>
         </Tabs>
       </div>
     </section>
+  );
+}
+
+function DeleteAppCard({ app }: { app: App }) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+
+  const remove = useMutation({
+    mutationFn: () => deleteApp(app.id),
+    onSuccess: async () => {
+      setError(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["app", app.id] }),
+        queryClient.invalidateQueries({ queryKey: ["apps", app.environmentId] }),
+      ]);
+      if (app.projectId) {
+        await navigate({ to: "/projects/$projectId", params: { projectId: app.projectId } });
+      } else {
+        await navigate({ to: "/projects" });
+      }
+    },
+    onError: (mutationError: Error) => setError(mutationError.message),
+  });
+
+  function confirmDelete() {
+    if (!window.confirm(`Delete ${app.name}? This removes the app and its running containers.`)) {
+      return;
+    }
+    remove.mutate();
+  }
+
+  return (
+    <Card className="border-destructive/30 p-6">
+      <h2 className="font-semibold text-lg">Delete app</h2>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Remove this app, its running containers, deployment history, variables, and server
+        assignments.
+      </p>
+      {error ? <p className="mt-3 text-destructive-foreground text-sm">{error}</p> : null}
+      <Button
+        className="mt-4"
+        loading={remove.isPending}
+        onClick={confirmDelete}
+        variant="destructive"
+      >
+        <TrashIcon />
+        Delete app
+      </Button>
+    </Card>
   );
 }
 

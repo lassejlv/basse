@@ -2,6 +2,7 @@ import { app, db, environment, project } from "@basse/db";
 import type { CreateProjectInput } from "@basse/shared";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { Hono } from "hono";
+import { removeAppContainers } from "./app-cleanup";
 import { resolveActiveWorkspace } from "./workspace";
 
 function slugify(value: string) {
@@ -136,4 +137,32 @@ projects.post("/", async (c) => {
   } catch {
     return c.json({ error: "A project with that name already exists in this workspace" }, 409);
   }
+});
+
+projects.delete("/:id", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+
+  if (organizationId instanceof Response) {
+    return organizationId;
+  }
+
+  const [existing] = await db
+    .select({ id: project.id })
+    .from(project)
+    .where(and(eq(project.id, c.req.param("id")), eq(project.organizationId, organizationId)))
+    .limit(1);
+
+  if (!existing) {
+    return c.json({ error: "Project not found" }, 404);
+  }
+
+  const apps = await db
+    .select({ id: app.id })
+    .from(app)
+    .innerJoin(environment, eq(app.environmentId, environment.id))
+    .where(eq(environment.projectId, existing.id));
+
+  await removeAppContainers(apps.map((row) => row.id));
+  await db.delete(project).where(eq(project.id, existing.id));
+  return c.body(null, 204);
 });
