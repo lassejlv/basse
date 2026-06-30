@@ -15,10 +15,12 @@ describe("parseGitHubOwner", () => {
   test("returns the owner for GitHub SSH repositories", () => {
     expect(parseGitHubOwner("git@github.com:lassejlv/basse.git")).toBe("lassejlv");
     expect(parseGitHubOwner("git@github.com:org/private-repo")).toBe("org");
+    expect(parseGitHubOwner("ssh://git@github.com/lassejlv/basse.git")).toBe("lassejlv");
   });
 
   test("ignores non-GitHub and malformed repository URLs", () => {
     expect(parseGitHubOwner("https://gitlab.com/lassejlv/basse")).toBeNull();
+    expect(parseGitHubOwner("ssh://deploy@github.com/lassejlv/basse.git")).toBeNull();
     expect(parseGitHubOwner("not a url")).toBeNull();
     expect(parseGitHubOwner("https://github.com/lassejlv")).toBeNull();
   });
@@ -30,6 +32,9 @@ describe("gitHubHttpsCloneUrl", () => {
       "https://github.com/lassejlv/basse.git",
     );
     expect(gitHubHttpsCloneUrl("git@github.com:org/private-repo.git")).toBe(
+      "https://github.com/org/private-repo.git",
+    );
+    expect(gitHubHttpsCloneUrl("ssh://git@github.com/org/private-repo.git")).toBe(
       "https://github.com/org/private-repo.git",
     );
   });

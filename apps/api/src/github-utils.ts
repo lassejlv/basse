@@ -13,6 +13,7 @@ function parseGitHubRepository(repositoryUrl: string): { owner: string; repo: st
   try {
     const url = new URL(repositoryUrl);
     if (url.hostname !== "github.com") return null;
+    if (url.protocol === "ssh:" && url.username && url.username !== "git") return null;
     const [owner, repo] = url.pathname.replace(/^\/+/, "").split("/");
     return normalizeRepository(owner, repo);
   } catch {
