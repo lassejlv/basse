@@ -1,6 +1,6 @@
-import { db, project } from "@basse/db";
+import { db, environment, project } from "@basse/db";
 import type { CreateProjectInput } from "@basse/shared";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { resolveActiveWorkspace } from "./workspace";
 
@@ -30,6 +30,26 @@ projects.get("/", async (c) => {
   return c.json(rows);
 });
 
+projects.get("/:id", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+
+  if (organizationId instanceof Response) {
+    return organizationId;
+  }
+
+  const [row] = await db
+    .select()
+    .from(project)
+    .where(and(eq(project.id, c.req.param("id")), eq(project.organizationId, organizationId)))
+    .limit(1);
+
+  if (!row) {
+    return c.json({ error: "Project not found" }, 404);
+  }
+
+  return c.json(row);
+});
+
 projects.post("/", async (c) => {
   const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
 
@@ -53,17 +73,37 @@ projects.post("/", async (c) => {
   const now = new Date();
 
   try {
-    const [created] = await db
-      .insert(project)
-      .values({
+    // Create the project and its default "production" environment atomically, so
+    // the "every project has >= 1 environment" invariant always holds.
+    const created = await db.transaction(async (tx) => {
+      const [proj] = await tx
+        .insert(project)
+        .values({
+          id: crypto.randomUUID(),
+          organizationId,
+          name,
+          slug,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+
+      if (!proj) {
+        throw new Error("project insert failed");
+      }
+
+      await tx.insert(environment).values({
         id: crypto.randomUUID(),
-        organizationId,
-        name,
-        slug,
+        projectId: proj.id,
+        name: "Production",
+        slug: "production",
+        isDefault: true,
         createdAt: now,
         updatedAt: now,
-      })
-      .returning();
+      });
+
+      return proj;
+    });
 
     return c.json(created, 201);
   } catch {

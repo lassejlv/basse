@@ -5,6 +5,7 @@ import { logger } from "hono/logger";
 import { auth } from "./auth";
 import { depot } from "./depot";
 import { domains } from "./domains";
+import { environments } from "./environments";
 import { projects } from "./projects";
 import { actionsQueue } from "./queue/queue";
 import { reconcileProvisioningServers } from "./queue/reconcile";
@@ -34,6 +35,7 @@ app.use(
 app.on(["GET", "POST"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 
 app.route("/api/projects", projects);
+app.route("/api/environments", environments);
 app.route("/api/ssh-keys", sshKeys);
 app.route("/api/depot", depot);
 app.route("/api/servers", servers);

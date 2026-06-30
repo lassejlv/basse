@@ -1,5 +1,13 @@
 import { relations } from "drizzle-orm";
-import { index, integer, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import {
+  boolean,
+  index,
+  integer,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
 
 export * from "./auth-schema";
 import { organization } from "./auth-schema";
@@ -58,26 +66,75 @@ export const project = pgTable(
   ],
 );
 
-export const app = pgTable("app", {
-  id: text("id").primaryKey(),
-  projectId: text("project_id")
-    .notNull()
-    .references(() => project.id, { onDelete: "cascade" }),
-  serverId: text("server_id").references(() => server.id, {
-    onDelete: "set null",
-  }),
-  name: text("name").notNull(),
-  slug: text("slug").notNull().unique(),
-  repositoryUrl: text("repository_url").notNull(),
-  branch: text("branch").notNull().default("main"),
-  buildMode: text("build_mode", {
-    enum: ["nixpacks", "dockerfile", "compose", "image", "static"],
-  })
-    .notNull()
-    .default("nixpacks"),
-  createdAt: timestamp("created_at").notNull(),
-  updatedAt: timestamp("updated_at").notNull(),
-});
+// An environment within a project (e.g. production, staging). Every project has
+// a default "production" environment, auto-created on project creation.
+export const environment = pgTable(
+  "environment",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    isDefault: boolean("is_default").notNull().default(false),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("environment_projectId_idx").on(table.projectId),
+    uniqueIndex("environment_projectId_slug_uidx").on(table.projectId, table.slug),
+  ],
+);
+
+export const app = pgTable(
+  "app",
+  {
+    id: text("id").primaryKey(),
+    environmentId: text("environment_id")
+      .notNull()
+      .references(() => environment.id, { onDelete: "cascade" }),
+    serverId: text("server_id").references(() => server.id, {
+      onDelete: "set null",
+    }),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    repositoryUrl: text("repository_url").notNull(),
+    branch: text("branch").notNull().default("main"),
+    // The port the app listens on inside its container (the domain upstream).
+    port: integer("port").notNull().default(3000),
+    buildMode: text("build_mode", {
+      enum: ["auto", "dockerfile", "railpack"],
+    })
+      .notNull()
+      .default("auto"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("app_environmentId_idx").on(table.environmentId),
+    uniqueIndex("app_environmentId_slug_uidx").on(table.environmentId, table.slug),
+  ],
+);
+
+// Runtime environment variables for an app. Values are encrypted at rest.
+export const envVar = pgTable(
+  "env_var",
+  {
+    id: text("id").primaryKey(),
+    appId: text("app_id")
+      .notNull()
+      .references(() => app.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    value: text("value").notNull(),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("env_var_appId_idx").on(table.appId),
+    uniqueIndex("env_var_appId_key_uidx").on(table.appId, table.key),
+  ],
+);
 
 export const deployment = pgTable("deployment", {
   id: text("id").primaryKey(),
@@ -91,6 +148,9 @@ export const deployment = pgTable("deployment", {
     .default("queued"),
   commitSha: text("commit_sha"),
   imageRef: text("image_ref"),
+  buildId: text("build_id"),
+  // Append-only build + deploy log shown in the UI.
+  logs: text("logs"),
   createdAt: timestamp("created_at").notNull(),
   updatedAt: timestamp("updated_at").notNull(),
 });
@@ -99,6 +159,14 @@ export const projectRelations = relations(project, ({ one, many }) => ({
   organization: one(organization, {
     fields: [project.organizationId],
     references: [organization.id],
+  }),
+  environments: many(environment),
+}));
+
+export const environmentRelations = relations(environment, ({ one, many }) => ({
+  project: one(project, {
+    fields: [environment.projectId],
+    references: [project.id],
   }),
   apps: many(app),
 }));
@@ -112,15 +180,23 @@ export const serverRelations = relations(server, ({ one, many }) => ({
 }));
 
 export const appRelations = relations(app, ({ one, many }) => ({
-  project: one(project, {
-    fields: [app.projectId],
-    references: [project.id],
+  environment: one(environment, {
+    fields: [app.environmentId],
+    references: [environment.id],
   }),
   server: one(server, {
     fields: [app.serverId],
     references: [server.id],
   }),
   deployments: many(deployment),
+  envVars: many(envVar),
+}));
+
+export const envVarRelations = relations(envVar, ({ one }) => ({
+  app: one(app, {
+    fields: [envVar.appId],
+    references: [app.id],
+  }),
 }));
 
 export const deploymentRelations = relations(deployment, ({ one }) => ({
@@ -193,6 +269,8 @@ export const depotConnection = pgTable(
       .references(() => organization.id, { onDelete: "cascade" }),
     token: text("token").notNull(),
     projectId: text("project_id").notNull(),
+    // Depot organization id — the registry subdomain ({orgId}.registry.depot.dev).
+    orgId: text("org_id"),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },

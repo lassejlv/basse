@@ -15,6 +15,87 @@ export type CreateProjectInput = {
   name: string;
 };
 
+export type Environment = {
+  id: string;
+  projectId: string;
+  name: string;
+  slug: string;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateEnvironmentInput = {
+  projectId: string;
+  name: string;
+};
+
+export type AppBuildMode = "auto" | "dockerfile" | "railpack";
+
+export type App = {
+  id: string;
+  environmentId: string;
+  serverId: string | null;
+  name: string;
+  slug: string;
+  repositoryUrl: string;
+  branch: string;
+  port: number;
+  buildMode: AppBuildMode;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateAppInput = {
+  environmentId: string;
+  name: string;
+  repositoryUrl: string;
+  branch?: string;
+  port?: number;
+  buildMode?: AppBuildMode;
+  serverId?: string;
+};
+
+export type UpdateAppInput = {
+  name?: string;
+  repositoryUrl?: string;
+  branch?: string;
+  port?: number;
+  buildMode?: AppBuildMode;
+  serverId?: string | null;
+};
+
+// Env var with the value masked (last-4 only). Plaintext never leaves the API.
+export type EnvVarMasked = {
+  key: string;
+  valueHint: string;
+  updatedAt: string;
+};
+
+export type SetEnvVarsInput = {
+  vars: { key: string; value: string }[];
+};
+
+export type DeploymentStatus =
+  | "queued"
+  | "building"
+  | "deploying"
+  | "healthy"
+  | "failed"
+  | "cancelled";
+
+export type Deployment = {
+  id: string;
+  appId: string;
+  status: DeploymentStatus;
+  commitSha: string | null;
+  imageRef: string | null;
+  buildId: string | null;
+  logs: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type SshKey = {
   id: string;
   organizationId: string;
