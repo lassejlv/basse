@@ -110,6 +110,32 @@ export type CreateAppInput = {
   databasePublicPort?: number | null;
 };
 
+export type ImportableDockerContainerPort = {
+  ip?: string;
+  privatePort: number;
+  publicPort?: number;
+  type: string;
+};
+
+export type ImportableDockerContainer = {
+  id: string;
+  name: string;
+  image: string;
+  imageId: string;
+  state: string;
+  status: string;
+  running: boolean;
+  ports: ImportableDockerContainerPort[];
+};
+
+export type ImportDockerContainerInput = {
+  environmentId: string;
+  serverId: string;
+  containerId: string;
+  name: string;
+  port: number;
+};
+
 export type UpdateAppInput = {
   name?: string;
   repositoryUrl?: string;

@@ -5,6 +5,8 @@ import type {
   AppLogs,
   AppMetrics,
   CreateAppInput,
+  ImportDockerContainerInput,
+  ImportableDockerContainer,
   UpdateAppInput,
 } from "@basse/shared";
 
@@ -34,6 +36,28 @@ export async function getApp(id: string): Promise<App> {
 
 export async function createApp(input: CreateAppInput): Promise<App> {
   const response = await fetch(`${apiBaseUrl}/api/apps`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<App>;
+}
+
+export async function listImportableDockerContainers(
+  serverId: string,
+): Promise<ImportableDockerContainer[]> {
+  const response = await fetch(
+    `${apiBaseUrl}/api/apps/importable-containers?serverId=${encodeURIComponent(serverId)}`,
+    { credentials: "include" },
+  );
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<ImportableDockerContainer[]>;
+}
+
+export async function importDockerContainer(input: ImportDockerContainerInput): Promise<App> {
+  const response = await fetch(`${apiBaseUrl}/api/apps/import-container`, {
     method: "POST",
     credentials: "include",
     headers: { "content-type": "application/json" },

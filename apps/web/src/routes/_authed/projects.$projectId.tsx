@@ -1,8 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
-import { ArrowLeftIcon, BoxIcon, ChevronRightIcon, PlusIcon, TrashIcon } from "lucide-react";
-import { FormEvent, useState } from "react";
-import type { App, AppBuildRunner, AppKind, AppSourceType, DatabaseKind } from "@basse/shared";
+import {
+  ArrowLeftIcon,
+  BoxIcon,
+  ChevronRightIcon,
+  DownloadIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  TrashIcon,
+} from "lucide-react";
+import { FormEvent, useEffect, useState } from "react";
+import type {
+  App,
+  AppBuildRunner,
+  AppKind,
+  AppSourceType,
+  DatabaseKind,
+  ImportableDockerContainer,
+} from "@basse/shared";
 import { DeployStatusBadge, StatusDot } from "@/components/deploy-status";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,7 +52,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
-import { createApp, listApps } from "@/lib/apps";
+import {
+  createApp,
+  importDockerContainer,
+  listApps,
+  listImportableDockerContainers,
+} from "@/lib/apps";
 import { triggerDeploy } from "@/lib/deployments";
 import { createEnvironment, listEnvironments } from "@/lib/environments";
 import { relativeTime } from "@/lib/format";
@@ -127,7 +147,12 @@ function ProjectDetailRoute() {
               <TrashIcon />
               Delete
             </Button>
-            {selectedEnv ? <CreateAppDialog environmentId={selectedEnv} /> : null}
+            {selectedEnv ? (
+              <>
+                <ImportContainerDialog environmentId={selectedEnv} />
+                <CreateAppDialog environmentId={selectedEnv} />
+              </>
+            ) : null}
           </div>
         </div>
         {deleteError ? (
@@ -180,7 +205,8 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
             Deploy from a Git repository or a prebuilt Docker image.
           </EmptyDescription>
         </EmptyHeader>
-        <EmptyContent>
+        <EmptyContent className="flex flex-wrap items-center justify-center gap-2">
+          <ImportContainerDialog environmentId={environmentId} />
           <CreateAppDialog environmentId={environmentId} />
         </EmptyContent>
       </Empty>
@@ -227,6 +253,246 @@ function AppRow({ app }: { app: App }) {
       </div>
       <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground/50 transition group-hover:translate-x-0.5 group-hover:text-muted-foreground" />
     </Link>
+  );
+}
+
+function firstContainerPort(container: ImportableDockerContainer): number {
+  return container.ports.find((port) => port.privatePort > 0)?.privatePort ?? 3000;
+}
+
+function containerPortsLabel(container: ImportableDockerContainer): string {
+  const ports = container.ports
+    .filter((port) => port.privatePort > 0)
+    .map((port) =>
+      port.publicPort
+        ? `${port.publicPort}:${port.privatePort}/${port.type}`
+        : `${port.privatePort}/${port.type}`,
+    );
+  return ports.length > 0 ? ports.join(", ") : "No exposed ports";
+}
+
+function ImportContainerDialog({ environmentId }: { environmentId: string }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [serverId, setServerId] = useState("");
+  const [containerId, setContainerId] = useState("");
+  const [name, setName] = useState("");
+  const [port, setPort] = useState("3000");
+  const [error, setError] = useState<string | null>(null);
+
+  const servers = useQuery({ queryKey: ["servers", "for-container-import"], queryFn: listServers });
+  const activeServers = (servers.data ?? []).filter((server) => server.status === "active");
+
+  useEffect(() => {
+    if (open && !serverId && activeServers[0]) {
+      setServerId(activeServers[0].id);
+    }
+  }, [activeServers, open, serverId]);
+
+  const containers = useQuery({
+    queryKey: ["importable-containers", serverId],
+    queryFn: () => listImportableDockerContainers(serverId),
+    enabled: open && Boolean(serverId),
+  });
+  const containerList = containers.data ?? [];
+  const selectedContainer = containerList.find((container) => container.id === containerId);
+
+  function reset() {
+    setContainerId("");
+    setName("");
+    setPort("3000");
+    setError(null);
+  }
+
+  function selectContainer(container: ImportableDockerContainer) {
+    if (!container.running) return;
+    setContainerId(container.id);
+    setName(container.name);
+    setPort(String(firstContainerPort(container)));
+  }
+
+  const importMutation = useMutation({
+    mutationFn: () =>
+      importDockerContainer({
+        environmentId,
+        serverId,
+        containerId,
+        name,
+        port: Number(port),
+      }),
+    onSuccess: async () => {
+      reset();
+      setOpen(false);
+      await queryClient.invalidateQueries({ queryKey: ["apps", environmentId] });
+    },
+    onError: (mutationError: Error) => setError(mutationError.message),
+  });
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!serverId) {
+      setError("Choose an active server.");
+      return;
+    }
+    if (!containerId) {
+      setError("Choose a running container.");
+      return;
+    }
+    if (!name.trim()) {
+      setError("Name is required.");
+      return;
+    }
+    const numericPort = Number(port);
+    if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) {
+      setError("Port must be a valid port.");
+      return;
+    }
+    importMutation.mutate();
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) reset();
+      }}
+    >
+      <DialogTrigger
+        render={
+          <Button variant="outline">
+            <DownloadIcon />
+            Import
+          </Button>
+        }
+      />
+      <DialogPopup className="h-fit max-w-2xl">
+        <form onSubmit={submit}>
+          <DialogHeader>
+            <DialogTitle>Import container</DialogTitle>
+            <DialogDescription>
+              Take over a running Docker container that is not already tracked by Basse.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+              <div className="space-y-2">
+                <Label>Server</Label>
+                <Select
+                  value={serverId}
+                  onValueChange={(value) => {
+                    setServerId(value ?? "");
+                    setContainerId("");
+                  }}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Server">
+                      {(value: string) =>
+                        activeServers.find((server) => server.id === value)?.name ?? "Server"
+                      }
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {activeServers.map((server) => (
+                      <SelectItem key={server.id} value={server.id}>
+                        {server.name}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              </div>
+              <div className="flex items-end">
+                <Button
+                  disabled={!serverId || containers.isFetching}
+                  onClick={() => void containers.refetch()}
+                  type="button"
+                  variant="outline"
+                >
+                  <RefreshCwIcon />
+                  Scan
+                </Button>
+              </div>
+            </div>
+            {servers.isPending ? (
+              <p className="text-muted-foreground text-sm">Loading servers…</p>
+            ) : activeServers.length === 0 ? (
+              <p className="text-muted-foreground text-sm">
+                No active servers are ready for container import.
+              </p>
+            ) : containers.isPending && serverId ? (
+              <div className="h-28 animate-pulse rounded-lg border bg-muted/30" aria-hidden />
+            ) : containerList.length === 0 && serverId ? (
+              <p className="rounded-lg border border-dashed px-3 py-6 text-center text-muted-foreground text-sm">
+                No unmanaged containers found on this server.
+              </p>
+            ) : (
+              <div className="max-h-72 overflow-y-auto rounded-lg border">
+                {containerList.map((container) => {
+                  const selected = container.id === containerId;
+                  return (
+                    <button
+                      className="flex w-full min-w-0 items-center justify-between gap-3 border-b px-3 py-2.5 text-left text-sm last:border-b-0 hover:bg-accent/40 disabled:cursor-not-allowed disabled:opacity-60 data-[selected=true]:bg-accent"
+                      data-selected={selected}
+                      disabled={!container.running}
+                      key={container.id}
+                      onClick={() => selectContainer(container)}
+                      type="button"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium">{container.name}</span>
+                        <span className="block truncate font-mono text-muted-foreground text-xs">
+                          {container.image}
+                        </span>
+                      </span>
+                      <span className="shrink-0 text-right">
+                        <Badge size="sm" variant={container.running ? "outline" : "secondary"}>
+                          {container.running ? "running" : container.state}
+                        </Badge>
+                        <span className="mt-1 block font-mono text-muted-foreground text-xs">
+                          {containerPortsLabel(container)}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {selectedContainer ? (
+              <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
+                <div className="space-y-2">
+                  <Label htmlFor="import-app-name">App name</Label>
+                  <Input
+                    id="import-app-name"
+                    onChange={(event) => setName(event.currentTarget.value)}
+                    value={name}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="import-app-port">Port</Label>
+                  <Input
+                    id="import-app-port"
+                    onChange={(event) => setPort(event.currentTarget.value)}
+                    type="number"
+                    value={port}
+                  />
+                </div>
+              </div>
+            ) : null}
+            {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+          </DialogPanel>
+          <DialogFooter>
+            <DialogClose render={<Button variant="outline">Cancel</Button>} />
+            <Button
+              disabled={!containerId || !name.trim() || !serverId}
+              loading={importMutation.isPending}
+              type="submit"
+            >
+              Import container
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogPopup>
+    </Dialog>
   );
 }
 

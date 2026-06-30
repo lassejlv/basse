@@ -128,6 +128,70 @@ export type DeployAppResult = {
   running: boolean;
 };
 
+export type AgentContainerPort = {
+  ip?: string;
+  privatePort: number;
+  publicPort?: number;
+  type: string;
+};
+
+export type AgentContainerMount = {
+  type: string;
+  name?: string;
+  source: string;
+  destination: string;
+  readOnly: boolean;
+};
+
+export type AgentContainerSummary = {
+  id: string;
+  name: string;
+  image: string;
+  imageId: string;
+  state: string;
+  status: string;
+  running: boolean;
+  ports: AgentContainerPort[];
+};
+
+export type AgentContainerDetails = AgentContainerSummary & {
+  env: string[];
+  mounts: AgentContainerMount[];
+};
+
+export async function listImportableContainers(
+  conn: SshConnection,
+  token: string,
+): Promise<AgentContainerSummary[]> {
+  return withTunnel(conn, AGENT_PORT, async (baseUrl) => {
+    const response = await getJson<{ containers: AgentContainerSummary[] }>(
+      { baseUrl, token },
+      "/v1/apps/importable-containers",
+      true,
+    );
+    return response.containers;
+  });
+}
+
+export async function importContainer(
+  conn: SshConnection,
+  token: string,
+  input: { appId: string; containerId: string },
+): Promise<AgentContainerDetails> {
+  return withTunnel(
+    conn,
+    AGENT_PORT,
+    (baseUrl) =>
+      postJson<AgentContainerDetails>(
+        { baseUrl, token },
+        "/v1/apps/import-container",
+        input,
+        60_000,
+      ),
+    { timeoutMs: 20_000 },
+  );
+}
+
 /**
  * Deploys an app on the server: pulls the (private Depot) image and runs the
  * container on the 'basse' network. The image pull dominates, so the inner

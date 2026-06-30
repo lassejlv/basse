@@ -52,6 +52,87 @@ type deployResponse struct {
 	Running     bool   `json:"running"`
 }
 
+type importContainerRequest struct {
+	AppID       string `json:"appId"`
+	ContainerID string `json:"containerId"`
+}
+
+func isImportableContainer(container dockerx.ContainerSummary, caddyContainer string) bool {
+	if container.ID == "" || container.Name == "" {
+		return false
+	}
+	if container.Name == caddyContainer || container.Name == "basse-agent" {
+		return false
+	}
+	if strings.HasPrefix(container.Name, "basse-app-") {
+		return false
+	}
+	if container.Labels["basse.managed"] == "true" || container.Labels["basse.app"] != "" {
+		return false
+	}
+	return true
+}
+
+func (a Apps) ImportableContainers(w http.ResponseWriter, r *http.Request) {
+	containers, err := a.Docker.ListContainers(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusBadGateway, "list containers: "+err.Error())
+		return
+	}
+
+	out := make([]dockerx.ContainerSummary, 0, len(containers))
+	for _, container := range containers {
+		if isImportableContainer(container, a.Cfg.CaddyContainer) {
+			out = append(out, container)
+		}
+	}
+	httpx.JSON(w, http.StatusOK, map[string][]dockerx.ContainerSummary{"containers": out})
+}
+
+func (a Apps) ImportContainer(w http.ResponseWriter, r *http.Request) {
+	var req importContainerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.AppID == "" || req.ContainerID == "" {
+		httpx.Error(w, http.StatusBadRequest, "appId and containerId are required")
+		return
+	}
+
+	ctx := r.Context()
+	details, err := a.Docker.InspectContainerDetails(ctx, req.ContainerID)
+	if err != nil {
+		httpx.Error(w, http.StatusBadGateway, "inspect container: "+err.Error())
+		return
+	}
+	if !isImportableContainer(details.ContainerSummary, a.Cfg.CaddyContainer) {
+		httpx.Error(w, http.StatusBadRequest, "container is already managed by Basse")
+		return
+	}
+
+	targetName := containerName(req.AppID)
+	if err := a.Docker.EnsureNetwork(ctx, a.Cfg.ProxyNetwork); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "ensure network: "+err.Error())
+		return
+	}
+	if err := a.Docker.RenameContainer(ctx, req.ContainerID, targetName); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "rename container: "+err.Error())
+		return
+	}
+	if err := a.Docker.ConnectNetwork(ctx, a.Cfg.ProxyNetwork, targetName, []string{targetName}); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "connect network: "+err.Error())
+		return
+	}
+
+	imported, err := a.Docker.InspectContainerDetails(ctx, targetName)
+	if err != nil {
+		httpx.Error(w, http.StatusBadGateway, "inspect imported container: "+err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, imported)
+}
+
 // Deploy pulls the app image (private Depot registry) and (re)runs the container
 // on the shared 'basse' network so Caddy can reverse-proxy to it. Bearer-guarded.
 func (a Apps) Deploy(w http.ResponseWriter, r *http.Request) {
