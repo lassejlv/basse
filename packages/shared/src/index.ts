@@ -165,6 +165,47 @@ export type Server = {
   updatedAt: string;
 };
 
+export type AgentInfo = {
+  reachable: boolean;
+  ready: boolean;
+  version?: string;
+  targetImage: string;
+  docker?: {
+    containers: number;
+    containersRunning: number;
+    images: number;
+    ncpu: number;
+    memTotal: number;
+  };
+  engine?: {
+    version: string;
+    apiVersion: string;
+    os: string;
+    arch: string;
+  };
+  error?: string;
+};
+
+export type AgentUpdateCheck = {
+  targetImage: string;
+  currentImageId: string | null;
+  latestImageId: string | null;
+  updateAvailable: boolean;
+  output: string;
+};
+
+export type AgentMetrics = {
+  timestamp: string;
+  cpuPercent: number;
+  memoryBytes: number;
+  memoryLimitBytes: number;
+  memoryPercent: number;
+};
+
+export type AgentLogs = {
+  logs: string;
+};
+
 export type CreateServerInput = {
   name: string;
   sshHost: string;

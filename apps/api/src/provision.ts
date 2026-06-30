@@ -8,7 +8,7 @@ import { probeReachable, runScript, writeRemoteFile } from "./ssh";
 
 type ServerRow = typeof server.$inferSelect;
 
-const AGENT_IMAGE = Bun.env.BASSE_AGENT_IMAGE ?? "ghcr.io/lassejlv/basse-agent:latest";
+export const AGENT_IMAGE = Bun.env.BASSE_AGENT_IMAGE ?? "ghcr.io/lassejlv/basse-agent:latest";
 const CADDY_IMAGE = Bun.env.BASSE_CADDY_IMAGE ?? "caddy:2";
 const AGENT_ENV_PATH = "/etc/basse/agent.env";
 
@@ -19,7 +19,7 @@ const CADDY_ADMIN_MOUNT = "basse_caddy_admin:/run/caddy-admin";
 
 // Operator-controlled image ref; validate defensively since it is the one value
 // interpolated into the remote bootstrap script.
-const IMAGE_REF_PATTERN = /^[A-Za-z0-9._/:@-]+$/;
+export const IMAGE_REF_PATTERN = /^[A-Za-z0-9._/:@-]+$/;
 
 async function setStatus(
   id: string,

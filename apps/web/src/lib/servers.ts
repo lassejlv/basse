@@ -1,4 +1,11 @@
-import type { CreateServerInput, Server } from "@basse/shared";
+import type {
+  AgentInfo,
+  AgentLogs,
+  AgentMetrics,
+  AgentUpdateCheck,
+  CreateServerInput,
+  Server,
+} from "@basse/shared";
 
 export type { Server };
 
@@ -76,6 +83,47 @@ export async function provisionServer(id: string): Promise<void> {
   if (!response.ok) {
     throw new Error(await parseError(response));
   }
+}
+
+export async function getAgentInfo(id: string): Promise<AgentInfo> {
+  const response = await fetch(`${apiBaseUrl}/api/servers/${id}/agent`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<AgentInfo>;
+}
+
+export async function getAgentMetrics(id: string): Promise<AgentMetrics> {
+  const response = await fetch(`${apiBaseUrl}/api/servers/${id}/agent/metrics`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<AgentMetrics>;
+}
+
+export async function getAgentLogs(id: string): Promise<AgentLogs> {
+  const response = await fetch(`${apiBaseUrl}/api/servers/${id}/agent/logs?tail=250`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<AgentLogs>;
+}
+
+export async function checkAgentUpdate(id: string): Promise<AgentUpdateCheck> {
+  const response = await fetch(`${apiBaseUrl}/api/servers/${id}/agent/check-update`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<AgentUpdateCheck>;
+}
+
+export async function updateAgent(id: string): Promise<void> {
+  const response = await fetch(`${apiBaseUrl}/api/servers/${id}/agent/update`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
 }
 
 export async function deleteServer(id: string): Promise<void> {

@@ -476,6 +476,19 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
     },
   });
 
+  const addPreview = useMutation({
+    mutationFn: () => {
+      const ip = selectedServer?.sshHost ?? "";
+      const host = `${app.slug}-${app.id.slice(0, 8)}.${ip}.sslip.io`;
+      return createDomain(serverId, { host, upstream, appId: app.id });
+    },
+    onSuccess: async () => {
+      setError(null);
+      await queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (e: Error) => setError(e.message),
+  });
+
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     add.mutate();
@@ -484,6 +497,10 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
   // Only this app's domains (the server may host domains for other apps too).
   const appDomains = (domains.data ?? []).filter((d) => d.appId === app.id);
   const selectedServer = (servers.data ?? []).find((s) => s.id === serverId);
+  const canGeneratePreview = Boolean(selectedServer?.sshHost.match(/^\d{1,3}(?:\.\d{1,3}){3}$/));
+  const previewHost = selectedServer
+    ? `${app.slug}-${app.id.slice(0, 8)}.${selectedServer.sshHost}.sslip.io`
+    : "";
 
   return (
     <div className="max-w-2xl rounded-lg border bg-card p-6">
@@ -493,6 +510,25 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
         <code className="font-mono">{selectedServer?.sshHost ?? "this server"}</code>. Basse will
         configure HTTPS on that server and route traffic to the app.
       </p>
+      <div className="mt-4 rounded-md border bg-muted/20 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="font-medium text-sm">Preview domain</p>
+            <p className="truncate font-mono text-muted-foreground text-xs">
+              {previewHost || "Requires an IPv4 server address"}
+            </p>
+          </div>
+          <Button
+            disabled={!canGeneratePreview}
+            loading={addPreview.isPending}
+            onClick={() => addPreview.mutate()}
+            size="sm"
+            variant="outline"
+          >
+            Generate sslip.io
+          </Button>
+        </div>
+      </div>
 
       <div className="mt-5">
         {appDomains.length === 0 ? (

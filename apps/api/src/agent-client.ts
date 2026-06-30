@@ -19,6 +19,23 @@ export type AgentHealth = {
   error?: string;
 };
 
+export type AgentInfo = {
+  agent: { version: string };
+  docker: {
+    Containers: number;
+    ContainersRunning: number;
+    Images: number;
+    NCPU: number;
+    MemTotal: number;
+  };
+  engine: {
+    Version: string;
+    ApiVersion: string;
+    Os: string;
+    Arch: string;
+  };
+};
+
 type AgentCallContext = {
   baseUrl: string;
   token: string;
@@ -72,6 +89,12 @@ export async function ensureProxy(conn: SshConnection, token: string): Promise<P
     AGENT_PORT,
     (baseUrl) => postJson<ProxyStatus>({ baseUrl, token }, "/v1/proxy/ensure", {}, 170_000),
     { timeoutMs: 20_000 },
+  );
+}
+
+export async function getAgentInfo(conn: SshConnection, token: string): Promise<AgentInfo> {
+  return withTunnel(conn, AGENT_PORT, (baseUrl) =>
+    getJson<AgentInfo>({ baseUrl, token }, "/v1/info", true),
   );
 }
 
