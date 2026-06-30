@@ -72,6 +72,8 @@ export type CloudflareSyncResult = {
 };
 
 const CLOUDFLARE_API = "https://api.cloudflare.com/client/v4";
+const CLOUDFLARE_TOKEN_HELP =
+  "Use a Cloudflare API token with Zone Read, Zone Load Balancers Edit, and Account Load Balancing Monitors and Pools Edit permissions for the matching zone/account.";
 
 class CloudflareClient {
   constructor(private readonly token: string) {}
@@ -130,6 +132,13 @@ class CloudflareClient {
       const message =
         parsed?.errors?.map((error) => error.message).filter(Boolean).join(", ") ||
         `request failed with ${response.status}`;
+      const authFailed =
+        response.status === 401 ||
+        response.status === 403 ||
+        message.toLowerCase().includes("authentication");
+      if (authFailed) {
+        throw new Error(`Cloudflare: ${message}. ${CLOUDFLARE_TOKEN_HELP}`);
+      }
       throw new Error(`Cloudflare: ${message}`);
     }
 
@@ -144,6 +153,7 @@ class CloudflareClient {
 export async function testCloudflareToken(token: string): Promise<void> {
   const client = new CloudflareClient(token);
   await client.get<{ status?: string }>("/user/tokens/verify");
+  await client.envelope<CloudflareZone[]>("/zones?per_page=1&page=1");
 }
 
 export async function deleteCloudflareLoadBalancer(token: string, providerResourceId: string) {

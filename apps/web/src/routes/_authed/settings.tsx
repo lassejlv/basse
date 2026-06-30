@@ -266,7 +266,7 @@ function LoadBalancerIntegrationsCard() {
         <p className="text-muted-foreground text-xs">
           {provider === "hetzner"
             ? "The token is validated against Hetzner Cloud and stored encrypted."
-            : "The token is validated against Cloudflare and should allow Zone Read plus Load Balancers Write."}
+            : "The token is validated against Cloudflare and needs Zone Read, Zone Load Balancers Edit, and Account Load Balancing Monitors and Pools Edit."}
         </p>
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
         <Button disabled={!token.trim()} loading={save.isPending} type="submit">
