@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { chmod, unlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { SshConnection } from "./ssh";
 import { runScript, uploadDirectory } from "./ssh";
 
@@ -54,36 +55,69 @@ async function run(
 
 const BRANCH_PATTERN = /^[A-Za-z0-9._/-]+$/;
 
+export function gitAskPassScript(): string {
+  return [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  *Username*) printf "%s\\n" "x-access-token" ;;',
+    '  *Password*) printf "%s\\n" "$GIT_PASSWORD" ;;',
+    '  *) printf "\\n" ;;',
+    "esac",
+    "",
+  ].join("\n");
+}
+
+export function gitAskPassPath(ctxDir: string): string {
+  return join(dirname(ctxDir), `${ctxDir.split("/").pop() ?? "basse-build"}.git-askpass.sh`);
+}
+
 /**
- * Shallow-clones a public repo at a branch into ctxDir. No credentials are ever
- * supplied (GIT_TERMINAL_PROMPT/ASKPASS disabled), so a private/auth repo fails
- * fast rather than hanging. Returns the commit SHA.
+ * Shallow-clones a repo at a branch into ctxDir. When authToken is supplied,
+ * git receives it through GIT_ASKPASS so credentials never appear in argv.
  */
 export async function cloneRepo(opts: {
   repositoryUrl: string;
   branch: string;
   ctxDir: string;
+  authToken?: string | null;
   onLine?: BuildLogger;
 }): Promise<string> {
   if (!BRANCH_PATTERN.test(opts.branch) || opts.branch.startsWith("-")) {
     throw new Error(`invalid branch: ${opts.branch}`);
   }
 
-  const cloneEnv = { GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/bin/true" };
-  const clone = await run(
-    [
-      "git",
-      "clone",
-      "--depth",
-      "1",
-      "--branch",
-      opts.branch,
-      "--",
-      opts.repositoryUrl,
-      opts.ctxDir,
-    ],
-    { env: cloneEnv, onLine: opts.onLine, timeoutMs: 120_000 },
-  );
+  const askPassPath = gitAskPassPath(opts.ctxDir);
+  if (opts.authToken) {
+    await writeFile(askPassPath, gitAskPassScript(), { mode: 0o700 });
+    await chmod(askPassPath, 0o700);
+  }
+
+  const cloneEnv = {
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: opts.authToken ? askPassPath : "/bin/true",
+    ...(opts.authToken ? { GIT_PASSWORD: opts.authToken } : {}),
+  };
+  let clone: SpawnResult;
+  try {
+    clone = await run(
+      [
+        "git",
+        "clone",
+        "--depth",
+        "1",
+        "--branch",
+        opts.branch,
+        "--",
+        opts.repositoryUrl,
+        opts.ctxDir,
+      ],
+      { env: cloneEnv, onLine: opts.onLine, timeoutMs: 120_000 },
+    );
+  } finally {
+    if (opts.authToken) {
+      await unlink(askPassPath).catch(() => {});
+    }
+  }
   if (clone.exitCode !== 0) {
     throw new Error(`git clone failed: ${clone.output.trim().split("\n").slice(-2).join(" ")}`);
   }

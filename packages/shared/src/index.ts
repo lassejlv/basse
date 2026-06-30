@@ -448,6 +448,48 @@ export type SaveDepotConnectionInput = {
   orgId: string;
 };
 
+export type GitHubAppIntegration = {
+  connected: boolean;
+  appName?: string;
+  appSlug?: string;
+  appId?: string;
+  installUrl?: string;
+  updatedAt?: string;
+};
+
+export type GitHubAppManifest = {
+  actionUrl: string;
+  manifest: string;
+};
+
+export type CompleteGitHubAppManifestInput = {
+  code: string;
+};
+
+export type GitHubAppInstallation = {
+  id: string;
+  installationId: string;
+  accountLogin: string;
+  accountType: string | null;
+  repositorySelection: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SaveGitHubAppInstallationInput = {
+  installationId: string;
+};
+
+export type GitHubRepository = {
+  id: string;
+  installationId: string;
+  accountLogin: string;
+  fullName: string;
+  cloneUrl: string;
+  defaultBranch: string;
+  private: boolean;
+};
+
 export type ServerStatus = "pending" | "provisioning" | "active" | "error" | "unreachable";
 
 // Server DTO returned to the client. Secrets (private key, raw agent token) are

@@ -219,7 +219,12 @@ function AuthedLayout() {
                 <SidebarMenuItem>
                   <SidebarMenuButton
                     isActive={pathname === "/secrets"}
-                    render={<Link to="/secrets" />}
+                    render={
+                      <Link
+                        to="/secrets"
+                        search={{ code: undefined, installation_id: undefined, setup_action: undefined }}
+                      />
+                    }
                     tooltip="Secrets"
                   >
                     <KeyRoundIcon />

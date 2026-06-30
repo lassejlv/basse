@@ -21,6 +21,7 @@ import type {
 } from "@basse/shared";
 import { DatabaseIcon, databaseEngineLabel } from "@/components/database-icon";
 import { DeployStatusBadge, StatusDot } from "@/components/deploy-status";
+import { GitHubRepositorySelect } from "@/components/github-repository-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -79,6 +80,7 @@ import {
   type SharedEnvVarPlain,
 } from "@/lib/env-vars";
 import { relativeTime } from "@/lib/format";
+import { listGitHubRepositories } from "@/lib/github";
 import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
 import { deleteProject, getProject } from "@/lib/projects";
 import { listServers } from "@/lib/servers";
@@ -762,6 +764,10 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
   const [open, setOpen] = useState(false);
 
   const servers = useQuery({ queryKey: ["servers", "for-apps"], queryFn: listServers });
+  const githubRepositories = useQuery({
+    queryKey: ["github-repositories", "create-app"],
+    queryFn: listGitHubRepositories,
+  });
 
   const [name, setName] = useState("");
   const [appKind, setAppKind] = useState<AppKind>("service");
@@ -872,6 +878,7 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
   }
 
   const serverList = servers.data ?? [];
+  const githubRepoList = githubRepositories.data ?? [];
 
   function updateDatabaseKind(kind: DatabaseKind) {
     setDatabaseKind(kind);
@@ -970,6 +977,17 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
                 </div>
                 {sourceType === "repository" ? (
                   <>
+                    {githubRepoList.length > 0 ? (
+                      <GitHubRepositorySelect
+                        label="GitHub repository"
+                        onSelect={(repository) => {
+                          setRepositoryUrl(repository.cloneUrl);
+                          setBranch(repository.defaultBranch);
+                        }}
+                        repositories={githubRepoList}
+                        value={repositoryUrl}
+                      />
+                    ) : null}
                     <div className="space-y-2">
                       <Label htmlFor="app-repo">Repository URL</Label>
                       <Input

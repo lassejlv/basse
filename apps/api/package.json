@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "bun --env-file=../../.env --hot src/index.ts",
     "check": "tsc --noEmit -p tsconfig.json",
+    "test": "bun test src",
     "auth:secret": "bun x @better-auth/cli@latest secret"
   },
   "dependencies": {

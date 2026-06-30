@@ -11,6 +11,7 @@
     "dev:api": "bun --cwd apps/api dev",
     "dev:web": "bun --cwd apps/web dev",
     "check": "bun --filter '*' check",
+    "test": "bun --cwd apps/api test",
     "lint": "oxlint .",
     "format": "oxfmt --write .",
     "db:generate": "bun --cwd packages/db db:generate",

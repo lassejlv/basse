@@ -30,6 +30,7 @@ import { ChartTooltip } from "@/components/charts/tooltip";
 import { XAxis } from "@/components/charts/x-axis";
 import { DatabaseIcon, databaseEngineLabel } from "@/components/database-icon";
 import { DeployStatusBadge, StatusDot } from "@/components/deploy-status";
+import { GitHubRepositorySelect } from "@/components/github-repository-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -83,6 +84,7 @@ import { createDomain, deleteDomain, listDomains } from "@/lib/domains";
 import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
 import { listEnvReferences, listEnvVars, revealEnvVars } from "@/lib/env-vars";
 import { formatBytes } from "@/lib/format";
+import { listGitHubRepositories } from "@/lib/github";
 import {
   createManagedLoadBalancer,
   deleteManagedLoadBalancer,
@@ -1202,6 +1204,10 @@ function ServerCard({ app }: { app: App }) {
 
 function BuildSettingsCard({ app }: { app: App }) {
   const queryClient = useQueryClient();
+  const githubRepositories = useQuery({
+    queryKey: ["github-repositories", "build-settings"],
+    queryFn: listGitHubRepositories,
+  });
   const [sourceType, setSourceType] = useState<AppSourceType>(app.sourceType);
   const [repositoryUrl, setRepositoryUrl] = useState(app.repositoryUrl);
   const [imageRef, setImageRef] = useState(app.imageRef ?? "");
@@ -1237,6 +1243,7 @@ function BuildSettingsCard({ app }: { app: App }) {
     onError: (e: Error) => setError(e.message),
   });
   const localBuildInvalid = app.buildRunner === "server" && app.serverIds.length !== 1;
+  const githubRepoList = githubRepositories.data ?? [];
 
   return (
     <Card className="p-6">
@@ -1278,6 +1285,17 @@ function BuildSettingsCard({ app }: { app: App }) {
         </div>
         {sourceType === "repository" ? (
           <>
+            {githubRepoList.length > 0 ? (
+              <GitHubRepositorySelect
+                label="GitHub repository"
+                onSelect={(repository) => {
+                  setRepositoryUrl(repository.cloneUrl);
+                  setBranch(repository.defaultBranch);
+                }}
+                repositories={githubRepoList}
+                value={repositoryUrl}
+              />
+            ) : null}
             <div className="space-y-2">
               <Label htmlFor="app-source-repo">Repository URL</Label>
               <Input

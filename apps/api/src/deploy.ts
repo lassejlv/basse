@@ -23,6 +23,8 @@ import {
 } from "./builder";
 import { decryptSecret } from "./crypto";
 import { loadResolvedEnvMap } from "./env-resolver";
+import { resolveGitHubCloneToken } from "./github";
+import { gitHubHttpsCloneUrl } from "./github-utils";
 import { connectionFromServer } from "./server-connection";
 import { runScript, type SshConnection } from "./ssh";
 
@@ -193,6 +195,16 @@ async function resolveDepotRegistryForImage(
   };
 }
 
+async function resolveAppOrganizationId(appRow: typeof app.$inferSelect): Promise<string | null> {
+  const [row] = await db
+    .select({ organizationId: project.organizationId })
+    .from(environment)
+    .innerJoin(project, eq(environment.projectId, project.id))
+    .where(eq(environment.id, appRow.environmentId))
+    .limit(1);
+  return row?.organizationId ?? null;
+}
+
 /**
  * Builds and deploys a deployment. Idempotent-ish and NEVER throws — every
  * failure lands the deployment in a terminal status with logs. The deployment
@@ -321,10 +333,20 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       // Clone.
       log.line(`Cloning ${appRow.repositoryUrl} (${appRow.branch})…`);
       ctxDir = await mkdtemp(join(tmpdir(), "basse-build-"));
+      const organizationId = await resolveAppOrganizationId(appRow);
+      const authToken = organizationId
+        ? await resolveGitHubCloneToken(organizationId, appRow.repositoryUrl)
+        : null;
+      if (authToken) {
+        log.line("Using GitHub App installation token for repository access.");
+      }
       const commitSha = await cloneRepo({
-        repositoryUrl: appRow.repositoryUrl,
+        repositoryUrl: authToken
+          ? (gitHubHttpsCloneUrl(appRow.repositoryUrl) ?? appRow.repositoryUrl)
+          : appRow.repositoryUrl,
         branch: appRow.branch,
         ctxDir,
+        authToken,
         onLine: log.line,
       });
       await setStatus(deploymentId, "building", { commitSha });

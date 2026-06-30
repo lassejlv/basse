@@ -1,17 +1,31 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
-import { TrashIcon } from "lucide-react";
-import { FormEvent, useState } from "react";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { ExternalLinkIcon, TrashIcon } from "lucide-react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { authClient } from "@/lib/auth-client";
 import { disconnectDepot, getDepotConnection, saveDepotConnection } from "@/lib/depot";
+import {
+  completeGitHubAppManifest,
+  disconnectGitHubApp,
+  getGitHubAppIntegration,
+  getGitHubAppManifest,
+  listGitHubAppInstallations,
+  saveGitHubAppInstallation,
+} from "@/lib/github";
 import { toast, toMessage } from "@/lib/toast";
 import { createSshKey, deleteSshKey, listSshKeys } from "@/lib/ssh-keys";
 
 export const Route = createFileRoute("/_authed/secrets")({
+  validateSearch: (search: Record<string, unknown>) => ({
+    code: typeof search.code === "string" ? search.code : undefined,
+    installation_id:
+      typeof search.installation_id === "string" ? search.installation_id : undefined,
+    setup_action: typeof search.setup_action === "string" ? search.setup_action : undefined,
+  }),
   component: SecretsRoute,
 });
 
@@ -29,9 +43,187 @@ function SecretsRoute() {
       </div>
 
       <SshKeysSection organizationId={organizationId} />
+      <GitHubSection organizationId={organizationId} />
       <DepotSection organizationId={organizationId} />
     </section>
   );
+}
+
+function GitHubSection({ organizationId }: { organizationId?: string }) {
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const search = Route.useSearch();
+  const processedCode = useRef<string | null>(null);
+  const processedInstallation = useRef<string | null>(null);
+  const integrationKey = ["github-app-integration", organizationId];
+  const installationsKey = ["github-app-installations", organizationId];
+
+  const integration = useQuery({
+    queryKey: integrationKey,
+    queryFn: getGitHubAppIntegration,
+    enabled: Boolean(organizationId),
+  });
+
+  const manifest = useQuery({
+    queryKey: ["github-app-manifest", organizationId],
+    queryFn: getGitHubAppManifest,
+    enabled: Boolean(organizationId),
+  });
+
+  const installations = useQuery({
+    queryKey: installationsKey,
+    queryFn: listGitHubAppInstallations,
+    enabled: Boolean(organizationId),
+  });
+
+  const completeManifest = useMutation({
+    mutationFn: (code: string) => completeGitHubAppManifest({ code }),
+    onSuccess: async () => {
+      toast.success("GitHub App connected");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: integrationKey }),
+        queryClient.invalidateQueries({ queryKey: installationsKey }),
+        queryClient.invalidateQueries({ queryKey: ["github-repositories"] }),
+      ]);
+      await clearGitHubCallbackSearch(navigate);
+    },
+    onError: (error) => toast.error("Couldn't connect GitHub App", { description: toMessage(error) }),
+  });
+
+  const saveInstallation = useMutation({
+    mutationFn: (input: { installationId: string; setupAction?: string }) =>
+      saveGitHubAppInstallation({ installationId: input.installationId }),
+    onSuccess: async (_installation, input) => {
+      toast.success(
+        input.setupAction === "update"
+          ? "GitHub repository access updated"
+          : "GitHub installation saved",
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: installationsKey }),
+        queryClient.invalidateQueries({ queryKey: ["github-repositories"] }),
+      ]);
+      await clearGitHubCallbackSearch(navigate);
+    },
+    onError: (error) =>
+      toast.error("Couldn't save GitHub installation", { description: toMessage(error) }),
+  });
+
+  const disconnect = useMutation({
+    mutationFn: disconnectGitHubApp,
+    onSuccess: async () => {
+      toast.success("GitHub disconnected");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: integrationKey }),
+        queryClient.invalidateQueries({ queryKey: installationsKey }),
+        queryClient.invalidateQueries({ queryKey: ["github-repositories"] }),
+      ]);
+    },
+    onError: (error) => toast.error("Couldn't disconnect GitHub", { description: toMessage(error) }),
+  });
+
+  useEffect(() => {
+    if (!search.code || processedCode.current === search.code) return;
+    processedCode.current = search.code;
+    completeManifest.mutate(search.code);
+  }, [completeManifest, search.code]);
+
+  useEffect(() => {
+    if (!search.installation_id || processedInstallation.current === search.installation_id) return;
+    if (!/^\d+$/.test(search.installation_id)) return;
+    processedInstallation.current = search.installation_id;
+    saveInstallation.mutate({
+      installationId: search.installation_id,
+      setupAction: search.setup_action,
+    });
+  }, [saveInstallation, search.installation_id, search.setup_action]);
+
+  const connected = integration.data?.connected;
+  const installUrl = integration.data?.installUrl;
+  const savedInstallations = installations.data ?? [];
+
+  return (
+    <div className="max-w-2xl rounded-lg border bg-card p-6">
+      <h2 className="text-lg font-semibold">GitHub</h2>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Create a workspace GitHub App, install it on private repositories, and deploy over
+        short-lived installation tokens.
+      </p>
+
+      {connected ? (
+        <div className="mt-5 rounded-md border px-3 py-2 text-sm">
+          <p className="font-medium">{integration.data?.appName}</p>
+          <p className="font-mono text-muted-foreground text-xs">
+            github.com/apps/{integration.data?.appSlug}
+          </p>
+        </div>
+      ) : null}
+
+      {savedInstallations.length > 0 ? (
+        <ul className="mt-4 flex flex-col gap-2">
+          {savedInstallations.map((installation) => (
+            <li
+              key={installation.id}
+              className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+            >
+              <div className="min-w-0 text-sm">
+                <p className="truncate font-medium">{installation.accountLogin}</p>
+                <p className="truncate text-muted-foreground text-xs">
+                  {installation.accountType ?? "account"} ·{" "}
+                  {installation.repositorySelection ?? "repositories"}
+                </p>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : connected ? (
+        <p className="mt-4 text-muted-foreground text-sm">No GitHub installations saved yet.</p>
+      ) : null}
+
+      <div className="mt-6 flex flex-wrap gap-2 border-t pt-6">
+        <form action={manifest.data?.actionUrl} method="post">
+          <input name="manifest" type="hidden" value={manifest.data?.manifest ?? ""} />
+          <Button
+            disabled={!organizationId || manifest.isPending || !manifest.data?.manifest}
+            type="submit"
+          >
+            {connected ? "Create another GitHub App" : "Create GitHub App"}
+          </Button>
+        </form>
+
+        {installUrl ? (
+          <>
+            <Button
+              render={<a href={installUrl} rel="noreferrer" target="_blank" />}
+              variant="outline"
+            >
+              {savedInstallations.length > 0 ? "Install or update access" : "Install app"}
+              <ExternalLinkIcon />
+            </Button>
+            <Button
+              loading={disconnect.isPending}
+              onClick={() => {
+                if (window.confirm("Disconnect GitHub from this workspace?")) {
+                  disconnect.mutate();
+                }
+              }}
+              variant="outline"
+            >
+              Disconnect
+            </Button>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+async function clearGitHubCallbackSearch(navigate: ReturnType<typeof useNavigate>) {
+  await navigate({
+    replace: true,
+    search: { code: undefined, installation_id: undefined, setup_action: undefined },
+    to: "/secrets",
+  });
 }
 
 function SshKeysSection({ organizationId }: { organizationId?: string }) {

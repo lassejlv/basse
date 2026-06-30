@@ -600,6 +600,48 @@ export const depotConnection = pgTable("depot_connection", {
   updatedAt: timestamp("updated_at").notNull(),
 });
 
+export const githubAppIntegration = pgTable("github_app_integration", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id")
+    .notNull()
+    .unique()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  appId: text("app_id").notNull(),
+  slug: text("slug").notNull(),
+  name: text("name").notNull(),
+  clientId: text("client_id"),
+  privateKey: text("private_key").notNull(),
+  webhookSecret: text("webhook_secret"),
+  createdAt: timestamp("created_at").notNull(),
+  updatedAt: timestamp("updated_at").notNull(),
+});
+
+export const githubAppInstallation = pgTable(
+  "github_app_installation",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    integrationId: text("integration_id")
+      .notNull()
+      .references(() => githubAppIntegration.id, { onDelete: "cascade" }),
+    installationId: text("installation_id").notNull(),
+    accountLogin: text("account_login").notNull(),
+    accountType: text("account_type"),
+    repositorySelection: text("repository_selection"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("github_app_installation_organizationId_idx").on(table.organizationId),
+    uniqueIndex("github_app_installation_integrationId_installationId_uidx").on(
+      table.integrationId,
+      table.installationId,
+    ),
+  ],
+);
+
 // Workspace-level credentials for third-party traffic providers. Tokens are
 // encrypted by the API before they reach this table.
 export const loadBalancerIntegration = pgTable(

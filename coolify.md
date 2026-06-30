@@ -56,10 +56,12 @@ Checked against the current repo on 2026-06-30.
 - [x] Added background monitoring for server reachability, stuck deployments, app container health, resource pressure, and in-app alerts.
 - [x] Added Cloudflare Email Sending delivery for new monitor alerts through `@opencoredev/email-sdk`.
 - [x] Added `packages/emails` with React Email templates for monitor alert email rendering.
+- [x] Added GitHub App manifest setup, installation callback handling, installed repository picker, and private repository clone support through short-lived installation tokens.
 
 ### Current Validation
 
 - [x] `bun run check`
+- [x] `bun run test`
 - [x] `bun run lint`
 - [x] `bun run --cwd apps/web build`
 - [x] `git diff --check`
@@ -149,8 +151,9 @@ Supported build modes:
 Basse parity:
 
 - v0: Git repo URL + branch + Dockerfile or Nixpacks.
+- v0.5: GitHub App integration for workspace-owned private repository access, installation tracking, installed repository picker, and short-lived installation-token clones.
 - v1: Docker image deploys, static sites, compose stacks.
-- later: Git provider apps, deploy keys, private repo OAuth, monorepo base directory detection.
+- later: GitLab/Bitbucket/Gitea provider apps, deploy keys, private repo OAuth, monorepo base directory detection.
 
 ## Deployment Flow
 
