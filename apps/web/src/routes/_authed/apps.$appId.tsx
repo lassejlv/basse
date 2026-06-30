@@ -1,14 +1,34 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { TrashIcon } from "lucide-react";
+import { FormEvent, useState } from "react";
+import type { DeploymentStatus } from "@basse/shared";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import type { App } from "@/lib/apps";
 import { getApp } from "@/lib/apps";
+import { listDeployments, triggerDeploy } from "@/lib/deployments";
+import { createDomain, deleteDomain, listDomains } from "@/lib/domains";
 import { listEnvVars, setEnvVars } from "@/lib/env-vars";
 
 export const Route = createFileRoute("/_authed/apps/$appId")({
   component: AppDetailRoute,
 });
+
+const DEPLOY_STATUS_VARIANT: Record<
+  DeploymentStatus,
+  "outline" | "info" | "success" | "error" | "secondary"
+> = {
+  queued: "outline",
+  building: "info",
+  deploying: "info",
+  healthy: "success",
+  failed: "error",
+  cancelled: "secondary",
+};
 
 function AppDetailRoute() {
   const { appId } = Route.useParams();
@@ -37,8 +57,74 @@ function AppDetailRoute() {
         ) : null}
       </div>
 
+      <DeploySection appId={appId} canDeploy={Boolean(data.serverId)} />
       <EnvVarsCard appId={appId} />
+      {data.serverId ? <AppDomainsSection app={data} serverId={data.serverId} /> : null}
     </section>
+  );
+}
+
+function DeploySection({ appId, canDeploy }: { appId: string; canDeploy: boolean }) {
+  const queryClient = useQueryClient();
+  const queryKey = ["deployments", appId];
+  const [error, setError] = useState<string | null>(null);
+
+  const deployments = useQuery({
+    queryKey,
+    queryFn: () => listDeployments(appId),
+    // Poll while the newest deployment is still in flight.
+    refetchInterval: (query) => {
+      const latest = query.state.data?.[0];
+      return latest && ["queued", "building", "deploying"].includes(latest.status) ? 2000 : false;
+    },
+  });
+
+  const deploy = useMutation({
+    mutationFn: () => triggerDeploy(appId),
+    onSuccess: async () => {
+      setError(null);
+      await queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  const list = deployments.data ?? [];
+  const latest = list[0];
+
+  return (
+    <div className="max-w-2xl rounded-lg border bg-card p-6">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-lg font-semibold">Deployments</h2>
+        <Button disabled={!canDeploy} loading={deploy.isPending} onClick={() => deploy.mutate()}>
+          Deploy
+        </Button>
+      </div>
+      {error ? <p className="mt-2 text-destructive-foreground text-sm">{error}</p> : null}
+
+      {latest ? (
+        <pre className="mt-4 max-h-72 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
+          {latest.logs ?? "Waiting for logs…"}
+        </pre>
+      ) : null}
+
+      <div className="mt-4">
+        {list.length === 0 ? (
+          <p className="text-muted-foreground text-sm">No deployments yet.</p>
+        ) : (
+          <ul className="flex flex-col gap-1.5">
+            {list.map((d) => (
+              <li key={d.id} className="flex items-center justify-between gap-3 text-sm">
+                <span className="font-mono text-muted-foreground text-xs">
+                  {new Date(d.createdAt).toLocaleString()}
+                  {d.commitSha ? ` · ${d.commitSha.slice(0, 7)}` : ""}
+                </span>
+                <Badge variant={DEPLOY_STATUS_VARIANT[d.status]}>{d.status}</Badge>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -114,6 +200,99 @@ function EnvVarsCard({ appId }: { appId: string }) {
           Save variables
         </Button>
       </div>
+    </div>
+  );
+}
+
+function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
+  const queryClient = useQueryClient();
+  const queryKey = ["domains", serverId];
+  const upstream = `basse-app-${app.id}:${app.port}`;
+  const [host, setHost] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const domains = useQuery({
+    queryKey,
+    queryFn: () => listDomains(serverId),
+    refetchInterval: (query) =>
+      (query.state.data ?? []).some((d) => d.status === "pending") ? 2000 : false,
+  });
+
+  const add = useMutation({
+    mutationFn: () => createDomain(serverId, { host, upstream, appId: app.id }),
+    onSuccess: async () => {
+      setHost("");
+      setError(null);
+      await queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) => deleteDomain(id),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey });
+    },
+  });
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    add.mutate();
+  }
+
+  // Only this app's domains (the server may host domains for other apps too).
+  const appDomains = (domains.data ?? []).filter((d) => d.appId === app.id);
+
+  return (
+    <div className="max-w-2xl rounded-lg border bg-card p-6">
+      <h2 className="text-lg font-semibold">Domains</h2>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Point a domain's DNS at the app's server; it routes to{" "}
+        <code className="font-mono">{upstream}</code> with automatic HTTPS.
+      </p>
+
+      <div className="mt-5">
+        {appDomains.length === 0 ? (
+          <p className="text-muted-foreground text-sm">No domains yet.</p>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {appDomains.map((d) => (
+              <li
+                key={d.id}
+                className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+              >
+                <span className="truncate font-medium text-sm">{d.host}</span>
+                <Button
+                  aria-label={`Delete ${d.host}`}
+                  loading={remove.isPending && remove.variables === d.id}
+                  onClick={() => remove.mutate(d.id)}
+                  size="icon"
+                  variant="outline"
+                >
+                  <TrashIcon />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <form className="mt-6 flex items-end gap-2 border-t pt-6" onSubmit={handleSubmit}>
+        <div className="flex-1 space-y-2">
+          <Label htmlFor="app-domain-host">Domain</Label>
+          <Input
+            id="app-domain-host"
+            onChange={(e) => setHost(e.currentTarget.value)}
+            placeholder="app.example.com"
+            required
+            value={host}
+          />
+        </div>
+        <Button loading={add.isPending} type="submit">
+          Add
+        </Button>
+      </form>
+      {error ? <p className="mt-2 text-destructive-foreground text-sm">{error}</p> : null}
     </div>
   );
 }
