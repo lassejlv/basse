@@ -48,6 +48,25 @@ export async function createServer(input: CreateServerInput): Promise<Server> {
   return response.json() as Promise<Server>;
 }
 
+export type ConnectionCheck = {
+  ok: boolean;
+  fingerprint: string | null;
+  error?: string;
+};
+
+export async function checkServerConnection(id: string): Promise<ConnectionCheck> {
+  const response = await fetch(`${apiBaseUrl}/api/servers/${id}/check-connection`, {
+    method: "POST",
+    credentials: "include",
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+
+  return response.json() as Promise<ConnectionCheck>;
+}
+
 export async function deleteServer(id: string): Promise<void> {
   const response = await fetch(`${apiBaseUrl}/api/servers/${id}`, {
     method: "DELETE",

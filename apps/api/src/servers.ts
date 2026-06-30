@@ -3,7 +3,9 @@ import type { CreateServerInput, Server } from "@basse/shared";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { decryptSecret, encryptSecret } from "./crypto";
+import { connectionFromServer } from "./server-connection";
 import { generateServerKeyPair } from "./server-keys";
+import { probeReachable } from "./ssh";
 import { resolveActiveWorkspace } from "./workspace";
 
 type ServerRow = typeof server.$inferSelect;
@@ -133,6 +135,40 @@ servers.post("/", async (c) => {
   }
 
   return c.json(await sanitizeServer(created), 201);
+});
+
+servers.post("/:id/check-connection", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+
+  if (organizationId instanceof Response) {
+    return organizationId;
+  }
+
+  const [row] = await db
+    .select()
+    .from(server)
+    .where(and(eq(server.id, c.req.param("id")), eq(server.organizationId, organizationId)))
+    .limit(1);
+
+  if (!row) {
+    return c.json({ error: "Server not found" }, 404);
+  }
+
+  const connection = await connectionFromServer(row);
+  const result = await probeReachable(connection);
+
+  if (result.fingerprint && result.fingerprint !== row.hostKeyFingerprint) {
+    await db
+      .update(server)
+      .set({ hostKeyFingerprint: result.fingerprint, updatedAt: new Date() })
+      .where(eq(server.id, row.id));
+  }
+
+  return c.json({
+    ok: result.ok,
+    fingerprint: result.fingerprint,
+    error: result.error,
+  });
 });
 
 servers.delete("/:id", async (c) => {

@@ -5,7 +5,7 @@ import { useState } from "react";
 import { ServerStatusBadge } from "@/components/server-status-badge";
 import { Button } from "@/components/ui/button";
 import { authClient } from "@/lib/auth-client";
-import { deleteServer, getServer } from "@/lib/servers";
+import { checkServerConnection, deleteServer, getServer } from "@/lib/servers";
 
 export const Route = createFileRoute("/_authed/servers/$serverId")({
   component: ServerDetailRoute,
@@ -28,6 +28,13 @@ function ServerDetailRoute() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["servers", activeOrganization?.id] });
       navigate({ to: "/servers" });
+    },
+  });
+
+  const test = useMutation({
+    mutationFn: () => checkServerConnection(serverId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["server", serverId] });
     },
   });
 
@@ -81,10 +88,22 @@ function ServerDetailRoute() {
         <pre className="mt-4 overflow-x-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
           {data.sshPublicKey}
         </pre>
-        <div className="mt-3 flex gap-2">
+        <div className="mt-3 flex items-center gap-2">
           <Button onClick={copyPublicKey} size="sm" variant="outline">
             {copied ? "Copied" : "Copy key"}
           </Button>
+          <Button loading={test.isPending} onClick={() => test.mutate()} size="sm" variant="outline">
+            Test connection
+          </Button>
+          {test.data ? (
+            test.data.ok ? (
+              <span className="text-success-foreground text-sm">Reachable</span>
+            ) : (
+              <span className="text-destructive-foreground text-sm">
+                {test.data.error ?? "Unreachable"}
+              </span>
+            )
+          ) : null}
         </div>
       </div>
 
