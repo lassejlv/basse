@@ -234,18 +234,30 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
         </div>
         <div className="space-y-2">
           <Label>Server</Label>
-          <Select value={serverId} onValueChange={(v) => setServerId(v ?? "")}>
-            <SelectButton className="w-full" disabled={!serverList.length}>
-              <SelectValue placeholder="Select a server" />
-            </SelectButton>
-            <SelectPopup>
-              {serverList.map((s) => (
-                <SelectItem key={s.id} value={s.id}>
-                  {s.name}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
+          {servers.isPending ? (
+            <p className="text-muted-foreground text-sm">Loading servers…</p>
+          ) : serverList.length === 0 ? (
+            <p className="text-muted-foreground text-sm">
+              No servers yet —{" "}
+              <Link to="/servers" className="font-medium text-foreground underline">
+                add one
+              </Link>{" "}
+              first (you can also attach it after creating the app).
+            </p>
+          ) : (
+            <Select value={serverId} onValueChange={(v) => setServerId(v ?? "")}>
+              <SelectButton className="w-full">
+                <SelectValue placeholder="Select a server" />
+              </SelectButton>
+              <SelectPopup>
+                {serverList.map((s) => (
+                  <SelectItem key={s.id} value={s.id}>
+                    {s.name}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          )}
         </div>
 
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}

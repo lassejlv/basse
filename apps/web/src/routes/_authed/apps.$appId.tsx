@@ -7,12 +7,20 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectButton,
+  SelectItem,
+  SelectPopup,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import type { App } from "@/lib/apps";
-import { getApp } from "@/lib/apps";
+import { getApp, updateApp } from "@/lib/apps";
 import { listDeployments, triggerDeploy } from "@/lib/deployments";
 import { createDomain, deleteDomain, listDomains } from "@/lib/domains";
 import { listEnvVars, setEnvVars } from "@/lib/env-vars";
+import { listServers } from "@/lib/servers";
 
 export const Route = createFileRoute("/_authed/apps/$appId")({
   component: AppDetailRoute,
@@ -57,10 +65,59 @@ function AppDetailRoute() {
         ) : null}
       </div>
 
+      <ServerCard app={data} />
       <DeploySection appId={appId} canDeploy={Boolean(data.serverId)} />
       <EnvVarsCard appId={appId} />
       {data.serverId ? <AppDomainsSection app={data} serverId={data.serverId} /> : null}
     </section>
+  );
+}
+
+function ServerCard({ app }: { app: App }) {
+  const queryClient = useQueryClient();
+  const servers = useQuery({ queryKey: ["servers", "for-apps"], queryFn: listServers });
+
+  const setServer = useMutation({
+    mutationFn: (serverId: string) => updateApp(app.id, { serverId }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["app", app.id] });
+    },
+  });
+
+  const serverList = servers.data ?? [];
+
+  return (
+    <div className="max-w-2xl rounded-lg border bg-card p-6">
+      <h2 className="text-lg font-semibold">Server</h2>
+      <p className="mt-1 text-muted-foreground text-sm">
+        The server this app deploys to. Only active servers can run deployments.
+      </p>
+      <div className="mt-4">
+        {servers.isPending ? (
+          <p className="text-muted-foreground text-sm">Loading servers…</p>
+        ) : serverList.length === 0 ? (
+          <p className="text-muted-foreground text-sm">No servers in this workspace yet.</p>
+        ) : (
+          <Select
+            value={app.serverId ?? ""}
+            onValueChange={(v) => {
+              if (v) setServer.mutate(v);
+            }}
+          >
+            <SelectButton className="w-full max-w-sm">
+              <SelectValue placeholder="Select a server" />
+            </SelectButton>
+            <SelectPopup>
+              {serverList.map((s) => (
+                <SelectItem key={s.id} value={s.id}>
+                  {s.name} ({s.status})
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        )}
+      </div>
+    </div>
   );
 }
 
