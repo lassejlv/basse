@@ -2,9 +2,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { TrashIcon } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
+import type { LoadBalancerProvider } from "@basse/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectItem,
+  SelectPopup,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { authClient } from "@/lib/auth-client";
 import {
   deleteLoadBalancerIntegration,
@@ -136,17 +144,23 @@ function LoadBalancerIntegrationsCard() {
     queryKey,
     queryFn: listLoadBalancerIntegrations,
   });
+  const [provider, setProvider] = useState<LoadBalancerProvider>("hetzner");
   const [name, setName] = useState("Hetzner");
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const providerLabel = trafficProviderLabel(provider);
+
+  useEffect(() => {
+    setName(providerLabel);
+  }, [providerLabel]);
 
   const save = useMutation({
-    mutationFn: () => saveLoadBalancerIntegration({ provider: "hetzner", name, token }),
+    mutationFn: () => saveLoadBalancerIntegration({ provider, name, token }),
     onSuccess: async () => {
       setToken("");
       setError(null);
       await queryClient.invalidateQueries({ queryKey });
-      toast.success("Hetzner connected");
+      toast.success(`${providerLabel} connected`);
     },
     onError: (saveError: Error) => setError(saveError.message),
   });
@@ -212,7 +226,24 @@ function LoadBalancerIntegrationsCard() {
       </div>
 
       <form className="mt-6 space-y-4 border-t pt-6" onSubmit={handleSubmit}>
-        <div className="grid gap-3 sm:grid-cols-[150px_1fr]">
+        <div className="grid gap-3 sm:grid-cols-[150px_150px_1fr]">
+          <div className="space-y-2">
+            <Label>Provider</Label>
+            <Select
+              value={provider}
+              onValueChange={(value) => setProvider((value ?? "hetzner") as LoadBalancerProvider)}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Provider">
+                  {(value: LoadBalancerProvider) => trafficProviderLabel(value)}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup>
+                <SelectItem value="hetzner">Hetzner</SelectItem>
+                <SelectItem value="cloudflare">Cloudflare</SelectItem>
+              </SelectPopup>
+            </Select>
+          </div>
           <div className="space-y-2">
             <Label htmlFor="traffic-provider-name">Name</Label>
             <Input
@@ -222,25 +253,30 @@ function LoadBalancerIntegrationsCard() {
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="traffic-provider-token">Hetzner API token</Label>
+            <Label htmlFor="traffic-provider-token">{providerLabel} API token</Label>
             <Input
               id="traffic-provider-token"
               onChange={(event) => setToken(event.currentTarget.value)}
-              placeholder="hcloud token"
+              placeholder={provider === "hetzner" ? "hcloud token" : "Cloudflare API token"}
               type="password"
               value={token}
             />
           </div>
         </div>
         <p className="text-muted-foreground text-xs">
-          The token is validated against Hetzner Cloud and stored encrypted. Cloudflare will plug
-          into the same provider model later.
+          {provider === "hetzner"
+            ? "The token is validated against Hetzner Cloud and stored encrypted."
+            : "The token is validated against Cloudflare and should allow Zone Read plus Load Balancers Write."}
         </p>
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
         <Button disabled={!token.trim()} loading={save.isPending} type="submit">
-          Connect Hetzner
+          Connect {providerLabel}
         </Button>
       </form>
     </div>
   );
+}
+
+function trafficProviderLabel(provider: LoadBalancerProvider): string {
+  return provider === "hetzner" ? "Hetzner" : "Cloudflare";
 }

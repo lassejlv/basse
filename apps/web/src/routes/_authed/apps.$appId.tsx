@@ -20,6 +20,7 @@ import type {
   AppVolume,
   DatabaseKind,
   Deployment,
+  LoadBalancerIntegration,
   ManagedLoadBalancer,
 } from "@basse/shared";
 import { chartCssVars } from "@/components/charts/chart-context";
@@ -2001,6 +2002,11 @@ const LOAD_BALANCER_STATUS_VARIANT = {
   error: "error",
 } as const;
 
+function providerOptionLabel(integration: LoadBalancerIntegration | null): string {
+  if (!integration) return "Provider";
+  return `${integration.name} · ${integration.provider}`;
+}
+
 function ManagedLoadBalancerSection({ app }: { app: App }) {
   const queryClient = useQueryClient();
   const integrationsKey = ["load-balancer-integrations"];
@@ -2019,6 +2025,10 @@ function ManagedLoadBalancerSection({ app }: { app: App }) {
   const [loadBalancerType, setLoadBalancerType] = useState("lb11");
   const [healthCheckPath, setHealthCheckPath] = useState("/");
   const [error, setError] = useState<string | null>(null);
+  const integrationList = integrations.data ?? [];
+  const selectedIntegration =
+    integrationList.find((integration) => integration.id === integrationId) ?? null;
+  const selectedProvider = selectedIntegration?.provider ?? "hetzner";
 
   useEffect(() => {
     const firstIntegration = integrations.data?.[0]?.id ?? "";
@@ -2027,14 +2037,25 @@ function ManagedLoadBalancerSection({ app }: { app: App }) {
     }
   }, [integrationId, integrations.data]);
 
+  useEffect(() => {
+    if (selectedProvider === "cloudflare") {
+      setLocation("auto-zone");
+      setLoadBalancerType("proxied");
+      return;
+    }
+
+    if (location === "auto-zone") setLocation("fsn1");
+    if (loadBalancerType === "proxied") setLoadBalancerType("lb11");
+  }, [loadBalancerType, location, selectedProvider]);
+
   const create = useMutation({
     mutationFn: () =>
       createManagedLoadBalancer({
         appId: app.id,
         integrationId,
         host,
-        location,
-        loadBalancerType,
+        location: selectedProvider === "hetzner" ? location : "auto-zone",
+        loadBalancerType: selectedProvider === "hetzner" ? loadBalancerType : "proxied",
         healthCheckPath,
       }),
     onSuccess: async (created) => {
@@ -2062,7 +2083,6 @@ function ManagedLoadBalancerSection({ app }: { app: App }) {
     create.mutate();
   }
 
-  const integrationList = integrations.data ?? [];
   const existing = loadBalancers.data ?? [];
 
   return (
@@ -2083,7 +2103,7 @@ function ManagedLoadBalancerSection({ app }: { app: App }) {
       ) : integrationList.length === 0 ? (
         <div className="mt-5 rounded-md border border-dashed p-5">
           <p className="text-muted-foreground text-sm">
-            Connect Hetzner in Settings before creating a managed load balancer.
+            Connect Hetzner or Cloudflare in Settings before creating a managed load balancer.
           </p>
           <Button className="mt-3" render={<Link to="/settings" />} size="sm" variant="outline">
             Open settings
@@ -2119,38 +2139,48 @@ function ManagedLoadBalancerSection({ app }: { app: App }) {
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Provider">
                     {(value: string) =>
-                      integrationList.find((integration) => integration.id === value)?.name ??
-                      "Provider"
+                      providerOptionLabel(
+                        integrationList.find((integration) => integration.id === value) ?? null,
+                      )
                     }
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup>
                   {integrationList.map((integration) => (
                     <SelectItem key={integration.id} value={integration.id}>
-                      {integration.name}
+                      {providerOptionLabel(integration)}
                     </SelectItem>
                   ))}
                 </SelectPopup>
               </Select>
             </div>
           </div>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <div className="space-y-2">
-              <Label htmlFor="load-balancer-location">Hetzner location</Label>
-              <Input
-                id="load-balancer-location"
-                onChange={(event) => setLocation(event.currentTarget.value)}
-                value={location}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="load-balancer-type">Type</Label>
-              <Input
-                id="load-balancer-type"
-                onChange={(event) => setLoadBalancerType(event.currentTarget.value)}
-                value={loadBalancerType}
-              />
-            </div>
+          <div className={`grid gap-3 ${selectedProvider === "hetzner" ? "sm:grid-cols-3" : ""}`}>
+            {selectedProvider === "hetzner" ? (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="load-balancer-location">Hetzner location</Label>
+                  <Input
+                    id="load-balancer-location"
+                    onChange={(event) => setLocation(event.currentTarget.value)}
+                    value={location}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="load-balancer-type">Type</Label>
+                  <Input
+                    id="load-balancer-type"
+                    onChange={(event) => setLoadBalancerType(event.currentTarget.value)}
+                    value={loadBalancerType}
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="rounded-md border bg-muted/20 p-3 text-muted-foreground text-sm">
+                Basse will resolve the Cloudflare zone from the domain, then create a proxied load
+                balancer with one pool and health monitor.
+              </div>
+            )}
             <div className="space-y-2">
               <Label htmlFor="load-balancer-health">Health path</Label>
               <Input
@@ -2161,8 +2191,9 @@ function ManagedLoadBalancerSection({ app }: { app: App }) {
             </div>
           </div>
           <p className="text-muted-foreground text-xs">
-            Hetzner v0 creates a Basse-owned load balancer with TCP passthrough on 80 and 443, so
-            each target server's Caddy keeps handling TLS and app routing.
+            {selectedProvider === "hetzner"
+              ? "Hetzner creates a Basse-owned load balancer with TCP passthrough on 80 and 443, so each target server's Caddy keeps handling TLS and app routing."
+              : "Cloudflare creates the public hostname directly in your zone. Point the domain to Cloudflare nameservers first."}
           </p>
           {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
           <Button disabled={!integrationId || !host.trim()} loading={create.isPending} type="submit">
@@ -2265,10 +2296,20 @@ function ManagedLoadBalancerCard({
         <p className="mt-3 text-destructive-foreground text-sm">{loadBalancer.statusMessage}</p>
       ) : null}
 
-      <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-        <DnsRecord label="A record" value={loadBalancer.endpointIpv4} host={loadBalancer.host} />
-        <DnsRecord label="AAAA record" value={loadBalancer.endpointIpv6} host={loadBalancer.host} />
-      </div>
+      {loadBalancer.provider === "cloudflare" ? (
+        <div className="mt-4 rounded-md border bg-background p-3 text-sm">
+          <p className="font-medium">Cloudflare DNS</p>
+          <p className="mt-1 text-muted-foreground">
+            {loadBalancer.host} is managed as a proxied Cloudflare load balancer in the matching
+            zone.
+          </p>
+        </div>
+      ) : (
+        <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+          <DnsRecord label="A record" value={loadBalancer.endpointIpv4} host={loadBalancer.host} />
+          <DnsRecord label="AAAA record" value={loadBalancer.endpointIpv6} host={loadBalancer.host} />
+        </div>
+      )}
 
       <div className="mt-4">
         <p className="font-medium text-sm">Targets</p>

@@ -20,6 +20,11 @@ import type {
 } from "@basse/shared";
 import { and, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
+import {
+  deleteCloudflareLoadBalancer,
+  syncCloudflareLoadBalancer,
+  testCloudflareToken,
+} from "./cloudflare";
 import { decryptSecret, encryptSecret } from "./crypto";
 import {
   deleteHetznerLoadBalancer,
@@ -63,15 +68,19 @@ loadBalancers.post("/integrations", async (c) => {
   const provider = PROVIDERS.includes(body?.provider as LoadBalancerProvider)
     ? (body?.provider as LoadBalancerProvider)
     : null;
-  const name = typeof body?.name === "string" && body.name.trim() ? body.name.trim() : "Hetzner";
   const token = typeof body?.token === "string" ? body.token.trim() : "";
 
   if (!provider) return c.json({ error: "provider is required" }, 400);
-  if (provider !== "hetzner") return c.json({ error: "Cloudflare is not wired yet" }, 400);
+  const name =
+    typeof body?.name === "string" && body.name.trim() ? body.name.trim() : providerName(provider);
   if (!token) return c.json({ error: "token is required" }, 400);
 
   try {
-    await testHetznerToken(token);
+    if (provider === "hetzner") {
+      await testHetznerToken(token);
+    } else {
+      await testCloudflareToken(token);
+    }
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Could not validate token" }, 400);
   }
@@ -182,12 +191,12 @@ loadBalancers.post("/", async (c) => {
   const appId = typeof body?.appId === "string" ? body.appId : "";
   const integrationId = typeof body?.integrationId === "string" ? body.integrationId : "";
   const host = typeof body?.host === "string" ? body.host.trim().toLowerCase() : "";
-  const location =
-    typeof body?.location === "string" && body.location.trim() ? body.location.trim() : "fsn1";
-  const loadBalancerType =
+  const requestedLocation =
+    typeof body?.location === "string" && body.location.trim() ? body.location.trim() : "";
+  const requestedLoadBalancerType =
     typeof body?.loadBalancerType === "string" && body.loadBalancerType.trim()
       ? body.loadBalancerType.trim()
-      : "lb11";
+      : "";
   const healthCheckPath =
     typeof body?.healthCheckPath === "string" && body.healthCheckPath.trim()
       ? normalizeHealthCheckPath(body.healthCheckPath)
@@ -199,12 +208,15 @@ loadBalancers.post("/", async (c) => {
 
   const integration = await ownedIntegration(integrationId, organizationId);
   if (!integration) return c.json({ error: "Integration not found" }, 404);
-  if (integration.provider !== "hetzner") return c.json({ error: "Provider is not wired yet" }, 400);
 
   const hostError = validateHost(host);
   if (hostError) return c.json({ error: hostError }, 400);
   const pathError = validateHealthCheckPath(healthCheckPath);
   if (pathError) return c.json({ error: pathError }, 400);
+  const location =
+    requestedLocation || (integration.provider === "hetzner" ? "fsn1" : "auto-zone");
+  const loadBalancerType =
+    requestedLoadBalancerType || (integration.provider === "hetzner" ? "lb11" : "proxied");
 
   const now = new Date();
   let row: LoadBalancerRow | undefined;
@@ -261,6 +273,8 @@ loadBalancers.delete("/:id", async (c) => {
     const token = await decryptSecret(integration.token);
     if (row.provider === "hetzner") {
       await deleteHetznerLoadBalancer(token, row.providerResourceId);
+    } else {
+      await deleteCloudflareLoadBalancer(token, row.providerResourceId);
     }
   }
 
@@ -388,21 +402,33 @@ async function syncManagedLoadBalancer(
     await ensureDomains(row, appContext);
 
     const token = await decryptSecret(integration.token);
-    const syncResult = await syncHetznerLoadBalancer({
-      token,
-      providerResourceId: row.providerResourceId,
-      name: row.name,
-      appId: row.appId,
-      host: row.host,
-      location: row.location,
-      loadBalancerType: row.loadBalancerType,
-      healthCheckPath: row.healthCheckPath,
-      targets: appContext.servers.map((target) => ({
-        serverId: target.id,
-        name: target.name,
-        address: target.sshHost,
-      })),
-    });
+    const targets = appContext.servers.map((target) => ({
+      serverId: target.id,
+      name: target.name,
+      address: target.sshHost,
+    }));
+    const syncResult =
+      row.provider === "hetzner"
+        ? await syncHetznerLoadBalancer({
+            token,
+            providerResourceId: row.providerResourceId,
+            name: row.name,
+            appId: row.appId,
+            host: row.host,
+            location: row.location,
+            loadBalancerType: row.loadBalancerType,
+            healthCheckPath: row.healthCheckPath,
+            targets,
+          })
+        : await syncCloudflareLoadBalancer({
+            token,
+            providerResourceId: row.providerResourceId,
+            name: row.name,
+            appId: row.appId,
+            host: row.host,
+            healthCheckPath: row.healthCheckPath,
+            targets,
+          });
 
     const now = new Date();
     const staleDomainServerIds: string[] = [];
@@ -605,6 +631,10 @@ function validateHost(host: string): string | null {
 function normalizeHealthCheckPath(path: string): string {
   const value = path.trim();
   return value.startsWith("/") ? value : `/${value}`;
+}
+
+function providerName(provider: LoadBalancerProvider): string {
+  return provider === "hetzner" ? "Hetzner" : "Cloudflare";
 }
 
 function validateHealthCheckPath(path: string): string | null {
