@@ -115,6 +115,8 @@ export type DeployAppInput = {
   port: number;
   env: Record<string, string>;
   registry?: { host: string; user: string; token: string };
+  pullImage?: boolean;
+  volumes?: { hostPath: string; containerPath: string; readOnly: boolean }[];
 };
 
 export type DeployAppResult = {

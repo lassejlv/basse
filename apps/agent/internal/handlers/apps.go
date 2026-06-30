@@ -25,10 +25,16 @@ func containerName(appID string) string {
 }
 
 type deployRequest struct {
-	AppID    string            `json:"appId"`
-	Image    string            `json:"image"`
-	Port     int               `json:"port"`
-	Env      map[string]string `json:"env"`
+	AppID     string            `json:"appId"`
+	Image     string            `json:"image"`
+	Port      int               `json:"port"`
+	Env       map[string]string `json:"env"`
+	PullImage bool              `json:"pullImage"`
+	Volumes   []struct {
+		HostPath      string `json:"hostPath"`
+		ContainerPath string `json:"containerPath"`
+		ReadOnly      bool   `json:"readOnly"`
+	} `json:"volumes"`
 	Registry struct {
 		Host  string `json:"host"`
 		User  string `json:"user"`
@@ -73,6 +79,11 @@ func (a Apps) Deploy(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, http.StatusBadGateway, "pull image: "+err.Error())
 			return
 		}
+	} else if req.PullImage {
+		if err := a.Docker.PullImage(ctx, req.Image); err != nil {
+			httpx.Error(w, http.StatusBadGateway, "pull image: "+err.Error())
+			return
+		}
 	}
 
 	if err := a.Docker.RemoveContainer(ctx, name); err != nil {
@@ -88,6 +99,18 @@ func (a Apps) Deploy(w http.ResponseWriter, r *http.Request) {
 	sort.Strings(env)
 
 	port := fmt.Sprintf("%d/tcp", req.Port)
+	binds := make([]string, 0, len(req.Volumes))
+	for _, volume := range req.Volumes {
+		if volume.HostPath == "" || volume.ContainerPath == "" {
+			httpx.Error(w, http.StatusBadRequest, "volume hostPath and containerPath are required")
+			return
+		}
+		bind := volume.HostPath + ":" + volume.ContainerPath
+		if volume.ReadOnly {
+			bind += ":ro"
+		}
+		binds = append(binds, bind)
+	}
 	spec := dockerx.ContainerSpec{
 		Image:  req.Image,
 		Env:    env,
@@ -99,6 +122,7 @@ func (a Apps) Deploy(w http.ResponseWriter, r *http.Request) {
 			// No PortBindings — traffic arrives via Caddy on the basse network.
 			NetworkMode:   a.Cfg.ProxyNetwork,
 			RestartPolicy: dockerx.RestartPolicy{Name: "unless-stopped"},
+			Binds:         binds,
 		},
 	}
 

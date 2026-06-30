@@ -25,6 +25,7 @@ import { decryptSecret } from "./crypto";
 import { connectionFromServer } from "./server-connection";
 
 type DeploymentRow = typeof deployment.$inferSelect;
+type AppVolume = { hostPath: string; containerPath: string; readOnly: boolean };
 
 const NON_TERMINAL: DeploymentRow["status"][] = ["queued", "building", "deploying"];
 
@@ -74,6 +75,29 @@ function makeLogger(deploymentId: string) {
       await flush();
     },
   };
+}
+
+function parseVolumes(value: string): AppVolume[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const volume = item as Partial<AppVolume>;
+        if (typeof volume.hostPath !== "string" || typeof volume.containerPath !== "string") {
+          return null;
+        }
+        return {
+          hostPath: volume.hostPath,
+          containerPath: volume.containerPath,
+          readOnly: volume.readOnly === true,
+        };
+      })
+      .filter((volume): volume is AppVolume => Boolean(volume));
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -139,92 +163,110 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       return;
     }
 
-    if (appRow.buildRunner === "server" && targetServers.length !== 1) {
+    if (
+      appRow.sourceType === "repository" &&
+      appRow.buildRunner === "server" &&
+      targetServers.length !== 1
+    ) {
       log.line("Selected-server builds require exactly one attached server. Use Depot for multi-server deploys.");
       await log.done();
       await setStatus(deploymentId, "failed");
       return;
     }
 
-    // Clone.
-    log.line(`Cloning ${appRow.repositoryUrl} (${appRow.branch})…`);
-    ctxDir = await mkdtemp(join(tmpdir(), "basse-build-"));
-    const commitSha = await cloneRepo({
-      repositoryUrl: appRow.repositoryUrl,
-      branch: appRow.branch,
-      ctxDir,
-      onLine: log.line,
-    });
-    await setStatus(deploymentId, "building", { commitSha });
-
-    const kind = resolveBuildKind(appRow.buildMode, ctxDir);
     let imageRef: string;
     let buildId: string | null = null;
     let registry: { host: string; user: string; token: string } | undefined;
+    let pullImage = false;
 
-    if (appRow.buildRunner === "server") {
-      const buildServer = targetServers[0]!;
-      log.line(
-        `Building with ${kind === "dockerfile" ? "Dockerfile" : "Railpack"} on ${buildServer.name}…`,
-      );
-      const connection = await connectionFromServer(buildServer);
-      const built = await buildImageOnServer({
-        kind,
-        ctxDir,
-        connection,
-        deploymentId,
-        onLine: log.line,
-      });
-      imageRef = built.imageRef;
-    } else {
-      // Resolve the workspace's Depot connection (token + project + orgId).
-      const [env] = await db
-        .select()
-        .from(environment)
-        .where(eq(environment.id, appRow.environmentId))
-        .limit(1);
-      const [proj] = env
-        ? await db.select().from(project).where(eq(project.id, env.projectId)).limit(1)
-        : [];
-      const [depot] = proj
-        ? await db
-            .select()
-            .from(depotConnection)
-            .where(eq(depotConnection.organizationId, proj.organizationId))
-            .limit(1)
-        : [];
-
-      if (!depot || !depot.orgId) {
-        log.line("No Depot connection (token + project id + org id) for this workspace.");
+    if (appRow.sourceType === "image") {
+      if (!appRow.imageRef) {
+        log.line("No Docker image configured for this app.");
         await log.done();
         await setStatus(deploymentId, "failed");
         return;
       }
-
-      const depotToken = await decryptSecret(depot.token);
-      imageRef = `${depot.orgId}.registry.depot.dev/${depot.projectId}:${deploymentId}`;
-
-      // Build remotely on Depot.
-      log.line(`Building with ${kind === "dockerfile" ? "Dockerfile" : "Railpack"} on Depot…`);
-      const metadataFile = join(ctxDir, "depot-metadata.json");
-      const built = await buildImage({
-        kind,
+      imageRef = appRow.imageRef;
+      pullImage = true;
+      log.line(`Using prebuilt Docker image ${imageRef}.`);
+    } else {
+      // Clone.
+      log.line(`Cloning ${appRow.repositoryUrl} (${appRow.branch})…`);
+      ctxDir = await mkdtemp(join(tmpdir(), "basse-build-"));
+      const commitSha = await cloneRepo({
+        repositoryUrl: appRow.repositoryUrl,
+        branch: appRow.branch,
         ctxDir,
-        depotToken,
-        projectId: depot.projectId,
-        deploymentId,
-        metadataFile,
         onLine: log.line,
       });
-      buildId = built.buildId;
+      await setStatus(deploymentId, "building", { commitSha });
 
-      // Mint a pull token (just before the agent call, so it can't expire queued).
-      const pullToken = await mintPullToken(depotToken, depot.projectId);
-      registry = {
-        host: `${depot.orgId}.registry.depot.dev`,
-        user: "x-token",
-        token: pullToken,
-      };
+      const kind = resolveBuildKind(appRow.buildMode, ctxDir);
+
+      if (appRow.buildRunner === "server") {
+        const buildServer = targetServers[0]!;
+        log.line(
+          `Building with ${kind === "dockerfile" ? "Dockerfile" : "Railpack"} on ${buildServer.name}…`,
+        );
+        const connection = await connectionFromServer(buildServer);
+        const built = await buildImageOnServer({
+          kind,
+          ctxDir,
+          connection,
+          deploymentId,
+          onLine: log.line,
+        });
+        imageRef = built.imageRef;
+      } else {
+        // Resolve the workspace's Depot connection (token + project + orgId).
+        const [env] = await db
+          .select()
+          .from(environment)
+          .where(eq(environment.id, appRow.environmentId))
+          .limit(1);
+        const [proj] = env
+          ? await db.select().from(project).where(eq(project.id, env.projectId)).limit(1)
+          : [];
+        const [depot] = proj
+          ? await db
+              .select()
+              .from(depotConnection)
+              .where(eq(depotConnection.organizationId, proj.organizationId))
+              .limit(1)
+          : [];
+
+        if (!depot || !depot.orgId) {
+          log.line("No Depot connection (token + project id + org id) for this workspace.");
+          await log.done();
+          await setStatus(deploymentId, "failed");
+          return;
+        }
+
+        const depotToken = await decryptSecret(depot.token);
+        imageRef = `${depot.orgId}.registry.depot.dev/${depot.projectId}:${deploymentId}`;
+
+        // Build remotely on Depot.
+        log.line(`Building with ${kind === "dockerfile" ? "Dockerfile" : "Railpack"} on Depot…`);
+        const metadataFile = join(ctxDir, "depot-metadata.json");
+        const built = await buildImage({
+          kind,
+          ctxDir,
+          depotToken,
+          projectId: depot.projectId,
+          deploymentId,
+          metadataFile,
+          onLine: log.line,
+        });
+        buildId = built.buildId;
+
+        // Mint a pull token (just before the agent call, so it can't expire queued).
+        const pullToken = await mintPullToken(depotToken, depot.projectId);
+        registry = {
+          host: `${depot.orgId}.registry.depot.dev`,
+          user: "x-token",
+          token: pullToken,
+        };
+      }
     }
 
     await setStatus(deploymentId, "deploying", { imageRef, buildId });
@@ -235,6 +277,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
     for (const v of vars) {
       envMap[v.key] = await decryptSecret(v.value);
     }
+    const volumes = parseVolumes(appRow.volumes);
 
     let allRunning = true;
     for (const srv of targetServers) {
@@ -248,6 +291,8 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         port: appRow.port,
         env: envMap,
         registry,
+        pullImage,
+        volumes,
       });
 
       log.line(

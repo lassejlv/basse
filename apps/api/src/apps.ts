@@ -5,6 +5,8 @@ import type {
   AppBuildRunner,
   AppConsoleResult,
   AppMetrics,
+  AppSourceType,
+  AppVolume,
   CreateAppInput,
   UpdateAppInput,
 } from "@basse/shared";
@@ -19,6 +21,7 @@ type AppRow = typeof app.$inferSelect;
 
 const BUILD_MODES: AppBuildMode[] = ["auto", "dockerfile", "railpack"];
 const BUILD_RUNNERS: AppBuildRunner[] = ["depot", "server"];
+const SOURCE_TYPES: AppSourceType[] = ["repository", "image"];
 
 function slugify(value: string) {
   return value
@@ -41,6 +44,56 @@ function validateRepositoryUrl(url: string): string | null {
   return null;
 }
 
+function validateImageRef(value: string): string | null {
+  if (!value) return "imageRef is required";
+  if (value.length > 255) return "imageRef is too long";
+  if (/\s/.test(value)) return "imageRef must not contain whitespace";
+  if (value.startsWith("-")) return "imageRef must be a Docker image reference";
+  return null;
+}
+
+function normalizeVolumes(value: unknown): AppVolume[] | null {
+  if (!Array.isArray(value)) return null;
+  const volumes: AppVolume[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") return null;
+    const candidate = item as Partial<AppVolume>;
+    const hostPath = typeof candidate.hostPath === "string" ? candidate.hostPath.trim() : "";
+    const containerPath =
+      typeof candidate.containerPath === "string" ? candidate.containerPath.trim() : "";
+    const readOnly = candidate.readOnly === true;
+    if (!hostPath && !containerPath) continue;
+    volumes.push({ hostPath, containerPath, readOnly });
+  }
+  return volumes;
+}
+
+function validateVolumes(volumes: AppVolume[]): string | null {
+  if (volumes.length > 20) return "Too many volumes";
+  for (const volume of volumes) {
+    if (!volume.hostPath || !volume.hostPath.startsWith("/")) {
+      return "Volume host paths must be absolute";
+    }
+    if (!volume.containerPath || !volume.containerPath.startsWith("/")) {
+      return "Volume container paths must be absolute";
+    }
+    if (volume.hostPath.includes(":") || volume.containerPath.includes(":")) {
+      return "Volume paths must not contain ':'";
+    }
+  }
+  return null;
+}
+
+function parseVolumes(value: string): AppVolume[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    const volumes = normalizeVolumes(parsed);
+    return volumes ?? [];
+  } catch {
+    return [];
+  }
+}
+
 function toApp(row: AppRow, serverIds: string[] = row.serverId ? [row.serverId] : []): App {
   return {
     id: row.id,
@@ -54,6 +107,9 @@ function toApp(row: AppRow, serverIds: string[] = row.serverId ? [row.serverId] 
     port: row.port,
     buildMode: row.buildMode,
     buildRunner: row.buildRunner,
+    sourceType: row.sourceType,
+    imageRef: row.imageRef,
+    volumes: parseVolumes(row.volumes),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -233,6 +289,10 @@ apps.post("/", async (c) => {
   const environmentId = typeof body?.environmentId === "string" ? body.environmentId : "";
   const name = typeof body?.name === "string" ? body.name.trim() : "";
   const repositoryUrl = typeof body?.repositoryUrl === "string" ? body.repositoryUrl.trim() : "";
+  const imageRef = typeof body?.imageRef === "string" ? body.imageRef.trim() : "";
+  const sourceType = SOURCE_TYPES.includes(body?.sourceType as AppSourceType)
+    ? (body?.sourceType as AppSourceType)
+    : "repository";
   const branch = typeof body?.branch === "string" && body.branch.trim() ? body.branch.trim() : "main";
   const port = typeof body?.port === "number" ? body.port : 3000;
   const buildMode = BUILD_MODES.includes(body?.buildMode as AppBuildMode)
@@ -243,16 +303,24 @@ apps.post("/", async (c) => {
     : "depot";
   const serverIds = normalizeServerIds(body) ?? [];
   const serverId = serverIds[0] ?? null;
+  const volumes = normalizeVolumes(body?.volumes ?? []) ?? [];
 
   if (!(await ownedEnvironmentId(environmentId, organizationId))) {
     return c.json({ error: "Environment not found" }, 404);
   }
   if (!name) return c.json({ error: "name is required" }, 400);
-  const repoError = validateRepositoryUrl(repositoryUrl);
-  if (repoError) return c.json({ error: repoError }, 400);
+  if (sourceType === "repository") {
+    const repoError = validateRepositoryUrl(repositoryUrl);
+    if (repoError) return c.json({ error: repoError }, 400);
+  } else {
+    const imageError = validateImageRef(imageRef);
+    if (imageError) return c.json({ error: imageError }, 400);
+  }
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     return c.json({ error: "port must be a valid port" }, 400);
   }
+  const volumeError = validateVolumes(volumes);
+  if (volumeError) return c.json({ error: volumeError }, 400);
   if (!(await validateServersInOrg(serverIds, organizationId))) {
     return c.json({ error: "Server not found" }, 404);
   }
@@ -269,10 +337,13 @@ apps.post("/", async (c) => {
           name,
           slug: slugify(name),
           repositoryUrl,
+          imageRef: sourceType === "image" ? imageRef : null,
+          sourceType,
           branch,
           port,
           buildMode,
           buildRunner,
+          volumes: JSON.stringify(volumes),
           createdAt: now,
           updatedAt: now,
         })
@@ -317,6 +388,17 @@ apps.patch("/:id", async (c) => {
     if (repoError) return c.json({ error: repoError }, 400);
     updates.repositoryUrl = body.repositoryUrl.trim();
   }
+  if (SOURCE_TYPES.includes(body?.sourceType as AppSourceType)) {
+    updates.sourceType = body?.sourceType as AppSourceType;
+  }
+  if (typeof body?.imageRef === "string" || body?.imageRef === null) {
+    const imageRef = typeof body.imageRef === "string" ? body.imageRef.trim() : "";
+    if ((updates.sourceType ?? existing.sourceType) === "image") {
+      const imageError = validateImageRef(imageRef);
+      if (imageError) return c.json({ error: imageError }, 400);
+    }
+    updates.imageRef = imageRef || null;
+  }
   if (typeof body?.branch === "string" && body.branch.trim()) updates.branch = body.branch.trim();
   if (typeof body?.port === "number") {
     if (!Number.isInteger(body.port) || body.port < 1 || body.port > 65535) {
@@ -329,6 +411,21 @@ apps.patch("/:id", async (c) => {
   }
   if (BUILD_RUNNERS.includes(body?.buildRunner as AppBuildRunner)) {
     updates.buildRunner = body?.buildRunner as AppBuildRunner;
+  }
+  if (body && "volumes" in body) {
+    const volumes = normalizeVolumes(body.volumes);
+    if (!volumes) return c.json({ error: "volumes must be an array" }, 400);
+    const volumeError = validateVolumes(volumes);
+    if (volumeError) return c.json({ error: volumeError }, 400);
+    updates.volumes = JSON.stringify(volumes);
+  }
+  if ((updates.sourceType ?? existing.sourceType) === "repository") {
+    const repoError = validateRepositoryUrl(updates.repositoryUrl ?? existing.repositoryUrl);
+    if (repoError) return c.json({ error: repoError }, 400);
+  }
+  if ((updates.sourceType ?? existing.sourceType) === "image") {
+    const imageError = validateImageRef(updates.imageRef ?? existing.imageRef ?? "");
+    if (imageError) return c.json({ error: imageError }, 400);
   }
   const serverIds = normalizeServerIds(body);
   if (serverIds) {

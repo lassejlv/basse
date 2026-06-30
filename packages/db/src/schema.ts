@@ -113,6 +113,13 @@ export const app = pgTable(
     })
       .notNull()
       .default("depot"),
+    sourceType: text("source_type", {
+      enum: ["repository", "image"],
+    })
+      .notNull()
+      .default("repository"),
+    imageRef: text("image_ref"),
+    volumes: text("volumes").notNull().default("[]"),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },

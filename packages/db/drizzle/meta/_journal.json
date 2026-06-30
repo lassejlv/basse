@@ -78,6 +78,13 @@
       "when": 1782787788631,
       "tag": "0010_spotty_red_ghost",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1782788242839,
+      "tag": "0011_hard_scarlet_spider",
+      "breakpoints": true
     }
   ]
 }

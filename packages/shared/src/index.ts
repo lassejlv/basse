@@ -32,6 +32,13 @@ export type CreateEnvironmentInput = {
 
 export type AppBuildMode = "auto" | "dockerfile" | "railpack";
 export type AppBuildRunner = "depot" | "server";
+export type AppSourceType = "repository" | "image";
+
+export type AppVolume = {
+  hostPath: string;
+  containerPath: string;
+  readOnly: boolean;
+};
 
 export type App = {
   id: string;
@@ -45,6 +52,9 @@ export type App = {
   port: number;
   buildMode: AppBuildMode;
   buildRunner: AppBuildRunner;
+  sourceType: AppSourceType;
+  imageRef: string | null;
+  volumes: AppVolume[];
   createdAt: string;
   updatedAt: string;
 };
@@ -57,6 +67,9 @@ export type CreateAppInput = {
   port?: number;
   buildMode?: AppBuildMode;
   buildRunner?: AppBuildRunner;
+  sourceType?: AppSourceType;
+  imageRef?: string | null;
+  volumes?: AppVolume[];
   serverId?: string;
   serverIds?: string[];
 };
@@ -68,6 +81,9 @@ export type UpdateAppInput = {
   port?: number;
   buildMode?: AppBuildMode;
   buildRunner?: AppBuildRunner;
+  sourceType?: AppSourceType;
+  imageRef?: string | null;
+  volumes?: AppVolume[];
   serverId?: string | null;
   serverIds?: string[];
 };

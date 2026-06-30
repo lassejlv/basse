@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { ArrowLeftIcon } from "lucide-react";
 import { FormEvent, useState } from "react";
-import type { AppBuildRunner } from "@basse/shared";
+import type { AppBuildRunner, AppSourceType } from "@basse/shared";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -130,7 +130,9 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
   const servers = useQuery({ queryKey: ["servers", "for-apps"], queryFn: listServers });
 
   const [name, setName] = useState("");
+  const [sourceType, setSourceType] = useState<AppSourceType>("repository");
   const [repositoryUrl, setRepositoryUrl] = useState("");
+  const [imageRef, setImageRef] = useState("");
   const [branch, setBranch] = useState("main");
   const [port, setPort] = useState("3000");
   const [serverIds, setServerIds] = useState<string[]>([]);
@@ -143,7 +145,9 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
       createApp({
         environmentId,
         name,
+        sourceType,
         repositoryUrl,
+        imageRef,
         branch,
         port: Number(port),
         serverIds,
@@ -151,7 +155,9 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
       }),
     onSuccess: async () => {
       setName("");
+      setSourceType("repository");
       setRepositoryUrl("");
+      setImageRef("");
       setBranch("main");
       setPort("3000");
       setServerIds([]);
@@ -200,7 +206,7 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
                 >
                   <span className="font-medium">{a.name}</span>
                   <span className="truncate font-mono text-muted-foreground text-xs">
-                    {a.repositoryUrl}
+                    {a.sourceType === "image" ? a.imageRef : a.repositoryUrl}
                   </span>
                 </Link>
               </li>
@@ -222,34 +228,79 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
           />
         </div>
         <div className="space-y-2">
-          <Label htmlFor="app-repo">Repository URL</Label>
-          <Input
-            id="app-repo"
-            onChange={(e) => setRepositoryUrl(e.currentTarget.value)}
-            placeholder="https://github.com/user/repo"
-            required
-            value={repositoryUrl}
-          />
+          <Label>Source</Label>
+          <Select
+            value={sourceType}
+            onValueChange={(value) => setSourceType((value ?? "repository") as AppSourceType)}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="Source">
+                {(value: AppSourceType) =>
+                  value === "image" ? "Prebuilt Docker image" : "Git repository"
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup>
+              <SelectItem value="repository">Git repository</SelectItem>
+              <SelectItem value="image">Prebuilt Docker image</SelectItem>
+            </SelectPopup>
+          </Select>
         </div>
-        <div className="flex gap-3">
-          <div className="flex-1 space-y-2">
-            <Label htmlFor="app-branch">Branch</Label>
-            <Input
-              id="app-branch"
-              onChange={(e) => setBranch(e.currentTarget.value)}
-              value={branch}
-            />
+        {sourceType === "repository" ? (
+          <>
+            <div className="space-y-2">
+              <Label htmlFor="app-repo">Repository URL</Label>
+              <Input
+                id="app-repo"
+                onChange={(e) => setRepositoryUrl(e.currentTarget.value)}
+                placeholder="https://github.com/user/repo"
+                required
+                value={repositoryUrl}
+              />
+            </div>
+            <div className="flex gap-3">
+              <div className="flex-1 space-y-2">
+                <Label htmlFor="app-branch">Branch</Label>
+                <Input
+                  id="app-branch"
+                  onChange={(e) => setBranch(e.currentTarget.value)}
+                  value={branch}
+                />
+              </div>
+              <div className="w-28 space-y-2">
+                <Label htmlFor="app-port">Port</Label>
+                <Input
+                  id="app-port"
+                  onChange={(e) => setPort(e.currentTarget.value)}
+                  type="number"
+                  value={port}
+                />
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="flex gap-3">
+            <div className="flex-1 space-y-2">
+              <Label htmlFor="app-image">Docker image</Label>
+              <Input
+                id="app-image"
+                onChange={(e) => setImageRef(e.currentTarget.value)}
+                placeholder="nginx:alpine"
+                required
+                value={imageRef}
+              />
+            </div>
+            <div className="w-28 space-y-2">
+              <Label htmlFor="app-port">Port</Label>
+              <Input
+                id="app-port"
+                onChange={(e) => setPort(e.currentTarget.value)}
+                type="number"
+                value={port}
+              />
+            </div>
           </div>
-          <div className="w-28 space-y-2">
-            <Label htmlFor="app-port">Port</Label>
-            <Input
-              id="app-port"
-              onChange={(e) => setPort(e.currentTarget.value)}
-              type="number"
-              value={port}
-            />
-          </div>
-        </div>
+        )}
         <div className="space-y-2">
           <Label>Servers</Label>
           {servers.isPending ? (
@@ -282,7 +333,8 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
             </div>
           )}
         </div>
-        <div className="space-y-2">
+        {sourceType === "repository" ? (
+          <div className="space-y-2">
           <Label>Build location</Label>
           <Select
             value={buildRunner}
@@ -305,7 +357,8 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
               Selected-server builds require exactly one server. Use Depot for multiple servers.
             </p>
           ) : null}
-        </div>
+          </div>
+        ) : null}
 
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
 
