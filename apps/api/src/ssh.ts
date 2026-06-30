@@ -195,6 +195,48 @@ export async function writeRemoteFile(
   }
 }
 
+export async function uploadDirectory(
+  conn: SshConnection,
+  localDir: string,
+  remoteDir: string,
+  options: { timeoutMs?: number } = {},
+): Promise<void> {
+  await withKeyMaterial(conn, async ({ keyPath, knownHostsPath }) => {
+    const tar = Bun.spawn(["tar", "-C", localDir, "-czf", "-", "."], {
+      stdout: "pipe",
+      stderr: "pipe",
+      signal: AbortSignal.timeout(options.timeoutMs ?? 300_000),
+    });
+    const archive = await new Response(tar.stdout).arrayBuffer();
+    const tarStderr = await new Response(tar.stderr).text();
+    const tarExit = await tar.exited;
+    if (tarExit !== 0) {
+      throw new Error(`Failed to archive build context: ${tarStderr.trim()}`);
+    }
+
+    const command = `set -euo pipefail; rm -rf '${remoteDir}'; mkdir -p '${remoteDir}'; tar -xzf - -C '${remoteDir}'`;
+    const ssh = Bun.spawn(
+      [
+        "ssh",
+        ...baseArgs(conn, keyPath, knownHostsPath, DEFAULT_CONNECT_TIMEOUT_SECONDS),
+        target(conn),
+        command,
+      ],
+      {
+        stdin: new Uint8Array(archive),
+        stdout: "pipe",
+        stderr: "pipe",
+        signal: AbortSignal.timeout(options.timeoutMs ?? 300_000),
+      },
+    );
+    const stderr = await new Response(ssh.stderr).text();
+    const exitCode = await ssh.exited;
+    if (exitCode !== 0) {
+      throw new Error(`Failed to upload build context: ${stderr.trim()}`);
+    }
+  });
+}
+
 /** Picks a free localhost TCP port by binding to :0 and releasing it. */
 function freeLocalPort(): Promise<number> {
   return new Promise((resolve, reject) => {

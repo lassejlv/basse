@@ -2,6 +2,7 @@ import { app, appServer, db, environment, project, server } from "@basse/db";
 import type {
   App,
   AppBuildMode,
+  AppBuildRunner,
   AppConsoleResult,
   AppMetrics,
   CreateAppInput,
@@ -17,6 +18,7 @@ import { resolveActiveWorkspace } from "./workspace";
 type AppRow = typeof app.$inferSelect;
 
 const BUILD_MODES: AppBuildMode[] = ["auto", "dockerfile", "railpack"];
+const BUILD_RUNNERS: AppBuildRunner[] = ["depot", "server"];
 
 function slugify(value: string) {
   return value
@@ -51,6 +53,7 @@ function toApp(row: AppRow, serverIds: string[] = row.serverId ? [row.serverId] 
     branch: row.branch,
     port: row.port,
     buildMode: row.buildMode,
+    buildRunner: row.buildRunner,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -235,6 +238,9 @@ apps.post("/", async (c) => {
   const buildMode = BUILD_MODES.includes(body?.buildMode as AppBuildMode)
     ? (body?.buildMode as AppBuildMode)
     : "auto";
+  const buildRunner = BUILD_RUNNERS.includes(body?.buildRunner as AppBuildRunner)
+    ? (body?.buildRunner as AppBuildRunner)
+    : "depot";
   const serverIds = normalizeServerIds(body) ?? [];
   const serverId = serverIds[0] ?? null;
 
@@ -266,6 +272,7 @@ apps.post("/", async (c) => {
           branch,
           port,
           buildMode,
+          buildRunner,
           createdAt: now,
           updatedAt: now,
         })
@@ -319,6 +326,9 @@ apps.patch("/:id", async (c) => {
   }
   if (BUILD_MODES.includes(body?.buildMode as AppBuildMode)) {
     updates.buildMode = body?.buildMode as AppBuildMode;
+  }
+  if (BUILD_RUNNERS.includes(body?.buildRunner as AppBuildRunner)) {
+    updates.buildRunner = body?.buildRunner as AppBuildRunner;
   }
   const serverIds = normalizeServerIds(body);
   if (serverIds) {

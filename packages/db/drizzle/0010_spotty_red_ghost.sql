@@ -1,0 +1,1 @@
+ALTER TABLE "app" ADD COLUMN "build_runner" text DEFAULT 'depot' NOT NULL;

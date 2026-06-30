@@ -71,6 +71,13 @@
       "when": 1782786619000,
       "tag": "0009_clear_old_healthy_deployments",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1782787788631,
+      "tag": "0010_spotty_red_ghost",
+      "breakpoints": true
     }
   ]
 }

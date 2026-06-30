@@ -114,7 +114,7 @@ export type DeployAppInput = {
   image: string;
   port: number;
   env: Record<string, string>;
-  registry: { host: string; user: string; token: string };
+  registry?: { host: string; user: string; token: string };
 };
 
 export type DeployAppResult = {

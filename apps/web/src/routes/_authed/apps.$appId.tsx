@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { TrashIcon } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
-import type { DeploymentStatus } from "@basse/shared";
+import type { AppBuildRunner, DeploymentStatus } from "@basse/shared";
 import { chartCssVars } from "@/components/charts/chart-context";
 import { Grid } from "@/components/charts/grid";
 import { Line, LineChart } from "@/components/charts/line-chart";
@@ -57,13 +57,15 @@ function AppDetailRoute() {
   }
 
   const data = app.data;
+  const canDeploy = data.serverIds.length > 0 && (data.buildRunner !== "server" || data.serverIds.length === 1);
 
   return (
     <section className="flex flex-1 flex-col gap-8 p-4 md:p-6">
       <div className="max-w-2xl">
         <h1 className="text-2xl font-semibold tracking-normal md:text-3xl">{data.name}</h1>
         <p className="mt-2 font-mono text-muted-foreground text-sm">
-          {data.repositoryUrl} · {data.branch} · :{data.port} · {data.buildMode}
+          {data.repositoryUrl} · {data.branch} · :{data.port} · {data.buildMode} ·{" "}
+          {data.buildRunner}
         </p>
         {data.serverIds.length === 0 ? (
           <p className="mt-2 text-warning-foreground text-sm">
@@ -73,7 +75,8 @@ function AppDetailRoute() {
       </div>
 
       <ServerCard app={data} />
-      <DeploySection appId={appId} canDeploy={data.serverIds.length > 0} />
+      <BuildSettingsCard app={data} />
+      <DeploySection appId={appId} canDeploy={canDeploy} />
       <RuntimeCard app={data} />
       <EnvVarsCard appId={appId} />
       {data.serverIds.length === 1 ? (
@@ -140,6 +143,48 @@ function ServerCard({ app }: { app: App }) {
             })}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function BuildSettingsCard({ app }: { app: App }) {
+  const queryClient = useQueryClient();
+  const update = useMutation({
+    mutationFn: (buildRunner: AppBuildRunner) => updateApp(app.id, { buildRunner }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["app", app.id] });
+    },
+  });
+  const localBuildInvalid = app.buildRunner === "server" && app.serverIds.length !== 1;
+
+  return (
+    <div className="max-w-2xl rounded-lg border bg-card p-6">
+      <h2 className="text-lg font-semibold">Build</h2>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Choose where images are built before deployment.
+      </p>
+      <div className="mt-4 space-y-2">
+        <Label>Build location</Label>
+        <Select
+          value={app.buildRunner}
+          onValueChange={(value) => update.mutate((value ?? "depot") as AppBuildRunner)}
+        >
+          <SelectTrigger className="w-full">
+            <SelectValue placeholder="Build location">
+              {(value: AppBuildRunner) => (value === "server" ? "Selected server" : "Depot")}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectPopup>
+            <SelectItem value="depot">Depot</SelectItem>
+            <SelectItem value="server">Selected server</SelectItem>
+          </SelectPopup>
+        </Select>
+        {localBuildInvalid ? (
+          <p className="text-warning-foreground text-sm">
+            Selected-server builds require exactly one server. Use Depot for multiple servers.
+          </p>
+        ) : null}
       </div>
     </div>
   );

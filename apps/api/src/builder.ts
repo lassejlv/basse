@@ -1,5 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import type { SshConnection } from "./ssh";
+import { runScript, uploadDirectory } from "./ssh";
 
 // Build orchestration: clone a public repo, detect Dockerfile vs Railpack, build
 // REMOTELY on Depot, and mint a short-lived pull token. All commands run via
@@ -160,6 +162,59 @@ export async function buildImage(opts: {
   }
 
   return { buildId };
+}
+
+export async function prepareRailpackPlan(opts: {
+  ctxDir: string;
+  onLine?: BuildLogger;
+}): Promise<void> {
+  const planPath = join(opts.ctxDir, "railpack-plan.json");
+  const prepare = await run(["railpack", "prepare", opts.ctxDir, "--plan-out", planPath], {
+    onLine: opts.onLine,
+    timeoutMs: 120_000,
+  });
+  if (prepare.exitCode !== 0) {
+    throw new Error("railpack could not detect how to build this repo");
+  }
+}
+
+export async function buildImageOnServer(opts: {
+  kind: "dockerfile" | "railpack";
+  ctxDir: string;
+  connection: SshConnection;
+  deploymentId: string;
+  onLine?: BuildLogger;
+}): Promise<{ imageRef: string }> {
+  if (opts.kind === "railpack") {
+    await prepareRailpackPlan({ ctxDir: opts.ctxDir, onLine: opts.onLine });
+  }
+
+  const remoteDir = `/tmp/basse-build-${opts.deploymentId}`;
+  const imageRef = `basse-app:${opts.deploymentId}`;
+  opts.onLine?.(`Uploading build context to ${remoteDir}…`);
+  await uploadDirectory(opts.connection, opts.ctxDir, remoteDir, { timeoutMs: 300_000 });
+
+  const dockerfileArg =
+    opts.kind === "dockerfile"
+      ? `-f '${remoteDir}/Dockerfile'`
+      : `--build-arg BUILDKIT_SYNTAX='${RAILPACK_FRONTEND}' -f '${remoteDir}/railpack-plan.json'`;
+
+  const result = await runScript(
+    opts.connection,
+    `set -euo pipefail
+cleanup() { rm -rf '${remoteDir}'; }
+trap cleanup EXIT
+cd '${remoteDir}'
+DOCKER_BUILDKIT=1 docker build ${dockerfileArg} -t '${imageRef}' .
+`,
+    { onLine: opts.onLine, timeoutMs: 1_200_000 },
+  );
+
+  if (result.exitCode !== 0) {
+    throw new Error("local server build failed");
+  }
+
+  return { imageRef };
 }
 
 /** Mints a short-lived (1h), read-only pull token for the Depot project. */

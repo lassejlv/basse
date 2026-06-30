@@ -2,10 +2,18 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { ArrowLeftIcon } from "lucide-react";
 import { FormEvent, useState } from "react";
+import type { AppBuildRunner } from "@basse/shared";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectItem,
+  SelectPopup,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { createApp, listApps } from "@/lib/apps";
 import { createEnvironment, listEnvironments } from "@/lib/environments";
 import { getProject } from "@/lib/projects";
@@ -126,8 +134,10 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
   const [branch, setBranch] = useState("main");
   const [port, setPort] = useState("3000");
   const [serverIds, setServerIds] = useState<string[]>([]);
+  const [buildRunner, setBuildRunner] = useState<AppBuildRunner>("depot");
   const [error, setError] = useState<string | null>(null);
 
+  const localBuildInvalid = buildRunner === "server" && serverIds.length !== 1;
   const add = useMutation({
     mutationFn: () =>
       createApp({
@@ -137,6 +147,7 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
         branch,
         port: Number(port),
         serverIds,
+        buildRunner,
       }),
     onSuccess: async () => {
       setName("");
@@ -144,6 +155,7 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
       setBranch("main");
       setPort("3000");
       setServerIds([]);
+      setBuildRunner("depot");
       setError(null);
       await queryClient.invalidateQueries({ queryKey });
     },
@@ -152,6 +164,10 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (localBuildInvalid) {
+      setError("Selected-server builds require exactly one server.");
+      return;
+    }
     add.mutate();
   }
 
@@ -266,10 +282,34 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
             </div>
           )}
         </div>
+        <div className="space-y-2">
+          <Label>Build location</Label>
+          <Select
+            value={buildRunner}
+            onValueChange={(value) => setBuildRunner((value ?? "depot") as AppBuildRunner)}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="Build location">
+                {(value: AppBuildRunner) =>
+                  value === "server" ? "Selected server" : "Depot"
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup>
+              <SelectItem value="depot">Depot</SelectItem>
+              <SelectItem value="server">Selected server</SelectItem>
+            </SelectPopup>
+          </Select>
+          {localBuildInvalid ? (
+            <p className="text-warning-foreground text-sm">
+              Selected-server builds require exactly one server. Use Depot for multiple servers.
+            </p>
+          ) : null}
+        </div>
 
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
 
-        <Button loading={add.isPending} type="submit">
+        <Button disabled={localBuildInvalid} loading={add.isPending} type="submit">
           Create app
         </Button>
       </form>

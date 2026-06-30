@@ -31,6 +31,7 @@ export type CreateEnvironmentInput = {
 };
 
 export type AppBuildMode = "auto" | "dockerfile" | "railpack";
+export type AppBuildRunner = "depot" | "server";
 
 export type App = {
   id: string;
@@ -43,6 +44,7 @@ export type App = {
   branch: string;
   port: number;
   buildMode: AppBuildMode;
+  buildRunner: AppBuildRunner;
   createdAt: string;
   updatedAt: string;
 };
@@ -54,6 +56,7 @@ export type CreateAppInput = {
   branch?: string;
   port?: number;
   buildMode?: AppBuildMode;
+  buildRunner?: AppBuildRunner;
   serverId?: string;
   serverIds?: string[];
 };
@@ -64,6 +67,7 @@ export type UpdateAppInput = {
   branch?: string;
   port?: number;
   buildMode?: AppBuildMode;
+  buildRunner?: AppBuildRunner;
   serverId?: string | null;
   serverIds?: string[];
 };

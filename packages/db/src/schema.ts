@@ -108,6 +108,11 @@ export const app = pgTable(
     })
       .notNull()
       .default("auto"),
+    buildRunner: text("build_runner", {
+      enum: ["depot", "server"],
+    })
+      .notNull()
+      .default("depot"),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },

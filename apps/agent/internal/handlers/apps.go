@@ -33,7 +33,7 @@ type deployRequest struct {
 		Host  string `json:"host"`
 		User  string `json:"user"`
 		Token string `json:"token"`
-	} `json:"registry"`
+	} `json:"registry,omitempty"`
 }
 
 type deployResponse struct {
@@ -64,13 +64,15 @@ func (a Apps) Deploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.Docker.PullImageAuth(ctx, req.Image, dockerx.RegistryAuth{
-		Username:      req.Registry.User,
-		Password:      req.Registry.Token,
-		ServerAddress: req.Registry.Host,
-	}); err != nil {
-		httpx.Error(w, http.StatusBadGateway, "pull image: "+err.Error())
-		return
+	if req.Registry.Host != "" {
+		if err := a.Docker.PullImageAuth(ctx, req.Image, dockerx.RegistryAuth{
+			Username:      req.Registry.User,
+			Password:      req.Registry.Token,
+			ServerAddress: req.Registry.Host,
+		}); err != nil {
+			httpx.Error(w, http.StatusBadGateway, "pull image: "+err.Error())
+			return
+		}
 	}
 
 	if err := a.Docker.RemoveContainer(ctx, name); err != nil {
