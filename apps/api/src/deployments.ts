@@ -3,6 +3,7 @@ import type { Deployment } from "@basse/shared";
 import { desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { ownedApp } from "./apps";
+import { enqueueAction } from "./queue/queue";
 import { resolveActiveWorkspace } from "./workspace";
 
 type DeploymentRow = typeof deployment.$inferSelect;
@@ -54,6 +55,46 @@ deployments.get("/", async (c) => {
     .orderBy(desc(deployment.createdAt));
 
   return c.json(rows.map(toDeployment));
+});
+
+deployments.post("/", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const body = (await c.req.json().catch(() => null)) as { appId?: unknown } | null;
+  const appId = typeof body?.appId === "string" ? body.appId : "";
+
+  const appRow = await ownedApp(appId, organizationId);
+  if (!appRow) return c.json({ error: "App not found" }, 404);
+  if (!appRow.serverId) {
+    return c.json({ error: "Attach a server to the app before deploying" }, 400);
+  }
+
+  const now = new Date();
+  const [created] = await db
+    .insert(deployment)
+    .values({
+      id: crypto.randomUUID(),
+      appId: appRow.id,
+      status: "queued",
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+
+  if (!created) return c.json({ error: "Failed to create deployment" }, 500);
+
+  try {
+    await enqueueAction("deploy-app", created.id);
+  } catch {
+    await db
+      .update(deployment)
+      .set({ status: "failed", logs: "Could not queue the deployment.", updatedAt: new Date() })
+      .where(eq(deployment.id, created.id));
+    return c.json({ error: "Could not queue the deployment" }, 503);
+  }
+
+  return c.json(toDeployment(created), 201);
 });
 
 deployments.get("/:id", async (c) => {

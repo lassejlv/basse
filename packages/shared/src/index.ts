@@ -113,6 +113,8 @@ export type CreateSshKeyInput = {
 export type DepotConnection = {
   connected: boolean;
   projectId?: string;
+  /** Depot organization id — the {orgId}.registry.depot.dev subdomain. */
+  orgId?: string | null;
   /** Last 4 characters of the access token, for display only. */
   tokenHint?: string;
   updatedAt?: string;
@@ -121,6 +123,7 @@ export type DepotConnection = {
 export type SaveDepotConnectionInput = {
   token: string;
   projectId: string;
+  orgId: string;
 };
 
 export type ServerStatus = "pending" | "provisioning" | "active" | "error" | "unreachable";

@@ -149,6 +149,7 @@ function DepotSection({ organizationId }: { organizationId?: string }) {
   const queryKey = ["depot-connection", organizationId];
   const [token, setToken] = useState("");
   const [projectId, setProjectId] = useState("");
+  const [orgId, setOrgId] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const connection = useQuery({
@@ -158,10 +159,11 @@ function DepotSection({ organizationId }: { organizationId?: string }) {
   });
 
   const save = useMutation({
-    mutationFn: () => saveDepotConnection({ token, projectId }),
+    mutationFn: () => saveDepotConnection({ token, projectId, orgId }),
     onSuccess: async () => {
       setToken("");
       setProjectId("");
+      setOrgId("");
       setError(null);
       await queryClient.invalidateQueries({ queryKey });
     },
@@ -194,7 +196,8 @@ function DepotSection({ organizationId }: { organizationId?: string }) {
           <div className="min-w-0 text-sm">
             <p className="font-medium">Connected</p>
             <p className="truncate font-mono text-muted-foreground text-xs">
-              project {connection.data?.projectId} · token ••••{connection.data?.tokenHint}
+              project {connection.data?.projectId} · org {connection.data?.orgId ?? "—"} · token ••••
+              {connection.data?.tokenHint}
             </p>
           </div>
           <Button
@@ -215,6 +218,16 @@ function DepotSection({ organizationId }: { organizationId?: string }) {
             value={projectId}
             onChange={(event) => setProjectId(event.currentTarget.value)}
             placeholder="abc123def4"
+            required
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="depot-org">Organization ID</Label>
+          <Input
+            id="depot-org"
+            value={orgId}
+            onChange={(event) => setOrgId(event.currentTarget.value)}
+            placeholder="the {orgId}.registry.depot.dev subdomain"
             required
           />
         </div>

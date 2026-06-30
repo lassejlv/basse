@@ -1,3 +1,4 @@
+import { runDeployment } from "../deploy";
 import { provisionServer } from "../provision";
 import { syncServerDomains } from "../proxy-sync";
 import type { ActionName } from "./queue";
@@ -10,4 +11,5 @@ import type { ActionName } from "./queue";
 export const actionHandlers: Record<ActionName, (entityId: string) => Promise<void>> = {
   "provision-server": (serverId) => provisionServer(serverId),
   "sync-domains": (serverId) => syncServerDomains(serverId),
+  "deploy-app": (deploymentId) => runDeployment(deploymentId),
 };

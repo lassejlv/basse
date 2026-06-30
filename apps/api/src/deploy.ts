@@ -1,0 +1,220 @@
+import { app, db, deployment, depotConnection, environment, envVar, project, server } from "@basse/db";
+import { and, eq, inArray, ne } from "drizzle-orm";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { deployApp, ensureProxy } from "./agent-client";
+import { buildImage, cloneRepo, mintPullToken, resolveBuildKind } from "./builder";
+import { decryptSecret } from "./crypto";
+import { connectionFromServer } from "./server-connection";
+
+type DeploymentRow = typeof deployment.$inferSelect;
+
+const NON_TERMINAL: DeploymentRow["status"][] = ["queued", "building", "deploying"];
+
+async function setStatus(
+  id: string,
+  status: DeploymentRow["status"],
+  extra: Partial<Pick<DeploymentRow, "imageRef" | "buildId" | "commitSha">> = {},
+): Promise<void> {
+  await db
+    .update(deployment)
+    .set({ status, updatedAt: new Date(), ...extra })
+    .where(eq(deployment.id, id));
+}
+
+/** Debounced append into deployment.logs so a chatty build doesn't hammer the DB. */
+function makeLogger(deploymentId: string) {
+  let pending = "";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const flush = async () => {
+    if (!pending) return;
+    const chunk = pending;
+    pending = "";
+    const [row] = await db
+      .select({ logs: deployment.logs })
+      .from(deployment)
+      .where(eq(deployment.id, deploymentId))
+      .limit(1);
+    await db
+      .update(deployment)
+      .set({ logs: (row?.logs ?? "") + chunk, updatedAt: new Date() })
+      .where(eq(deployment.id, deploymentId));
+  };
+
+  return {
+    line(text: string) {
+      pending += `${text}\n`;
+      if (!timer) {
+        timer = setTimeout(() => {
+          timer = undefined;
+          void flush();
+        }, 1000);
+      }
+    },
+    async done() {
+      if (timer) clearTimeout(timer);
+      await flush();
+    },
+  };
+}
+
+/**
+ * Builds and deploys a deployment. Idempotent-ish and NEVER throws — every
+ * failure lands the deployment in a terminal status with logs. The deployment
+ * row is the single UI source of truth.
+ */
+export async function runDeployment(deploymentId: string): Promise<void> {
+  const log = makeLogger(deploymentId);
+  let ctxDir: string | null = null;
+
+  try {
+    // Claim: queued/failed -> building (the DB row is the lock).
+    const claimed = await db
+      .update(deployment)
+      .set({ status: "building", updatedAt: new Date() })
+      .where(and(eq(deployment.id, deploymentId), inArray(deployment.status, ["queued", "failed"])))
+      .returning({ id: deployment.id });
+    if (!claimed[0]) return;
+
+    const [dep] = await db.select().from(deployment).where(eq(deployment.id, deploymentId)).limit(1);
+    if (!dep) return;
+
+    const [appRow] = await db.select().from(app).where(eq(app.id, dep.appId)).limit(1);
+    if (!appRow) {
+      log.line("App no longer exists.");
+      await log.done();
+      await setStatus(deploymentId, "failed");
+      return;
+    }
+
+    // Supersede any other in-flight deploy of the same app.
+    await db
+      .update(deployment)
+      .set({ status: "cancelled", updatedAt: new Date() })
+      .where(
+        and(
+          eq(deployment.appId, appRow.id),
+          ne(deployment.id, deploymentId),
+          inArray(deployment.status, NON_TERMINAL),
+        ),
+      );
+
+    if (!appRow.serverId) {
+      log.line("No server attached to this app.");
+      await log.done();
+      await setStatus(deploymentId, "failed");
+      return;
+    }
+
+    const [srv] = await db.select().from(server).where(eq(server.id, appRow.serverId)).limit(1);
+    if (!srv || srv.status !== "active" || !srv.agentToken) {
+      log.line("Target server is not active.");
+      await log.done();
+      await setStatus(deploymentId, "failed");
+      return;
+    }
+
+    // Resolve the workspace's Depot connection (token + project + orgId).
+    const [env] = await db
+      .select()
+      .from(environment)
+      .where(eq(environment.id, appRow.environmentId))
+      .limit(1);
+    const [proj] = env
+      ? await db.select().from(project).where(eq(project.id, env.projectId)).limit(1)
+      : [];
+    const [depot] = proj
+      ? await db
+          .select()
+          .from(depotConnection)
+          .where(eq(depotConnection.organizationId, proj.organizationId))
+          .limit(1)
+      : [];
+
+    if (!depot || !depot.orgId) {
+      log.line("No Depot connection (token + project id + org id) for this workspace.");
+      await log.done();
+      await setStatus(deploymentId, "failed");
+      return;
+    }
+
+    const depotToken = await decryptSecret(depot.token);
+    const imageRef = `${depot.orgId}.registry.depot.dev/${depot.projectId}:${deploymentId}`;
+
+    // Clone.
+    log.line(`Cloning ${appRow.repositoryUrl} (${appRow.branch})…`);
+    ctxDir = await mkdtemp(join(tmpdir(), "basse-build-"));
+    const commitSha = await cloneRepo({
+      repositoryUrl: appRow.repositoryUrl,
+      branch: appRow.branch,
+      ctxDir,
+      onLine: log.line,
+    });
+    await setStatus(deploymentId, "building", { commitSha });
+
+    // Build remotely on Depot.
+    const kind = resolveBuildKind(appRow.buildMode, ctxDir);
+    log.line(`Building with ${kind === "dockerfile" ? "Dockerfile" : "Railpack"} on Depot…`);
+    const metadataFile = join(ctxDir, "depot-metadata.json");
+    const { buildId } = await buildImage({
+      kind,
+      ctxDir,
+      depotToken,
+      projectId: depot.projectId,
+      deploymentId,
+      metadataFile,
+      onLine: log.line,
+    });
+    await setStatus(deploymentId, "deploying", { imageRef, buildId });
+
+    // Mint a pull token (just before the agent call, so it can't expire queued).
+    const pullToken = await mintPullToken(depotToken, depot.projectId);
+
+    // Decrypt the app's runtime env vars.
+    const vars = await db.select().from(envVar).where(eq(envVar.appId, appRow.id));
+    const envMap: Record<string, string> = {};
+    for (const v of vars) {
+      envMap[v.key] = await decryptSecret(v.value);
+    }
+
+    // Deploy on the server's agent (ensure the proxy first so it has a router).
+    log.line("Deploying to the server…");
+    const connection = await connectionFromServer(srv);
+    const agentToken = await decryptSecret(srv.agentToken);
+    await ensureProxy(connection, agentToken);
+    const result = await deployApp(connection, agentToken, {
+      appId: appRow.id,
+      image: imageRef,
+      port: appRow.port,
+      env: envMap,
+      registry: {
+        host: `${depot.orgId}.registry.depot.dev`,
+        user: "x-token",
+        token: pullToken,
+      },
+    });
+
+    log.line(result.running ? "Container is running." : "Container did not start.");
+    await log.done();
+    await setStatus(deploymentId, result.running ? "healthy" : "failed");
+  } catch (error) {
+    log.line(`Error: ${error instanceof Error ? error.message : String(error)}`);
+    await log.done().catch(() => {});
+    await setStatus(deploymentId, "failed").catch(() => {});
+  } finally {
+    if (ctxDir) await rm(ctxDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * On boot, fail any deployment left mid-flight by a crashed process (its build
+ * temp dir and pull token are gone, so it cannot resume).
+ */
+export async function reconcileInflightDeployments(): Promise<void> {
+  await db
+    .update(deployment)
+    .set({ status: "failed", updatedAt: new Date() })
+    .where(inArray(deployment.status, ["building", "deploying"]));
+}

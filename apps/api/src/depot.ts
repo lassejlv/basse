@@ -36,6 +36,7 @@ depot.get("/", async (c) => {
   return c.json({
     connected: true,
     projectId: connection.projectId,
+    orgId: connection.orgId,
     tokenHint,
     updatedAt: connection.updatedAt.toISOString(),
   } satisfies DepotConnection);
@@ -51,6 +52,7 @@ depot.put("/", async (c) => {
   const body = (await c.req.json().catch(() => null)) as Partial<SaveDepotConnectionInput> | null;
   const token = typeof body?.token === "string" ? body.token.trim() : "";
   const projectId = typeof body?.projectId === "string" ? body.projectId.trim() : "";
+  const orgId = typeof body?.orgId === "string" ? body.orgId.trim() : "";
 
   if (!token) {
     return c.json({ error: "token is required" }, 400);
@@ -58,6 +60,10 @@ depot.put("/", async (c) => {
 
   if (!projectId) {
     return c.json({ error: "projectId is required" }, 400);
+  }
+
+  if (!orgId) {
+    return c.json({ error: "orgId is required" }, 400);
   }
 
   const now = new Date();
@@ -70,17 +76,19 @@ depot.put("/", async (c) => {
       organizationId,
       token: encryptedToken,
       projectId,
+      orgId,
       createdAt: now,
       updatedAt: now,
     })
     .onConflictDoUpdate({
       target: depotConnection.organizationId,
-      set: { token: encryptedToken, projectId, updatedAt: now },
+      set: { token: encryptedToken, projectId, orgId, updatedAt: now },
     });
 
   return c.json({
     connected: true,
     projectId,
+    orgId,
     tokenHint: token.slice(-4),
     updatedAt: now.toISOString(),
   } satisfies DepotConnection);

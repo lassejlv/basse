@@ -4,6 +4,7 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { apps } from "./apps";
 import { auth } from "./auth";
+import { reconcileInflightDeployments } from "./deploy";
 import { deployments } from "./deployments";
 import { depot } from "./depot";
 import { domains } from "./domains";
@@ -62,6 +63,9 @@ const worker = startWorker();
 
 // Re-enqueue any server left mid-provision by a previous process (crash/restart).
 void reconcileProvisioningServers().catch(() => {});
+
+// Fail any deployment left mid-build/deploy by a crashed process (can't resume).
+void reconcileInflightDeployments().catch(() => {});
 
 // Graceful shutdown: stop fetching new jobs and let the in-flight job finish
 // before the process exits (docker-compose grants a stop_grace_period for this).
