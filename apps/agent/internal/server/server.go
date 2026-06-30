@@ -40,6 +40,8 @@ func Run(cfg config.Config, version string) error {
 	mux.Handle("POST /v1/proxy/ensure", middleware.Bearer(cfg.Token, http.HandlerFunc(proxy.Ensure)))
 	mux.Handle("GET /v1/proxy/status", middleware.Bearer(cfg.Token, http.HandlerFunc(proxy.Status)))
 	mux.Handle("POST /v1/proxy/sync", middleware.Bearer(cfg.Token, http.HandlerFunc(proxy.Sync)))
+	mux.Handle("GET /v1/apps/importable-containers", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.ImportableContainers)))
+	mux.Handle("POST /v1/apps/import-container", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.ImportContainer)))
 	mux.Handle("POST /v1/apps/deploy", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Deploy)))
 	mux.Handle("GET /v1/apps/{appId}/status", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Status)))
 	mux.Handle("GET /v1/apps/{appId}/metrics", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Metrics)))

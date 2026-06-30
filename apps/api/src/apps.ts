@@ -1,4 +1,4 @@
-import { app, appServer, db, deployment, environment, project, server } from "@basse/db";
+import { app, appServer, db, deployment, environment, envVar, project, server } from "@basse/db";
 import type {
   App,
   AppBuildMode,
@@ -7,6 +7,8 @@ import type {
   AppConsoleResult,
   DatabaseConnectionInfo,
   DatabaseKind,
+  ImportDockerContainerInput,
+  ImportableDockerContainer,
   AppLogs,
   AppMetrics,
   AppSourceType,
@@ -22,6 +24,8 @@ import {
   execAppCommand,
   getAppLogs as getAgentAppLogs,
   getAppMetrics as getAgentAppMetrics,
+  importContainer,
+  listImportableContainers,
 } from "./agent-client";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { connectionFromServer } from "./server-connection";
@@ -191,6 +195,30 @@ function validateVolumes(volumes: AppVolume[]): string | null {
   return null;
 }
 
+function importedEnvVars(values: string[]): { key: string; value: string }[] {
+  const vars = new Map<string, string>();
+  for (const value of values) {
+    const equals = value.indexOf("=");
+    if (equals <= 0) continue;
+    const key = value.slice(0, equals);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    vars.set(key, value.slice(equals + 1));
+  }
+  return [...vars].map(([key, value]) => ({ key, value }));
+}
+
+function importedVolumes(
+  mounts: { source: string; destination: string; readOnly: boolean }[],
+): AppVolume[] {
+  return mounts
+    .filter((mount) => mount.source.startsWith("/") && mount.destination.startsWith("/"))
+    .map((mount) => ({
+      hostPath: mount.source,
+      containerPath: mount.destination,
+      readOnly: mount.readOnly,
+    }));
+}
+
 function parseVolumes(value: string): AppVolume[] {
   try {
     const parsed = JSON.parse(value) as unknown;
@@ -334,6 +362,15 @@ async function validateServersInOrg(serverIds: string[], organizationId: string)
   return rows.length === serverIds.length;
 }
 
+async function ownedServer(serverId: string, organizationId: string) {
+  const [row] = await db
+    .select()
+    .from(server)
+    .where(and(eq(server.id, serverId), eq(server.organizationId, organizationId)))
+    .limit(1);
+  return row ?? null;
+}
+
 async function resolveAttachedServer(appId: string, requestedServerId?: string) {
   const rows = await db
     .select({ server })
@@ -386,6 +423,150 @@ apps.get("/", async (c) => {
   const serverIds = await loadAppServerIds(appIds);
   const statuses = await loadLatestDeploymentStatus(appIds);
   return c.json(rows.map((row) => toApp(row, serverIds.get(row.id), statuses.get(row.id) ?? null)));
+});
+
+apps.get("/importable-containers", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const serverId = c.req.query("serverId") ?? "";
+  const target = await ownedServer(serverId, organizationId);
+  if (!target) return c.json({ error: "Server not found" }, 404);
+  if (target.status !== "active" || !target.agentToken) {
+    return c.json({ error: "Server is not active" }, 400);
+  }
+
+  const connection = await connectionFromServer(target);
+  const token = await decryptSecret(target.agentToken);
+  const containers = await listImportableContainers(connection, token);
+  return c.json(
+    containers.map(
+      (container): ImportableDockerContainer => ({
+        id: container.id,
+        name: container.name,
+        image: container.image,
+        imageId: container.imageId,
+        state: container.state,
+        status: container.status,
+        running: container.running,
+        ports: container.ports,
+      }),
+    ),
+  );
+});
+
+apps.post("/import-container", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const body = (await c.req.json().catch(() => null)) as Partial<ImportDockerContainerInput> | null;
+  const environmentId = typeof body?.environmentId === "string" ? body.environmentId : "";
+  const serverId = typeof body?.serverId === "string" ? body.serverId : "";
+  const containerId = typeof body?.containerId === "string" ? body.containerId : "";
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
+  const port = typeof body?.port === "number" ? body.port : 0;
+
+  if (!(await ownedEnvironmentId(environmentId, organizationId))) {
+    return c.json({ error: "Environment not found" }, 404);
+  }
+  const target = await ownedServer(serverId, organizationId);
+  if (!target) return c.json({ error: "Server not found" }, 404);
+  if (target.status !== "active" || !target.agentToken) {
+    return c.json({ error: "Server is not active" }, 400);
+  }
+  if (!containerId) return c.json({ error: "containerId is required" }, 400);
+  if (!name) return c.json({ error: "name is required" }, 400);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return c.json({ error: "port must be a valid port" }, 400);
+  }
+
+  const slug = slugify(name);
+  const [existing] = await db
+    .select({ id: app.id })
+    .from(app)
+    .where(and(eq(app.environmentId, environmentId), eq(app.slug, slug)))
+    .limit(1);
+  if (existing) {
+    return c.json({ error: "An app with that name already exists in this environment" }, 409);
+  }
+
+  const connection = await connectionFromServer(target);
+  const token = await decryptSecret(target.agentToken);
+  const candidates = await listImportableContainers(connection, token);
+  const candidate = candidates.find((container) => container.id === containerId);
+  if (!candidate) return c.json({ error: "Container not found or already managed" }, 404);
+  if (!candidate.running) return c.json({ error: "Only running containers can be imported" }, 400);
+  const imageError = validateImageRef(candidate.image);
+  if (imageError) return c.json({ error: imageError }, 400);
+
+  const appId = crypto.randomUUID();
+  const imported = await importContainer(connection, token, { appId, containerId });
+  const volumes = importedVolumes(imported.mounts).slice(0, 20);
+  const imageRef =
+    imported.image && !validateImageRef(imported.image) ? imported.image : candidate.image;
+  const importedVars = importedEnvVars(imported.env);
+  const now = new Date();
+
+  const created = await db.transaction(async (tx) => {
+    const [row] = await tx
+      .insert(app)
+      .values({
+        id: appId,
+        environmentId,
+        serverId,
+        name,
+        slug,
+        repositoryUrl: "",
+        imageRef,
+        sourceType: "image",
+        branch: "main",
+        port,
+        buildMode: "auto",
+        buildRunner: "server",
+        appKind: "service",
+        volumes: JSON.stringify(volumes),
+        databaseKind: null,
+        databaseVersion: null,
+        databaseName: null,
+        databaseUser: null,
+        databasePassword: null,
+        databasePublicEnabled: false,
+        databasePublicPort: null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+
+    await tx.insert(appServer).values({ appId, serverId, createdAt: now });
+    if (importedVars.length > 0) {
+      await tx.insert(envVar).values(
+        await Promise.all(
+          importedVars.map(async (entry) => ({
+            id: crypto.randomUUID(),
+            appId,
+            key: entry.key,
+            value: await encryptSecret(entry.value),
+            createdAt: now,
+            updatedAt: now,
+          })),
+        ),
+      );
+    }
+    await tx.insert(deployment).values({
+      id: crypto.randomUUID(),
+      appId,
+      status: imported.running ? "healthy" : "stopped",
+      imageRef,
+      logs: `Imported Docker container ${candidate.name} as basse-app-${appId}.\n`,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    return row;
+  });
+
+  if (!created) return c.json({ error: "Failed to import container" }, 500);
+  return c.json(toApp(created, [serverId], imported.running ? "healthy" : "stopped"), 201);
 });
 
 apps.get("/:id", async (c) => {
