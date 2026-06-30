@@ -19,7 +19,7 @@ ENV API_HOST=0.0.0.0
 ENV API_PORT=3000
 # Pin the Railpack CLI + matching BuildKit frontend image (must agree).
 ENV RAILPACK_VERSION=0.30.0
-ENV BASSE_RAILPACK_FRONTEND=ghcr.io/railwayapp/railpack-frontend:0.30.0
+ENV BASSE_RAILPACK_FRONTEND=ghcr.io/railwayapp/railpack-frontend:v0.30.0
 # Tooling the deploy pipeline shells out to:
 # - openssh-client: ssh/ssh-keygen for server provisioning.
 # - git: clone public repos to build.

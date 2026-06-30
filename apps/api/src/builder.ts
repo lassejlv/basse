@@ -8,7 +8,7 @@ import { join } from "node:path";
 // and railpack CLIs (installed in the Docker image).
 
 const RAILPACK_FRONTEND =
-  Bun.env.BASSE_RAILPACK_FRONTEND ?? "ghcr.io/railwayapp/railpack-frontend:0.30.0";
+  Bun.env.BASSE_RAILPACK_FRONTEND ?? "ghcr.io/railwayapp/railpack-frontend:v0.30.0";
 
 export type BuildLogger = (line: string) => void;
 
