@@ -3,6 +3,7 @@ import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ArrowLeftIcon, BoxIcon, ChevronRightIcon, PlusIcon, TrashIcon } from "lucide-react";
 import { FormEvent, useState } from "react";
 import type { App, AppBuildRunner, AppKind, AppSourceType, DatabaseKind } from "@basse/shared";
+import { DatabaseIcon, databaseEngineLabel } from "@/components/database-icon";
 import { DeployStatusBadge, StatusDot } from "@/components/deploy-status";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -197,9 +198,10 @@ function EnvironmentApps({ environmentId }: { environmentId: string }) {
 }
 
 function AppRow({ app }: { app: App }) {
+  const database = app.appKind === "database" ? app.database : null;
   const source =
-    app.appKind === "database"
-      ? `${app.database?.kind === "redis" ? "Redis" : "Postgres"} ${app.database?.version ?? ""}`
+    database
+      ? `${databaseEngineLabel(database.kind)} ${database.version ?? ""}`
       : app.sourceType === "image"
         ? app.imageRef
         : app.repositoryUrl;
@@ -212,7 +214,16 @@ function AppRow({ app }: { app: App }) {
       <StatusDot status={app.latestDeploymentStatus} />
       <div className="min-w-0 flex-1">
         <p className="truncate font-medium text-sm">{app.name}</p>
-        <p className="truncate font-mono text-muted-foreground text-xs">{source}</p>
+        <p className="truncate font-mono text-muted-foreground text-xs">
+          {database ? (
+            <span className="inline-flex max-w-full items-center gap-1.5 align-middle">
+              <DatabaseIcon className="size-3.5" kind={database.kind} />
+              <span className="truncate">{source}</span>
+            </span>
+          ) : (
+            source
+          )}
+        </p>
       </div>
       <div className="hidden shrink-0 items-center gap-2 sm:flex">
         {app.appKind === "database" ? (
@@ -577,12 +588,27 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
                   >
                     <SelectTrigger className="w-full">
                       <SelectValue placeholder="Engine">
-                        {(value: DatabaseKind) => (value === "redis" ? "Redis" : "Postgres")}
+                        {(value: DatabaseKind) => (
+                          <span className="flex items-center gap-2">
+                            <DatabaseIcon className="size-4" kind={value} />
+                            <span>{databaseEngineLabel(value)}</span>
+                          </span>
+                        )}
                       </SelectValue>
                     </SelectTrigger>
                     <SelectPopup>
-                      <SelectItem value="postgres">Postgres</SelectItem>
-                      <SelectItem value="redis">Redis</SelectItem>
+                      <SelectItem value="postgres">
+                        <span className="flex items-center gap-2">
+                          <DatabaseIcon className="size-4" kind="postgres" />
+                          <span>Postgres</span>
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="redis">
+                        <span className="flex items-center gap-2">
+                          <DatabaseIcon className="size-4" kind="redis" />
+                          <span>Redis</span>
+                        </span>
+                      </SelectItem>
                     </SelectPopup>
                   </Select>
                 </div>

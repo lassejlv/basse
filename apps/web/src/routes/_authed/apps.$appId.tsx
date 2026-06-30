@@ -29,6 +29,7 @@ import { Grid } from "@/components/charts/grid";
 import { Line, LineChart } from "@/components/charts/line-chart";
 import { ChartTooltip } from "@/components/charts/tooltip";
 import { XAxis } from "@/components/charts/x-axis";
+import { DatabaseIcon, databaseEngineLabel } from "@/components/database-icon";
 import { DeployStatusBadge, StatusDot } from "@/components/deploy-status";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -278,8 +279,11 @@ function AppHeader({
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-muted-foreground text-xs">
         {database ? (
           <>
-            <span className="text-foreground/80">
-              {databaseEngineLabel(database.kind)} {database.version}
+            <span className="inline-flex items-center gap-1.5 text-foreground/80">
+              <DatabaseIcon className="size-4" kind={database.kind} />
+              <span>
+                {databaseEngineLabel(database.kind)} {database.version}
+              </span>
             </span>
             <SpecDivider />
             <span>
@@ -352,10 +356,6 @@ function SpecDivider() {
       ·
     </span>
   );
-}
-
-function databaseEngineLabel(kind: DatabaseKind) {
-  return kind === "redis" ? "Redis" : "Postgres";
 }
 
 function databaseDefaultPort(kind: DatabaseKind) {
@@ -592,7 +592,10 @@ function DatabaseSettingsCard({ app }: { app: App }) {
 
   return (
     <Card className="p-6">
-      <h2 className="font-semibold text-lg">Database</h2>
+      <div className="flex items-center gap-2">
+        <DatabaseIcon className="size-6" kind={databaseKind} />
+        <h2 className="font-semibold text-lg">Database</h2>
+      </div>
       <p className="mt-1 text-muted-foreground text-sm">
         Managed standalone {engineLabel} settings.
       </p>
