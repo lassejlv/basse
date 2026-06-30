@@ -9,6 +9,7 @@ import {
   project,
   server,
 } from "@basse/db";
+import type { DatabaseKind } from "@basse/shared";
 import { and, eq, inArray, ne } from "drizzle-orm";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,7 +31,9 @@ type AppVolume = { hostPath: string; containerPath: string; readOnly: boolean };
 
 const NON_TERMINAL: DeploymentRow["status"][] = ["queued", "building", "deploying"];
 const DEFAULT_POSTGRES_VERSION = "18";
+const DEFAULT_REDIS_VERSION = "8";
 const POSTGRES_PORT = 5432;
+const REDIS_PORT = 6379;
 
 async function setStatus(
   id: string,
@@ -108,15 +111,33 @@ function shellQuote(value: string): string {
 }
 
 function databaseImage(appRow: typeof app.$inferSelect): string {
-  return appRow.databaseKind === "postgres"
-    ? `postgres:${appRow.databaseVersion ?? DEFAULT_POSTGRES_VERSION}`
-    : "";
+  const kind = (appRow.databaseKind ?? "postgres") as DatabaseKind;
+  if (kind === "postgres") return `postgres:${appRow.databaseVersion ?? DEFAULT_POSTGRES_VERSION}`;
+  return `redis:${appRow.databaseVersion ?? DEFAULT_REDIS_VERSION}`;
 }
 
-function databaseVolume(appId: string): AppVolume {
+function databasePort(kind: DatabaseKind): number {
+  return kind === "postgres" ? POSTGRES_PORT : REDIS_PORT;
+}
+
+function postgresDataPath(version: string | null): string {
+  const major = Number.parseInt(version ?? DEFAULT_POSTGRES_VERSION, 10);
+  return Number.isFinite(major) && major >= 18
+    ? "/var/lib/postgresql"
+    : "/var/lib/postgresql/data";
+}
+
+function databaseVolume(appId: string, kind: DatabaseKind, version: string | null): AppVolume {
+  if (kind === "redis") {
+    return {
+      hostPath: `basse-redis-${appId}`,
+      containerPath: "/data",
+      readOnly: false,
+    };
+  }
   return {
     hostPath: `basse-postgres-${appId}`,
-    containerPath: "/var/lib/postgresql/data",
+    containerPath: postgresDataPath(version),
     readOnly: false,
   };
 }
@@ -244,14 +265,16 @@ export async function runDeployment(deploymentId: string): Promise<void> {
     let buildId: string | null = null;
     let registry: { host: string; user: string; token: string } | undefined;
     let pullImage = false;
+    let command: string[] | undefined;
+    const databaseKind = (appRow.databaseKind ?? "postgres") as DatabaseKind;
 
     if (dep.imageRef) {
       imageRef = dep.imageRef;
       registry = await resolveDepotRegistryForImage(appRow, imageRef);
       log.line(`Using saved deployment image ${imageRef}.`);
     } else if (appRow.appKind === "database") {
-      if (appRow.databaseKind !== "postgres") {
-        log.line("Only Postgres database apps are supported right now.");
+      if (!["postgres", "redis"].includes(databaseKind)) {
+        log.line("Only Postgres and Redis database apps are supported right now.");
         await log.done();
         await setStatus(deploymentId, "failed");
         return;
@@ -263,7 +286,9 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         await setStatus(deploymentId, "failed");
         return;
       }
-      log.line(`Using managed Postgres image ${imageRef}.`);
+      log.line(
+        `Using managed ${databaseKind === "postgres" ? "Postgres" : "Redis"} image ${imageRef}.`,
+      );
     } else if (appRow.sourceType === "image") {
       if (!appRow.imageRef) {
         log.line("No Docker image configured for this app.");
@@ -368,13 +393,21 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         await setStatus(deploymentId, "failed");
         return;
       }
-      envMap.POSTGRES_DB = appRow.databaseName ?? "postgres";
-      envMap.POSTGRES_USER = appRow.databaseUser ?? "postgres";
-      envMap.POSTGRES_PASSWORD = await decryptSecret(appRow.databasePassword);
+      const password = await decryptSecret(appRow.databasePassword);
+      if (databaseKind === "postgres") {
+        envMap.POSTGRES_DB = appRow.databaseName ?? "postgres";
+        envMap.POSTGRES_USER = appRow.databaseUser ?? "postgres";
+        envMap.POSTGRES_PASSWORD = password;
+      } else {
+        command = ["redis-server", "--requirepass", password, "--appendonly", "yes"];
+      }
     }
     const volumes =
       appRow.appKind === "database"
-        ? [databaseVolume(appRow.id), ...parseVolumes(appRow.volumes)]
+        ? [
+            databaseVolume(appRow.id, databaseKind, appRow.databaseVersion),
+            ...parseVolumes(appRow.volumes),
+          ]
         : parseVolumes(appRow.volumes);
 
     let allRunning = true;
@@ -398,6 +431,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       const result = await deployApp(connection, agentToken, {
         appId: appRow.id,
         image: imageRef,
+        cmd: command,
         port: appRow.port,
         env: envMap,
         registry,
@@ -405,7 +439,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         volumes,
         publicPort:
           appRow.appKind === "database" && appRow.databasePublicEnabled
-            ? (appRow.databasePublicPort ?? POSTGRES_PORT)
+            ? (appRow.databasePublicPort ?? databasePort(databaseKind))
             : undefined,
       });
 

@@ -40,7 +40,7 @@ export type AppBuildMode = "auto" | "dockerfile" | "railpack";
 export type AppBuildRunner = "depot" | "server";
 export type AppKind = "service" | "database";
 export type AppSourceType = "repository" | "image";
-export type DatabaseKind = "postgres";
+export type DatabaseKind = "postgres" | "redis";
 
 export type AppVolume = {
   hostPath: string;
@@ -52,7 +52,7 @@ export type AppDatabase = {
   kind: DatabaseKind;
   version: string;
   name: string;
-  user: string;
+  user: string | null;
   internalHost: string;
   internalPort: number;
   publicEnabled: boolean;

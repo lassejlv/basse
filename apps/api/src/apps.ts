@@ -34,9 +34,11 @@ const BUILD_MODES: AppBuildMode[] = ["auto", "dockerfile", "railpack"];
 const BUILD_RUNNERS: AppBuildRunner[] = ["depot", "server"];
 const APP_KINDS: AppKind[] = ["service", "database"];
 const SOURCE_TYPES: AppSourceType[] = ["repository", "image"];
-const DATABASE_KINDS: DatabaseKind[] = ["postgres"];
+const DATABASE_KINDS: DatabaseKind[] = ["postgres", "redis"];
 const DEFAULT_POSTGRES_VERSION = "18";
+const DEFAULT_REDIS_VERSION = "8";
 const POSTGRES_PORT = 5432;
+const REDIS_PORT = 6379;
 
 function slugify(value: string) {
   return value
@@ -65,7 +67,15 @@ function databaseInternalHost(appId: string): string {
 }
 
 function databaseImage(kind: DatabaseKind, version: string): string {
-  return kind === "postgres" ? `postgres:${version}` : "";
+  return kind === "postgres" ? `postgres:${version}` : `redis:${version}`;
+}
+
+function defaultDatabaseVersion(kind: DatabaseKind): string {
+  return kind === "postgres" ? DEFAULT_POSTGRES_VERSION : DEFAULT_REDIS_VERSION;
+}
+
+function databasePort(kind: DatabaseKind): number {
+  return kind === "postgres" ? POSTGRES_PORT : REDIS_PORT;
 }
 
 function validateDatabaseVersion(version: string): string | null {
@@ -95,6 +105,37 @@ function postgresUri(input: {
   const password = encodeURIComponent(input.password);
   const database = encodeURIComponent(input.database);
   return `postgresql://${user}:${password}@${input.host}:${input.port}/${database}`;
+}
+
+function redisUri(input: {
+  password: string;
+  host: string;
+  port: number;
+  database: string;
+}): string {
+  const password = encodeURIComponent(input.password);
+  const database = encodeURIComponent(input.database);
+  return `redis://:${password}@${input.host}:${input.port}/${database}`;
+}
+
+function databaseUri(
+  kind: DatabaseKind,
+  input: { user: string | null; password: string; host: string; port: number; database: string },
+): string {
+  return kind === "postgres"
+    ? postgresUri({
+        user: input.user ?? "postgres",
+        password: input.password,
+        host: input.host,
+        port: input.port,
+        database: input.database,
+      })
+    : redisUri({
+        password: input.password,
+        host: input.host,
+        port: input.port,
+        database: input.database,
+      });
 }
 
 // Public https git URL with no embedded credentials (no userinfo '@').
@@ -169,15 +210,16 @@ function toApp(
   serverIds: string[] = row.serverId ? [row.serverId] : [],
   latestDeploymentStatus: DeploymentStatus | null = null,
 ): App {
+  const kind = (row.databaseKind ?? "postgres") as DatabaseKind;
   const database =
     row.appKind === "database"
       ? {
-          kind: row.databaseKind ?? "postgres",
-          version: row.databaseVersion ?? DEFAULT_POSTGRES_VERSION,
-          name: row.databaseName ?? "postgres",
-          user: row.databaseUser ?? "postgres",
+          kind,
+          version: row.databaseVersion ?? defaultDatabaseVersion(kind),
+          name: row.databaseName ?? (kind === "postgres" ? "postgres" : "0"),
+          user: kind === "postgres" ? (row.databaseUser ?? "postgres") : null,
           internalHost: databaseInternalHost(row.id),
-          internalPort: POSTGRES_PORT,
+          internalPort: databasePort(kind),
           publicEnabled: row.databasePublicEnabled,
           publicPort: row.databasePublicPort,
         }
@@ -383,18 +425,19 @@ apps.get("/:id/database/connection", async (c) => {
   const appId = c.req.param("id");
   const row = await ownedApp(appId, organizationId);
   if (!row) return c.json({ error: "App not found" }, 404);
-  if (row.appKind !== "database" || row.databaseKind !== "postgres" || !row.databasePassword) {
+  if (row.appKind !== "database" || !row.databaseKind || !row.databasePassword) {
     return c.json({ error: "Database app not found" }, 404);
   }
 
+  const kind = row.databaseKind;
   const password = await decryptSecret(row.databasePassword);
-  const database = row.databaseName ?? "postgres";
-  const user = row.databaseUser ?? "postgres";
-  const internalUri = postgresUri({
+  const database = row.databaseName ?? (kind === "postgres" ? "postgres" : "0");
+  const user = kind === "postgres" ? (row.databaseUser ?? "postgres") : null;
+  const internalUri = databaseUri(kind, {
     user,
     password,
     host: databaseInternalHost(row.id),
-    port: POSTGRES_PORT,
+    port: databasePort(kind),
     database,
   });
 
@@ -407,7 +450,7 @@ apps.get("/:id/database/connection", async (c) => {
 
   const publicUri =
     row.databasePublicEnabled && row.databasePublicPort && target?.server.sshHost
-      ? postgresUri({
+      ? databaseUri(kind, {
           user,
           password,
           host: target.server.sshHost,
@@ -526,16 +569,22 @@ apps.post("/", async (c) => {
   const databaseVersion =
     typeof body?.databaseVersion === "string" && body.databaseVersion.trim()
       ? body.databaseVersion.trim()
-      : DEFAULT_POSTGRES_VERSION;
+      : defaultDatabaseVersion(databaseKind);
   const defaultDatabaseIdentifier = databaseIdentifier(slugify(name).replaceAll("-", "_"), "app");
-  const databaseName = databaseIdentifier(
-    typeof body?.databaseName === "string" ? body.databaseName : "",
-    defaultDatabaseIdentifier,
-  );
-  const databaseUser = databaseIdentifier(
-    typeof body?.databaseUser === "string" ? body.databaseUser : "",
-    "postgres",
-  );
+  const databaseName =
+    databaseKind === "postgres"
+      ? databaseIdentifier(
+          typeof body?.databaseName === "string" ? body.databaseName : "",
+          defaultDatabaseIdentifier,
+        )
+      : "0";
+  const databaseUser =
+    databaseKind === "postgres"
+      ? databaseIdentifier(
+          typeof body?.databaseUser === "string" ? body.databaseUser : "",
+          "postgres",
+        )
+      : null;
   const databasePlainPassword =
     typeof body?.databasePassword === "string" && body.databasePassword
       ? body.databasePassword
@@ -543,7 +592,9 @@ apps.post("/", async (c) => {
   const databasePublicEnabled = body?.databasePublicEnabled === true;
   const requestedPublicPort =
     typeof body?.databasePublicPort === "number" ? body.databasePublicPort : null;
-  const databasePublicPort = databasePublicEnabled ? (requestedPublicPort ?? POSTGRES_PORT) : null;
+  const databasePublicPort = databasePublicEnabled
+    ? (requestedPublicPort ?? databasePort(databaseKind))
+    : null;
   const repositoryUrl =
     appKind === "database"
       ? ""
@@ -565,7 +616,11 @@ apps.post("/", async (c) => {
   const branch =
     typeof body?.branch === "string" && body.branch.trim() ? body.branch.trim() : "main";
   const port =
-    appKind === "database" ? POSTGRES_PORT : typeof body?.port === "number" ? body.port : 3000;
+    appKind === "database"
+      ? databasePort(databaseKind)
+      : typeof body?.port === "number"
+        ? body.port
+        : 3000;
   const buildMode = BUILD_MODES.includes(body?.buildMode as AppBuildMode)
     ? (body?.buildMode as AppBuildMode)
     : "auto";
@@ -706,17 +761,19 @@ apps.patch("/:id", async (c) => {
     updates.buildRunner = body?.buildRunner as AppBuildRunner;
   }
   if (existing.appKind === "database") {
+    const existingDatabaseKind = (existing.databaseKind ?? "postgres") as DatabaseKind;
     if (typeof body?.databaseVersion === "string" && body.databaseVersion.trim()) {
       const version = body.databaseVersion.trim();
       const versionError = validateDatabaseVersion(version);
       if (versionError) return c.json({ error: versionError }, 400);
       updates.databaseVersion = version;
-      updates.imageRef = databaseImage(existing.databaseKind ?? "postgres", version);
+      updates.imageRef = databaseImage(existingDatabaseKind, version);
     }
     if (typeof body?.databasePublicEnabled === "boolean") {
       updates.databasePublicEnabled = body.databasePublicEnabled;
       if (body.databasePublicEnabled && !(body && "databasePublicPort" in body)) {
-        updates.databasePublicPort = existing.databasePublicPort ?? POSTGRES_PORT;
+        updates.databasePublicPort =
+          existing.databasePublicPort ?? databasePort(existingDatabaseKind);
       }
       if (!body.databasePublicEnabled) {
         updates.databasePublicPort = null;
