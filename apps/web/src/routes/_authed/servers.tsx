@@ -5,8 +5,11 @@ import { ServerStatusBadge } from "@/components/server-status-badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { authClient } from "@/lib/auth-client";
 import { createServer, listServers } from "@/lib/servers";
+
+type KeySource = "generate" | "paste";
 
 export const Route = createFileRoute("/_authed/servers")({
   component: ServersRoute,
@@ -22,6 +25,8 @@ function ServersRoute() {
   const [sshHost, setSshHost] = useState("");
   const [sshUser, setSshUser] = useState("root");
   const [sshPort, setSshPort] = useState("22");
+  const [keySource, setKeySource] = useState<KeySource>("generate");
+  const [privateKey, setPrivateKey] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const servers = useQuery({
@@ -32,12 +37,20 @@ function ServersRoute() {
 
   const add = useMutation({
     mutationFn: () =>
-      createServer({ name, sshHost, sshUser, sshPort: Number(sshPort) }),
+      createServer({
+        name,
+        sshHost,
+        sshUser,
+        sshPort: Number(sshPort),
+        privateKey: keySource === "paste" ? privateKey : undefined,
+      }),
     onSuccess: async () => {
       setName("");
       setSshHost("");
       setSshUser("root");
       setSshPort("22");
+      setKeySource("generate");
+      setPrivateKey("");
       setError(null);
       await queryClient.invalidateQueries({ queryKey });
     },
@@ -132,6 +145,53 @@ function ServersRoute() {
             required
           />
         </div>
+
+        <fieldset className="space-y-2">
+          <Label>SSH key</Label>
+          <div className="flex flex-col gap-2">
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                checked={keySource === "generate"}
+                className="mt-0.5"
+                name="key-source"
+                onChange={() => setKeySource("generate")}
+                type="radio"
+              />
+              <span>
+                <span className="font-medium">Generate a new key</span>
+                <span className="block text-muted-foreground text-xs">
+                  Basse creates a keypair; you add the public key to the server.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                checked={keySource === "paste"}
+                className="mt-0.5"
+                name="key-source"
+                onChange={() => setKeySource("paste")}
+                type="radio"
+              />
+              <span>
+                <span className="font-medium">Use my own key</span>
+                <span className="block text-muted-foreground text-xs">
+                  Paste a private key already trusted on the server.
+                </span>
+              </span>
+            </label>
+          </div>
+          {keySource === "paste" ? (
+            <Textarea
+              aria-label="Private key"
+              className="font-mono text-xs"
+              onChange={(event) => setPrivateKey(event.currentTarget.value)}
+              placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+              required
+              rows={5}
+              value={privateKey}
+            />
+          ) : null}
+        </fieldset>
 
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
 

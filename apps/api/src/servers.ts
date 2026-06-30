@@ -5,7 +5,7 @@ import { Hono } from "hono";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { provisionServer } from "./provision";
 import { connectionFromServer } from "./server-connection";
-import { generateServerKeyPair } from "./server-keys";
+import { derivePublicKey, generateServerKeyPair } from "./server-keys";
 import { probeReachable } from "./ssh";
 import { resolveActiveWorkspace } from "./workspace";
 
@@ -96,6 +96,8 @@ servers.post("/", async (c) => {
   const sshHost = typeof body?.sshHost === "string" ? body.sshHost.trim() : "";
   const sshPort = typeof body?.sshPort === "number" ? body.sshPort : 22;
   const sshUser = typeof body?.sshUser === "string" && body.sshUser.trim() ? body.sshUser.trim() : "root";
+  const providedPrivateKey =
+    typeof body?.privateKey === "string" && body.privateKey.trim() ? body.privateKey.trim() : null;
 
   if (!name) {
     return c.json({ error: "name is required" }, 400);
@@ -110,8 +112,29 @@ servers.post("/", async (c) => {
   }
 
   const id = crypto.randomUUID();
-  const keyPair = await generateServerKeyPair(id);
-  const encryptedPrivateKey = await encryptSecret(keyPair.privateKey);
+
+  // Either reuse a pasted private key (deriving its public half) or generate a
+  // new per-server keypair.
+  let publicKey: string;
+  let privateKey: string;
+
+  if (providedPrivateKey) {
+    try {
+      publicKey = await derivePublicKey(providedPrivateKey);
+      privateKey = providedPrivateKey;
+    } catch (error) {
+      return c.json(
+        { error: error instanceof Error ? error.message : "Invalid private key" },
+        400,
+      );
+    }
+  } else {
+    const keyPair = await generateServerKeyPair(id);
+    publicKey = keyPair.publicKey;
+    privateKey = keyPair.privateKey;
+  }
+
+  const encryptedPrivateKey = await encryptSecret(privateKey);
   const now = new Date();
 
   const [created] = await db
@@ -123,7 +146,7 @@ servers.post("/", async (c) => {
       sshHost,
       sshPort,
       sshUser,
-      sshPublicKey: keyPair.publicKey,
+      sshPublicKey: publicKey,
       sshPrivateKey: encryptedPrivateKey,
       status: "pending",
       createdAt: now,

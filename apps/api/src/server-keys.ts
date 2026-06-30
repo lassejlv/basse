@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -49,6 +49,44 @@ export async function generateServerKeyPair(serverId: string): Promise<Generated
     ]);
 
     return { publicKey: publicKey.trim(), privateKey: privateKey.trim() };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Validates a user-supplied private key by deriving its public key with
+ * `ssh-keygen -y`. Returns the matching authorized_keys-format public key, or
+ * throws if the key is invalid or passphrase-protected. The key is written to a
+ * 0600 temp file that is always removed.
+ */
+export async function derivePublicKey(privateKey: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "basse-derive-"));
+  const keyPath = join(dir, "key");
+
+  try {
+    await writeFile(keyPath, `${privateKey.trimEnd()}\n`, { mode: 0o600 });
+
+    // -P "" rejects passphrase-protected keys instead of prompting (we run
+    // unattended and cannot store a passphrase).
+    const proc = Bun.spawn(["ssh-keygen", "-y", "-P", "", "-f", keyPath], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const exitCode = await proc.exited;
+
+    if (exitCode !== 0) {
+      throw new Error("Invalid or passphrase-protected private key");
+    }
+
+    const publicKey = (await new Response(proc.stdout).text()).trim();
+
+    if (!publicKey) {
+      throw new Error("Could not derive a public key");
+    }
+
+    return publicKey;
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

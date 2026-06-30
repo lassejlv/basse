@@ -1,5 +1,11 @@
 import { Link, Outlet, createFileRoute, redirect, useLocation } from "@tanstack/react-router";
-import { CloudIcon, LayoutDashboardIcon, ServerIcon, SettingsIcon } from "lucide-react";
+import {
+  CloudIcon,
+  KeyRoundIcon,
+  LayoutDashboardIcon,
+  ServerIcon,
+  SettingsIcon,
+} from "lucide-react";
 import { useEffect } from "react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Select, SelectButton, SelectItem, SelectPopup, SelectValue } from "@/components/ui/select";
@@ -46,9 +52,11 @@ function AuthedLayout() {
   const pathname = useLocation({ select: (location) => location.pathname });
   const pageTitle = pathname.startsWith("/servers")
     ? "Servers"
-    : pathname === "/settings"
-      ? "Settings"
-      : "Overview";
+    : pathname === "/secrets"
+      ? "Secrets"
+      : pathname === "/settings"
+        ? "Settings"
+        : "Overview";
   const user = session.user;
   const displayName = user.name || user.email;
   const initials = getInitials(displayName);
@@ -160,6 +168,16 @@ function AuthedLayout() {
             <SidebarGroupLabel>Workspace</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    isActive={pathname === "/secrets"}
+                    render={<Link to="/secrets" />}
+                    tooltip="Secrets"
+                  >
+                    <KeyRoundIcon />
+                    <span>Secrets</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
                 <SidebarMenuItem>
                   <SidebarMenuButton
                     isActive={pathname === "/settings"}

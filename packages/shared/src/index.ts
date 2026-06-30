@@ -69,4 +69,7 @@ export type CreateServerInput = {
   sshHost: string;
   sshPort?: number;
   sshUser?: string;
+  // Optional: paste an existing private key to reuse one already trusted on the
+  // server. When omitted, Basse generates a new per-server keypair.
+  privateKey?: string;
 };
