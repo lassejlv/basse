@@ -57,7 +57,7 @@ export function StatusDot({
 }): React.ReactElement {
   const { tone, pulse } = deployState(status);
   return (
-    <span className={cn("relative inline-flex size-2.5 shrink-0", className)}>
+    <span className={cn("relative inline-flex size-2 shrink-0", className)}>
       {pulse ? (
         <span
           className={cn(
