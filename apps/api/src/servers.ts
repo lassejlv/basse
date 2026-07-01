@@ -1,4 +1,4 @@
-import { db, server, sshKey } from "@basse/db";
+import { db, domain, server, sshKey } from "@basse/db";
 import type {
   AgentInfo,
   AgentLogs,
@@ -12,6 +12,7 @@ import { Hono } from "hono";
 import { checkAgentHealth, getAgentInfo } from "./agent-client";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { AGENT_IMAGE, IMAGE_REF_PATTERN } from "./provision";
+import { enqueueOrRunDomainSync } from "./proxy-sync";
 import { enqueueAction } from "./queue/queue";
 import { connectionFromServer } from "./server-connection";
 import { derivePublicKey, generateServerKeyPair } from "./server-keys";
@@ -513,13 +514,17 @@ servers.post("/:id/proxy/resync", async (c) => {
     return c.json({ error: "Server not found" }, 404);
   }
 
-  try {
-    await enqueueAction("sync-domains", row.id);
-  } catch {
-    return c.json({ error: "Could not queue resync" }, 503);
+  await db
+    .update(domain)
+    .set({ status: "pending", statusMessage: null, updatedAt: new Date() })
+    .where(eq(domain.serverId, row.id));
+
+  const sync = await enqueueOrRunDomainSync(row.id);
+  if (!sync.ok) {
+    return c.json({ error: `Proxy sync failed: ${sync.error}` }, 502);
   }
 
-  return c.body(null, 202);
+  return c.body(null, "queued" in sync ? 202 : 200);
 });
 
 servers.post("/:id/check-connection", async (c) => {

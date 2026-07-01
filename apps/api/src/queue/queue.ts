@@ -29,9 +29,11 @@ actionsQueue.on("error", (error) => {
 const ENQUEUE_TIMEOUT_MS = 5000;
 
 /**
- * Enqueues a background action. jobId is namespaced as `${name}__${entityId}` so a
- * duplicate enqueue while one is queued/active is collapsed. The DB claim remains
- * the authoritative concurrency lock; this is a secondary net.
+ * Enqueues a background action. Most job ids are namespaced as
+ * `${name}__${entityId}` so a duplicate enqueue while one is queued/active is
+ * collapsed. Domain syncs are intentionally unique: each enqueue follows a DB
+ * route-set change and must get a chance to reconcile Caddy to the latest state.
+ * syncServerDomains serializes per server, so unique jobs do not race each other.
  *
  * Rejects within ENQUEUE_TIMEOUT_MS if Redis is unreachable. enableOfflineQueue
  * does NOT cover the never-connected-at-boot case (BullMQ's add() awaits its own
@@ -42,7 +44,11 @@ const ENQUEUE_TIMEOUT_MS = 5000;
  * jobs), so the separator is "__". The jobId is opaque — only used for dedup.
  */
 export async function enqueueAction(name: ActionName, entityId: string): Promise<void> {
-  const add = actionsQueue.add(name, { entityId }, { jobId: `${name}__${entityId}` });
+  const jobId =
+    name === "sync-domains"
+      ? `${name}__${entityId}__${Date.now()}__${crypto.randomUUID()}`
+      : `${name}__${entityId}`;
+  const add = actionsQueue.add(name, { entityId }, { jobId });
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {

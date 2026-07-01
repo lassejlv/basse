@@ -10,6 +10,8 @@ import type { ActionName } from "./queue";
 // would stall and re-run the job).
 export const actionHandlers: Record<ActionName, (entityId: string) => Promise<void>> = {
   "provision-server": (serverId) => provisionServer(serverId),
-  "sync-domains": (serverId) => syncServerDomains(serverId),
+  "sync-domains": async (serverId) => {
+    await syncServerDomains(serverId);
+  },
   "deploy-app": (deploymentId) => runDeployment(deploymentId),
 };

@@ -34,7 +34,7 @@ import { buildAppUpdates, loadAppServerIds, ownedApp, slugify, toApp } from "./a
 import { decryptSecret, encryptSecret } from "./crypto";
 import { enqueueDeploy, toDeployment } from "./deployments";
 import { validateHost, validateUpstream } from "./domains";
-import { enqueueAction } from "./queue/queue";
+import { enqueueOrRunDomainSync } from "./proxy-sync";
 import { resolveActiveWorkspace } from "./workspace";
 
 type AppRow = typeof app.$inferSelect;
@@ -240,6 +240,9 @@ async function applyStagedChangesForApp(
   if (!result.ok) return { ok: false, error: result.error, status: result.status };
   const updates = result.updates;
   const serverIds = result.serverIds;
+  const currentServerIds = (await loadAppServerIds([existing.id])).get(existing.id) ?? [];
+  const nextPort = typeof updates.port === "number" ? updates.port : existing.port;
+  const nextUpstream = `basse-app-${existing.id}:${nextPort}`;
 
   const envRows = rows.filter((row) => row.resource === "env_var");
   const domainRows = rows.filter((row) => row.resource === "domain");
@@ -266,6 +269,64 @@ async function applyStagedChangesForApp(
               serverIds.map((serverId) => ({ appId: existing.id, serverId, createdAt: now })),
             );
         }
+        const domainServerRows = await tx
+          .select({ serverId: domain.serverId })
+          .from(domain)
+          .where(eq(domain.appId, existing.id));
+        const domainServerIds = [...new Set(domainServerRows.map((row) => row.serverId))];
+        const currentSet = new Set(currentServerIds);
+        const nextSet = new Set(serverIds);
+        const removedDomainServerIds = domainServerIds.filter((serverId) => !nextSet.has(serverId));
+        const singleServerMove =
+          currentServerIds.length === 1 &&
+          serverIds.length === 1 &&
+          currentServerIds[0] !== serverIds[0];
+
+        if (singleServerMove) {
+          const oldServerId = currentServerIds[0]!;
+          const newServerId = serverIds[0]!;
+          await tx
+            .update(domain)
+            .set({
+              serverId: newServerId,
+              upstream: nextUpstream,
+              status: "pending",
+              statusMessage: null,
+              updatedAt: now,
+            })
+            .where(and(eq(domain.appId, existing.id), eq(domain.serverId, oldServerId)));
+          domainSyncServerIds.add(oldServerId);
+          domainSyncServerIds.add(newServerId);
+          const staleServerIds = removedDomainServerIds.filter((serverId) => serverId !== oldServerId);
+          if (staleServerIds.length > 0) {
+            await tx
+              .delete(domain)
+              .where(and(eq(domain.appId, existing.id), inArray(domain.serverId, staleServerIds)));
+            for (const serverId of staleServerIds) domainSyncServerIds.add(serverId);
+          }
+        } else if (removedDomainServerIds.length > 0) {
+          await tx
+            .delete(domain)
+            .where(
+              and(eq(domain.appId, existing.id), inArray(domain.serverId, removedDomainServerIds)),
+            );
+          for (const serverId of removedDomainServerIds) domainSyncServerIds.add(serverId);
+        }
+
+        for (const serverId of serverIds) {
+          if (!currentSet.has(serverId)) domainSyncServerIds.add(serverId);
+        }
+      }
+      if (typeof updates.port === "number") {
+        const domainServerRows = await tx
+          .select({ serverId: domain.serverId })
+          .from(domain)
+          .where(eq(domain.appId, existing.id));
+        await tx
+          .update(domain)
+          .set({ upstream: nextUpstream, status: "pending", statusMessage: null, updatedAt: now })
+          .where(eq(domain.appId, existing.id));
+        for (const row of domainServerRows) domainSyncServerIds.add(row.serverId);
       }
       for (const row of envRows) {
         if (row.action === "delete") {
@@ -370,9 +431,7 @@ async function applyStagedChangesForApp(
     throw error;
   }
 
-  await Promise.all(
-    [...domainSyncServerIds].map((serverId) => enqueueAction("sync-domains", serverId)),
-  );
+  await Promise.all([...domainSyncServerIds].map((serverId) => enqueueOrRunDomainSync(serverId)));
 
   let deployment: ApplyStagedChangesResult["deployment"] = null;
   if (shouldDeploy) {

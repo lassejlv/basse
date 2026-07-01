@@ -2,7 +2,7 @@ import { db, domain, server } from "@basse/db";
 import type { CreateDomainInput, Domain } from "@basse/shared";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { enqueueAction } from "./queue/queue";
+import { enqueueOrRunDomainSync } from "./proxy-sync";
 import { resolveActiveWorkspace } from "./workspace";
 
 type DomainRow = typeof domain.$inferSelect;
@@ -119,8 +119,18 @@ domains.post("/", async (c) => {
     return c.json({ error: "Failed to create domain" }, 500);
   }
 
-  // Push the new desired set to the server's proxy in the background.
-  await enqueueAction("sync-domains", serverId).catch(() => {});
+  // Push the new desired set to the server's proxy in the background, falling
+  // back to an inline sync when the queue is unavailable.
+  const sync = await enqueueOrRunDomainSync(serverId);
+  if (!sync.ok) {
+    const updatedAt = new Date();
+    await db
+      .update(domain)
+      .set({ status: "error", statusMessage: sync.error, updatedAt })
+      .where(eq(domain.id, created.id))
+      .catch(() => {});
+    created = { ...created, status: "error", statusMessage: sync.error, updatedAt };
+  }
 
   return c.json(toDomain(created), 201);
 });
@@ -144,7 +154,7 @@ domains.delete("/:id", async (c) => {
   await db.delete(domain).where(eq(domain.id, row.id));
 
   // Re-push the (now smaller) desired set so the route disappears from Caddy.
-  await enqueueAction("sync-domains", row.serverId).catch(() => {});
+  await enqueueOrRunDomainSync(row.serverId);
 
   return c.body(null, 204);
 });

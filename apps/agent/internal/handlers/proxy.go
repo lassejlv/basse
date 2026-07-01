@@ -33,6 +33,11 @@ func (p Proxy) Ensure(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	cfg := p.Cfg
 
+	if current := p.status(ctx); current.Running && current.AdminReachable {
+		httpx.JSON(w, http.StatusOK, current)
+		return
+	}
+
 	if err := p.Docker.EnsureNetwork(ctx, cfg.ProxyNetwork); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "ensure network: "+err.Error())
 		return
@@ -43,20 +48,26 @@ func (p Proxy) Ensure(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Boot config: admin on the unix socket + empty HTTP server. Routes arrive
-	// later via /v1/proxy/sync.
-	initConfig, err := caddyx.BuildConfig(cfg.AdminSocketPath(), nil)
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "build init config: "+err.Error())
-		return
-	}
 	if err := os.MkdirAll(cfg.AdminDir, 0o755); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "prepare admin dir: "+err.Error())
 		return
 	}
-	if err := os.WriteFile(cfg.InitConfigPath(), initConfig, 0o644); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "write init config: "+err.Error())
-		return
+	if _, err := os.Stat(cfg.InitConfigPath()); err != nil {
+		if !os.IsNotExist(err) {
+			httpx.Error(w, http.StatusInternalServerError, "stat init config: "+err.Error())
+			return
+		}
+		// First boot config: admin on the unix socket + empty HTTP server. Sync
+		// persists the desired routes to this same file for future restarts.
+		initConfig, err := caddyx.BuildConfig(cfg.AdminSocketPath(), nil)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "build init config: "+err.Error())
+			return
+		}
+		if err := os.WriteFile(cfg.InitConfigPath(), initConfig, 0o644); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "write init config: "+err.Error())
+			return
+		}
 	}
 
 	// Recreate the container (volumes — certs in particular — survive rm).
@@ -139,6 +150,14 @@ func (p Proxy) Sync(w http.ResponseWriter, r *http.Request) {
 
 	if err := p.Caddy.Load(r.Context(), config); err != nil {
 		httpx.Error(w, http.StatusBadGateway, "apply config: "+err.Error())
+		return
+	}
+	if err := os.MkdirAll(p.Cfg.AdminDir, 0o755); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "prepare admin dir: "+err.Error())
+		return
+	}
+	if err := os.WriteFile(p.Cfg.InitConfigPath(), config, 0o644); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "persist config: "+err.Error())
 		return
 	}
 

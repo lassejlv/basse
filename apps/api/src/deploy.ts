@@ -27,6 +27,7 @@ import { decryptSecret } from "./crypto";
 import { loadResolvedEnvMap } from "./env-resolver";
 import { resolveGitHubCloneToken } from "./github";
 import { gitHubHttpsCloneUrl, parseGitHubOwner } from "./github-utils";
+import { syncServerDomains } from "./proxy-sync";
 import { connectionFromServer } from "./server-connection";
 import { runScript, type SshConnection } from "./ssh";
 
@@ -500,6 +501,13 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       const agentToken = await decryptSecret(srv.agentToken!);
       if (appRow.appKind !== "database") {
         await ensureProxy(connection, agentToken);
+        log.line(`Restoring proxy routes on ${srv.name}…`);
+        const sync = await syncServerDomains(srv.id);
+        log.line(
+          sync.ok
+            ? `Proxy routes restored on ${srv.name} (${sync.count}).`
+            : `Proxy route restore failed on ${srv.name}: ${sync.error}`,
+        );
       }
       if (appRow.sourceType === "image") {
         log.line(`Pulling ${imageRef} on ${srv.name}…`);
@@ -556,6 +564,15 @@ export async function runDeployment(deploymentId: string): Promise<void> {
           log.line("Redis authentication verified.");
         }
         allRunning &&= auth.ok;
+      }
+      if (result.running && appRow.appKind !== "database") {
+        log.line(`Refreshing proxy routes on ${srv.name}…`);
+        const sync = await syncServerDomains(srv.id);
+        log.line(
+          sync.ok
+            ? `Proxy routes refreshed on ${srv.name} (${sync.count}).`
+            : `Proxy route refresh failed on ${srv.name}: ${sync.error}`,
+        );
       }
       allRunning &&= result.running;
     }

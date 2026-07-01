@@ -83,7 +83,7 @@ import {
   stageEnvVars,
 } from "@/lib/changes";
 import { listDeployments, rollbackDeployment, triggerDeploy } from "@/lib/deployments";
-import { listDomains, type Domain } from "@/lib/domains";
+import { listDomains, resyncProxy, type Domain } from "@/lib/domains";
 import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
 import { listEnvReferences, listEnvVars, revealEnvVars } from "@/lib/env-vars";
 import { formatBytes } from "@/lib/format";
@@ -2116,7 +2116,7 @@ type StagedDomainPayload = {
 };
 
 type DomainDisplayItem = Domain & {
-  pendingAction?: "create" | "delete";
+  pendingAction?: "create" | "update" | "delete";
 };
 
 function parseStagedDomain(raw: string | null): StagedDomainPayload | null {
@@ -2221,6 +2221,17 @@ function AppDomainsSection({
     onError: (e: Error) => setError(e.message),
   });
 
+  const resync = useMutation({
+    mutationFn: () => resyncProxy(serverId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey });
+      toast.success("Proxy sync queued");
+    },
+    onError: (resyncError) => {
+      toast.error("Couldn't sync proxy", { description: toMessage(resyncError) });
+    },
+  });
+
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     add.mutate();
@@ -2233,6 +2244,12 @@ function AppDomainsSection({
       .filter((change) => change.action === "delete")
       .map((change) => change.field),
   );
+  const stagedUpdateFields = new Map<string, StagedDomainPayload>();
+  for (const change of stagedDomainChanges) {
+    if (change.action !== "update") continue;
+    const value = parseStagedDomain(change.value);
+    if (value) stagedUpdateFields.set(change.field, value);
+  }
   const stagedCreates: DomainDisplayItem[] = stagedDomainChanges.flatMap((change) => {
     if (change.action !== "create" || !change.value) return [];
     const value = parseStagedDomain(change.value);
@@ -2256,12 +2273,19 @@ function AppDomainsSection({
   });
   const appDomains: DomainDisplayItem[] = (domains.data ?? [])
     .filter((d) => d.appId === app.id)
-    .map((d) => ({
-      ...d,
-      pendingAction: stagedDeleteFields.has(domainField(d.serverId, d.host))
-        ? ("delete" as const)
-        : undefined,
-    }));
+    .map((d) => {
+      const field = domainField(d.serverId, d.host);
+      const stagedUpdate = stagedUpdateFields.get(field);
+      return {
+        ...d,
+        upstream: stagedUpdate?.upstream ?? d.upstream,
+        pendingAction: stagedDeleteFields.has(field)
+          ? ("delete" as const)
+          : stagedUpdate
+            ? ("update" as const)
+            : undefined,
+      };
+    });
   const visibleDomains = [
     ...appDomains,
     ...stagedCreates.filter(
@@ -2280,12 +2304,25 @@ function AppDomainsSection({
 
   return (
     <Card className="p-6">
-      <h2 className="font-semibold text-lg">Domains</h2>
-      <p className="mt-1 text-muted-foreground text-sm">
-        Add an A record for your domain pointing to{" "}
-        <code className="font-mono">{selectedServer?.sshHost ?? "this server"}</code>. Basse will
-        configure HTTPS on that server and route traffic to the app.
-      </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="font-semibold text-lg">Domains</h2>
+          <p className="mt-1 text-muted-foreground text-sm">
+            Add an A record for your domain pointing to{" "}
+            <code className="font-mono">{selectedServer?.sshHost ?? "this server"}</code>. Basse
+            will configure HTTPS on that server and route traffic to the app.
+          </p>
+        </div>
+        <Button
+          loading={resync.isPending}
+          onClick={() => resync.mutate()}
+          size="sm"
+          variant="outline"
+        >
+          <RotateCcwIcon />
+          Sync
+        </Button>
+      </div>
       <div className="mt-4 rounded-md border bg-muted/20 p-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
@@ -2333,9 +2370,21 @@ function AppDomainsSection({
                       ? "staged"
                       : d.pendingAction === "delete"
                         ? "staged remove"
+                        : d.pendingAction === "update"
+                          ? "staged update"
                         : d.status}
                   </Badge>
-                  <span className="truncate font-medium text-sm">{d.host}</span>
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium text-sm">{d.host}</span>
+                    {d.statusMessage ? (
+                      <span
+                        className="block truncate text-muted-foreground text-xs"
+                        title={d.statusMessage}
+                      >
+                        {d.statusMessage}
+                      </span>
+                    ) : null}
+                  </span>
                 </span>
                 {d.pendingAction ? null : (
                   <Button

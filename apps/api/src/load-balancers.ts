@@ -31,7 +31,7 @@ import {
   syncHetznerLoadBalancer,
   testHetznerToken,
 } from "./hetzner";
-import { enqueueAction } from "./queue/queue";
+import { enqueueOrRunDomainSync } from "./proxy-sync";
 import { resolveActiveWorkspace } from "./workspace";
 
 type IntegrationRow = typeof loadBalancerIntegration.$inferSelect;
@@ -560,7 +560,7 @@ async function ensureDomains(
 }
 
 async function enqueueDomainSyncs(serverIds: string[]) {
-  await Promise.all([...new Set(serverIds)].map((serverId) => enqueueAction("sync-domains", serverId)));
+  await Promise.all([...new Set(serverIds)].map((serverId) => enqueueOrRunDomainSync(serverId)));
 }
 
 async function ownedIntegration(
