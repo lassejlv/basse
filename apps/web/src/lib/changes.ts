@@ -6,6 +6,7 @@ import type {
   ProjectStagedChangeHistoryEntry,
   ProjectStagedChanges,
   StageAppChangesInput,
+  StageDomainChangeInput,
   StageEnvVarsInput,
   StagedChange,
   StagedChangeHistoryEntry,
@@ -113,6 +114,20 @@ export async function stageEnvVars(
   input: StageEnvVarsInput,
 ): Promise<AppStagedChanges> {
   const response = await fetch(`${apiBaseUrl}/api/apps/${appId}/changes/env`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<AppStagedChanges>;
+}
+
+export async function stageDomainChange(
+  appId: string,
+  input: StageDomainChangeInput,
+): Promise<AppStagedChanges> {
+  const response = await fetch(`${apiBaseUrl}/api/apps/${appId}/changes/domain`, {
     method: "POST",
     credentials: "include",
     headers: { "content-type": "application/json" },

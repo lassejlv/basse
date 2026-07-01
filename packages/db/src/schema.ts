@@ -314,8 +314,8 @@ export const alert = pgTable(
 );
 
 // Railway-style staged ("uncommitted") changes for an app. Each row is one
-// pending edit to the app's config or env vars, not yet applied to the live
-// `app`/`env_var` tables. They survive page reloads and are applied as a batch
+// pending edit to the app's config, env vars, or domains, not yet applied to the live
+// `app`/`env_var`/`domain` tables. They survive page reloads and are applied as a batch
 // (then a deploy is triggered) or discarded. Workspace-scoped transitively via
 // the app (app->environment->project->organizationId).
 export const stagedChange = pgTable(
@@ -326,15 +326,17 @@ export const stagedChange = pgTable(
       .notNull()
       .references(() => app.id, { onDelete: "cascade" }),
     // What the change targets. "app" = a column on the app row; "env_var" = a
-    // runtime environment variable.
-    resource: text("resource", { enum: ["app", "env_var"] }).notNull(),
-    // For "app" this is always "update". For "env_var" it is create/update/delete.
+    // runtime environment variable; "domain" = a proxy route.
+    resource: text("resource", { enum: ["app", "env_var", "domain"] }).notNull(),
+    // For "app" this is always "update". For "env_var" and "domain" it is
+    // create/update/delete.
     action: text("action", { enum: ["create", "update", "delete"] }).notNull(),
     // For "app": the app DB column name (e.g. "port", "serverIds"). For
-    // "env_var": the variable key.
+    // "env_var": the variable key. For "domain": `${serverId}:${host}`.
     field: text("field").notNull(),
     // New value. For "app" rows: JSON-encoded column value. For "env_var" rows:
-    // the new value, AES-encrypted at rest (null for a delete).
+    // the new value, AES-encrypted at rest (null for a delete). For "domain":
+    // JSON-encoded route data (null for a delete).
     value: text("value"),
     // Snapshot of the prior value (same encoding as `value`) for diff display;
     // null when the change creates something that did not exist.
@@ -365,7 +367,7 @@ export const stagedChangeHistory = pgTable(
       .references(() => app.id, { onDelete: "cascade" }),
     deploymentId: text("deployment_id").references(() => deployment.id, { onDelete: "set null" }),
     outcome: text("outcome", { enum: ["applied", "discarded"] }).notNull(),
-    resource: text("resource", { enum: ["app", "env_var"] }).notNull(),
+    resource: text("resource", { enum: ["app", "env_var", "domain"] }).notNull(),
     action: text("action", { enum: ["create", "update", "delete"] }).notNull(),
     field: text("field").notNull(),
     value: text("value"),

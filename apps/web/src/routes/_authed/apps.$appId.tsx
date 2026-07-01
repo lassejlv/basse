@@ -71,7 +71,7 @@ import {
   getAppMetrics,
   deleteApp,
 } from "@/lib/apps";
-import type { StagedChange } from "@/lib/changes";
+import type { AppStagedChanges, StagedChange } from "@/lib/changes";
 import {
   getChangeHistory,
   getChanges,
@@ -79,10 +79,11 @@ import {
   getProjectChangeHistory,
   getProjectChanges,
   stageAppChanges,
+  stageDomainChange,
   stageEnvVars,
 } from "@/lib/changes";
 import { listDeployments, rollbackDeployment, triggerDeploy } from "@/lib/deployments";
-import { createDomain, deleteDomain, listDomains } from "@/lib/domains";
+import { listDomains, type Domain } from "@/lib/domains";
 import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
 import { listEnvReferences, listEnvVars, revealEnvVars } from "@/lib/env-vars";
 import { formatBytes } from "@/lib/format";
@@ -147,6 +148,9 @@ function AppDetailRoute() {
   const draft = changes.data?.draft ?? data;
   const stagedChanges = changes.data?.changes ?? [];
   const projectStagedChanges = projectChanges.data?.changes ?? [];
+  const currentAppStagedChanges = data.projectId
+    ? projectStagedChanges.filter((change) => change.appId === data.id)
+    : stagedChanges;
   const hasStagedChanges = data.projectId
     ? (projectChanges.data?.changes.length ?? stagedChanges.length) > 0
     : stagedChanges.length > 0;
@@ -198,7 +202,12 @@ function AppDetailRoute() {
           {data.appKind === "service" ? (
             <TabsPanel className="pt-5" value="domains">
               {data.serverIds.length === 1 ? (
-                <AppDomainsSection app={data} serverId={data.serverIds[0]!} />
+                <AppDomainsSection
+                  app={draft}
+                  projectId={data.projectId}
+                  serverId={data.serverIds[0]!}
+                  stagedChanges={currentAppStagedChanges}
+                />
               ) : data.serverIds.length > 1 ? (
                 <ManagedLoadBalancerSection app={data} />
               ) : (
@@ -2098,7 +2107,61 @@ function EnvVarsCard({ appId, stagedChanges }: { appId: string; stagedChanges: S
   );
 }
 
-function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
+type StagedDomainPayload = {
+  id?: string | null;
+  serverId?: string;
+  appId?: string | null;
+  host?: string;
+  upstream?: string;
+};
+
+type DomainDisplayItem = Domain & {
+  pendingAction?: "create" | "delete";
+};
+
+function parseStagedDomain(raw: string | null): StagedDomainPayload | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as StagedDomainPayload;
+  } catch {
+    return null;
+  }
+}
+
+function domainField(serverId: string, host: string): string {
+  return `${serverId}:${host}`;
+}
+
+async function cacheDomainStage(
+  queryClient: ReturnType<typeof useQueryClient>,
+  appId: string,
+  projectId: string | undefined,
+  data: AppStagedChanges,
+) {
+  queryClient.setQueryData(["changes", appId], data);
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["changes", appId] }),
+    queryClient.invalidateQueries({ queryKey: ["change-history", appId] }),
+    ...(projectId
+      ? [
+          queryClient.invalidateQueries({ queryKey: ["project-changes", projectId] }),
+          queryClient.invalidateQueries({ queryKey: ["project-change-history", projectId] }),
+        ]
+      : []),
+  ]);
+}
+
+function AppDomainsSection({
+  app,
+  projectId,
+  serverId,
+  stagedChanges,
+}: {
+  app: App;
+  projectId?: string;
+  serverId: string;
+  stagedChanges: StagedChange[];
+}) {
   const queryClient = useQueryClient();
   const queryKey = ["domains", serverId];
   const upstream = `basse-app-${app.id}:${app.port}`;
@@ -2114,21 +2177,27 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
   });
 
   const add = useMutation({
-    mutationFn: () => createDomain(serverId, { host, upstream, appId: app.id }),
-    onSuccess: async () => {
+    mutationFn: () =>
+      stageDomainChange(app.id, {
+        action: "create",
+        serverId,
+        host,
+        upstream,
+      }),
+    onSuccess: async (data) => {
       setHost("");
       setError(null);
-      toast.success("Domain added");
-      await queryClient.invalidateQueries({ queryKey });
+      toast.success("Domain change staged");
+      await cacheDomainStage(queryClient, app.id, projectId, data);
     },
     onError: (e: Error) => setError(e.message),
   });
 
   const remove = useMutation({
-    mutationFn: (id: string) => deleteDomain(id),
-    onSuccess: async () => {
-      toast.success("Domain removed");
-      await queryClient.invalidateQueries({ queryKey });
+    mutationFn: (id: string) => stageDomainChange(app.id, { action: "delete", domainId: id }),
+    onSuccess: async (data) => {
+      toast.success("Domain change staged");
+      await cacheDomainStage(queryClient, app.id, projectId, data);
     },
     onError: (e: Error) => toast.error("Couldn't remove domain", { description: toMessage(e) }),
   });
@@ -2137,12 +2206,17 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
     mutationFn: () => {
       const ip = selectedServer?.sshHost ?? "";
       const previewDomainHost = `${app.slug}-${app.id.slice(0, 8)}.${ip}.sslip.io`;
-      return createDomain(serverId, { host: previewDomainHost, upstream, appId: app.id });
+      return stageDomainChange(app.id, {
+        action: "create",
+        serverId,
+        host: previewDomainHost,
+        upstream,
+      });
     },
-    onSuccess: async () => {
+    onSuccess: async (data) => {
       setError(null);
-      toast.success("Preview domain created");
-      await queryClient.invalidateQueries({ queryKey });
+      toast.success("Preview domain staged");
+      await cacheDomainStage(queryClient, app.id, projectId, data);
     },
     onError: (e: Error) => setError(e.message),
   });
@@ -2153,7 +2227,51 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
   }
 
   // Only this app's domains (the server may host domains for other apps too).
-  const appDomains = (domains.data ?? []).filter((d) => d.appId === app.id);
+  const stagedDomainChanges = stagedChanges.filter((change) => change.resource === "domain");
+  const stagedDeleteFields = new Set(
+    stagedDomainChanges
+      .filter((change) => change.action === "delete")
+      .map((change) => change.field),
+  );
+  const stagedCreates: DomainDisplayItem[] = stagedDomainChanges.flatMap((change) => {
+    if (change.action !== "create" || !change.value) return [];
+    const value = parseStagedDomain(change.value);
+    if (!value?.serverId || !value.host || !value.upstream || value.serverId !== serverId) {
+      return [];
+    }
+    return [
+      {
+        id: change.id,
+        serverId: value.serverId,
+        appId: app.id,
+        host: value.host,
+        upstream: value.upstream,
+        status: "pending",
+        statusMessage: null,
+        pendingAction: "create",
+        createdAt: change.createdAt,
+        updatedAt: change.createdAt,
+      },
+    ];
+  });
+  const appDomains: DomainDisplayItem[] = (domains.data ?? [])
+    .filter((d) => d.appId === app.id)
+    .map((d) => ({
+      ...d,
+      pendingAction: stagedDeleteFields.has(domainField(d.serverId, d.host))
+        ? ("delete" as const)
+        : undefined,
+    }));
+  const visibleDomains = [
+    ...appDomains,
+    ...stagedCreates.filter(
+      (staged) =>
+        !appDomains.some(
+          (live) =>
+            domainField(live.serverId, live.host) === domainField(staged.serverId, staged.host),
+        ),
+    ),
+  ];
   const selectedServer = (servers.data ?? []).find((s) => s.id === serverId);
   const canGeneratePreview = Boolean(selectedServer?.sshHost.match(/^\d{1,3}(?:\.\d{1,3}){3}$/));
   const previewHost = selectedServer
@@ -2189,11 +2307,11 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
       </div>
 
       <div className="mt-5">
-        {appDomains.length === 0 ? (
+        {visibleDomains.length === 0 ? (
           <p className="text-muted-foreground text-sm">No domains yet.</p>
         ) : (
           <ul className="flex flex-col gap-2">
-            {appDomains.map((d) => (
+            {visibleDomains.map((d) => (
               <li
                 key={d.id}
                 className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
@@ -2202,22 +2320,34 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
                   <Badge
                     size="sm"
                     variant={
-                      d.status === "active" ? "success" : d.status === "error" ? "error" : "warning"
+                      d.pendingAction
+                        ? "outline"
+                        : d.status === "active"
+                          ? "success"
+                          : d.status === "error"
+                            ? "error"
+                            : "warning"
                     }
                   >
-                    {d.status}
+                    {d.pendingAction === "create"
+                      ? "staged"
+                      : d.pendingAction === "delete"
+                        ? "staged remove"
+                        : d.status}
                   </Badge>
                   <span className="truncate font-medium text-sm">{d.host}</span>
                 </span>
-                <Button
-                  aria-label={`Delete ${d.host}`}
-                  loading={remove.isPending && remove.variables === d.id}
-                  onClick={() => remove.mutate(d.id)}
-                  size="icon"
-                  variant="outline"
-                >
-                  <TrashIcon />
-                </Button>
+                {d.pendingAction ? null : (
+                  <Button
+                    aria-label={`Delete ${d.host}`}
+                    loading={remove.isPending && remove.variables === d.id}
+                    onClick={() => remove.mutate(d.id)}
+                    size="icon"
+                    variant="outline"
+                  >
+                    <TrashIcon />
+                  </Button>
+                )}
               </li>
             ))}
           </ul>
@@ -2236,7 +2366,7 @@ function AppDomainsSection({ app, serverId }: { app: App; serverId: string }) {
           />
         </div>
         <Button loading={add.isPending} type="submit">
-          Add
+          Stage
         </Button>
       </form>
       {error ? <p className="mt-2 text-destructive-foreground text-sm">{error}</p> : null}

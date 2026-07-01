@@ -13,7 +13,7 @@ const HOST_PATTERN = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 const UPSTREAM_HOST_PATTERN = /^[a-zA-Z0-9](?:[a-zA-Z0-9._-]{0,253}[a-zA-Z0-9])?$/;
 const CONTROL_PLANE_DOMAIN = Bun.env.DOMAIN?.trim().toLowerCase();
 
-function validateHost(host: string): string | null {
+export function validateHost(host: string): string | null {
   if (!host) return "host is required";
   if (host.includes("*")) return "wildcard hosts are not supported";
   if (host.length > 253 || !HOST_PATTERN.test(host)) return `invalid host: ${host}`;
@@ -21,7 +21,7 @@ function validateHost(host: string): string | null {
   return null;
 }
 
-function validateUpstream(upstream: string): string | null {
+export function validateUpstream(upstream: string): string | null {
   const [host, port, ...rest] = upstream.split(":");
   if (rest.length > 0 || !host || port === undefined) return "upstream must be host:port";
   if (!UPSTREAM_HOST_PATTERN.test(host)) return `invalid upstream host: ${host}`;

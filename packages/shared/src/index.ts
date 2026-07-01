@@ -228,7 +228,7 @@ export type EnvReferenceSuggestion = {
 // here until the user applies them (which commits them and triggers a deploy)
 // or discards them. They are persisted server-side, so they survive reloads.
 
-export type StagedChangeResource = "app" | "env_var";
+export type StagedChangeResource = "app" | "env_var" | "domain";
 export type StagedChangeAction = "create" | "update" | "delete";
 
 export type StagedChange = {
@@ -237,11 +237,12 @@ export type StagedChange = {
   resource: StagedChangeResource;
   action: StagedChangeAction;
   // For "app": the app field name (e.g. "port", "serverIds"). For "env_var": the
-  // variable key.
+  // variable key. For "domain": `${serverId}:${host}`.
   field: string;
   // Display-safe representation of the new value. For "app" rows it is the
   // JSON-encoded column value; for "env_var" rows it is a masked hint (never
-  // plaintext) or null on delete.
+  // plaintext) or null on delete; for "domain" rows it is a JSON-encoded route
+  // or null on delete.
   value: string | null;
   // Display-safe representation of the prior value (same encoding as `value`),
   // or null when the change creates something new.
@@ -295,6 +296,7 @@ export type ProjectApplyStagedChangesResult = {
     appId: string;
     appName: string;
     deployment: Deployment | null;
+    domainSyncs: number;
   }[];
 };
 
@@ -319,10 +321,23 @@ export type StageAppChangesInput = UpdateAppInput;
 // Stage the full desired env-var set; the server diffs it against the live vars.
 export type StageEnvVarsInput = SetEnvVarsInput;
 
+export type StageDomainChangeInput =
+  | {
+      action: "create";
+      serverId: string;
+      host: string;
+      upstream: string;
+    }
+  | {
+      action: "delete";
+      domainId: string;
+    };
+
 // Result of applying staged changes: the deployment that was triggered, or null
 // when the app has no server attached and could not be deployed.
 export type ApplyStagedChangesResult = {
   deployment: Deployment | null;
+  domainSyncs: number;
 };
 
 export type DeploymentStatus =

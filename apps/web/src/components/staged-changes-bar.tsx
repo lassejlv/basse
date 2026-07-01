@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronDownIcon, ChevronUpIcon, RocketIcon, XIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, ChevronUpIcon, RocketIcon, XIcon } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import type {
   AppStagedChanges,
@@ -46,6 +46,11 @@ type DisplayChange = Pick<
   StagedChange,
   "resource" | "action" | "field" | "value" | "previousValue"
 >;
+
+type DomainChangePayload = {
+  host?: string;
+  upstream?: string;
+};
 
 // "slug" is derived from "name", so it is hidden from the diff to avoid noise.
 function isHidden(change: DisplayChange): boolean {
@@ -95,11 +100,34 @@ function formatAppValue(field: string, raw: string | null): string {
   return String(value);
 }
 
+function parseDomainChangeValue(raw: string | null): DomainChangePayload | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as DomainChangePayload;
+  } catch {
+    return null;
+  }
+}
+
+function formatDomainHost(change: DisplayChange): string {
+  const parsed = parseDomainChangeValue(change.value ?? change.previousValue);
+  return parsed?.host ?? change.field.split(":").slice(1).join(":") ?? change.field;
+}
+
 function ChangeSummary({ change }: { change: DisplayChange }) {
   let label: string;
   let detail: ReactNode;
 
-  if (change.resource === "env_var") {
+  if (change.resource === "domain") {
+    label = "Domain";
+    const verb =
+      change.action === "create" ? "add" : change.action === "delete" ? "remove" : "change";
+    detail = (
+      <span className="text-muted-foreground">
+        {verb} <span className="font-mono text-foreground/80">{formatDomainHost(change)}</span>
+      </span>
+    );
+  } else if (change.resource === "env_var") {
     label = change.field;
     const verb =
       change.action === "create" ? "added" : change.action === "delete" ? "removed" : "changed";
@@ -135,9 +163,14 @@ function ChangeSummary({ change }: { change: DisplayChange }) {
 }
 
 function changeLabel(change: DisplayChange): string {
+  if (change.resource === "domain") return `domain ${formatDomainHost(change)}`;
   return change.resource === "env_var"
     ? change.field
     : APP_FIELD_LABELS[change.field] ?? change.field;
+}
+
+function hasDeployableChanges(changes: DisplayChange[]): boolean {
+  return changes.some((change) => change.resource !== "domain");
 }
 
 function ChangeRow({
@@ -175,6 +208,7 @@ export function StagedChangesBar({ appId, changes }: { appId: string; changes: S
   const [notice, setNotice] = useState<string | null>(null);
 
   const visible = changes.filter((change) => !isHidden(change));
+  const deployableChanges = hasDeployableChanges(visible);
 
   function cacheChanges(data: AppStagedChanges) {
     queryClient.setQueryData(["changes", appId], data);
@@ -185,13 +219,18 @@ export function StagedChangesBar({ appId, changes }: { appId: string; changes: S
     onSuccess: async (result) => {
       setError(null);
       setNotice(
-        result.deployment ? null : "Changes saved. Attach a server to this app to deploy them.",
+        result.deployment
+          ? null
+          : result.domainSyncs > 0
+            ? "Domain changes applied. Proxy sync queued."
+            : "Changes saved. Attach a server to this app to deploy them.",
       );
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["changes", appId] }),
         queryClient.invalidateQueries({ queryKey: ["change-history", appId] }),
         queryClient.invalidateQueries({ queryKey: ["app", appId] }),
         queryClient.invalidateQueries({ queryKey: ["deployments", appId] }),
+        queryClient.invalidateQueries({ queryKey: ["domains"] }),
         queryClient.invalidateQueries({ queryKey: ["env-vars", appId] }),
         queryClient.invalidateQueries({ queryKey: ["env-vars-reveal", appId] }),
       ]);
@@ -276,8 +315,8 @@ export function StagedChangesBar({ appId, changes }: { appId: string; changes: S
               onClick={() => apply.mutate()}
               size="sm"
             >
-              <RocketIcon />
-              Deploy
+              {deployableChanges ? <RocketIcon /> : <CheckIcon />}
+              {deployableChanges ? "Deploy" : "Apply"}
             </Button>
           </div>
         </div>
@@ -337,6 +376,7 @@ export function ProjectStagedChangesBar({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const visible = changes.filter((change) => !isHidden(change));
+  const deployableChanges = hasDeployableChanges(visible);
 
   function cacheChanges(data: ProjectStagedChanges) {
     queryClient.setQueryData(["project-changes", projectId], data);
@@ -350,6 +390,7 @@ export function ProjectStagedChangesBar({
       queryClient.invalidateQueries({ queryKey: ["change-history"] }),
       queryClient.invalidateQueries({ queryKey: ["app"] }),
       queryClient.invalidateQueries({ queryKey: ["deployments"] }),
+      queryClient.invalidateQueries({ queryKey: ["domains"] }),
       queryClient.invalidateQueries({ queryKey: ["env-vars"] }),
       queryClient.invalidateQueries({ queryKey: ["env-vars-reveal"] }),
     ]);
@@ -359,9 +400,12 @@ export function ProjectStagedChangesBar({
     mutationFn: () => applyProjectChanges(projectId),
     onSuccess: async (result) => {
       setError(null);
+      const domainSyncs = result.deployments.reduce((total, item) => total + item.domainSyncs, 0);
       setNotice(
-        result.deployments.some((item) => item.deployment === null)
+        result.deployments.some((item) => item.deployment === null && item.domainSyncs === 0)
           ? "Some changes were saved without deploys because those apps have no deploy target."
+          : domainSyncs > 0 && result.deployments.every((item) => item.deployment === null)
+            ? "Domain changes applied. Proxy sync queued."
           : null,
       );
       await invalidateProjectChanges();
@@ -446,8 +490,8 @@ export function ProjectStagedChangesBar({
               onClick={() => apply.mutate()}
               size="sm"
             >
-              <RocketIcon />
-              Deploy project
+              {deployableChanges ? <RocketIcon /> : <CheckIcon />}
+              {deployableChanges ? "Deploy project" : "Apply project"}
             </Button>
           </div>
         </div>

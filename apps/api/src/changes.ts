@@ -2,9 +2,11 @@ import {
   app,
   appServer,
   db,
+  domain,
   envVar,
   environment,
   project,
+  server,
   stagedChange,
   stagedChangeHistory,
 } from "@basse/db";
@@ -18,6 +20,7 @@ import type {
   ProjectStagedChangeHistoryEntry,
   ProjectStagedChanges,
   SetEnvVarsInput,
+  StageDomainChangeInput,
   StagedChange,
   StagedChangeHistoryEntry,
   StagedChangeHistoryItem,
@@ -30,12 +33,23 @@ import { Hono } from "hono";
 import { buildAppUpdates, loadAppServerIds, ownedApp, slugify, toApp } from "./apps";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { enqueueDeploy, toDeployment } from "./deployments";
+import { validateHost, validateUpstream } from "./domains";
+import { enqueueAction } from "./queue/queue";
 import { resolveActiveWorkspace } from "./workspace";
 
 type AppRow = typeof app.$inferSelect;
 type StagedChangeRow = typeof stagedChange.$inferSelect;
 type StagedChangeHistoryRow = typeof stagedChangeHistory.$inferSelect;
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type DomainRow = typeof domain.$inferSelect;
+
+type DomainChangePayload = {
+  id: string | null;
+  serverId: string;
+  appId: string | null;
+  host: string;
+  upstream: string;
+};
 
 /** Last-4 masked hint for an encrypted env value; never returns plaintext. */
 async function maskedValue(encrypted: string): Promise<string> {
@@ -104,6 +118,12 @@ function isUniqueViolation(error: unknown): boolean {
   if ((error as { code?: unknown }).code === "23505") return true;
   const message = (error as { message?: unknown }).message;
   return typeof message === "string" && message.includes("duplicate key value");
+}
+
+function uniqueConstraint(error: unknown): string | null {
+  if (typeof error !== "object" || error === null) return null;
+  const constraint = (error as { constraint?: unknown }).constraint;
+  return typeof constraint === "string" ? constraint : null;
 }
 
 /** Standard response after any change to the staging set: the list + the draft. */
@@ -222,8 +242,11 @@ async function applyStagedChangesForApp(
   const serverIds = result.serverIds;
 
   const envRows = rows.filter((row) => row.resource === "env_var");
+  const domainRows = rows.filter((row) => row.resource === "domain");
+  const shouldDeploy = rows.some((row) => row.resource !== "domain");
   const stagedIds = rows.map((row) => row.id);
   const now = new Date();
+  const domainSyncServerIds = new Set<string>();
   let historyBatchId: string | null = null;
 
   try {
@@ -267,6 +290,64 @@ async function applyStagedChangesForApp(
             set: { value: row.value, updatedAt: now },
           });
       }
+      for (const row of domainRows) {
+        if (row.action === "delete") {
+          const payload = parseDomainChangePayload(row.previousValue);
+          if (!payload) continue;
+          await tx
+            .delete(domain)
+            .where(
+              and(
+                eq(domain.serverId, payload.serverId),
+                eq(domain.host, payload.host),
+                eq(domain.appId, existing.id),
+              ),
+            );
+          domainSyncServerIds.add(payload.serverId);
+          continue;
+        }
+
+        if (!row.value) continue;
+        const payload = parseDomainChangePayload(row.value);
+        if (!payload) continue;
+        const serverAttached = await appServerBelongsToWorkspaceApp(
+          payload.serverId,
+          existing.id,
+          organizationId,
+        );
+        if (!serverAttached) throw new Error("Domain server is not attached to this app");
+        if (row.action === "update") {
+          await tx
+            .update(domain)
+            .set({
+              upstream: payload.upstream,
+              status: "pending",
+              statusMessage: null,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(domain.serverId, payload.serverId),
+                eq(domain.host, payload.host),
+                eq(domain.appId, existing.id),
+              ),
+            );
+          domainSyncServerIds.add(payload.serverId);
+          continue;
+        }
+        await tx.insert(domain).values({
+          id: payload.id ?? crypto.randomUUID(),
+          serverId: payload.serverId,
+          appId: existing.id,
+          host: payload.host,
+          upstream: payload.upstream,
+          status: "pending",
+          statusMessage: null,
+          createdAt: now,
+          updatedAt: now,
+        });
+        domainSyncServerIds.add(payload.serverId);
+      }
       historyBatchId = await insertChangeHistory(tx, rows, "applied", now);
       // Clear only the rows we actually applied; anything staged concurrently
       // (between the read above and this commit) survives to be applied later.
@@ -274,17 +355,30 @@ async function applyStagedChangesForApp(
     });
   } catch (error) {
     if (isUniqueViolation(error)) {
+      if (uniqueConstraint(error)?.includes("domain_serverId_host")) {
+        return { ok: false, error: "That host is already in use", status: 409 };
+      }
       return {
         ok: false,
         error: "An app with that name already exists in this environment",
         status: 409,
       };
     }
+    if (error instanceof Error && error.message === "Domain server is not attached to this app") {
+      return { ok: false, error: error.message, status: 400 };
+    }
     throw error;
   }
 
-  const deployResult = await enqueueDeploy(existing.id);
-  const deployment = "deployment" in deployResult ? toDeployment(deployResult.deployment) : null;
+  await Promise.all(
+    [...domainSyncServerIds].map((serverId) => enqueueAction("sync-domains", serverId)),
+  );
+
+  let deployment: ApplyStagedChangesResult["deployment"] = null;
+  if (shouldDeploy) {
+    const deployResult = await enqueueDeploy(existing.id);
+    deployment = "deployment" in deployResult ? toDeployment(deployResult.deployment) : null;
+  }
   if (historyBatchId && deployment) {
     await db
       .update(stagedChangeHistory)
@@ -292,7 +386,7 @@ async function applyStagedChangesForApp(
       .where(eq(stagedChangeHistory.batchId, historyBatchId));
   }
 
-  return { ok: true, result: { deployment } };
+  return { ok: true, result: { deployment, domainSyncs: domainSyncServerIds.size } };
 }
 
 async function loadProjectApps(projectId: string, organizationId: string) {
@@ -444,6 +538,7 @@ projectChanges.post("/:id/changes/apply", async (c) => {
       appId: context.app.id,
       appName: context.app.name,
       deployment: result.result.deployment,
+      domainSyncs: result.result.domainSyncs,
     });
   }
 
@@ -723,6 +818,115 @@ changes.post("/:id/changes/env", async (c) => {
   return respondWithChanges(c, existing);
 });
 
+// POST /api/apps/:id/changes/domain — stage a domain create/delete. Applying
+// the batch commits the domain table change and queues a proxy sync.
+changes.post("/:id/changes/domain", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const existing = await ownedApp(c.req.param("id"), organizationId);
+  if (!existing) return c.json({ error: "App not found" }, 404);
+
+  const body = (await c.req.json().catch(() => null)) as Partial<StageDomainChangeInput> | null;
+  const now = new Date();
+
+  if (body?.action === "create") {
+    const serverId = typeof body.serverId === "string" ? body.serverId : "";
+    const host = typeof body.host === "string" ? body.host.trim().toLowerCase() : "";
+    const upstream = typeof body.upstream === "string" ? body.upstream.trim() : "";
+    const hostError = validateHost(host);
+    if (hostError) return c.json({ error: hostError }, 400);
+    const upstreamError = validateUpstream(upstream);
+    if (upstreamError) return c.json({ error: upstreamError }, 400);
+    if (!(await appServerBelongsToWorkspaceApp(serverId, existing.id, organizationId))) {
+      return c.json({ error: "Server is not attached to this app" }, 400);
+    }
+
+    const [liveDomain] = await db
+      .select()
+      .from(domain)
+      .where(and(eq(domain.serverId, serverId), eq(domain.host, host)))
+      .limit(1);
+    const field = domainChangeField(serverId, host);
+
+    if (liveDomain) {
+      if (liveDomain.appId !== existing.id) {
+        return c.json({ error: "That host is already in use" }, 409);
+      }
+      if (liveDomain.upstream === upstream) {
+        await db
+          .delete(stagedChange)
+          .where(
+            and(
+              eq(stagedChange.appId, existing.id),
+              eq(stagedChange.resource, "domain"),
+              eq(stagedChange.field, field),
+            ),
+          );
+        return respondWithChanges(c, existing);
+      }
+      await upsertDomainChange(
+        db,
+        existing.id,
+        "update",
+        field,
+        serializeDomainChangePayload({ ...domainToPayload(liveDomain), upstream }),
+        serializeDomainChangePayload(domainToPayload(liveDomain)),
+        now,
+      );
+      return respondWithChanges(c, existing);
+    }
+
+    await upsertDomainChange(
+      db,
+      existing.id,
+      "create",
+      field,
+      serializeDomainChangePayload({
+        id: null,
+        serverId,
+        appId: existing.id,
+        host,
+        upstream,
+      }),
+      null,
+      now,
+    );
+    return respondWithChanges(c, existing);
+  }
+
+  if (body?.action === "delete") {
+    const domainId = typeof body.domainId === "string" ? body.domainId : "";
+    const [liveDomain] = await db
+      .select({ domain })
+      .from(domain)
+      .innerJoin(server, eq(domain.serverId, server.id))
+      .where(
+        and(
+          eq(domain.id, domainId),
+          eq(domain.appId, existing.id),
+          eq(server.organizationId, organizationId),
+        ),
+      )
+      .limit(1);
+
+    if (!liveDomain) return c.json({ error: "Domain not found" }, 404);
+
+    await upsertDomainChange(
+      db,
+      existing.id,
+      "delete",
+      domainChangeField(liveDomain.domain.serverId, liveDomain.domain.host),
+      null,
+      serializeDomainChangePayload(domainToPayload(liveDomain.domain)),
+      now,
+    );
+    return respondWithChanges(c, existing);
+  }
+
+  return c.json({ error: "Invalid domain change" }, 400);
+});
+
 // POST /api/apps/:id/changes/apply — commit every staged change to the live
 // app/env tables in one transaction, clear the staging set, then trigger a
 // deploy (which reads the now-updated config). Returns the deployment, or null
@@ -806,6 +1010,95 @@ function upsertAppChange(
     .onConflictDoUpdate({
       target: [stagedChange.appId, stagedChange.resource, stagedChange.field],
       set: { value, previousValue, action: "update", updatedAt: now },
+    });
+}
+
+function domainChangeField(serverId: string, host: string): string {
+  return `${serverId}:${host}`;
+}
+
+function domainToPayload(row: DomainRow): DomainChangePayload {
+  return {
+    id: row.id,
+    serverId: row.serverId,
+    appId: row.appId,
+    host: row.host,
+    upstream: row.upstream,
+  };
+}
+
+function serializeDomainChangePayload(payload: DomainChangePayload): string {
+  return JSON.stringify(payload);
+}
+
+function parseDomainChangePayload(value: string | null): DomainChangePayload | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<DomainChangePayload>;
+    if (
+      typeof parsed.serverId !== "string" ||
+      typeof parsed.host !== "string" ||
+      typeof parsed.upstream !== "string"
+    ) {
+      return null;
+    }
+    return {
+      id: typeof parsed.id === "string" ? parsed.id : null,
+      serverId: parsed.serverId,
+      appId: typeof parsed.appId === "string" ? parsed.appId : null,
+      host: parsed.host,
+      upstream: parsed.upstream,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function appServerBelongsToWorkspaceApp(
+  serverId: string,
+  appId: string,
+  organizationId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: appServer.serverId })
+    .from(appServer)
+    .innerJoin(server, eq(appServer.serverId, server.id))
+    .where(
+      and(
+        eq(appServer.appId, appId),
+        eq(appServer.serverId, serverId),
+        eq(server.organizationId, organizationId),
+      ),
+    )
+    .limit(1);
+  return Boolean(row);
+}
+
+function upsertDomainChange(
+  tx: typeof db,
+  appId: string,
+  action: "create" | "update" | "delete",
+  field: string,
+  value: string | null,
+  previousValue: string | null,
+  now: Date,
+): Promise<unknown> {
+  return tx
+    .insert(stagedChange)
+    .values({
+      id: crypto.randomUUID(),
+      appId,
+      resource: "domain",
+      action,
+      field,
+      value,
+      previousValue,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [stagedChange.appId, stagedChange.resource, stagedChange.field],
+      set: { action, value, previousValue, updatedAt: now },
     });
 }
 
