@@ -131,7 +131,10 @@ export function createGitHubAppManifest(
       contents: "read",
       metadata: "read",
     },
-    default_events: ["push", "installation"],
+    // Only subscribable events belong here. GitHub delivers `installation`
+    // (and other app-lifecycle events) automatically, and listing it makes the
+    // manifest invalid ("Default events unsupported: installation").
+    default_events: ["push"],
     setup_on_update: true,
   };
 }

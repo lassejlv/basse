@@ -122,7 +122,7 @@ describe("createGitHubAppManifest", () => {
         contents: "read",
         metadata: "read",
       },
-      default_events: ["push", "installation"],
+      default_events: ["push"],
       setup_on_update: true,
     });
   });
