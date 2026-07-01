@@ -88,7 +88,8 @@ export async function raiseAlert(issue: MonitorIssue): Promise<void> {
         updatedAt: now,
       })
       .where(eq(alert.id, existing.id));
-    publishRealtime(issue.organizationId, { type: "alert" });
+    // No realtime publish here: this branch re-bumps an already-open alert on
+    // every monitor tick, which would make clients refetch once a minute.
     return;
   }
 

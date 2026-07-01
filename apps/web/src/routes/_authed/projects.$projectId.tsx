@@ -516,7 +516,6 @@ function EnvironmentCanvas({
   const apps = useQuery({
     queryKey: ["apps", environmentId],
     queryFn: () => listApps(environmentId),
-    refetchInterval: 15_000,
   });
   const appList = useMemo(() => apps.data ?? [], [apps.data]);
 

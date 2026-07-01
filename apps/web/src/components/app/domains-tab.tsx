@@ -130,8 +130,6 @@ function AppDomainsSection({
   const domains = useQuery({
     queryKey,
     queryFn: () => listDomains(serverId),
-    refetchInterval: (query) =>
-      (query.state.data ?? []).some((d) => d.status === "pending") ? 2000 : false,
   });
   const previewConfig = useQuery({
     queryKey: ["preview-domain", app.id],

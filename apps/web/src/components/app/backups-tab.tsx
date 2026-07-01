@@ -40,12 +40,6 @@ export function BackupsTab({ app }: { app: App }) {
   const backupsQuery = useQuery({
     queryKey: ["backups", app.id],
     queryFn: () => listBackups(app.id),
-    refetchInterval: (query) =>
-      query.state.data?.backups.some(
-        (b) => b.status === "queued" || b.status === "running" || b.s3Status === "uploading",
-      )
-        ? 4000
-        : false,
   });
   const s3Connections = useQuery({
     queryKey: ["s3-connections"],

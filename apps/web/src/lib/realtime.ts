@@ -6,7 +6,7 @@ import { useEffect } from "react";
 // React Query invalidations. Data always flows through the normal fetch layer.
 
 type RealtimeEvent = {
-  type: "deployment" | "backup" | "staged-changes" | "alert" | "server";
+  type: "deployment" | "backup" | "staged-changes" | "alert" | "server" | "domain";
   appId?: string;
   projectId?: string;
   serverId?: string;
@@ -32,6 +32,25 @@ export function useRealtime(workspaceId: string | null | undefined): void {
     let attempts = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
+    // Coalesce bursts: events buffer for a beat and duplicates collapse, so a
+    // rapid stream (deploy transitions, provisioning) causes one refetch round
+    // instead of one per frame.
+    const pending = new Map<string, RealtimeEvent>();
+    let flushTimer: ReturnType<typeof setTimeout> | undefined;
+
+    function enqueue(event: RealtimeEvent) {
+      pending.set(
+        `${event.type}:${event.appId ?? ""}:${event.serverId ?? ""}:${event.projectId ?? ""}`,
+        event,
+      );
+      flushTimer ??= setTimeout(() => {
+        flushTimer = undefined;
+        const events = [...pending.values()];
+        pending.clear();
+        for (const item of events) invalidate(item);
+      }, 300);
+    }
+
     function invalidate(event: RealtimeEvent) {
       switch (event.type) {
         case "deployment":
@@ -43,8 +62,13 @@ export function useRealtime(workspaceId: string | null | undefined): void {
           void queryClient.invalidateQueries({ queryKey: ["backups", event.appId] });
           break;
         case "staged-changes":
-          void queryClient.invalidateQueries({ queryKey: ["changes"] });
-          void queryClient.invalidateQueries({ queryKey: ["change-history"] });
+          if (event.appId) {
+            void queryClient.invalidateQueries({ queryKey: ["changes", event.appId] });
+            void queryClient.invalidateQueries({ queryKey: ["change-history", event.appId] });
+          } else {
+            void queryClient.invalidateQueries({ queryKey: ["changes"] });
+            void queryClient.invalidateQueries({ queryKey: ["change-history"] });
+          }
           void queryClient.invalidateQueries({ queryKey: ["project-changes"] });
           void queryClient.invalidateQueries({ queryKey: ["project-change-history"] });
           break;
@@ -55,6 +79,9 @@ export function useRealtime(workspaceId: string | null | undefined): void {
         case "server":
           void queryClient.invalidateQueries({ queryKey: ["servers"] });
           void queryClient.invalidateQueries({ queryKey: ["server", event.serverId] });
+          break;
+        case "domain":
+          void queryClient.invalidateQueries({ queryKey: ["domains"] });
           break;
       }
     }
@@ -69,7 +96,7 @@ export function useRealtime(workspaceId: string | null | undefined): void {
       socket.onmessage = (event) => {
         if (event.data === "pong") return;
         try {
-          invalidate(JSON.parse(event.data as string) as RealtimeEvent);
+          enqueue(JSON.parse(event.data as string) as RealtimeEvent);
         } catch {
           // Ignore malformed frames.
         }
@@ -91,6 +118,7 @@ export function useRealtime(workspaceId: string | null | undefined): void {
     return () => {
       closed = true;
       clearTimeout(reconnectTimer);
+      clearTimeout(flushTimer);
       clearInterval(pingTimer);
       socket?.close();
     };

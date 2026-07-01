@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 import { syncDomains } from "./agent-client";
 import { decryptSecret } from "./crypto";
 import { enqueueAction } from "./queue/queue";
+import { publishRealtime } from "./realtime";
 import { connectionFromServer } from "./server-connection";
 
 export type DomainSyncResult = { ok: true; count: number } | { ok: false; error: string };
@@ -72,6 +73,7 @@ async function syncServerDomainsNow(serverId: string): Promise<DomainSyncResult>
       .update(domain)
       .set({ status: "active", statusMessage: null, updatedAt: new Date() })
       .where(eq(domain.serverId, serverId));
+    void publishDomainEvent(serverId);
     return { ok: true, count: desired.length };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -80,6 +82,17 @@ async function syncServerDomainsNow(serverId: string): Promise<DomainSyncResult>
       .set({ status: "error", statusMessage: message, updatedAt: new Date() })
       .where(eq(domain.serverId, serverId))
       .catch(() => {});
+    void publishDomainEvent(serverId);
     return { ok: false, error: message };
   }
+}
+
+/** Realtime hint so open domain lists refetch after a sync settles. */
+async function publishDomainEvent(serverId: string): Promise<void> {
+  const [row] = await db
+    .select({ organizationId: server.organizationId })
+    .from(server)
+    .where(eq(server.id, serverId))
+    .limit(1);
+  if (row) publishRealtime(row.organizationId, { type: "domain", serverId });
 }

@@ -82,11 +82,6 @@ function ServerDetailRoute() {
   const server = useQuery({
     queryKey: ["server", serverId],
     queryFn: () => getServer(serverId),
-    // Poll while a provision is in flight; stop once it reaches a terminal state.
-    refetchInterval: (query) => {
-      const status = query.state.data?.status;
-      return status === "pending" || status === "provisioning" ? 2000 : false;
-    },
   });
 
   const remove = useMutation({
@@ -692,9 +687,6 @@ function DomainsSection({ serverId, sshHost }: { serverId: string; sshHost: stri
   const domains = useQuery({
     queryKey,
     queryFn: () => listDomains(serverId),
-    // Poll while any domain is mid-sync.
-    refetchInterval: (query) =>
-      (query.state.data ?? []).some((d) => d.status === "pending") ? 2000 : false,
   });
 
   const add = useMutation({

@@ -83,7 +83,6 @@ function AuthedLayout() {
     queryKey: ["alerts-overview", activeOrganization?.id],
     queryFn: getAlertsOverview,
     enabled: Boolean(activeOrganization?.id),
-    refetchInterval: 15_000,
   });
   const workspaceList = organizations ?? [];
   const selectedWorkspaceId = activeOrganization?.id ?? workspaceList[0]?.id ?? "";

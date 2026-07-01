@@ -8,24 +8,20 @@ import {
   getProjectChanges,
 } from "@/lib/changes";
 import { listDeployments } from "@/lib/deployments";
-import { IN_FLIGHT } from "./shared";
 
 /**
- * Everything the app panel needs: live app, deployments (polled while one is
- * in flight), and staged changes (app- and project-scoped). `draft` is the
+ * Everything the app panel needs: live app, deployments (refreshed via the
+ * realtime socket), and staged changes (app- and project-scoped). `draft` is the
  * live app with staged config overlaid — settings forms seed from it, while
  * the header and deployments show live state.
  */
 export function useAppDetail(appId: string) {
   const app = useQuery({ queryKey: ["app", appId], queryFn: () => getApp(appId) });
 
+  // Status and log updates arrive over the realtime socket (lib/realtime.ts).
   const deployments = useQuery({
     queryKey: ["deployments", appId],
     queryFn: () => listDeployments(appId),
-    refetchInterval: (query) => {
-      const latest = query.state.data?.[0];
-      return latest && IN_FLIGHT.includes(latest.status) ? 2000 : false;
-    },
   });
 
   const changes = useQuery({ queryKey: ["changes", appId], queryFn: () => getChanges(appId) });

@@ -28,7 +28,6 @@ function AlertsRoute() {
   const alerts = useQuery({
     queryKey: ["alerts", filter],
     queryFn: () => listAlerts(filter),
-    refetchInterval: 15_000,
   });
   const list = alerts.data ?? [];
 
