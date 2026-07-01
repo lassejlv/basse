@@ -115,6 +115,7 @@ github.get("/manifest", async (c) => {
   const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
   if (organizationId instanceof Response) return organizationId;
 
+  c.header("Cache-Control", "no-store");
   return c.json(
     createManifest(organizationId, c.req.url, c.req.header("origin"), c.req.raw.headers),
   );

@@ -58,6 +58,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
   const processedCode = useRef<string | null>(null);
   const processedInstallation = useRef<string | null>(null);
   const [copiedWebhook, setCopiedWebhook] = useState(false);
+  const [startingGitHubSetup, setStartingGitHubSetup] = useState(false);
   const integrationKey = ["github-app-integration", organizationId];
   const installationsKey = ["github-app-installations", organizationId];
 
@@ -168,6 +169,41 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
     window.setTimeout(() => setCopiedWebhook(false), 1500);
   }
 
+  async function submitGitHubManifest(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (
+      connected &&
+      !window.confirm(
+        "Replace the connected GitHub App? This clears saved installations for this workspace.",
+      )
+    ) {
+      return;
+    }
+
+    setStartingGitHubSetup(true);
+    try {
+      const result = await manifest.refetch();
+      const data = result.data;
+      if (!data?.actionUrl || !data.manifest) {
+        throw result.error ?? new Error("GitHub App manifest is unavailable");
+      }
+
+      const form = document.createElement("form");
+      form.action = data.actionUrl;
+      form.method = "post";
+      const input = document.createElement("input");
+      input.name = "manifest";
+      input.type = "hidden";
+      input.value = data.manifest;
+      form.append(input);
+      document.body.append(form);
+      form.submit();
+    } catch (error) {
+      setStartingGitHubSetup(false);
+      toast.error("Couldn't prepare GitHub App setup", { description: toMessage(error) });
+    }
+  }
+
   return (
     <div className="max-w-2xl rounded-lg border bg-card p-6">
       <h2 className="text-lg font-semibold">GitHub</h2>
@@ -264,23 +300,11 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
       ) : null}
 
       <div className="mt-6 flex flex-wrap gap-2 border-t pt-6">
-        <form
-          action={manifest.data?.actionUrl}
-          method="post"
-          onSubmit={(event) => {
-            if (
-              connected &&
-              !window.confirm(
-                "Replace the connected GitHub App? This clears saved installations for this workspace.",
-              )
-            ) {
-              event.preventDefault();
-            }
-          }}
-        >
+        <form action={manifest.data?.actionUrl} method="post" onSubmit={submitGitHubManifest}>
           <input name="manifest" type="hidden" value={manifest.data?.manifest ?? ""} />
           <Button
-            disabled={!organizationId || manifest.isPending || !manifest.data?.manifest}
+            disabled={!organizationId || manifest.isPending || startingGitHubSetup}
+            loading={startingGitHubSetup}
             type="submit"
           >
             {connected ? "Replace GitHub App" : "Create GitHub App"}

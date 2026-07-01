@@ -33,6 +33,7 @@ export async function disconnectGitHubApp(): Promise<void> {
 export async function getGitHubAppManifest(): Promise<GitHubAppManifest> {
   const origin = encodeURIComponent(window.location.origin);
   const response = await fetch(`${apiBaseUrl}/api/github/manifest?origin=${origin}`, {
+    cache: "no-store",
     credentials: "include",
   });
   if (!response.ok) throw new Error(await parseError(response));
