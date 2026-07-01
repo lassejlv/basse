@@ -1,8 +1,15 @@
 # Basse agent
 
 The on-server agent. It runs as a container on each user server, mounts the
-Docker socket, and exposes a small bearer-authenticated HTTP API that the Basse
-control plane reaches over an SSH tunnel.
+Docker socket, and exposes a small bearer-authenticated HTTP API.
+
+Basse can reach the agent in two ways:
+
+- **SSH mode**: the default. The control plane opens an SSH tunnel to the
+  server and calls the agent on loopback.
+- **Outbound mode**: for servers with no public ingress and no SSH access from
+  Basse. The agent polls the control plane over HTTPS, pulls queued commands,
+  runs them against its local HTTP API, then posts the result back.
 
 ## Why Go (and no dependencies)
 
@@ -13,13 +20,69 @@ build hermetic (no `go.sum`, no module downloads).
 
 ## Transport / security
 
-- The container publishes its port to **host loopback only**
+- In SSH mode, the container publishes its port to **host loopback only**
   (`docker run -p 127.0.0.1:8888:8888`). There is no public port.
-- The control plane reaches the agent over an on-demand `ssh -L` tunnel reusing
+- The control plane reaches SSH-mode agents over an on-demand `ssh -L` tunnel reusing
   the per-server provisioning key, so the bearer token never crosses the network.
+- In outbound mode, the agent does not publish a host port. It makes outbound
+  HTTPS requests to the control plane endpoint configured by
+  `BASSE_CONTROL_PLANE_URL`.
 - `/v1/*` routes require `Authorization: Bearer <BASSE_AGENT_TOKEN>`, compared in
   constant time. The agent refuses to start if the token is empty.
+- Outbound polling also uses `Authorization: Bearer <BASSE_AGENT_TOKEN>`. The
+  API stores an encrypted token plus a SHA-256 lookup hash; the raw token is
+  shown only in the one-time install command.
 - It runs as **root** so it can read `/var/run/docker.sock` (owned `root:docker`).
+
+## Connection modes
+
+### SSH mode
+
+SSH mode is the normal self-hosted flow:
+
+1. A user adds a server with SSH host, user, port, and key settings.
+2. The API provisions Docker and starts `basse-agent` over SSH.
+3. Later API calls use `ssh -L` to reach `http://127.0.0.1:8888` on the server.
+4. The local agent API handles Docker, app containers, and Caddy proxy updates.
+
+This mode supports host-level operations such as provisioning, connection
+checks, agent container logs/stats, and selected-server source builds.
+
+### Outbound mode
+
+Outbound mode is for locked-down servers where Basse cannot connect inward:
+
+1. A user creates a server and chooses **Outbound agent**.
+2. The API creates an encrypted agent token, stores `connectionMode=outbound`,
+   and returns a one-time `docker run` command.
+3. The user runs that command on the server.
+4. The agent starts its normal local HTTP server and a poller.
+5. The poller sends `POST /api/agent/outbound/poll` to the control plane.
+6. If a command is queued, the API returns `{ id, method, path, body }`.
+7. The agent calls its own local endpoint, for example
+   `POST http://127.0.0.1:8888/v1/apps/deploy`.
+8. The agent posts the result to
+   `POST /api/agent/outbound/commands/:id/result`.
+
+From the rest of the API, outbound calls look like normal agent calls. The
+transport layer decides whether to use an SSH tunnel or the outbound command
+queue.
+
+Outbound currently supports agent-backed operations: health checks, info, proxy
+ensure/sync, app deploy, app status, app metrics, app logs, app console exec,
+container import, and app container removal.
+
+These still require SSH today:
+
+- provisioning Docker and the agent
+- raw SSH connection checks
+- host-level `basse-agent` logs and Docker stats
+- automatic agent image updates
+- selected-server source builds
+- app stop through the host shell
+
+For source-based apps on outbound servers, use Depot builds. Prebuilt images and
+managed database images deploy through the agent.
 
 ## Endpoints
 
@@ -35,8 +98,16 @@ build hermetic (no `go.sum`, no module downloads).
 | Env var               | Default                | Notes                        |
 | --------------------- | ---------------------- | ---------------------------- |
 | `BASSE_AGENT_TOKEN`   | —                      | Required. Bearer credential. |
+| `BASSE_AGENT_MODE`    | `serve`                | `serve` or `outbound`.       |
 | `BASSE_AGENT_PORT`    | `8888`                 | Listen port.                 |
 | `BASSE_DOCKER_SOCKET` | `/var/run/docker.sock` | Docker Engine API socket.    |
+| `BASSE_CONTROL_PLANE_URL` | —                  | Required in outbound mode. Base API origin, for example `https://basse.sh`. |
+| `BASSE_CADDY_IMAGE` | `caddy:2` | Caddy image the proxy runs. |
+| `BASSE_CADDY_CONTAINER` | `basse-caddy` | Proxy container name. |
+| `BASSE_PROXY_NETWORK` | `basse` | Docker network shared by apps and Caddy. |
+| `BASSE_CADDY_DATA_VOLUME` | `basse_caddy_data` | Caddy data volume for state and certificates. |
+| `BASSE_CADDY_ADMIN_VOLUME` | `basse_caddy_admin` | Shared volume for the Caddy admin unix socket. |
+| `BASSE_CADDY_ADMIN_DIR` | `/run/caddy-admin` | Mount path for the admin socket volume. |
 
 ## Commands
 
@@ -56,7 +127,7 @@ docker build -t basse-agent --build-arg VERSION=$(git rev-parse --short HEAD) .
 
 ## How it is run on a server
 
-The control plane provisions it during server bootstrap:
+In SSH mode, the control plane provisions it during server bootstrap:
 
 ```sh
 docker run -d --name basse-agent --restart unless-stopped \
@@ -65,3 +136,20 @@ docker run -d --name basse-agent --restart unless-stopped \
   --env-file /etc/basse/agent.env \
   ghcr.io/lassejlv/basse-agent:latest
 ```
+
+In outbound mode, the dashboard returns a one-time command shaped like this:
+
+```sh
+docker run -d --name basse-agent --restart unless-stopped \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v basse_caddy_data:/data \
+  -v basse_caddy_admin:/run/caddy-admin \
+  -e BASSE_AGENT_TOKEN='<one-time-token-from-basse>' \
+  -e BASSE_AGENT_MODE=outbound \
+  -e BASSE_CONTROL_PLANE_URL='https://basse.sh' \
+  ghcr.io/lassejlv/basse-agent:latest
+```
+
+`BASSE_CONTROL_PLANE_URL` should be the public API origin. In cloud/prod this is
+usually derived from `API_ORIGIN`; locally it can be the HTTPS tunnel URL that
+reaches the API.
