@@ -2,14 +2,12 @@ import { ExternalLinkIcon, Maximize2Icon, Minimize2Icon, XIcon } from "lucide-re
 import { useState } from "react";
 import { DatabaseIcon, databaseEngineLabel } from "@/components/database-icon";
 import { DeployStatusBadge, StatusDot } from "@/components/deploy-status";
-import {
-  ProjectStagedChangesHistory,
-  StagedChangesHistory,
-} from "@/components/staged-changes-bar";
+import { ProjectStagedChangesHistory, StagedChangesHistory } from "@/components/staged-changes-bar";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs";
 import type { App } from "@/lib/apps";
 import { cn } from "@/lib/utils";
+import { BackupsTab } from "./backups-tab";
 import { DatabaseConnectionCard } from "./connection-tab";
 import { DeployButton } from "./deploy-button";
 import { DeploymentsPanel } from "./deployments-tab";
@@ -20,7 +18,7 @@ import { useAppDetail } from "./use-app-detail";
 import { EnvVarsCard } from "./variables-tab";
 
 const SERVICE_TABS = ["deployments", "variables", "domains", "changes", "settings"];
-const DATABASE_TABS = ["deployments", "connection", "changes", "settings"];
+const DATABASE_TABS = ["deployments", "connection", "backups", "changes", "settings"];
 
 /** The app sidecard on the project canvas — the entire app experience lives
  * here: deployments, variables, domains, staged-change history, settings. */
@@ -96,7 +94,12 @@ export function AppPanel({
             >
               <TabsTab value="deployments">Deployments</TabsTab>
               {app.appKind === "database" ? (
-                <TabsTab value="connection">Connection</TabsTab>
+                <>
+                  <TabsTab value="connection">Connection</TabsTab>
+                  {app.database?.kind === "postgres" ? (
+                    <TabsTab value="backups">Backups</TabsTab>
+                  ) : null}
+                </>
               ) : (
                 <>
                   <TabsTab value="variables">Variables</TabsTab>
@@ -115,9 +118,16 @@ export function AppPanel({
                 />
               </TabsPanel>
               {app.appKind === "database" ? (
-                <TabsPanel value="connection">
-                  <DatabaseConnectionCard app={app} />
-                </TabsPanel>
+                <>
+                  <TabsPanel value="connection">
+                    <DatabaseConnectionCard app={app} />
+                  </TabsPanel>
+                  {app.database?.kind === "postgres" ? (
+                    <TabsPanel value="backups">
+                      <BackupsTab app={app} />
+                    </TabsPanel>
+                  ) : null}
+                </>
               ) : (
                 <>
                   <TabsPanel value="variables">

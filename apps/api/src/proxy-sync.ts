@@ -6,9 +6,7 @@ import { decryptSecret } from "./crypto";
 import { enqueueAction } from "./queue/queue";
 import { connectionFromServer } from "./server-connection";
 
-export type DomainSyncResult =
-  | { ok: true; count: number }
-  | { ok: false; error: string };
+export type DomainSyncResult = { ok: true; count: number } | { ok: false; error: string };
 export type DomainSyncQueueResult = { ok: true; queued: true } | DomainSyncResult;
 
 const serverSyncLocks = new Map<string, Promise<void>>();

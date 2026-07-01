@@ -146,10 +146,7 @@ export function gitHubWebhookUrl(
   return `${webhookOrigin}/api/github/webhook`;
 }
 
-export function createGitHubManifestState(
-  organizationId: string,
-  now = new Date(),
-): string {
+export function createGitHubManifestState(organizationId: string, now = new Date()): string {
   const payload = Buffer.from(
     JSON.stringify({
       organizationId,

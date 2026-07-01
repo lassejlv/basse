@@ -5,7 +5,12 @@ import { createConnection } from "./connection";
 // dispatched to a typed handler (see actions.ts). New actions (e.g.
 // "sync-domains", "deploy-app") are added as a union member + a handler entry +
 // an enqueue call site — no new queue.
-export type ActionName = "provision-server" | "sync-domains" | "deploy-app";
+export type ActionName =
+  | "provision-server"
+  | "sync-domains"
+  | "deploy-app"
+  | "database-backup"
+  | "database-backup-upload";
 
 export const ACTIONS_QUEUE = "basse-actions";
 

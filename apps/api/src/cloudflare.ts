@@ -137,8 +137,10 @@ class CloudflareClient {
     const parsed = (await response.json().catch(() => null)) as CloudflareEnvelope<T> | null;
     if (!response.ok || parsed?.success === false) {
       const message =
-        parsed?.errors?.map((error) => error.message).filter(Boolean).join(", ") ||
-        `request failed with ${response.status}`;
+        parsed?.errors
+          ?.map((error) => error.message)
+          .filter(Boolean)
+          .join(", ") || `request failed with ${response.status}`;
       const authFailed =
         response.status === 401 ||
         response.status === 403 ||
@@ -197,10 +199,7 @@ export async function upsertCloudflareARecord(
     return;
   }
 
-  await client.post<CloudflareDnsRecord>(
-    `/zones/${encodeURIComponent(zone.id)}/dns_records`,
-    body,
-  );
+  await client.post<CloudflareDnsRecord>(`/zones/${encodeURIComponent(zone.id)}/dns_records`, body);
 }
 
 export async function deleteCloudflareARecord(token: string, host: string): Promise<void> {

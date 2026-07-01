@@ -166,7 +166,7 @@ function changeLabel(change: DisplayChange): string {
   if (change.resource === "domain") return `domain ${formatDomainHost(change)}`;
   return change.resource === "env_var"
     ? change.field
-    : APP_FIELD_LABELS[change.field] ?? change.field;
+    : (APP_FIELD_LABELS[change.field] ?? change.field);
 }
 
 function hasDeployableChanges(changes: DisplayChange[]): boolean {
@@ -406,7 +406,7 @@ export function ProjectStagedChangesBar({
           ? "Some changes were saved without deploys because those apps have no deploy target."
           : domainSyncs > 0 && result.deployments.every((item) => item.deployment === null)
             ? "Domain changes applied. Proxy sync queued."
-          : null,
+            : null,
       );
       await invalidateProjectChanges();
     },

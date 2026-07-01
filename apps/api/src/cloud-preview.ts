@@ -25,7 +25,11 @@ export function cloudPreviewReservedHostMessage(): string {
 export function generatedCloudPreviewHost(appSlug: string, appId: string): string | null {
   const root = cloudPreviewRootDomain();
   if (!root) return null;
-  const slug = appSlug.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  const slug = appSlug
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
   return `${slug || "app"}-${appId.slice(0, 8)}.${root}`;
 }
 

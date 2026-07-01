@@ -1,12 +1,4 @@
-import {
-  app,
-  db,
-  envVar,
-  environment,
-  environmentEnvVar,
-  project,
-  projectEnvVar,
-} from "@basse/db";
+import { app, db, envVar, environment, environmentEnvVar, project, projectEnvVar } from "@basse/db";
 import { and, eq } from "drizzle-orm";
 import { decryptSecret } from "./crypto";
 
@@ -55,16 +47,13 @@ function resolveReferences(
   refs: { shared: Map<string, string>; env: Map<string, string> },
   appKey: string,
 ): string {
-  return value.replace(
-    ENV_REFERENCE_PATTERN,
-    (_match, scope: "shared" | "env", key: string) => {
-      const resolved = refs[scope].get(key);
-      if (resolved === undefined) {
-        throw new Error(`Missing ${scope} env reference ${key} used by ${appKey}`);
-      }
-      return resolved;
-    },
-  );
+  return value.replace(ENV_REFERENCE_PATTERN, (_match, scope: "shared" | "env", key: string) => {
+    const resolved = refs[scope].get(key);
+    if (resolved === undefined) {
+      throw new Error(`Missing ${scope} env reference ${key} used by ${appKey}`);
+    }
+    return resolved;
+  });
 }
 
 export async function ownedProjectId(projectId: string, organizationId: string): Promise<boolean> {

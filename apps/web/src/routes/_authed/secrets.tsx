@@ -203,7 +203,8 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
       }
 
       toast.warning("GitHub installation is not active yet", {
-        description: "If this was an organization install request, an owner may still need to approve it.",
+        description:
+          "If this was an organization install request, an owner may still need to approve it.",
       });
     },
     onError: (error) =>
@@ -265,13 +266,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
     if (processedSetupCallback.current === key) return;
     processedSetupCallback.current = key;
     syncInstallations.mutate();
-  }, [
-    organizationId,
-    search.code,
-    search.installation_id,
-    search.setup_action,
-    syncInstallations,
-  ]);
+  }, [organizationId, search.code, search.installation_id, search.setup_action, syncInstallations]);
 
   const connected = integration.data?.connected;
   const installUrl = integration.data?.installUrl;

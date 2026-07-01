@@ -206,9 +206,9 @@ async function listHetznerServers(client: HetznerClient): Promise<HetznerServer[
   let page = 1;
 
   while (page) {
-    const response = await client.get<
-      { servers: HetznerServer[] } & HetznerPagination
-    >(`/servers?per_page=50&page=${page}`);
+    const response = await client.get<{ servers: HetznerServer[] } & HetznerPagination>(
+      `/servers?per_page=50&page=${page}`,
+    );
     servers.push(...response.servers);
     page = response.meta?.pagination?.next_page ?? 0;
   }
@@ -246,7 +246,10 @@ async function resolveTargets(
 }
 
 function normalizeAddress(address: string | null): string | null {
-  const value = address?.trim().replace(/^\[|\]$/g, "").toLowerCase();
+  const value = address
+    ?.trim()
+    .replace(/^\[|\]$/g, "")
+    .toLowerCase();
   return value || null;
 }
 
@@ -255,7 +258,9 @@ async function syncServices(
   loadBalancer: HetznerLoadBalancer,
   input: HetznerSyncInput,
 ) {
-  const existingPorts = new Set((loadBalancer.services ?? []).map((service) => service.listen_port));
+  const existingPorts = new Set(
+    (loadBalancer.services ?? []).map((service) => service.listen_port),
+  );
   const services = [tcpPassthroughService(80, input), tcpPassthroughService(443, input)];
 
   for (const service of services) {

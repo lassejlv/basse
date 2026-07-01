@@ -229,7 +229,11 @@ function DashboardRoute() {
             ) : (
               <Card className="divide-y overflow-hidden p-0">
                 {alertList.slice(0, 5).map((alert) => (
-                  <Link className="flex gap-3 px-4 py-3 transition hover:bg-accent/40" key={alert.id} to="/alerts">
+                  <Link
+                    className="flex gap-3 px-4 py-3 transition hover:bg-accent/40"
+                    key={alert.id}
+                    to="/alerts"
+                  >
                     <span
                       className={cn(
                         "mt-1.5 size-2 shrink-0 rounded-full",
@@ -302,15 +306,7 @@ function StatTile({
   );
 }
 
-function EmptyHint({
-  icon,
-  text,
-  action,
-}: {
-  icon: ReactNode;
-  text: string;
-  action?: ReactNode;
-}) {
+function EmptyHint({ icon, text, action }: { icon: ReactNode; text: string; action?: ReactNode }) {
   return (
     <div className="flex flex-col items-start gap-3 rounded-xl border border-dashed p-5">
       <span className="text-muted-foreground">{icon}</span>

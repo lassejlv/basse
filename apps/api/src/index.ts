@@ -6,6 +6,7 @@ import { runMigrations } from "@basse/db/migrations";
 import { alerts } from "./alerts";
 import { apps } from "./apps";
 import { auth } from "./auth";
+import { backups, startBackupScheduler } from "./backups";
 import { changes, projectChanges } from "./changes";
 import { reconcileInflightDeployments } from "./deploy";
 import { deployments } from "./deployments";
@@ -18,6 +19,7 @@ import { loadBalancers } from "./load-balancers";
 import { startMonitor } from "./monitor";
 import { outboundAgent } from "./outbound-agent";
 import { projects } from "./projects";
+import { s3 } from "./s3";
 import { actionsQueue } from "./queue/queue";
 import { reconcileProvisioningServers } from "./queue/reconcile";
 import { startWorker } from "./queue/worker";
@@ -74,6 +76,7 @@ app.route("/api/apps", apps);
 app.route("/api/apps", envVars);
 app.route("/api/apps", appEnvReferences);
 app.route("/api/apps", changes);
+app.route("/api/apps", backups);
 app.route("/api/deployments", deployments);
 app.route("/api/ssh-keys", sshKeys);
 app.route("/api/depot", depot);
@@ -81,6 +84,7 @@ app.route("/api/github", github);
 app.route("/api/servers", servers);
 app.route("/api/domains", domains);
 app.route("/api/load-balancers", loadBalancers);
+app.route("/api/s3", s3);
 app.route("/api/workspace", workspaceSettingsRoutes);
 app.route("/api/alerts", alerts);
 app.route("/api/agent/outbound", outboundAgent);
@@ -98,6 +102,7 @@ app.get("*", serveStatic({ path: `${webDist}/index.html` }));
 // Start the in-process worker that runs background actions (provisioning, …).
 const worker = startWorker();
 const monitor = startMonitor();
+const backupScheduler = startBackupScheduler();
 
 // Re-enqueue any server left mid-provision by a previous process (crash/restart).
 void reconcileProvisioningServers().catch(() => {});
@@ -115,6 +120,7 @@ async function shutdown(): Promise<void> {
   shuttingDown = true;
   try {
     monitor.close();
+    backupScheduler.close();
     await worker.close();
     await actionsQueue.close();
   } catch (error) {

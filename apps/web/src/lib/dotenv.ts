@@ -54,7 +54,17 @@ function unescapeDouble(input: string): string {
     if (input.charAt(i) === "\\" && i + 1 < input.length) {
       const next = input.charAt(i + 1);
       const mapped =
-        next === "n" ? "\n" : next === "r" ? "\r" : next === "t" ? "\t" : next === '"' ? '"' : next === "\\" ? "\\" : null;
+        next === "n"
+          ? "\n"
+          : next === "r"
+            ? "\r"
+            : next === "t"
+              ? "\t"
+              : next === '"'
+                ? '"'
+                : next === "\\"
+                  ? "\\"
+                  : null;
       if (mapped !== null) {
         result += mapped;
         i += 1;

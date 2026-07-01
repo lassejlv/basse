@@ -314,7 +314,9 @@ async function applyStagedChangesForApp(
             .where(and(eq(domain.appId, existing.id), eq(domain.serverId, oldServerId)));
           domainSyncServerIds.add(oldServerId);
           domainSyncServerIds.add(newServerId);
-          const staleServerIds = removedDomainServerIds.filter((serverId) => serverId !== oldServerId);
+          const staleServerIds = removedDomainServerIds.filter(
+            (serverId) => serverId !== oldServerId,
+          );
           if (staleServerIds.length > 0) {
             const staleDomains = await tx
               .select()
@@ -1172,7 +1174,10 @@ async function buildPreviewDomainConfig(existing: AppRow): Promise<PreviewDomain
   return {
     enabled: true,
     rootDomain,
-    host: livePreview?.host ?? stagedPreview?.host ?? generatedCloudPreviewHost(draft.slug, existing.id),
+    host:
+      livePreview?.host ??
+      stagedPreview?.host ??
+      generatedCloudPreviewHost(draft.slug, existing.id),
   };
 }
 

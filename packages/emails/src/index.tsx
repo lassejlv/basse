@@ -1,9 +1,5 @@
 import { render } from "@react-email/render";
-import {
-  LoginOtpEmail,
-  type LoginOtpEmailProps,
-  type LoginOtpType,
-} from "./templates/login-otp";
+import { LoginOtpEmail, type LoginOtpEmailProps, type LoginOtpType } from "./templates/login-otp";
 import { MonitorAlertEmail, type MonitorAlertEmailProps } from "./templates/monitor-alert";
 
 export type RenderedEmail = {

@@ -197,6 +197,20 @@
       "when": 1782933093791,
       "tag": "0027_nasty_quasimodo",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1782941030253,
+      "tag": "0028_remarkable_shinobi_shaw",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1782941603187,
+      "tag": "0029_marvelous_lilith",
+      "breakpoints": true
     }
   ]
 }

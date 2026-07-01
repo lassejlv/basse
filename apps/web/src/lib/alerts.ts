@@ -9,7 +9,9 @@ async function parseError(response: Response): Promise<string> {
   return body?.error ?? `Request failed with ${response.status}`;
 }
 
-export async function listAlerts(status: "active" | "resolved" | "all" = "active"): Promise<Alert[]> {
+export async function listAlerts(
+  status: "active" | "resolved" | "all" = "active",
+): Promise<Alert[]> {
   const response = await fetch(`${apiBaseUrl}/api/alerts?status=${encodeURIComponent(status)}`, {
     credentials: "include",
   });

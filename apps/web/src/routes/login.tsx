@@ -186,7 +186,11 @@ function LoginRoute() {
   }
 
   return (
-    <AuthShell title="Sign in to Basse" subtitle="Welcome back. Sign in to continue." footer={signupLink}>
+    <AuthShell
+      title="Sign in to Basse"
+      subtitle="Welcome back. Sign in to continue."
+      footer={signupLink}
+    >
       <form className="space-y-4" onSubmit={handlePasswordSubmit}>
         <div className="space-y-2">
           <Label htmlFor="login-email">Email</Label>
@@ -225,12 +229,7 @@ function LoginRoute() {
         <span className="h-px flex-1 bg-border" />
       </div>
 
-      <Button
-        className="w-full"
-        variant="outline"
-        type="button"
-        onClick={() => reset("otp-email")}
-      >
+      <Button className="w-full" variant="outline" type="button" onClick={() => reset("otp-email")}>
         Email me a one-time code
       </Button>
     </AuthShell>

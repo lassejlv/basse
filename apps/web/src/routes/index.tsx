@@ -165,8 +165,8 @@ function LandingRoute() {
               you own.
             </h1>
             <p className="mb-9 max-w-[46ch] text-[18px] leading-[1.55] text-muted-foreground">
-              Connect a machine, push from Git or point at an image, and it's live with HTTPS.
-              The platform experience, without the platform bill.
+              Connect a machine, push from Git or point at an image, and it's live with HTTPS. The
+              platform experience, without the platform bill.
             </p>
             <div className="mb-8 flex flex-wrap items-center gap-[14px]">
               <Link
@@ -289,9 +289,7 @@ function LandingRoute() {
                           : "bg-border",
                     )}
                   />
-                  <span className="shrink-0 select-none text-muted-foreground/50">
-                    {line.time}
-                  </span>
+                  <span className="shrink-0 select-none text-muted-foreground/50">{line.time}</span>
                   <span
                     className={cn(
                       "min-w-0 truncate",
@@ -310,8 +308,7 @@ function LandingRoute() {
                 <span className="w-0.5 shrink-0 self-stretch rounded-full bg-success" />
                 <span className="shrink-0 select-none text-muted-foreground/50">18:21:34</span>
                 <span className="min-w-0 truncate text-foreground">
-                  ✓ live at{" "}
-                  <span className="underline underline-offset-[3px]">app.basse.dev</span>
+                  ✓ live at <span className="underline underline-offset-[3px]">app.basse.dev</span>
                 </span>
               </div>
             </div>

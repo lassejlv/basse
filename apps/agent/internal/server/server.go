@@ -32,6 +32,7 @@ func Run(cfg config.Config, version string) error {
 	system := handlers.System{Docker: docker, Version: version}
 	proxy := handlers.Proxy{Docker: docker, Caddy: caddy, Cfg: cfg}
 	apps := handlers.Apps{Docker: docker, Cfg: cfg}
+	backups := handlers.Backups{Docker: docker}
 
 	mux := http.NewServeMux()
 
@@ -53,6 +54,10 @@ func Run(cfg config.Config, version string) error {
 	mux.Handle("GET /v1/apps/{appId}/logs", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Logs)))
 	mux.Handle("POST /v1/apps/{appId}/exec", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Exec)))
 	mux.Handle("DELETE /v1/apps/{appId}", middleware.Bearer(cfg.Token, http.HandlerFunc(apps.Remove)))
+	mux.Handle("POST /v1/apps/{appId}/backups", middleware.Bearer(cfg.Token, http.HandlerFunc(backups.Create)))
+	mux.Handle("POST /v1/apps/{appId}/backups/{backupId}/restore", middleware.Bearer(cfg.Token, http.HandlerFunc(backups.Restore)))
+	mux.Handle("DELETE /v1/apps/{appId}/backups/{backupId}", middleware.Bearer(cfg.Token, http.HandlerFunc(backups.Delete)))
+	mux.Handle("GET /v1/apps/{appId}/backups/{backupId}/download", middleware.Bearer(cfg.Token, http.HandlerFunc(backups.Download)))
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

@@ -197,19 +197,19 @@ If it stays pending, check that:
 
 ## Configuration
 
-| Env var               | Default                | Notes                        |
-| --------------------- | ---------------------- | ---------------------------- |
-| `BASSE_AGENT_TOKEN`   | —                      | Required. Bearer credential. |
-| `BASSE_AGENT_MODE`    | `serve`                | `serve` or `outbound`.       |
-| `BASSE_AGENT_PORT`    | `8888`                 | Listen port.                 |
-| `BASSE_DOCKER_SOCKET` | `/var/run/docker.sock` | Docker Engine API socket.    |
-| `BASSE_CONTROL_PLANE_URL` | —                  | Required in outbound mode. Base API origin, for example `https://basse.sh`. |
-| `BASSE_CADDY_IMAGE` | `caddy:2` | Caddy image the proxy runs. |
-| `BASSE_CADDY_CONTAINER` | `basse-caddy` | Proxy container name. |
-| `BASSE_PROXY_NETWORK` | `basse` | Docker network shared by apps and Caddy. |
-| `BASSE_CADDY_DATA_VOLUME` | `basse_caddy_data` | Caddy data volume for state and certificates. |
-| `BASSE_CADDY_ADMIN_VOLUME` | `basse_caddy_admin` | Shared volume for the Caddy admin unix socket. |
-| `BASSE_CADDY_ADMIN_DIR` | `/run/caddy-admin` | Mount path for the admin socket volume. |
+| Env var                    | Default                | Notes                                                                       |
+| -------------------------- | ---------------------- | --------------------------------------------------------------------------- |
+| `BASSE_AGENT_TOKEN`        | —                      | Required. Bearer credential.                                                |
+| `BASSE_AGENT_MODE`         | `serve`                | `serve` or `outbound`.                                                      |
+| `BASSE_AGENT_PORT`         | `8888`                 | Listen port.                                                                |
+| `BASSE_DOCKER_SOCKET`      | `/var/run/docker.sock` | Docker Engine API socket.                                                   |
+| `BASSE_CONTROL_PLANE_URL`  | —                      | Required in outbound mode. Base API origin, for example `https://basse.sh`. |
+| `BASSE_CADDY_IMAGE`        | `caddy:2`              | Caddy image the proxy runs.                                                 |
+| `BASSE_CADDY_CONTAINER`    | `basse-caddy`          | Proxy container name.                                                       |
+| `BASSE_PROXY_NETWORK`      | `basse`                | Docker network shared by apps and Caddy.                                    |
+| `BASSE_CADDY_DATA_VOLUME`  | `basse_caddy_data`     | Caddy data volume for state and certificates.                               |
+| `BASSE_CADDY_ADMIN_VOLUME` | `basse_caddy_admin`    | Shared volume for the Caddy admin unix socket.                              |
+| `BASSE_CADDY_ADMIN_DIR`    | `/run/caddy-admin`     | Mount path for the admin socket volume.                                     |
 
 ## Commands
 

@@ -178,6 +178,75 @@ export type DatabaseConnectionInfo = {
   publicUri: string | null;
 };
 
+export type DatabaseBackupStatus = "queued" | "running" | "completed" | "failed";
+export type DatabaseBackupTrigger = "manual" | "scheduled";
+export type BackupS3Status = "uploading" | "uploaded" | "failed";
+
+export type DatabaseBackup = {
+  id: string;
+  appId: string;
+  serverId: string;
+  status: DatabaseBackupStatus;
+  trigger: DatabaseBackupTrigger;
+  sizeBytes: number | null;
+  error: string | null;
+  s3ConnectionId: string | null;
+  s3Status: BackupS3Status | null;
+  s3Key: string | null;
+  s3Error: string | null;
+  s3UploadedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+};
+
+export type DatabaseBackupSettings = {
+  scheduleEnabled: boolean;
+  intervalHours: number;
+  retention: number;
+  s3ConnectionId: string | null;
+};
+
+export type DatabaseBackupList = {
+  backups: DatabaseBackup[];
+  settings: DatabaseBackupSettings;
+};
+
+export type UpdateDatabaseBackupSettingsInput = {
+  scheduleEnabled?: boolean;
+  intervalHours?: number;
+  retention?: number;
+  // null clears the destination.
+  s3ConnectionId?: string | null;
+};
+
+export type S3ConnectionStatus = "active" | "error";
+
+export type S3Connection = {
+  id: string;
+  name: string;
+  endpoint: string | null;
+  region: string | null;
+  bucket: string;
+  accessKeyId: string;
+  secretHint: string | null;
+  status: S3ConnectionStatus;
+  statusMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateS3ConnectionInput = {
+  name: string;
+  endpoint?: string;
+  region?: string;
+  bucket: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+};
+
+export type UpdateS3ConnectionInput = Partial<CreateS3ConnectionInput>;
+
 // Env var with the value masked (last-4 only), returned by the list endpoint.
 export type EnvVarMasked = {
   key: string;

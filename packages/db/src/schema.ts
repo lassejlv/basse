@@ -171,6 +171,12 @@ export const app = pgTable(
     databasePassword: text("database_password"),
     databasePublicEnabled: boolean("database_public_enabled").notNull().default(false),
     databasePublicPort: integer("database_public_port"),
+    // Scheduled pg_dump backups (postgres databases only).
+    backupScheduleEnabled: boolean("backup_schedule_enabled").notNull().default(false),
+    backupIntervalHours: integer("backup_interval_hours").notNull().default(24),
+    backupRetention: integer("backup_retention").notNull().default(7),
+    // When set, completed backups are also uploaded to this S3 connection.
+    backupS3ConnectionId: text("backup_s3_connection_id"),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },
@@ -284,6 +290,92 @@ export const deployment = pgTable("deployment", {
   createdAt: timestamp("created_at").notNull(),
   updatedAt: timestamp("updated_at").notNull(),
 });
+
+// A workspace-level S3-compatible storage connection (AWS S3, R2, MinIO, …).
+// secretAccessKey is encrypted at rest by the API; secretHint keeps last-4 for
+// display. Used as an off-server destination for database backups.
+export const s3Connection = pgTable(
+  "s3_connection",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    endpoint: text("endpoint"),
+    region: text("region"),
+    bucket: text("bucket").notNull(),
+    accessKeyId: text("access_key_id").notNull(),
+    secretAccessKey: text("secret_access_key").notNull(),
+    secretHint: text("secret_hint"),
+    status: text("status", { enum: ["active", "error"] })
+      .notNull()
+      .default("active"),
+    statusMessage: text("status_message"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [index("s3_connection_organizationId_idx").on(table.organizationId)],
+);
+
+export const s3ConnectionRelations = relations(s3Connection, ({ one }) => ({
+  organization: one(organization, {
+    fields: [s3Connection.organizationId],
+    references: [organization.id],
+  }),
+}));
+
+// A pg_dump backup of a database app. The dump file lives on the target
+// server, inside the database's data volume (basse-backups/<id>.dump), so it
+// survives container recreation. Workspace-scoped transitively via the app.
+export const databaseBackup = pgTable(
+  "database_backup",
+  {
+    id: text("id").primaryKey(),
+    appId: text("app_id")
+      .notNull()
+      .references(() => app.id, { onDelete: "cascade" }),
+    serverId: text("server_id")
+      .notNull()
+      .references(() => server.id, { onDelete: "cascade" }),
+    status: text("status", { enum: ["queued", "running", "completed", "failed"] })
+      .notNull()
+      .default("queued"),
+    trigger: text("trigger", { enum: ["manual", "scheduled"] })
+      .notNull()
+      .default("manual"),
+    sizeBytes: bigint("size_bytes", { mode: "number" }),
+    error: text("error"),
+    // S3 offload state. Null s3Status = never uploaded.
+    s3ConnectionId: text("s3_connection_id").references(() => s3Connection.id, {
+      onDelete: "set null",
+    }),
+    s3Status: text("s3_status", { enum: ["uploading", "uploaded", "failed"] }),
+    s3Key: text("s3_key"),
+    s3Error: text("s3_error"),
+    s3UploadedAt: timestamp("s3_uploaded_at"),
+    startedAt: timestamp("started_at"),
+    completedAt: timestamp("completed_at"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("database_backup_appId_idx").on(table.appId),
+    index("database_backup_appId_status_idx").on(table.appId, table.status),
+    index("database_backup_serverId_idx").on(table.serverId),
+  ],
+);
+
+export const databaseBackupRelations = relations(databaseBackup, ({ one }) => ({
+  app: one(app, {
+    fields: [databaseBackup.appId],
+    references: [app.id],
+  }),
+  server: one(server, {
+    fields: [databaseBackup.serverId],
+    references: [server.id],
+  }),
+}));
 
 export const monitorEvent = pgTable(
   "monitor_event",
@@ -719,7 +811,9 @@ export const loadBalancerIntegration = pgTable(
     name: text("name").notNull(),
     token: text("token").notNull(),
     tokenHint: text("token_hint"),
-    status: text("status", { enum: ["active", "error"] }).notNull().default("active"),
+    status: text("status", { enum: ["active", "error"] })
+      .notNull()
+      .default("active"),
     statusMessage: text("status_message"),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),

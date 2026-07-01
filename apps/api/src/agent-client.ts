@@ -313,6 +313,64 @@ export async function execAppCommand(
   );
 }
 
+export type BackupTargetInput = {
+  backupId: string;
+  database: string;
+  user: string;
+  dataDir: string;
+};
+
+/** Runs pg_dump inside the database container; the dump lands on its data volume. */
+export async function createAgentBackup(
+  conn: AgentConnection,
+  token: string,
+  appId: string,
+  input: BackupTargetInput,
+): Promise<{ sizeBytes: number }> {
+  return postJson<{ sizeBytes: number }>(
+    conn,
+    token,
+    `/v1/apps/${appId}/backups`,
+    input,
+    1_800_000,
+  );
+}
+
+/** Runs pg_restore --clean --if-exists from an existing dump. Throws on failure. */
+export async function restoreAgentBackup(
+  conn: AgentConnection,
+  token: string,
+  appId: string,
+  input: BackupTargetInput,
+): Promise<void> {
+  await postJson(
+    conn,
+    token,
+    `/v1/apps/${appId}/backups/${input.backupId}/restore`,
+    input,
+    1_800_000,
+  );
+}
+
+/** Removes a dump file from the database's data volume. Missing files succeed. */
+export async function deleteAgentBackup(
+  conn: AgentConnection,
+  token: string,
+  appId: string,
+  backupId: string,
+  dataDir: string,
+): Promise<void> {
+  const response = await fetchAgent(conn, token, {
+    method: "DELETE",
+    path: `/v1/apps/${appId}/backups/${backupId}?dataDir=${encodeURIComponent(dataDir)}`,
+    authed: true,
+    timeoutMs: 30_000,
+  });
+  if (!response.ok) {
+    throw new Error(`agent backup delete returned ${response.status}`);
+  }
+}
+
 /** Tears down an app container. Throws on failure. */
 export async function removeApp(
   conn: AgentConnection,

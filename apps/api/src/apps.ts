@@ -453,7 +453,7 @@ async function resolveAttachedServer(appId: string, requestedServerId?: string) 
   return { server: rows[0]!.server };
 }
 
-async function requireAgentTarget(appId: string, requestedServerId?: string) {
+export async function requireAgentTarget(appId: string, requestedServerId?: string) {
   const resolved = await resolveAttachedServer(appId, requestedServerId);
   if (!resolved.server) return resolved;
   if (resolved.server.status !== "active" || !resolved.server.agentToken) {

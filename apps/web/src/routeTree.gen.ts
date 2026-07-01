@@ -15,6 +15,7 @@ import { Route as AuthedRouteImport } from './routes/_authed'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthedSettingsRouteImport } from './routes/_authed/settings'
 import { Route as AuthedSecretsRouteImport } from './routes/_authed/secrets'
+import { Route as AuthedS3RouteImport } from './routes/_authed/s3'
 import { Route as AuthedDashboardRouteImport } from './routes/_authed/dashboard'
 import { Route as AuthedAlertsRouteImport } from './routes/_authed/alerts'
 import { Route as AuthedServersIndexRouteImport } from './routes/_authed/servers.index'
@@ -50,6 +51,11 @@ const AuthedSettingsRoute = AuthedSettingsRouteImport.update({
 const AuthedSecretsRoute = AuthedSecretsRouteImport.update({
   id: '/secrets',
   path: '/secrets',
+  getParentRoute: () => AuthedRoute,
+} as any)
+const AuthedS3Route = AuthedS3RouteImport.update({
+  id: '/s3',
+  path: '/s3',
   getParentRoute: () => AuthedRoute,
 } as any)
 const AuthedDashboardRoute = AuthedDashboardRouteImport.update({
@@ -94,6 +100,7 @@ export interface FileRoutesByFullPath {
   '/signup': typeof SignupRoute
   '/alerts': typeof AuthedAlertsRoute
   '/dashboard': typeof AuthedDashboardRoute
+  '/s3': typeof AuthedS3Route
   '/secrets': typeof AuthedSecretsRoute
   '/settings': typeof AuthedSettingsRoute
   '/apps/$appId': typeof AuthedAppsAppIdRoute
@@ -108,6 +115,7 @@ export interface FileRoutesByTo {
   '/signup': typeof SignupRoute
   '/alerts': typeof AuthedAlertsRoute
   '/dashboard': typeof AuthedDashboardRoute
+  '/s3': typeof AuthedS3Route
   '/secrets': typeof AuthedSecretsRoute
   '/settings': typeof AuthedSettingsRoute
   '/apps/$appId': typeof AuthedAppsAppIdRoute
@@ -124,6 +132,7 @@ export interface FileRoutesById {
   '/signup': typeof SignupRoute
   '/_authed/alerts': typeof AuthedAlertsRoute
   '/_authed/dashboard': typeof AuthedDashboardRoute
+  '/_authed/s3': typeof AuthedS3Route
   '/_authed/secrets': typeof AuthedSecretsRoute
   '/_authed/settings': typeof AuthedSettingsRoute
   '/_authed/apps/$appId': typeof AuthedAppsAppIdRoute
@@ -140,6 +149,7 @@ export interface FileRouteTypes {
     | '/signup'
     | '/alerts'
     | '/dashboard'
+    | '/s3'
     | '/secrets'
     | '/settings'
     | '/apps/$appId'
@@ -154,6 +164,7 @@ export interface FileRouteTypes {
     | '/signup'
     | '/alerts'
     | '/dashboard'
+    | '/s3'
     | '/secrets'
     | '/settings'
     | '/apps/$appId'
@@ -169,6 +180,7 @@ export interface FileRouteTypes {
     | '/signup'
     | '/_authed/alerts'
     | '/_authed/dashboard'
+    | '/_authed/s3'
     | '/_authed/secrets'
     | '/_authed/settings'
     | '/_authed/apps/$appId'
@@ -229,6 +241,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthedSecretsRouteImport
       parentRoute: typeof AuthedRoute
     }
+    '/_authed/s3': {
+      id: '/_authed/s3'
+      path: '/s3'
+      fullPath: '/s3'
+      preLoaderRoute: typeof AuthedS3RouteImport
+      parentRoute: typeof AuthedRoute
+    }
     '/_authed/dashboard': {
       id: '/_authed/dashboard'
       path: '/dashboard'
@@ -284,6 +303,7 @@ declare module '@tanstack/react-router' {
 interface AuthedRouteChildren {
   AuthedAlertsRoute: typeof AuthedAlertsRoute
   AuthedDashboardRoute: typeof AuthedDashboardRoute
+  AuthedS3Route: typeof AuthedS3Route
   AuthedSecretsRoute: typeof AuthedSecretsRoute
   AuthedSettingsRoute: typeof AuthedSettingsRoute
   AuthedAppsAppIdRoute: typeof AuthedAppsAppIdRoute
@@ -296,6 +316,7 @@ interface AuthedRouteChildren {
 const AuthedRouteChildren: AuthedRouteChildren = {
   AuthedAlertsRoute: AuthedAlertsRoute,
   AuthedDashboardRoute: AuthedDashboardRoute,
+  AuthedS3Route: AuthedS3Route,
   AuthedSecretsRoute: AuthedSecretsRoute,
   AuthedSettingsRoute: AuthedSettingsRoute,
   AuthedAppsAppIdRoute: AuthedAppsAppIdRoute,

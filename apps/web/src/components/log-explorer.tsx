@@ -25,7 +25,8 @@ export type LogLine = {
 
 // eslint-disable-next-line no-control-regex
 const ANSI_PATTERN = /\u001B\[[0-9;]*[A-Za-z]/g;
-const ISO_TIME_PATTERN = /^\[?(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\]?\s*/;
+const ISO_TIME_PATTERN =
+  /^\[?(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\]?\s*/;
 const ERROR_PATTERN = /\b(error|err|fatal|panic|exception|failed|failure)\b/i;
 const WARN_PATTERN = /\bwarn(ing)?\b/i;
 

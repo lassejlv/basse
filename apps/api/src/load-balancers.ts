@@ -26,11 +26,7 @@ import {
   testCloudflareToken,
 } from "./cloudflare";
 import { decryptSecret, encryptSecret } from "./crypto";
-import {
-  deleteHetznerLoadBalancer,
-  syncHetznerLoadBalancer,
-  testHetznerToken,
-} from "./hetzner";
+import { deleteHetznerLoadBalancer, syncHetznerLoadBalancer, testHetznerToken } from "./hetzner";
 import { enqueueOrRunDomainSync } from "./proxy-sync";
 import { resolveActiveWorkspace } from "./workspace";
 
@@ -62,9 +58,9 @@ loadBalancers.post("/integrations", async (c) => {
   const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
   if (organizationId instanceof Response) return organizationId;
 
-  const body = (await c.req.json().catch(() => null)) as
-    | Partial<CreateLoadBalancerIntegrationInput>
-    | null;
+  const body = (await c.req
+    .json()
+    .catch(() => null)) as Partial<CreateLoadBalancerIntegrationInput> | null;
   const provider = PROVIDERS.includes(body?.provider as LoadBalancerProvider)
     ? (body?.provider as LoadBalancerProvider)
     : null;
@@ -82,7 +78,10 @@ loadBalancers.post("/integrations", async (c) => {
       await testCloudflareToken(token);
     }
   } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : "Could not validate token" }, 400);
+    return c.json(
+      { error: error instanceof Error ? error.message : "Could not validate token" },
+      400,
+    );
   }
 
   const now = new Date();
@@ -185,9 +184,9 @@ loadBalancers.post("/", async (c) => {
   const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
   if (organizationId instanceof Response) return organizationId;
 
-  const body = (await c.req.json().catch(() => null)) as
-    | Partial<CreateManagedLoadBalancerInput>
-    | null;
+  const body = (await c.req
+    .json()
+    .catch(() => null)) as Partial<CreateManagedLoadBalancerInput> | null;
   const appId = typeof body?.appId === "string" ? body.appId : "";
   const integrationId = typeof body?.integrationId === "string" ? body.integrationId : "";
   const host = typeof body?.host === "string" ? body.host.trim().toLowerCase() : "";
@@ -204,7 +203,8 @@ loadBalancers.post("/", async (c) => {
 
   const appRow = await ownedApp(appId, organizationId);
   if (!appRow) return c.json({ error: "App not found" }, 404);
-  if (appRow.appKind !== "service") return c.json({ error: "Only service apps can use a load balancer" }, 400);
+  if (appRow.appKind !== "service")
+    return c.json({ error: "Only service apps can use a load balancer" }, 400);
 
   const integration = await ownedIntegration(integrationId, organizationId);
   if (!integration) return c.json({ error: "Integration not found" }, 404);
@@ -213,8 +213,7 @@ loadBalancers.post("/", async (c) => {
   if (hostError) return c.json({ error: hostError }, 400);
   const pathError = validateHealthCheckPath(healthCheckPath);
   if (pathError) return c.json({ error: pathError }, 400);
-  const location =
-    requestedLocation || (integration.provider === "hetzner" ? "fsn1" : "auto-zone");
+  const location = requestedLocation || (integration.provider === "hetzner" ? "fsn1" : "auto-zone");
   const loadBalancerType =
     requestedLoadBalancerType || (integration.provider === "hetzner" ? "lb11" : "proxied");
 
@@ -283,9 +282,7 @@ loadBalancers.delete("/:id", async (c) => {
     .from(loadBalancerTarget)
     .where(eq(loadBalancerTarget.loadBalancerId, row.id));
 
-  await db
-    .delete(domain)
-    .where(and(eq(domain.appId, row.appId), eq(domain.host, row.host)));
+  await db.delete(domain).where(and(eq(domain.appId, row.appId), eq(domain.host, row.host)));
   await db.delete(loadBalancer).where(eq(loadBalancer.id, row.id));
   await enqueueDomainSyncs(targetRows.map((target) => target.serverId));
 
@@ -319,10 +316,7 @@ function toTarget(row: TargetRow): ManagedLoadBalancerTarget {
   };
 }
 
-function toManagedLoadBalancer(
-  row: LoadBalancerRow,
-  targets: TargetRow[],
-): ManagedLoadBalancer {
+function toManagedLoadBalancer(row: LoadBalancerRow, targets: TargetRow[]): ManagedLoadBalancer {
   return {
     id: row.id,
     organizationId: row.organizationId,
@@ -471,7 +465,9 @@ async function syncManagedLoadBalancer(
       }
 
       for (const target of syncResult.targets) {
-        const existing = existingTargets.find((candidate) => candidate.serverId === target.serverId);
+        const existing = existingTargets.find(
+          (candidate) => candidate.serverId === target.serverId,
+        );
         if (existing) {
           await tx
             .update(loadBalancerTarget)
@@ -587,7 +583,9 @@ async function ownedLoadBalancer(
   const [row] = await db
     .select()
     .from(loadBalancer)
-    .where(and(eq(loadBalancer.id, loadBalancerId), eq(loadBalancer.organizationId, organizationId)))
+    .where(
+      and(eq(loadBalancer.id, loadBalancerId), eq(loadBalancer.organizationId, organizationId)),
+    )
     .limit(1);
   return row ?? null;
 }

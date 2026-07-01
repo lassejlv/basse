@@ -1,3 +1,4 @@
+import { runBackupUpload, runDatabaseBackup } from "../backups";
 import { runDeployment } from "../deploy";
 import { provisionServer } from "../provision";
 import { syncServerDomains } from "../proxy-sync";
@@ -14,4 +15,6 @@ export const actionHandlers: Record<ActionName, (entityId: string) => Promise<vo
     await syncServerDomains(serverId);
   },
   "deploy-app": (deploymentId) => runDeployment(deploymentId),
+  "database-backup": (backupId) => runDatabaseBackup(backupId),
+  "database-backup-upload": (backupId) => runBackupUpload(backupId),
 };

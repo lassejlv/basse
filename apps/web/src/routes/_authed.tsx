@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, Outlet, createFileRoute, redirect, useLocation } from "@tanstack/react-router";
 import {
   BellIcon,
+  CloudIcon,
   FolderIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
@@ -206,6 +207,16 @@ function AuthedLayout() {
                   >
                     <ServerIcon />
                     <span>Servers</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    isActive={pathname === "/s3"}
+                    render={<Link to="/s3" />}
+                    tooltip="S3 storage"
+                  >
+                    <CloudIcon />
+                    <span>S3 storage</span>
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               </SidebarMenu>

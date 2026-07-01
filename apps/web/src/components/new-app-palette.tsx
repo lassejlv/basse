@@ -99,7 +99,8 @@ export function NewAppPalette({
       reset();
       onCreated(created.id);
     },
-    onError: (error: Error) => toast.error("Couldn't create app", { description: toMessage(error) }),
+    onError: (error: Error) =>
+      toast.error("Couldn't create app", { description: toMessage(error) }),
   });
 
   function goTo(next: PaletteView) {
@@ -148,9 +149,7 @@ export function NewAppPalette({
           },
         },
       ];
-      return needle
-        ? rootRows.filter((row) => row.label.toLowerCase().includes(needle))
-        : rootRows;
+      return needle ? rootRows.filter((row) => row.label.toLowerCase().includes(needle)) : rootRows;
     }
 
     if (view === "github") {

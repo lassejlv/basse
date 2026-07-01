@@ -2,11 +2,7 @@ import { Section, Text } from "@react-email/components";
 import type { CSSProperties } from "react";
 import { EmailHeading, EmailShell, EmailText } from "./base";
 
-export type LoginOtpType =
-  | "sign-in"
-  | "email-verification"
-  | "forget-password"
-  | "change-email";
+export type LoginOtpType = "sign-in" | "email-verification" | "forget-password" | "change-email";
 
 export type LoginOtpEmailProps = {
   otp: string;

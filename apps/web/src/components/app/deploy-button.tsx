@@ -24,7 +24,8 @@ export function DeployButton({
   const [error, setError] = useState<string | null>(null);
   const reusableImage = deployments.find(
     (deployment) =>
-      deployment.imageRef && (deployment.status === "healthy" || deployment.status === "superseded"),
+      deployment.imageRef &&
+      (deployment.status === "healthy" || deployment.status === "superseded"),
   );
   const disabledTitle = hasStagedChanges
     ? "You have unsaved changes — deploy them from the bar below"
@@ -73,7 +74,10 @@ export function DeployButton({
               loading={deploy.isPending && deploy.variables === "latest-image"}
               onClick={() => deploy.mutate("latest-image")}
               size="sm"
-              title={disabledTitle ?? (!reusableImage ? "No successful image to redeploy yet" : undefined)}
+              title={
+                disabledTitle ??
+                (!reusableImage ? "No successful image to redeploy yet" : undefined)
+              }
               variant="outline"
             >
               <RotateCcwIcon />

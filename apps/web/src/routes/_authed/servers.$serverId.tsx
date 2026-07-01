@@ -238,7 +238,13 @@ function ServerDetailRoute() {
             ) : null}
           </DialogPanel>
           <DialogFooter>
-            <DialogClose render={<Button type="button" variant="outline">Cancel</Button>} />
+            <DialogClose
+              render={
+                <Button type="button" variant="outline">
+                  Cancel
+                </Button>
+              }
+            />
             <Button
               disabled={deleteCode.length !== 6}
               loading={remove.isPending}
@@ -338,7 +344,9 @@ function SshSetupSection({
           {data.status === "active" ? (
             <p className="mt-2 text-success-foreground text-sm">
               Agent active
-              {data.lastSeenAt ? ` · last seen ${new Date(data.lastSeenAt).toLocaleString()}` : null}
+              {data.lastSeenAt
+                ? ` · last seen ${new Date(data.lastSeenAt).toLocaleString()}`
+                : null}
             </p>
           ) : null}
           <div className="mt-3 flex items-center gap-2">
@@ -549,7 +557,9 @@ function AgentSection({
                 <dt className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
                   Engine
                 </dt>
-                <dd className="mt-0.5 truncate text-sm">{info.data?.engine?.version ?? "unknown"}</dd>
+                <dd className="mt-0.5 truncate text-sm">
+                  {info.data?.engine?.version ?? "unknown"}
+                </dd>
               </div>
             </dl>
 
@@ -788,7 +798,10 @@ function DomainsSection({ serverId, sshHost }: { serverId: string; sshHost: stri
           )}
         </div>
 
-        <form className="mt-5 grid gap-3 border-t pt-4 sm:grid-cols-[1fr_1fr_auto]" onSubmit={handleSubmit}>
+        <form
+          className="mt-5 grid gap-3 border-t pt-4 sm:grid-cols-[1fr_1fr_auto]"
+          onSubmit={handleSubmit}
+        >
           <div className="space-y-2">
             <Label htmlFor="domain-host">Domain</Label>
             <Input

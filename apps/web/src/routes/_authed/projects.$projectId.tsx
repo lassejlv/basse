@@ -89,11 +89,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  importDockerContainer,
-  listApps,
-  listImportableDockerContainers,
-} from "@/lib/apps";
+import { importDockerContainer, listApps, listImportableDockerContainers } from "@/lib/apps";
 import { getProjectChangeHistory, getProjectChanges } from "@/lib/changes";
 import { createEnvironment, listEnvironments } from "@/lib/environments";
 import {
@@ -401,11 +397,7 @@ function ProjectDetailRoute() {
           </SheetPanel>
         </SheetPopup>
       </Sheet>
-      <NewEnvironmentDialog
-        onOpenChange={setNewEnvOpen}
-        open={newEnvOpen}
-        projectId={projectId}
-      />
+      <NewEnvironmentDialog onOpenChange={setNewEnvOpen} open={newEnvOpen} projectId={projectId} />
       {selectedEnv ? (
         <>
           <NewAppPalette
@@ -565,11 +557,7 @@ function EnvironmentCanvas({
     const width = Math.max(maxX - minX, 1);
     const height = Math.max(maxY - minY, 1);
     const scale = clampScale(
-      Math.min(
-        (rect.width - FIT_PADDING * 2) / width,
-        (rect.height - FIT_PADDING * 2) / height,
-        1,
-      ),
+      Math.min((rect.width - FIT_PADDING * 2) / width, (rect.height - FIT_PADDING * 2) / height, 1),
     );
     setView({
       scale,
@@ -647,75 +635,75 @@ function EnvironmentCanvas({
     <div className="absolute inset-0 overflow-hidden bg-background">
       <ContextMenu>
         <ContextMenuTrigger
-        className={cn(
-          "absolute inset-0 touch-none select-none",
-          panning ? "cursor-grabbing" : "cursor-grab",
-        )}
-        onPointerDown={(event) => {
-          if (event.button !== 0 && event.button !== 1) return;
-          panRef.current = {
-            pointerId: event.pointerId,
-            startX: event.clientX,
-            startY: event.clientY,
-            originX: view.x,
-            originY: view.y,
-            moved: false,
-          };
-          setPanning(true);
-          event.currentTarget.setPointerCapture(event.pointerId);
-        }}
-        onPointerMove={(event) => {
-          const gesture = panRef.current;
-          if (!gesture || gesture.pointerId !== event.pointerId) return;
-          const deltaX = event.clientX - gesture.startX;
-          const deltaY = event.clientY - gesture.startY;
-          if (!gesture.moved && Math.hypot(deltaX, deltaY) < 3) return;
-          gesture.moved = true;
-          setView((current) => ({
-            ...current,
-            x: gesture.originX + deltaX,
-            y: gesture.originY + deltaY,
-          }));
-        }}
-        onPointerUp={(event) => {
-          const gesture = panRef.current;
-          if (gesture?.pointerId === event.pointerId) {
-            if (!gesture.moved) onSelectApp(null);
+          className={cn(
+            "absolute inset-0 touch-none select-none",
+            panning ? "cursor-grabbing" : "cursor-grab",
+          )}
+          onPointerDown={(event) => {
+            if (event.button !== 0 && event.button !== 1) return;
+            panRef.current = {
+              pointerId: event.pointerId,
+              startX: event.clientX,
+              startY: event.clientY,
+              originX: view.x,
+              originY: view.y,
+              moved: false,
+            };
+            setPanning(true);
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }}
+          onPointerMove={(event) => {
+            const gesture = panRef.current;
+            if (!gesture || gesture.pointerId !== event.pointerId) return;
+            const deltaX = event.clientX - gesture.startX;
+            const deltaY = event.clientY - gesture.startY;
+            if (!gesture.moved && Math.hypot(deltaX, deltaY) < 3) return;
+            gesture.moved = true;
+            setView((current) => ({
+              ...current,
+              x: gesture.originX + deltaX,
+              y: gesture.originY + deltaY,
+            }));
+          }}
+          onPointerUp={(event) => {
+            const gesture = panRef.current;
+            if (gesture?.pointerId === event.pointerId) {
+              if (!gesture.moved) onSelectApp(null);
+              panRef.current = null;
+              setPanning(false);
+            }
+          }}
+          onPointerCancel={() => {
             panRef.current = null;
             setPanning(false);
-          }
-        }}
-        onPointerCancel={() => {
-          panRef.current = null;
-          setPanning(false);
-        }}
-        ref={viewportRef}
-        style={{
-          backgroundImage: "radial-gradient(var(--color-border) 1px, transparent 1px)",
-          backgroundSize: `${GRID_SIZE * view.scale}px ${GRID_SIZE * view.scale}px`,
-          backgroundPosition: `${view.x}px ${view.y}px`,
-        }}
-      >
-        <div
-          className="absolute top-0 left-0 will-change-transform"
+          }}
+          ref={viewportRef}
           style={{
-            transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
-            transformOrigin: "0 0",
+            backgroundImage: "radial-gradient(var(--color-border) 1px, transparent 1px)",
+            backgroundSize: `${GRID_SIZE * view.scale}px ${GRID_SIZE * view.scale}px`,
+            backgroundPosition: `${view.x}px ${view.y}px`,
           }}
         >
-          {nodes.map(({ app, position }) => (
-            <CanvasNode
-              app={app}
-              key={app.id}
-              onMove={moveNode}
-              onMoveEnd={persistPositions}
-              onSelect={onSelectApp}
-              position={position}
-              scale={view.scale}
-              selected={app.id === selectedAppId}
-            />
-          ))}
-        </div>
+          <div
+            className="absolute top-0 left-0 will-change-transform"
+            style={{
+              transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
+              transformOrigin: "0 0",
+            }}
+          >
+            {nodes.map(({ app, position }) => (
+              <CanvasNode
+                app={app}
+                key={app.id}
+                onMove={moveNode}
+                onMoveEnd={persistPositions}
+                onSelect={onSelectApp}
+                position={position}
+                scale={view.scale}
+                selected={app.id === selectedAppId}
+              />
+            ))}
+          </div>
         </ContextMenuTrigger>
         <ContextMenuPopup className="min-w-44">
           <ContextMenuItem onClick={onRequestNewApp}>
@@ -804,7 +792,6 @@ function EnvironmentCanvas({
           </Button>
         </div>
       ) : null}
-
     </div>
   );
 }
@@ -1377,4 +1364,3 @@ function NewEnvironmentDialog({
     </Dialog>
   );
 }
-

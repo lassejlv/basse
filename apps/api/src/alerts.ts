@@ -55,7 +55,10 @@ alerts.get("/", async (c) => {
       ? eq(alert.organizationId, organizationId)
       : status === "resolved"
         ? and(eq(alert.organizationId, organizationId), eq(alert.status, "resolved"))
-        : and(eq(alert.organizationId, organizationId), inArray(alert.status, ["open", "acknowledged"]));
+        : and(
+            eq(alert.organizationId, organizationId),
+            inArray(alert.status, ["open", "acknowledged"]),
+          );
 
   const rows = await db
     .select({

@@ -30,6 +30,10 @@ const baseApp = {
   databasePassword: null,
   databasePublicEnabled: false,
   databasePublicPort: null,
+  backupScheduleEnabled: false,
+  backupIntervalHours: 24,
+  backupRetention: 7,
+  backupS3ConnectionId: null,
   createdAt: new Date("2026-01-01T00:00:00.000Z"),
   updatedAt: new Date("2026-01-01T00:00:00.000Z"),
 } satisfies AppRow;

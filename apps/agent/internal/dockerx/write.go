@@ -415,6 +415,120 @@ func (c *Client) ExecContainer(ctx context.Context, name string, command string)
 	return ExecResult{ExitCode: inspected.ExitCode, Output: demuxDockerStream(raw)}, nil
 }
 
+// ExecContainerStdout runs a command in a container and streams ONLY its
+// stdout frames to w (stderr is captured separately for error reporting).
+// Unlike ExecContainer it does not buffer output, so it is safe for large
+// payloads (e.g. streaming a database dump). Returns the exec's exit code.
+func (c *Client) ExecContainerStdout(ctx context.Context, name string, command string, w io.Writer) (int, string, error) {
+	createBody, _ := json.Marshal(map[string]any{
+		"AttachStdout": true,
+		"AttachStderr": true,
+		"Cmd":          []string{"sh", "-lc", command},
+	})
+	createReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://docker/containers/"+name+"/exec", bytes.NewReader(createBody))
+	if err != nil {
+		return 0, "", err
+	}
+	createReq.Header.Set("Content-Type", "application/json")
+
+	createResp, err := c.http.Do(createReq)
+	if err != nil {
+		return 0, "", err
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode < 200 || createResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(createResp.Body, 2048))
+		return 0, "", fmt.Errorf("create exec %s: status %d: %s", name, createResp.StatusCode, b)
+	}
+
+	var created struct {
+		ID string `json:"Id"`
+	}
+	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
+		return 0, "", err
+	}
+	if created.ID == "" {
+		return 0, "", fmt.Errorf("create exec %s: missing id", name)
+	}
+
+	startBody, _ := json.Marshal(map[string]any{"Detach": false, "Tty": false})
+	startReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://docker/exec/"+created.ID+"/start", bytes.NewReader(startBody))
+	if err != nil {
+		return 0, "", err
+	}
+	startReq.Header.Set("Content-Type", "application/json")
+	startResp, err := c.stream.Do(startReq)
+	if err != nil {
+		return 0, "", err
+	}
+	defer startResp.Body.Close()
+	if startResp.StatusCode < 200 || startResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(startResp.Body, 2048))
+		return 0, "", fmt.Errorf("start exec %s: status %d: %s", name, startResp.StatusCode, b)
+	}
+
+	var stderr strings.Builder
+	header := make([]byte, 8)
+	for {
+		if _, err := io.ReadFull(startResp.Body, header); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return 0, stderr.String(), fmt.Errorf("exec stream %s: %w", name, err)
+		}
+		size := int(header[4])<<24 | int(header[5])<<16 | int(header[6])<<8 | int(header[7])
+		if size <= 0 {
+			continue
+		}
+		frame := io.LimitReader(startResp.Body, int64(size))
+		if header[0] == 1 {
+			if _, err := io.Copy(w, frame); err != nil {
+				return 0, stderr.String(), fmt.Errorf("exec stream %s: %w", name, err)
+			}
+		} else {
+			// Keep a bounded stderr tail for error messages.
+			if _, err := io.Copy(limitedBuilder{&stderr, 8 * 1024}, frame); err != nil {
+				return 0, stderr.String(), fmt.Errorf("exec stream %s: %w", name, err)
+			}
+		}
+	}
+
+	inspectReq, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/exec/"+created.ID+"/json", nil)
+	if err != nil {
+		return 0, stderr.String(), err
+	}
+	inspectResp, err := c.http.Do(inspectReq)
+	if err != nil {
+		return 0, stderr.String(), err
+	}
+	defer inspectResp.Body.Close()
+	var inspected struct {
+		ExitCode int `json:"ExitCode"`
+	}
+	if err := json.NewDecoder(inspectResp.Body).Decode(&inspected); err != nil {
+		return 0, stderr.String(), err
+	}
+	return inspected.ExitCode, stderr.String(), nil
+}
+
+// limitedBuilder discards writes past its cap but never errors, so io.Copy
+// always drains the source frame.
+type limitedBuilder struct {
+	b   *strings.Builder
+	cap int
+}
+
+func (l limitedBuilder) Write(p []byte) (int, error) {
+	if remaining := l.cap - l.b.Len(); remaining > 0 {
+		if len(p) > remaining {
+			l.b.Write(p[:remaining])
+		} else {
+			l.b.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
 func demuxDockerStream(raw []byte) string {
 	var out strings.Builder
 	for len(raw) >= 8 {
