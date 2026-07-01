@@ -124,6 +124,19 @@ The generated command includes the raw `BASSE_AGENT_TOKEN`. Treat it like a
 secret. It is shown once by the dashboard, then only an encrypted copy and a
 lookup hash are stored by the API.
 
+The generated command downloads `apps/agent/install.sh` and passes the token,
+API origin, and agent image as environment variables. The installer:
+
+- installs Docker on Linux if Docker is missing
+- creates the Caddy data/admin Docker volumes
+- removes an old `basse-agent` container if one exists
+- pulls the configured agent image
+- starts the agent in outbound mode
+- checks that the container stayed running
+
+Self-hosted installs can change the script URL with `BASSE_AGENT_INSTALL_URL` on
+the API service before creating the server.
+
 ### Local development setup
 
 For local development, the server still needs to reach your local API. The
@@ -227,16 +240,23 @@ docker run -d --name basse-agent --restart unless-stopped \
 In outbound mode, the dashboard returns a one-time command shaped like this:
 
 ```sh
-docker run -d --name basse-agent --restart unless-stopped \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v basse_caddy_data:/data \
-  -v basse_caddy_admin:/run/caddy-admin \
-  -e BASSE_AGENT_TOKEN='<one-time-token-from-basse>' \
-  -e BASSE_AGENT_MODE=outbound \
-  -e BASSE_CONTROL_PLANE_URL='https://basse.sh' \
-  ghcr.io/lassejlv/basse-agent:latest
+curl -fsSL 'https://raw.githubusercontent.com/lassejlv/basse/main/apps/agent/install.sh' | \
+  BASSE_AGENT_TOKEN='<one-time-token-from-basse>' \
+  BASSE_CONTROL_PLANE_URL='https://basse.sh' \
+  BASSE_AGENT_IMAGE='ghcr.io/lassejlv/basse-agent:latest' \
+  sh
 ```
 
 `BASSE_CONTROL_PLANE_URL` should be the public API origin. In cloud/prod this is
 usually derived from `API_ORIGIN`; locally it can be the HTTPS tunnel URL that
 reaches the API.
+
+To run the script manually without the dashboard command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/lassejlv/basse/main/apps/agent/install.sh -o install-basse-agent.sh
+chmod +x install-basse-agent.sh
+BASSE_AGENT_TOKEN='<token>' \
+  BASSE_CONTROL_PLANE_URL='https://basse.sh' \
+  ./install-basse-agent.sh
+```

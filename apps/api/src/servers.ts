@@ -135,15 +135,15 @@ function apiOriginFromRequest(request: Request): string {
 }
 
 function outboundInstallCommand(input: { apiOrigin: string; token: string }): string {
+  const installUrl =
+    Bun.env.BASSE_AGENT_INSTALL_URL ??
+    "https://raw.githubusercontent.com/lassejlv/basse/main/apps/agent/install.sh";
   return [
-    "docker run -d --name basse-agent --restart unless-stopped",
-    "-v /var/run/docker.sock:/var/run/docker.sock",
-    "-v basse_caddy_data:/data",
-    "-v basse_caddy_admin:/run/caddy-admin",
-    `-e BASSE_AGENT_TOKEN=${shellArg(input.token)}`,
-    "-e BASSE_AGENT_MODE=outbound",
-    `-e BASSE_CONTROL_PLANE_URL=${shellArg(input.apiOrigin)}`,
-    shellArg(AGENT_IMAGE),
+    `curl -fsSL ${shellArg(installUrl)} |`,
+    `BASSE_AGENT_TOKEN=${shellArg(input.token)}`,
+    `BASSE_CONTROL_PLANE_URL=${shellArg(input.apiOrigin)}`,
+    `BASSE_AGENT_IMAGE=${shellArg(AGENT_IMAGE)}`,
+    "sh",
   ].join(" \\\n  ");
 }
 
