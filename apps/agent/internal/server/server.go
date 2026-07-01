@@ -33,6 +33,7 @@ func Run(cfg config.Config, version string) error {
 	proxy := handlers.Proxy{Docker: docker, Caddy: caddy, Cfg: cfg}
 	apps := handlers.Apps{Docker: docker, Cfg: cfg}
 	backups := handlers.Backups{Docker: docker}
+	images := handlers.Images{Docker: docker}
 
 	mux := http.NewServeMux()
 
@@ -58,6 +59,7 @@ func Run(cfg config.Config, version string) error {
 	mux.Handle("POST /v1/apps/{appId}/backups/{backupId}/restore", middleware.Bearer(cfg.Token, http.HandlerFunc(backups.Restore)))
 	mux.Handle("DELETE /v1/apps/{appId}/backups/{backupId}", middleware.Bearer(cfg.Token, http.HandlerFunc(backups.Delete)))
 	mux.Handle("GET /v1/apps/{appId}/backups/{backupId}/download", middleware.Bearer(cfg.Token, http.HandlerFunc(backups.Download)))
+	mux.Handle("POST /v1/images/prune", middleware.Bearer(cfg.Token, http.HandlerFunc(images.Prune)))
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { RotateCcwIcon } from "lucide-react";
+import { CheckIcon, CircleIcon, Loader2Icon, RotateCcwIcon, XIcon } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { Deployment } from "@basse/shared";
+import type { Deployment, DeploymentPhase } from "@basse/shared";
 import { chartCssVars } from "@/components/charts/chart-context";
 import { Grid } from "@/components/charts/grid";
 import { Line, LineChart } from "@/components/charts/line-chart";
@@ -32,6 +32,7 @@ import { getDeployment, rollbackDeployment } from "@/lib/deployments";
 import { formatBytes, relativeTime } from "@/lib/format";
 import { listServers } from "@/lib/servers";
 import { toast } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 import { formatCpuCores } from "./shared";
 
 export function DeploymentsPanel({
@@ -115,6 +116,11 @@ export function DeploymentsPanel({
                       {imageTail}
                     </span>
                   </button>
+                  {IN_FLIGHT_STATUSES.includes(deployment.status) && deployment.phase ? (
+                    <span className="text-muted-foreground text-xs">
+                      {PHASE_LABELS[deployment.phase]}…
+                    </span>
+                  ) : null}
                   <DeployStatusBadge size="sm" status={deployment.status} />
                   {canRollback ? (
                     <Button
@@ -179,6 +185,7 @@ function DeploymentDetailSheet({
         <SheetPanel className="space-y-6">
           {deployment ? (
             <>
+              <DeploymentPhaseSteps app={app} deployment={deployment} />
               <DeploymentSummary deployment={deployment} />
               <DeploymentBuildLog deployment={deployment} />
               <DeploymentRuntimeSection app={app} deployment={deployment} />
@@ -187,6 +194,92 @@ function DeploymentDetailSheet({
         </SheetPanel>
       </SheetPopup>
     </Sheet>
+  );
+}
+
+const IN_FLIGHT_STATUSES = ["queued", "building", "deploying"];
+
+const PHASE_LABELS: Record<DeploymentPhase, string> = {
+  initializing: "Initializing",
+  cloning: "Cloning",
+  building: "Building",
+  deploying: "Deploying",
+};
+
+/**
+ * Railway-style step checklist for a deployment. Repository builds show the
+ * full pipeline; image/database deploys only initialize and deploy. Saved-image
+ * redeploys of repository apps jump straight to Deploy — earlier steps render
+ * as complete, which reads as "skipped".
+ */
+function DeploymentPhaseSteps({ app, deployment }: { app: App; deployment: Deployment }) {
+  const phases: DeploymentPhase[] =
+    app.appKind === "service" && app.sourceType === "repository"
+      ? ["initializing", "cloning", "building", "deploying"]
+      : ["initializing", "deploying"];
+
+  const inFlight = IN_FLIGHT_STATUSES.includes(deployment.status);
+  const succeeded = ["healthy", "superseded"].includes(deployment.status);
+  const currentIndex = deployment.phase
+    ? phases.indexOf(deployment.phase)
+    : deployment.status === "queued"
+      ? -1
+      : phases.length - 1;
+
+  return (
+    <section>
+      <h3 className="mb-2 font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+        Stages
+      </h3>
+      <ol className="flex flex-wrap items-center gap-x-1 gap-y-2">
+        {phases.map((phase, index) => {
+          const state = succeeded
+            ? "done"
+            : deployment.status === "failed"
+              ? index < currentIndex
+                ? "done"
+                : index === Math.max(currentIndex, 0)
+                  ? "failed"
+                  : "pending"
+              : deployment.status === "cancelled"
+                ? "pending"
+                : inFlight
+                  ? index < currentIndex
+                    ? "done"
+                    : index === currentIndex
+                      ? "active"
+                      : "pending"
+                  : "pending";
+          return (
+            <li className="flex items-center gap-1" key={phase}>
+              <span
+                className={cn(
+                  "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs",
+                  state === "done" && "border-success/40 text-foreground",
+                  state === "active" && "border-primary/50 text-foreground",
+                  state === "failed" && "border-destructive/50 text-foreground",
+                  state === "pending" && "border-dashed text-muted-foreground",
+                )}
+              >
+                {state === "done" ? (
+                  <CheckIcon className="size-3 text-success" />
+                ) : state === "active" ? (
+                  <Loader2Icon className="size-3 animate-spin text-primary" />
+                ) : state === "failed" ? (
+                  <XIcon className="size-3 text-destructive" />
+                ) : (
+                  <CircleIcon className="size-2.5 opacity-40" />
+                )}
+                {PHASE_LABELS[phase]}
+              </span>
+              {index < phases.length - 1 ? (
+                <span aria-hidden className="h-px w-3 bg-border" />
+              ) : null}
+            </li>
+          );
+        })}
+      </ol>
+    </section>
   );
 }
 

@@ -281,6 +281,10 @@ export const deployment = pgTable("deployment", {
   })
     .notNull()
     .default("queued"),
+  // Granular pipeline step within the coarse status, for the UI's stepper.
+  phase: text("phase", {
+    enum: ["initializing", "cloning", "building", "deploying"],
+  }),
   commitSha: text("commit_sha"),
   imageRef: text("image_ref"),
   buildId: text("build_id"),

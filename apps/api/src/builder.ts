@@ -21,6 +21,19 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+/** --env K=V flags for railpack prepare (values are baked into the plan). */
+function railpackEnvArgs(buildEnv: Record<string, string> | undefined): string[] {
+  return Object.entries(buildEnv ?? {}).flatMap(([key, value]) => ["--env", `${key}=${value}`]);
+}
+
+/** --build-arg K=V flags for Dockerfile builds (used when the Dockerfile declares ARG K). */
+function buildArgFlags(buildEnv: Record<string, string> | undefined): string[] {
+  return Object.entries(buildEnv ?? {}).flatMap(([key, value]) => [
+    "--build-arg",
+    `${key}=${value}`,
+  ]);
+}
+
 async function run(
   cmd: string[],
   options: { cwd?: string; env?: Record<string, string>; onLine?: BuildLogger; timeoutMs?: number },
@@ -155,6 +168,12 @@ export async function buildImage(opts: {
   projectId: string;
   deploymentId: string;
   metadataFile: string;
+  // BuildKit platform matching the target servers' CPU architecture.
+  platform: string;
+  // Resolved app env, made available at build time (railpack plan env /
+  // Dockerfile ARGs). Values can end up in image layers — same tradeoff as
+  // every build-arg-based PaaS.
+  buildEnv?: Record<string, string>;
   noCache?: boolean;
   onLine?: BuildLogger;
 }): Promise<{ buildId: string | null }> {
@@ -162,11 +181,21 @@ export async function buildImage(opts: {
 
   if (opts.kind === "railpack") {
     const planPath = join(opts.ctxDir, "railpack-plan.json");
-    const prepare = await run(["railpack", "prepare", opts.ctxDir, "--plan-out", planPath], {
-      env,
-      onLine: opts.onLine,
-      timeoutMs: 120_000,
-    });
+    const prepare = await run(
+      [
+        "railpack",
+        "prepare",
+        opts.ctxDir,
+        "--plan-out",
+        planPath,
+        ...railpackEnvArgs(opts.buildEnv),
+      ],
+      {
+        env,
+        onLine: opts.onLine,
+        timeoutMs: 120_000,
+      },
+    );
     if (prepare.exitCode !== 0) {
       throw new Error("railpack could not detect how to build this repo");
     }
@@ -194,10 +223,11 @@ export async function buildImage(opts: {
       "--metadata-file",
       opts.metadataFile,
       "--platform",
-      "linux/amd64",
+      opts.platform,
       "--progress",
       "plain",
       ...(opts.noCache ? ["--no-cache"] : []),
+      ...(opts.kind === "dockerfile" ? buildArgFlags(opts.buildEnv) : []),
       ...dockerfileArg,
       opts.ctxDir,
     ],
@@ -223,13 +253,17 @@ export async function buildImage(opts: {
 
 export async function prepareRailpackPlan(opts: {
   ctxDir: string;
+  buildEnv?: Record<string, string>;
   onLine?: BuildLogger;
 }): Promise<void> {
   const planPath = join(opts.ctxDir, "railpack-plan.json");
-  const prepare = await run(["railpack", "prepare", opts.ctxDir, "--plan-out", planPath], {
-    onLine: opts.onLine,
-    timeoutMs: 120_000,
-  });
+  const prepare = await run(
+    ["railpack", "prepare", opts.ctxDir, "--plan-out", planPath, ...railpackEnvArgs(opts.buildEnv)],
+    {
+      onLine: opts.onLine,
+      timeoutMs: 120_000,
+    },
+  );
   if (prepare.exitCode !== 0) {
     throw new Error("railpack could not detect how to build this repo");
   }
@@ -241,11 +275,16 @@ export async function buildImageOnServer(opts: {
   dockerfilePath?: string;
   connection: SshConnection;
   deploymentId: string;
+  buildEnv?: Record<string, string>;
   noCache?: boolean;
   onLine?: BuildLogger;
 }): Promise<{ imageRef: string }> {
   if (opts.kind === "railpack") {
-    await prepareRailpackPlan({ ctxDir: opts.ctxDir, onLine: opts.onLine });
+    await prepareRailpackPlan({
+      ctxDir: opts.ctxDir,
+      buildEnv: opts.buildEnv,
+      onLine: opts.onLine,
+    });
   }
 
   const remoteDir = `/tmp/basse-build-${opts.deploymentId}`;
@@ -260,6 +299,14 @@ export async function buildImageOnServer(opts: {
           `${remoteDir}/railpack-plan.json`,
         )}`;
   const noCacheArg = opts.noCache ? "--no-cache " : "";
+  // Dockerfile builds receive env as --build-arg (shell-quoted); railpack
+  // builds already carry env inside the uploaded plan.
+  const buildArgsShell =
+    opts.kind === "dockerfile"
+      ? Object.entries(opts.buildEnv ?? {})
+          .map(([key, value]) => `--build-arg ${shellQuote(`${key}=${value}`)}`)
+          .join(" ")
+      : "";
 
   const result = await runScript(
     opts.connection,
@@ -267,7 +314,7 @@ export async function buildImageOnServer(opts: {
 cleanup() { rm -rf ${shellQuote(remoteDir)}; }
 trap cleanup EXIT
 cd ${shellQuote(remoteDir)}
-DOCKER_BUILDKIT=1 docker build ${noCacheArg}${dockerfileArg} -t ${shellQuote(imageRef)} .
+DOCKER_BUILDKIT=1 docker build ${noCacheArg}${buildArgsShell ? `${buildArgsShell} ` : ""}${dockerfileArg} -t ${shellQuote(imageRef)} .
 `,
     { onLine: opts.onLine, timeoutMs: 1_200_000 },
   );

@@ -425,10 +425,14 @@ export type DeploymentStatus =
   | "cancelled"
   | "stopped";
 
+export type DeploymentPhase = "initializing" | "cloning" | "building" | "deploying";
+
 export type Deployment = {
   id: string;
   appId: string;
   status: DeploymentStatus;
+  // Granular pipeline step for the stepper UI; null on legacy rows.
+  phase: DeploymentPhase | null;
   commitSha: string | null;
   imageRef: string | null;
   buildId: string | null;

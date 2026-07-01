@@ -371,6 +371,24 @@ export async function deleteAgentBackup(
   }
 }
 
+/**
+ * Prunes Basse-managed images (basse-app:* and Depot registry pulls) older
+ * than the retention window, keeping everything in keepRefs. Throws on failure.
+ */
+export async function pruneServerImages(
+  conn: AgentConnection,
+  token: string,
+  input: { keepRefs: string[]; olderThanHours: number },
+): Promise<{ removed: number; skipped: number }> {
+  return postJson<{ removed: number; skipped: number }>(
+    conn,
+    token,
+    "/v1/images/prune",
+    input,
+    150_000,
+  );
+}
+
 /** Tears down an app container. Throws on failure. */
 export async function removeApp(
   conn: AgentConnection,

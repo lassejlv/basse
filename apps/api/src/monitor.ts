@@ -14,7 +14,7 @@ import { and, desc, eq, inArray, lt } from "drizzle-orm";
 import { checkAgentHealth, getAppMetrics, getAppStatus } from "./agent-client";
 import { decryptSecret } from "./crypto";
 import { sendAlertEmail } from "./email";
-import { publishRealtime } from "./realtime";
+import { publishForDeployment, publishRealtime } from "./realtime";
 import { connectionFromServer } from "./server-connection";
 
 type ServerRow = typeof server.$inferSelect;
@@ -237,6 +237,11 @@ async function checkServer(row: ServerRow): Promise<boolean> {
 }
 
 async function checkStuckDeployments(): Promise<void> {
+  // Staleness is judged by updatedAt: a live build bumps it constantly via the
+  // log writer and status transitions, so "no writes for the window" means the
+  // job is dead (crashed worker, lost lock). Dead runs can't resume — their
+  // build temp dir and pull token are gone — so mark them failed rather than
+  // leaving a zombie "building" row the UI shows forever.
   const cutoff = new Date(Date.now() - DEPLOYMENT_STUCK_MINUTES * 60_000);
   const rows = await db
     .select({
@@ -248,16 +253,31 @@ async function checkStuckDeployments(): Promise<void> {
     .innerJoin(app, eq(deployment.appId, app.id))
     .innerJoin(environment, eq(app.environmentId, environment.id))
     .innerJoin(project, eq(environment.projectId, project.id))
-    .where(and(inArray(deployment.status, IN_FLIGHT_DEPLOYMENTS), lt(deployment.createdAt, cutoff)))
+    .where(and(inArray(deployment.status, IN_FLIGHT_DEPLOYMENTS), lt(deployment.updatedAt, cutoff)))
     .limit(100);
 
   for (const row of rows) {
+    const now = new Date();
+    await db
+      .update(deployment)
+      .set({
+        status: "failed",
+        logs: `${row.deployment.logs ?? ""}\nMarked failed by the monitor: no progress for more than ${DEPLOYMENT_STUCK_MINUTES} minutes.\n`,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(deployment.id, row.deployment.id),
+          inArray(deployment.status, [...IN_FLIGHT_DEPLOYMENTS]),
+        ),
+      );
+    void publishForDeployment(row.deployment.id);
     await raiseAlert({
       organizationId: row.project.organizationId,
       severity: "warning",
       code: "deployment_stuck",
-      title: `${row.app.name} deployment is stuck`,
-      message: `Deployment ${row.deployment.id.slice(0, 8)} has been ${row.deployment.status} for more than ${DEPLOYMENT_STUCK_MINUTES} minutes.`,
+      title: `${row.app.name} deployment stalled`,
+      message: `Deployment ${row.deployment.id.slice(0, 8)} made no progress for more than ${DEPLOYMENT_STUCK_MINUTES} minutes and was marked failed.`,
       fingerprint: `deployment_stuck:${row.deployment.id}`,
       appId: row.app.id,
       deploymentId: row.deployment.id,

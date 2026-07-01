@@ -204,17 +204,14 @@ export async function uploadDirectory(
   options: { timeoutMs?: number } = {},
 ): Promise<void> {
   await withKeyMaterial(conn, async ({ keyPath, knownHostsPath }) => {
-    const tar = Bun.spawn(["tar", "-C", localDir, "-czf", "-", "."], {
+    // Stream tar -> ssh instead of buffering the whole archive in memory, and
+    // leave .git behind — docker build has no use for it and it can dwarf the
+    // actual context.
+    const tar = Bun.spawn(["tar", "-C", localDir, "--exclude=.git", "-czf", "-", "."], {
       stdout: "pipe",
       stderr: "pipe",
       signal: AbortSignal.timeout(options.timeoutMs ?? 300_000),
     });
-    const archive = await new Response(tar.stdout).arrayBuffer();
-    const tarStderr = await new Response(tar.stderr).text();
-    const tarExit = await tar.exited;
-    if (tarExit !== 0) {
-      throw new Error(`Failed to archive build context: ${tarStderr.trim()}`);
-    }
 
     const command = `set -euo pipefail; rm -rf '${remoteDir}'; mkdir -p '${remoteDir}'; tar -xzf - -C '${remoteDir}'`;
     const ssh = Bun.spawn(
@@ -225,16 +222,24 @@ export async function uploadDirectory(
         command,
       ],
       {
-        stdin: new Uint8Array(archive),
+        stdin: tar.stdout,
         stdout: "pipe",
         stderr: "pipe",
         signal: AbortSignal.timeout(options.timeoutMs ?? 300_000),
       },
     );
-    const stderr = await new Response(ssh.stderr).text();
-    const exitCode = await ssh.exited;
+
+    const [tarStderr, sshStderr, tarExit, exitCode] = await Promise.all([
+      new Response(tar.stderr).text(),
+      new Response(ssh.stderr).text(),
+      tar.exited,
+      ssh.exited,
+    ]);
+    if (tarExit !== 0) {
+      throw new Error(`Failed to archive build context: ${tarStderr.trim()}`);
+    }
     if (exitCode !== 0) {
-      throw new Error(`Failed to upload build context: ${stderr.trim()}`);
+      throw new Error(`Failed to upload build context: ${sshStderr.trim()}`);
     }
   });
 }

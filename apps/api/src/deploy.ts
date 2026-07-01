@@ -14,7 +14,14 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deployApp, ensureProxy, execAppCommand, type AgentConnection } from "./agent-client";
+import {
+  deployApp,
+  ensureProxy,
+  execAppCommand,
+  getAgentInfo,
+  getAppStatus,
+  type AgentConnection,
+} from "./agent-client";
 import {
   buildImage,
   buildImageOnServer,
@@ -33,6 +40,7 @@ import { connectionFromServer } from "./server-connection";
 import { runScript, type SshConnection } from "./ssh";
 
 type DeploymentRow = typeof deployment.$inferSelect;
+type ServerRow = typeof server.$inferSelect;
 type AppVolume = { hostPath: string; containerPath: string; readOnly: boolean };
 
 const NON_TERMINAL: DeploymentRow["status"][] = ["queued", "building", "deploying"];
@@ -41,16 +49,36 @@ const DEFAULT_REDIS_VERSION = "8";
 const POSTGRES_PORT = 5432;
 const REDIS_PORT = 6379;
 
+/**
+ * Advances a deployment's status, but only while it is still in flight. A
+ * deployment that a newer deploy marked cancelled (or that already reached a
+ * terminal state) is never resurrected — the stale job's writes are dropped.
+ * Returns whether the transition applied, so callers can stop working when
+ * they discover they've been cancelled.
+ */
 async function setStatus(
   id: string,
   status: DeploymentRow["status"],
-  extra: Partial<Pick<DeploymentRow, "imageRef" | "buildId" | "commitSha">> = {},
-): Promise<void> {
-  await db
+  extra: Partial<Pick<DeploymentRow, "imageRef" | "buildId" | "commitSha" | "phase">> = {},
+): Promise<boolean> {
+  const rows = await db
     .update(deployment)
     .set({ status, updatedAt: new Date(), ...extra })
-    .where(eq(deployment.id, id));
+    .where(and(eq(deployment.id, id), inArray(deployment.status, NON_TERMINAL)))
+    .returning({ id: deployment.id });
+  if (rows.length === 0) return false;
   void publishForDeployment(id);
+  return true;
+}
+
+/** True when a newer deploy cancelled this one mid-run. */
+async function isCancelled(id: string): Promise<boolean> {
+  const [row] = await db
+    .select({ status: deployment.status })
+    .from(deployment)
+    .where(eq(deployment.id, id))
+    .limit(1);
+  return !row || row.status === "cancelled";
 }
 
 /** Debounced append into deployment.logs so a chatty build doesn't hammer the DB. */
@@ -155,6 +183,27 @@ function databaseVolume(appId: string, kind: DatabaseKind, version: string | nul
   };
 }
 
+/** Polls pg_isready inside the container until Postgres accepts connections. */
+async function verifyPostgresReady(
+  connection: AgentConnection,
+  agentToken: string,
+  appId: string,
+  user: string,
+): Promise<{ ok: boolean; output: string }> {
+  const userArg = shellQuote(user);
+  const command = `
+last=''
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  last=$(pg_isready -q -U ${userArg} 2>&1) && exit 0
+  sleep 1
+done
+printf "%s" "$last"
+exit 1
+`.trim();
+  const result = await execAppCommand(connection, agentToken, appId, command);
+  return { ok: result.exitCode === 0, output: result.output.trim() };
+}
+
 async function verifyRedisAuth(
   connection: AgentConnection,
   agentToken: string,
@@ -174,6 +223,50 @@ exit 1
 `.trim();
   const result = await execAppCommand(connection, agentToken, appId, command);
   return { ok: result.exitCode === 0, output: result.output.trim() };
+}
+
+/** Maps a Docker engine arch (amd64/x86_64/arm64/aarch64) to a BuildKit platform. */
+function platformForArch(arch: string): string | null {
+  const normalized = arch.toLowerCase();
+  if (normalized === "amd64" || normalized === "x86_64") return "linux/amd64";
+  if (normalized === "arm64" || normalized === "aarch64") return "linux/arm64";
+  return null;
+}
+
+/**
+ * Resolves the build platform from the target servers' Docker engines so Depot
+ * produces images the servers can actually run (arm64 boxes were previously
+ * handed linux/amd64 unconditionally). Mixed-arch fleets are rejected — one
+ * image is deployed everywhere. Unknown arches fall back to linux/amd64.
+ */
+async function resolveBuildPlatform(
+  targets: ServerRow[],
+  onLine: (line: string) => void,
+): Promise<{ platform: string } | { error: string }> {
+  const platforms = new Set<string>();
+  for (const srv of targets) {
+    try {
+      const connection = await connectionFromServer(srv);
+      const token = await decryptSecret(srv.agentToken!);
+      const info = await getAgentInfo(connection, token);
+      const platform = platformForArch(info.engine.Arch);
+      if (platform) {
+        platforms.add(platform);
+      } else {
+        onLine(`Unknown CPU architecture "${info.engine.Arch}" on ${srv.name}; assuming amd64.`);
+        platforms.add("linux/amd64");
+      }
+    } catch {
+      onLine(`Could not detect CPU architecture on ${srv.name}; assuming amd64.`);
+      platforms.add("linux/amd64");
+    }
+  }
+  if (platforms.size > 1) {
+    return {
+      error: `Attached servers have mixed CPU architectures (${[...platforms].join(", ")}). Deploy to servers with a single architecture.`,
+    };
+  }
+  return { platform: [...platforms][0] ?? "linux/amd64" };
 }
 
 async function resolveDepotRegistryForImage(
@@ -231,7 +324,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
     // Claim: queued/failed -> building (the DB row is the lock).
     const claimed = await db
       .update(deployment)
-      .set({ status: "building", updatedAt: new Date() })
+      .set({ status: "building", phase: "initializing", updatedAt: new Date() })
       .where(and(eq(deployment.id, deploymentId), inArray(deployment.status, ["queued", "failed"])))
       .returning({ id: deployment.id });
     if (!claimed[0]) return;
@@ -306,6 +399,18 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       return;
     }
 
+    // Resolve env before the build so repository builds can consume it
+    // (NEXT_PUBLIC_*/VITE_* style variables are needed at build time).
+    let envMap: Record<string, string>;
+    try {
+      envMap = await loadResolvedEnvMap(appRow);
+    } catch (error) {
+      log.line(error instanceof Error ? error.message : "Could not resolve environment variables.");
+      await log.done();
+      await setStatus(deploymentId, "failed");
+      return;
+    }
+
     let imageRef: string;
     let buildId: string | null = null;
     let registry: { host: string; user: string; token: string } | undefined;
@@ -352,6 +457,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         log.line("Building without cache.");
       }
       log.line(`Cloning ${appRow.repositoryUrl} (${appRow.branch})…`);
+      await setStatus(deploymentId, "building", { phase: "cloning" });
       ctxDir = await mkdtemp(join(tmpdir(), "basse-build-"));
       const organizationId = await resolveAppOrganizationId(appRow);
       const gitHubOwner = parseGitHubOwner(appRow.repositoryUrl);
@@ -383,7 +489,13 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         }
         throw error;
       }
-      await setStatus(deploymentId, "building", { commitSha });
+      // Checkpoint before the expensive build: a newer deploy may have
+      // cancelled this one while the clone ran.
+      if (!(await setStatus(deploymentId, "building", { commitSha, phase: "building" }))) {
+        log.line("Deployment was cancelled by a newer deploy.");
+        await log.done();
+        return;
+      }
 
       const buildPaths = resolveBuildPaths(
         ctxDir,
@@ -405,6 +517,11 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         log.line(`Using Dockerfile ${buildPaths.dockerfilePathRelative}.`);
       }
 
+      const buildEnvCount = Object.keys(envMap).length;
+      if (buildEnvCount > 0) {
+        log.line(`Passing ${buildEnvCount} environment variable(s) to the build.`);
+      }
+
       if (appRow.buildRunner === "server") {
         const buildServer = targetServers[0]!;
         log.line(
@@ -423,6 +540,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
           dockerfilePath: buildPaths.dockerfilePathRelative,
           connection,
           deploymentId,
+          buildEnv: envMap,
           noCache: dep.buildNoCache,
           onLine: log.line,
         });
@@ -455,8 +573,18 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         const depotToken = await decryptSecret(depot.token);
         imageRef = `${depot.orgId}.registry.depot.dev/${depot.projectId}:${deploymentId}`;
 
+        const platformResult = await resolveBuildPlatform(targetServers, log.line);
+        if ("error" in platformResult) {
+          log.line(platformResult.error);
+          await log.done();
+          await setStatus(deploymentId, "failed");
+          return;
+        }
+
         // Build remotely on Depot.
-        log.line(`Building with ${kind === "dockerfile" ? "Dockerfile" : "Railpack"} on Depot…`);
+        log.line(
+          `Building with ${kind === "dockerfile" ? "Dockerfile" : "Railpack"} on Depot for ${platformResult.platform}…`,
+        );
         const metadataFile = join(ctxDir, "depot-metadata.json");
         const built = await buildImage({
           kind,
@@ -466,6 +594,8 @@ export async function runDeployment(deploymentId: string): Promise<void> {
           projectId: depot.projectId,
           deploymentId,
           metadataFile,
+          platform: platformResult.platform,
+          buildEnv: envMap,
           noCache: dep.buildNoCache,
           onLine: log.line,
         });
@@ -481,19 +611,15 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       }
     }
 
-    await setStatus(deploymentId, "deploying", { imageRef, buildId });
-
-    // Decrypt app env vars and resolve {{shared.KEY}} / {{env.KEY}} references.
-    let envMap: Record<string, string>;
-    let databasePasswordPlain: string | null = null;
-    try {
-      envMap = await loadResolvedEnvMap(appRow);
-    } catch (error) {
-      log.line(error instanceof Error ? error.message : "Could not resolve environment variables.");
+    // Checkpoint after the build: never deploy an image for a cancelled run —
+    // the racing job would replace the newer deploy's container.
+    if (!(await setStatus(deploymentId, "deploying", { imageRef, buildId, phase: "deploying" }))) {
+      log.line("Deployment was cancelled by a newer deploy.");
       await log.done();
-      await setStatus(deploymentId, "failed");
       return;
     }
+
+    let databasePasswordPlain: string | null = null;
     if (appRow.appKind === "database") {
       if (!appRow.databasePassword) {
         log.line("Database credentials are missing.");
@@ -519,26 +645,36 @@ export async function runDeployment(deploymentId: string): Promise<void> {
           ]
         : parseVolumes(appRow.volumes);
 
-    let allRunning = true;
-    for (const srv of targetServers) {
-      log.line(`Deploying to ${srv.name}…`);
+    // Fan out to all target servers concurrently: wall-clock is the slowest
+    // server, not the sum. Each server's lines are prefixed so interleaved
+    // logs stay readable; one server failing doesn't abort the others.
+    if (await isCancelled(deploymentId)) {
+      log.line("Deployment was cancelled by a newer deploy.");
+      await log.done();
+      return;
+    }
+
+    const deployToServer = async (srv: ServerRow): Promise<boolean> => {
+      const line =
+        targetServers.length > 1 ? (text: string) => log.line(`[${srv.name}] ${text}`) : log.line;
+      if (await isCancelled(deploymentId)) {
+        line("Skipped: deployment was cancelled by a newer deploy.");
+        return false;
+      }
+      line(`Deploying to ${srv.name}…`);
       const connection = await connectionFromServer(srv);
       const agentToken = await decryptSecret(srv.agentToken!);
       if (appRow.appKind !== "database") {
+        // Caddy must exist before the post-deploy route sync; the sync itself
+        // runs only after the new container is up (there is nothing to route
+        // to before that).
         await ensureProxy(connection, agentToken);
-        log.line(`Restoring proxy routes on ${srv.name}…`);
-        const sync = await syncServerDomains(srv.id);
-        log.line(
-          sync.ok
-            ? `Proxy routes restored on ${srv.name} (${sync.count}).`
-            : `Proxy route restore failed on ${srv.name}: ${sync.error}`,
-        );
       }
       if (appRow.sourceType === "image") {
-        log.line(`Pulling ${imageRef} on ${srv.name}…`);
+        line(`Pulling ${imageRef} on ${srv.name}…`);
         if (isSshConnection(connection)) {
           const pull = await runScript(connection, `docker pull ${shellQuote(imageRef)}`, {
-            onLine: log.line,
+            onLine: line,
             timeoutMs: 300_000,
           });
           if (pull.exitCode !== 0) {
@@ -563,18 +699,38 @@ export async function runDeployment(deploymentId: string): Promise<void> {
             : undefined,
       });
 
-      log.line(
+      line(
         result.running
           ? `Container is running on ${srv.name}.`
           : `Container did not start on ${srv.name}.`,
       );
+      let running = result.running;
+
+      // Readiness gates: "the process started" is not "the deploy worked".
+      if (running && appRow.appKind === "database" && databaseKind === "postgres") {
+        line("Waiting for Postgres to accept connections…");
+        const ready = await verifyPostgresReady(
+          connection,
+          agentToken,
+          appRow.id,
+          appRow.databaseUser ?? "postgres",
+        );
+        line(
+          ready.ok
+            ? "Postgres is accepting connections."
+            : ready.output
+              ? `Postgres did not become ready: ${ready.output}`
+              : "Postgres did not become ready.",
+        );
+        running &&= ready.ok;
+      }
       if (
-        result.running &&
+        running &&
         appRow.appKind === "database" &&
         databaseKind === "redis" &&
         databasePasswordPlain
       ) {
-        log.line("Verifying Redis authentication…");
+        line("Verifying Redis authentication…");
         const auth = await verifyRedisAuth(
           connection,
           agentToken,
@@ -582,31 +738,56 @@ export async function runDeployment(deploymentId: string): Promise<void> {
           databasePasswordPlain,
         );
         if (!auth.ok) {
-          log.line(
+          line(
             auth.output
               ? `Redis authentication failed: ${auth.output}`
               : "Redis authentication failed.",
           );
         } else {
-          log.line("Redis authentication verified.");
+          line("Redis authentication verified.");
         }
-        allRunning &&= auth.ok;
+        running &&= auth.ok;
       }
-      if (result.running && appRow.appKind !== "database") {
-        log.line(`Refreshing proxy routes on ${srv.name}…`);
+      if (running && appRow.appKind !== "database") {
+        // Catch immediate crash loops before routing traffic and reporting
+        // healthy: give the app a moment to boot, then confirm it is still up.
+        line(`Verifying the container stays up on ${srv.name}…`);
+        await Bun.sleep(5000);
+        const status = await getAppStatus(connection, agentToken, appRow.id);
+        if (!status.running) {
+          line(`Container exited shortly after starting on ${srv.name} — check the runtime logs.`);
+          running = false;
+        }
+      }
+
+      if (running && appRow.appKind !== "database") {
+        line(`Refreshing proxy routes on ${srv.name}…`);
         const sync = await syncServerDomains(srv.id);
-        log.line(
+        line(
           sync.ok
             ? `Proxy routes refreshed on ${srv.name} (${sync.count}).`
             : `Proxy route refresh failed on ${srv.name}: ${sync.error}`,
         );
       }
-      allRunning &&= result.running;
-    }
+      return running;
+    };
+
+    const settled = await Promise.allSettled(targetServers.map(deployToServer));
+    let allRunning = true;
+    settled.forEach((outcome, index) => {
+      if (outcome.status === "rejected") {
+        const reason =
+          outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+        log.line(`Deploy to ${targetServers[index]!.name} failed: ${reason}`);
+        allRunning = false;
+      } else {
+        allRunning &&= outcome.value;
+      }
+    });
 
     await log.done();
-    await setStatus(deploymentId, allRunning ? "healthy" : "failed");
-    if (allRunning) {
+    const finished = await setStatus(deploymentId, allRunning ? "healthy" : "failed");
+    if (allRunning && finished) {
       await db
         .update(deployment)
         .set({ status: "superseded", updatedAt: new Date() })

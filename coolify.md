@@ -66,17 +66,26 @@ Checked against the current repo on 2026-06-30.
 - [x] `bun run --cwd apps/web build`
 - [x] `git diff --check`
 
+### Done (2026-07-01 → 2026-07-03)
+
+- [x] API routes for projects, servers, apps, deployments, env vars, domains — all workspace-scoped.
+- [x] Full deploy pipeline: clone → Depot/server build (Dockerfile or Railpack) → agent deploy, with BullMQ queue.
+- [x] Railway-style project canvas, app side panel, staged-changes pill, dashboard/servers/secrets redesign.
+- [x] Postgres backups: pg_dump via agent, scheduling + retention, restore, streamed download, alerts.
+- [x] S3 connections (workspace-level, encrypted) with auto/manual backup upload and download fallback.
+- [x] Realtime WebSocket layer (org-scoped events → query invalidation); removed client polling.
+- [x] Deploy pipeline hardening: cancellation-safe status transitions, zombie-deployment recovery, image retention pruning, readiness gates (stay-up check, pg_isready, Redis auth), arm64 platform detection, parallel multi-server deploys, build-time env vars, deployment phase model + UI stepper.
+
 ### Next Implementation Targets
 
+- [ ] App health checks (HTTP path + expected status + interval + timeout) gating deploy cutover and monitored continuously.
+- [ ] Deploy webhooks + success/failure notifications.
+- [ ] Scoped API tokens for automation.
+- [ ] Redis backups (BGSAVE via the existing backup plumbing).
+- [ ] Scheduled cron jobs per app.
+- [ ] Team invites and roles.
 - [ ] Add automatic managed load balancer resync when app server assignments change.
-- [ ] Add provider DNS automation once Basse owns authoritative DNS settings.
 - [ ] Add load balancer action history and health telemetry.
-- [ ] Add real dashboard data fetching through TanStack Query.
-- [ ] Add API routes for projects, servers, apps, and deployments.
-- [ ] Add authenticated API middleware.
-- [ ] Add organization-aware ownership to Basse resources.
-- [ ] Add create-project and create-app flows.
-- [ ] Add first deploy job model and agent contract.
 
 ## Product Shape
 

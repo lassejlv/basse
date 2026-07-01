@@ -15,6 +15,7 @@ import { domains } from "./domains";
 import { environments } from "./environments";
 import { envVars } from "./env-vars";
 import { github } from "./github";
+import { startImagePruner } from "./image-prune";
 import { loadBalancers } from "./load-balancers";
 import { startMonitor } from "./monitor";
 import { outboundAgent } from "./outbound-agent";
@@ -101,43 +102,64 @@ app.get("/health", (c) =>
 app.use("/*", serveStatic({ root: webDist }));
 app.get("*", serveStatic({ path: `${webDist}/index.html` }));
 
-// Start the in-process worker that runs background actions (provisioning, …).
-const worker = startWorker();
-const monitor = startMonitor();
-const backupScheduler = startBackupScheduler();
+// Background services, guarded behind a global symbol: `bun --hot` re-runs
+// this module on every save while the previous run's intervals and worker keep
+// living, so an unguarded start would stack duplicates (and the reconciles
+// would fail every in-flight build on each save). First evaluation wins; a
+// full restart picks up code changes to the services.
+type BackgroundServices = {
+  worker: ReturnType<typeof startWorker>;
+  monitor: { close: () => void };
+  backupScheduler: { close: () => void };
+  imagePruner: { close: () => void };
+};
+const SERVICES_KEY = Symbol.for("basse.background-services");
+const globalState = globalThis as { [SERVICES_KEY]?: BackgroundServices };
 
-// Re-enqueue any server left mid-provision by a previous process (crash/restart).
-void reconcileProvisioningServers().catch(() => {});
+if (!globalState[SERVICES_KEY]) {
+  const services: BackgroundServices = {
+    // In-process worker that runs background actions (provisioning, deploys, …).
+    worker: startWorker(),
+    monitor: startMonitor(),
+    backupScheduler: startBackupScheduler(),
+    imagePruner: startImagePruner(),
+  };
+  globalState[SERVICES_KEY] = services;
 
-// Fail any deployment left mid-build/deploy by a crashed process (can't resume).
-void reconcileInflightDeployments().catch(() => {});
+  // Re-enqueue any server left mid-provision by a previous process (crash/restart).
+  void reconcileProvisioningServers().catch(() => {});
 
-// Graceful shutdown: stop fetching new jobs and let the in-flight job finish
-// before the process exits (docker-compose grants a stop_grace_period for this).
-let shuttingDown = false;
-async function shutdown(): Promise<void> {
-  if (shuttingDown) {
-    return;
-  }
-  shuttingDown = true;
-  try {
-    monitor.close();
-    backupScheduler.close();
-    await worker.close();
-    await actionsQueue.close();
-  } catch (error) {
-    console.error("[shutdown]", error);
-  } finally {
-    process.exit(0);
-  }
+  // Fail any deployment left mid-build/deploy by a crashed process (can't resume).
+  void reconcileInflightDeployments().catch(() => {});
+
+  // Graceful shutdown: stop fetching new jobs and let the in-flight job finish
+  // before the process exits (docker-compose grants a stop_grace_period for this).
+  let shuttingDown = false;
+  const shutdown = async (): Promise<void> => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    try {
+      services.monitor.close();
+      services.backupScheduler.close();
+      services.imagePruner.close();
+      await services.worker.close();
+      await actionsQueue.close();
+    } catch (error) {
+      console.error("[shutdown]", error);
+    } finally {
+      process.exit(0);
+    }
+  };
+
+  process.on("SIGTERM", () => void shutdown());
+  process.on("SIGINT", () => void shutdown());
+
+  // PID-1 backstops: a stray rejection/exception must never take the server down.
+  process.on("unhandledRejection", (reason) => console.error("[unhandledRejection]", reason));
+  process.on("uncaughtException", (error) => console.error("[uncaughtException]", error));
 }
-
-process.on("SIGTERM", () => void shutdown());
-process.on("SIGINT", () => void shutdown());
-
-// PID-1 backstops: a stray rejection/exception must never take the server down.
-process.on("unhandledRejection", (reason) => console.error("[unhandledRejection]", reason));
-process.on("uncaughtException", (error) => console.error("[uncaughtException]", error));
 
 export default {
   port: Number(Bun.env.API_PORT ?? 3000),
