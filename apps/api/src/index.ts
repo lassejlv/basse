@@ -15,6 +15,7 @@ import { envVars } from "./env-vars";
 import { github } from "./github";
 import { loadBalancers } from "./load-balancers";
 import { startMonitor } from "./monitor";
+import { outboundAgent } from "./outbound-agent";
 import { projects } from "./projects";
 import { actionsQueue } from "./queue/queue";
 import { reconcileProvisioningServers } from "./queue/reconcile";
@@ -76,6 +77,7 @@ app.route("/api/domains", domains);
 app.route("/api/load-balancers", loadBalancers);
 app.route("/api/workspace", workspaceSettingsRoutes);
 app.route("/api/alerts", alerts);
+app.route("/api/agent/outbound", outboundAgent);
 
 app.get("/health", (c) =>
   c.json({

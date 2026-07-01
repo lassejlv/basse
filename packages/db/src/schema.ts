@@ -33,6 +33,10 @@ export const server = pgTable(
     sshPrivateKey: text("ssh_private_key").notNull(),
     // Bearer token the agent requires; encrypted at rest. Null until provisioned.
     agentToken: text("agent_token"),
+    agentTokenHash: text("agent_token_hash"),
+    connectionMode: text("connection_mode", { enum: ["ssh", "outbound"] })
+      .notNull()
+      .default("ssh"),
     // Loopback URL the agent listens on (reached via SSH tunnel). Null until up.
     agentUrl: text("agent_url"),
     hostKeyFingerprint: text("host_key_fingerprint"),
@@ -47,6 +51,33 @@ export const server = pgTable(
     updatedAt: timestamp("updated_at").notNull(),
   },
   (table) => [index("server_organizationId_idx").on(table.organizationId)],
+);
+
+export const agentCommand = pgTable(
+  "agent_command",
+  {
+    id: text("id").primaryKey(),
+    serverId: text("server_id")
+      .notNull()
+      .references(() => server.id, { onDelete: "cascade" }),
+    method: text("method").notNull(),
+    path: text("path").notNull(),
+    body: text("body"),
+    status: text("status", { enum: ["queued", "running", "completed", "failed", "expired"] })
+      .notNull()
+      .default("queued"),
+    responseStatus: integer("response_status"),
+    responseBody: text("response_body"),
+    error: text("error"),
+    leaseUntil: timestamp("lease_until"),
+    completedAt: timestamp("completed_at"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("agent_command_serverId_status_idx").on(table.serverId, table.status),
+    index("agent_command_createdAt_idx").on(table.createdAt),
+  ],
 );
 
 export const project = pgTable(
@@ -450,6 +481,13 @@ export const appServerRelations = relations(appServer, ({ one }) => ({
   }),
   server: one(server, {
     fields: [appServer.serverId],
+    references: [server.id],
+  }),
+}));
+
+export const agentCommandRelations = relations(agentCommand, ({ one }) => ({
+  server: one(server, {
+    fields: [agentCommand.serverId],
     references: [server.id],
   }),
 }));

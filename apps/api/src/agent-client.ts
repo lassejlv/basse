@@ -1,4 +1,5 @@
 import type { DesiredDomain, ProxyStatus } from "@basse/shared";
+import { sendOutboundAgentRequest } from "./outbound-agent";
 import type { SshConnection } from "./ssh";
 import { withTunnel } from "./ssh";
 
@@ -7,6 +8,13 @@ import { withTunnel } from "./ssh";
 // bearer token therefore never crosses the public network.
 
 export const AGENT_PORT = 8888;
+
+export type OutboundAgentConnection = {
+  mode: "outbound";
+  serverId: string;
+};
+
+export type AgentConnection = SshConnection | OutboundAgentConnection;
 
 export type AgentVersion = {
   version: string;
@@ -36,46 +44,107 @@ export type AgentInfo = {
   };
 };
 
-type AgentCallContext = {
-  baseUrl: string;
-  token: string;
-};
+function isOutboundConnection(conn: AgentConnection): conn is OutboundAgentConnection {
+  return "mode" in conn && conn.mode === "outbound";
+}
 
-async function getJson<T>(ctx: AgentCallContext, path: string, authed: boolean): Promise<T> {
-  const response = await fetch(`${ctx.baseUrl}${path}`, {
-    headers: authed ? { authorization: `Bearer ${ctx.token}` } : undefined,
-    signal: AbortSignal.timeout(10_000),
+async function fetchAgent(
+  conn: AgentConnection,
+  token: string,
+  input: {
+    method: string;
+    path: string;
+    body?: unknown;
+    authed?: boolean;
+    timeoutMs: number;
+  },
+): Promise<{ status: number; ok: boolean; text: string }> {
+  if (isOutboundConnection(conn)) {
+    const result = await sendOutboundAgentRequest({
+      serverId: conn.serverId,
+      method: input.method,
+      path: input.path,
+      body: input.body,
+      timeoutMs: input.timeoutMs,
+    });
+    return {
+      status: result.status,
+      ok: result.status >= 200 && result.status < 300,
+      text: result.body,
+    };
+  }
+
+  return withTunnel(conn, AGENT_PORT, async (baseUrl) => {
+    const response = await fetch(`${baseUrl}${input.path}`, {
+      method: input.method,
+      headers: input.authed
+        ? {
+            authorization: `Bearer ${token}`,
+            ...(typeof input.body === "undefined" ? {} : { "content-type": "application/json" }),
+          }
+        : typeof input.body === "undefined"
+          ? undefined
+          : { "content-type": "application/json" },
+      body: typeof input.body === "undefined" ? undefined : JSON.stringify(input.body),
+      signal: AbortSignal.timeout(input.timeoutMs),
+    });
+    return { status: response.status, ok: response.ok, text: await response.text() };
+  });
+}
+
+function parseJson<T>(text: string): T {
+  return (text ? JSON.parse(text) : null) as T;
+}
+
+async function getJson<T>(
+  conn: AgentConnection,
+  token: string,
+  path: string,
+  authed: boolean,
+): Promise<T> {
+  const response = await fetchAgent(conn, token, {
+    method: "GET",
+    path,
+    authed,
+    timeoutMs: 10_000,
   });
 
   if (!response.ok) {
     throw new Error(`agent ${path} returned ${response.status}`);
   }
 
-  return response.json() as Promise<T>;
+  return parseJson<T>(response.text);
 }
 
 async function postJson<T>(
-  ctx: AgentCallContext,
+  conn: AgentConnection,
+  token: string,
   path: string,
   body: unknown,
   timeoutMs: number,
 ): Promise<T> {
-  const response = await fetch(`${ctx.baseUrl}${path}`, {
+  const response = await fetchAgent(conn, token, {
     method: "POST",
-    headers: {
-      authorization: `Bearer ${ctx.token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeoutMs),
+    path,
+    body,
+    authed: true,
+    timeoutMs,
   });
 
   if (!response.ok) {
-    const detail = (await response.json().catch(() => null)) as { error?: string } | null;
+    const detail = response.text
+      ? (() => {
+          try {
+            return parseJson<{ error?: string }>(response.text);
+          } catch {
+            return null;
+          }
+        })()
+      : null;
     throw new Error(detail?.error ?? `agent ${path} returned ${response.status}`);
   }
 
-  return response.json() as Promise<T>;
+  return parseJson<T>(response.text);
 }
 
 /**
@@ -83,30 +152,21 @@ async function postJson<T>(
  * /v1/proxy/ensure with a generous timeout (image pull + container start +
  * admin wait). Throws on failure.
  */
-export async function ensureProxy(conn: SshConnection, token: string): Promise<ProxyStatus> {
-  return withTunnel(
-    conn,
-    AGENT_PORT,
-    (baseUrl) => postJson<ProxyStatus>({ baseUrl, token }, "/v1/proxy/ensure", {}, 170_000),
-    { timeoutMs: 20_000 },
-  );
+export async function ensureProxy(conn: AgentConnection, token: string): Promise<ProxyStatus> {
+  return postJson<ProxyStatus>(conn, token, "/v1/proxy/ensure", {}, 170_000);
 }
 
-export async function getAgentInfo(conn: SshConnection, token: string): Promise<AgentInfo> {
-  return withTunnel(conn, AGENT_PORT, (baseUrl) =>
-    getJson<AgentInfo>({ baseUrl, token }, "/v1/info", true),
-  );
+export async function getAgentInfo(conn: AgentConnection, token: string): Promise<AgentInfo> {
+  return getJson<AgentInfo>(conn, token, "/v1/info", true);
 }
 
 /** Pushes the full desired domain set to the server's Caddy. Throws on failure. */
 export async function syncDomains(
-  conn: SshConnection,
+  conn: AgentConnection,
   token: string,
   domains: DesiredDomain[],
 ): Promise<void> {
-  await withTunnel(conn, AGENT_PORT, (baseUrl) =>
-    postJson({ baseUrl, token }, "/v1/proxy/sync", { domains }, 30_000),
-  );
+  await postJson(conn, token, "/v1/proxy/sync", { domains }, 30_000);
 }
 
 export type DeployAppInput = {
@@ -162,36 +222,24 @@ export type AgentContainerDetails = AgentContainerSummary & {
 };
 
 export async function listImportableContainers(
-  conn: SshConnection,
+  conn: AgentConnection,
   token: string,
 ): Promise<AgentContainerSummary[]> {
-  return withTunnel(conn, AGENT_PORT, async (baseUrl) => {
-    const response = await getJson<{ containers: AgentContainerSummary[] }>(
-      { baseUrl, token },
-      "/v1/apps/importable-containers",
-      true,
-    );
-    return response.containers;
-  });
+  const response = await getJson<{ containers: AgentContainerSummary[] }>(
+    conn,
+    token,
+    "/v1/apps/importable-containers",
+    true,
+  );
+  return response.containers;
 }
 
 export async function importContainer(
-  conn: SshConnection,
+  conn: AgentConnection,
   token: string,
   input: { appId: string; containerId: string },
 ): Promise<AgentContainerDetails> {
-  return withTunnel(
-    conn,
-    AGENT_PORT,
-    (baseUrl) =>
-      postJson<AgentContainerDetails>(
-        { baseUrl, token },
-        "/v1/apps/import-container",
-        input,
-        60_000,
-      ),
-    { timeoutMs: 20_000 },
-  );
+  return postJson<AgentContainerDetails>(conn, token, "/v1/apps/import-container", input, 60_000);
 }
 
 /**
@@ -200,30 +248,24 @@ export async function importContainer(
  * timeout is generous. Throws on failure.
  */
 export async function deployApp(
-  conn: SshConnection,
+  conn: AgentConnection,
   token: string,
   input: DeployAppInput,
 ): Promise<DeployAppResult> {
-  return withTunnel(
-    conn,
-    AGENT_PORT,
-    (baseUrl) => postJson<DeployAppResult>({ baseUrl, token }, "/v1/apps/deploy", input, 300_000),
-    { timeoutMs: 20_000 },
-  );
+  return postJson<DeployAppResult>(conn, token, "/v1/apps/deploy", input, 300_000);
 }
 
 /** Reports whether an app container exists and is running. Throws on failure. */
 export async function getAppStatus(
-  conn: SshConnection,
+  conn: AgentConnection,
   token: string,
   appId: string,
 ): Promise<{ exists: boolean; running: boolean }> {
-  return withTunnel(conn, AGENT_PORT, (baseUrl) =>
-    getJson<{ exists: boolean; running: boolean }>(
-      { baseUrl, token },
-      `/v1/apps/${appId}/status`,
-      true,
-    ),
+  return getJson<{ exists: boolean; running: boolean }>(
+    conn,
+    token,
+    `/v1/apps/${appId}/status`,
+    true,
   );
 }
 
@@ -235,62 +277,57 @@ export type AgentAppMetrics = {
 };
 
 export async function getAppMetrics(
-  conn: SshConnection,
+  conn: AgentConnection,
   token: string,
   appId: string,
 ): Promise<AgentAppMetrics> {
-  return withTunnel(conn, AGENT_PORT, (baseUrl) =>
-    getJson<AgentAppMetrics>({ baseUrl, token }, `/v1/apps/${appId}/metrics`, true),
-  );
+  return getJson<AgentAppMetrics>(conn, token, `/v1/apps/${appId}/metrics`, true);
 }
 
 export async function getAppLogs(
-  conn: SshConnection,
+  conn: AgentConnection,
   token: string,
   appId: string,
   tail = 250,
 ): Promise<{ logs: string }> {
-  return withTunnel(conn, AGENT_PORT, (baseUrl) =>
-    getJson<{ logs: string }>(
-      { baseUrl, token },
-      `/v1/apps/${appId}/logs?tail=${encodeURIComponent(String(tail))}`,
-      true,
-    ),
+  return getJson<{ logs: string }>(
+    conn,
+    token,
+    `/v1/apps/${appId}/logs?tail=${encodeURIComponent(String(tail))}`,
+    true,
   );
 }
 
 export async function execAppCommand(
-  conn: SshConnection,
+  conn: AgentConnection,
   token: string,
   appId: string,
   command: string,
 ): Promise<{ exitCode: number; output: string }> {
-  return withTunnel(
+  return postJson<{ exitCode: number; output: string }>(
     conn,
-    AGENT_PORT,
-    (baseUrl) =>
-      postJson<{ exitCode: number; output: string }>(
-        { baseUrl, token },
-        `/v1/apps/${appId}/exec`,
-        { command },
-        25_000,
-      ),
-    { timeoutMs: 20_000 },
+    token,
+    `/v1/apps/${appId}/exec`,
+    { command },
+    25_000,
   );
 }
 
 /** Tears down an app container. Throws on failure. */
-export async function removeApp(conn: SshConnection, token: string, appId: string): Promise<void> {
-  await withTunnel(conn, AGENT_PORT, async (baseUrl) => {
-    const response = await fetch(`${baseUrl}/v1/apps/${appId}`, {
-      method: "DELETE",
-      headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!response.ok) {
-      throw new Error(`agent app remove returned ${response.status}`);
-    }
+export async function removeApp(
+  conn: AgentConnection,
+  token: string,
+  appId: string,
+): Promise<void> {
+  const response = await fetchAgent(conn, token, {
+    method: "DELETE",
+    path: `/v1/apps/${appId}`,
+    authed: true,
+    timeoutMs: 30_000,
   });
+  if (!response.ok) {
+    throw new Error(`agent app remove returned ${response.status}`);
+  }
 }
 
 /**
@@ -299,39 +336,36 @@ export async function removeApp(conn: SshConnection, token: string, appId: strin
  * Never throws — returns a structured health result.
  */
 export async function checkAgentHealth(
-  conn: SshConnection,
+  conn: AgentConnection,
   token: string,
   options: { attempts?: number } = {},
 ): Promise<AgentHealth> {
   const attempts = options.attempts ?? 5;
 
   try {
-    return await withTunnel(conn, AGENT_PORT, async (baseUrl) => {
-      const ctx: AgentCallContext = { baseUrl, token };
-      let lastError = "";
+    let lastError = "";
 
-      for (let attempt = 0; attempt < attempts; attempt++) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        await getJson<{ status: string }>(conn, token, "/healthz", false);
+
+        let ready = false;
         try {
-          await getJson<{ status: string }>(ctx, "/healthz", false);
-
-          let ready = false;
-          try {
-            await getJson<{ status: string }>(ctx, "/readyz", false);
-            ready = true;
-          } catch {
-            ready = false;
-          }
-
-          const version = await getJson<AgentVersion>(ctx, "/v1/version", true);
-          return { reachable: true, ready, version: version.version };
-        } catch (error) {
-          lastError = error instanceof Error ? error.message : String(error);
-          await Bun.sleep(1000 * (attempt + 1));
+          await getJson<{ status: string }>(conn, token, "/readyz", false);
+          ready = true;
+        } catch {
+          ready = false;
         }
-      }
 
-      return { reachable: false, ready: false, error: lastError || "agent unreachable" };
-    });
+        const version = await getJson<AgentVersion>(conn, token, "/v1/version", true);
+        return { reachable: true, ready, version: version.version };
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+        await Bun.sleep(1000 * (attempt + 1));
+      }
+    }
+
+    return { reachable: false, ready: false, error: lastError || "agent unreachable" };
   } catch (error) {
     return {
       reachable: false,

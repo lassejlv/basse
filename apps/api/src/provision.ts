@@ -1,10 +1,10 @@
 import { db, server } from "@basse/db";
 import { eq } from "drizzle-orm";
-import { AGENT_PORT, checkAgentHealth, ensureProxy } from "./agent-client";
+import { AGENT_PORT, checkAgentHealth, ensureProxy, type AgentConnection } from "./agent-client";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { syncServerDomains } from "./proxy-sync";
 import { connectionFromServer } from "./server-connection";
-import { probeReachable, runScript, writeRemoteFile } from "./ssh";
+import { probeReachable, runScript, writeRemoteFile, type SshConnection } from "./ssh";
 
 type ServerRow = typeof server.$inferSelect;
 
@@ -16,6 +16,10 @@ const AGENT_ENV_PATH = "/etc/basse/agent.env";
 // (at agent-run time, here) and the Caddy container (by the agent). Must match
 // the agent's BASSE_CADDY_ADMIN_VOLUME / BASSE_CADDY_ADMIN_DIR defaults.
 const CADDY_ADMIN_MOUNT = "basse_caddy_admin:/run/caddy-admin";
+
+function isSshConnection(connection: AgentConnection): connection is SshConnection {
+  return !("mode" in connection);
+}
 
 // Operator-controlled image ref; validate defensively since it is the one value
 // interpolated into the remote bootstrap script.
@@ -94,6 +98,14 @@ export async function provisionServer(serverId: string): Promise<void> {
 
     const token = await ensureAgentToken(row);
     const connection = await connectionFromServer(row);
+    if (!isSshConnection(connection)) {
+      await setStatus(
+        serverId,
+        "error",
+        "Outbound servers connect from the server and do not use SSH provisioning",
+      );
+      return;
+    }
 
     await setStatus(serverId, "provisioning", "Connecting over SSH…");
     const probe = await probeReachable(connection);

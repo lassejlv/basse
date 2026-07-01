@@ -13,12 +13,13 @@ import { checkAgentHealth, getAgentInfo } from "./agent-client";
 import { auth } from "./auth";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { sendServerDeleteCodeEmail } from "./email";
+import { agentTokenHash } from "./outbound-agent";
 import { AGENT_IMAGE, IMAGE_REF_PATTERN } from "./provision";
 import { enqueueOrRunDomainSync } from "./proxy-sync";
 import { enqueueAction } from "./queue/queue";
 import { connectionFromServer } from "./server-connection";
 import { derivePublicKey, generateServerKeyPair } from "./server-keys";
-import { probeReachable, runScript } from "./ssh";
+import { probeReachable, runScript, type SshConnection } from "./ssh";
 import { resolveActiveWorkspace } from "./workspace";
 
 type ServerRow = typeof server.$inferSelect;
@@ -34,7 +35,10 @@ const SERVER_DELETE_CODE_TTL_MS = 10 * 60 * 1000;
  * Maps a DB row to the client-facing DTO. Never exposes the private key or the
  * raw agent token — only the public key and a last-4 token hint (depot pattern).
  */
-async function sanitizeServer(row: ServerRow): Promise<Server> {
+async function sanitizeServer(
+  row: ServerRow,
+  extras: Partial<Pick<Server, "agentInstallCommand">> = {},
+): Promise<Server> {
   let agentTokenHint: string | undefined;
 
   if (row.agentToken) {
@@ -54,6 +58,7 @@ async function sanitizeServer(row: ServerRow): Promise<Server> {
     sshPort: row.sshPort,
     sshUser: row.sshUser,
     sshPublicKey: row.sshPublicKey,
+    connectionMode: row.connectionMode,
     agentUrl: row.agentUrl,
     status: row.status,
     statusMessage: row.statusMessage,
@@ -62,6 +67,7 @@ async function sanitizeServer(row: ServerRow): Promise<Server> {
     lastSeenAt: row.lastSeenAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    ...extras,
   };
 }
 
@@ -76,7 +82,9 @@ async function ownedServer(serverId: string, organizationId: string): Promise<Se
   return row ?? null;
 }
 
-async function resolveActiveWorkspaceUser(headers: Headers): Promise<ActiveWorkspaceUser | Response> {
+async function resolveActiveWorkspaceUser(
+  headers: Headers,
+): Promise<ActiveWorkspaceUser | Response> {
   const session = await auth.api.getSession({ headers });
 
   if (!session) {
@@ -112,6 +120,35 @@ async function requireAgent(row: ServerRow) {
   const connection = await connectionFromServer(row);
   const token = await decryptSecret(row.agentToken);
   return { connection, token };
+}
+
+function isSshConnection(
+  connection: Awaited<ReturnType<typeof connectionFromServer>>,
+): connection is SshConnection {
+  return !("mode" in connection);
+}
+
+function apiOriginFromRequest(request: Request): string {
+  const configured = Bun.env.API_ORIGIN ?? Bun.env.BETTER_AUTH_URL;
+  if (configured) return configured.replace(/\/+$/, "");
+  return new URL(request.url).origin;
+}
+
+function outboundInstallCommand(input: { apiOrigin: string; token: string }): string {
+  return [
+    "docker run -d --name basse-agent --restart unless-stopped",
+    "-v /var/run/docker.sock:/var/run/docker.sock",
+    "-v basse_caddy_data:/data",
+    "-v basse_caddy_admin:/run/caddy-admin",
+    `-e BASSE_AGENT_TOKEN=${shellArg(input.token)}`,
+    "-e BASSE_AGENT_MODE=outbound",
+    `-e BASSE_CONTROL_PLANE_URL=${shellArg(input.apiOrigin)}`,
+    shellArg(AGENT_IMAGE),
+  ].join(" \\\n  ");
+}
+
+function shellArg(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function parseDockerStatsLine(line: string): Omit<AgentMetrics, "timestamp"> {
@@ -221,7 +258,7 @@ servers.get("/", async (c) => {
     .where(eq(server.organizationId, organizationId))
     .orderBy(server.createdAt);
 
-  return c.json(await Promise.all(rows.map(sanitizeServer)));
+  return c.json(await Promise.all(rows.map((row) => sanitizeServer(row))));
 });
 
 servers.get("/:id", async (c) => {
@@ -309,10 +346,16 @@ servers.get("/:id/agent/logs", async (c) => {
 
   const row = await ownedServer(c.req.param("id"), organizationId);
   if (!row) return c.json({ error: "Server not found" }, 404);
+  if (row.connectionMode === "outbound") {
+    return c.json({ error: "Outbound servers do not expose host-level agent logs over SSH" }, 400);
+  }
 
   const tail = Math.min(Math.max(Number(c.req.query("tail") ?? 200) || 200, 20), 1000);
+  const connection = await connectionFromServer(row);
+  if (!isSshConnection(connection))
+    return c.json({ error: "Server is not configured for SSH" }, 400);
   const result = await runScript(
-    await connectionFromServer(row),
+    connection,
     `docker logs --tail ${tail} basse-agent 2>&1 || true`,
     { timeoutMs: 30_000 },
   );
@@ -325,9 +368,18 @@ servers.get("/:id/agent/metrics", async (c) => {
 
   const row = await ownedServer(c.req.param("id"), organizationId);
   if (!row) return c.json({ error: "Server not found" }, 404);
+  if (row.connectionMode === "outbound") {
+    return c.json(
+      { error: "Outbound servers do not expose host-level Docker stats over SSH" },
+      400,
+    );
+  }
 
+  const connection = await connectionFromServer(row);
+  if (!isSshConnection(connection))
+    return c.json({ error: "Server is not configured for SSH" }, 400);
   const result = await runScript(
-    await connectionFromServer(row),
+    connection,
     `docker stats --no-stream --format '{{json .}}' basse-agent 2>/dev/null || true`,
     { timeoutMs: 30_000 },
   );
@@ -343,12 +395,18 @@ servers.post("/:id/agent/check-update", async (c) => {
 
   const row = await ownedServer(c.req.param("id"), organizationId);
   if (!row) return c.json({ error: "Server not found" }, 404);
+  if (row.connectionMode === "outbound") {
+    return c.json({ error: "Outbound agent updates must be run on the server with Docker" }, 400);
+  }
   if (!IMAGE_REF_PATTERN.test(AGENT_IMAGE)) {
     return c.json({ error: "Invalid agent image reference" }, 400);
   }
 
+  const connection = await connectionFromServer(row);
+  if (!isSshConnection(connection))
+    return c.json({ error: "Server is not configured for SSH" }, 400);
   const result = await runScript(
-    await connectionFromServer(row),
+    connection,
     `set -e
 current="$(docker inspect --format '{{.Image}}' basse-agent 2>/dev/null || true)"
 docker pull "${AGENT_IMAGE}"
@@ -381,6 +439,9 @@ servers.post("/:id/agent/update", async (c) => {
   const id = c.req.param("id");
   const row = await ownedServer(id, organizationId);
   if (!row) return c.json({ error: "Server not found" }, 404);
+  if (row.connectionMode === "outbound") {
+    return c.json({ error: "Outbound servers are updated by rerunning the install command" }, 400);
+  }
 
   await db
     .update(server)
@@ -417,7 +478,9 @@ servers.post("/", async (c) => {
   const sshPort = typeof body?.sshPort === "number" ? body.sshPort : 22;
   const sshUser =
     typeof body?.sshUser === "string" && body.sshUser.trim() ? body.sshUser.trim() : "root";
-  const sshKeyId = typeof body?.sshKeyId === "string" && body.sshKeyId.trim() ? body.sshKeyId.trim() : null;
+  const connectionMode = body?.connectionMode === "outbound" ? "outbound" : "ssh";
+  const sshKeyId =
+    typeof body?.sshKeyId === "string" && body.sshKeyId.trim() ? body.sshKeyId.trim() : null;
   const providedPrivateKey =
     typeof body?.privateKey === "string" && body.privateKey.trim() ? body.privateKey.trim() : null;
 
@@ -433,7 +496,7 @@ servers.post("/", async (c) => {
     return c.json({ error: "sshPort must be a valid port" }, 400);
   }
 
-  if (sshKeyId && providedPrivateKey) {
+  if (connectionMode === "ssh" && sshKeyId && providedPrivateKey) {
     return c.json({ error: "Choose a saved SSH key or paste a private key, not both" }, 400);
   }
 
@@ -444,7 +507,11 @@ servers.post("/", async (c) => {
   let publicKey: string;
   let privateKey: string;
 
-  if (sshKeyId) {
+  if (connectionMode === "outbound") {
+    const keyPair = await generateServerKeyPair(id);
+    publicKey = keyPair.publicKey;
+    privateKey = keyPair.privateKey;
+  } else if (sshKeyId) {
     const [storedKey] = await db
       .select()
       .from(sshKey)
@@ -475,6 +542,9 @@ servers.post("/", async (c) => {
   }
 
   const encryptedPrivateKey = await encryptSecret(privateKey);
+  const rawAgentToken =
+    connectionMode === "outbound" ? `ba_${crypto.randomUUID().replaceAll("-", "")}` : null;
+  const encryptedAgentToken = rawAgentToken ? await encryptSecret(rawAgentToken) : null;
   const now = new Date();
 
   const [created] = await db
@@ -488,7 +558,13 @@ servers.post("/", async (c) => {
       sshUser,
       sshPublicKey: publicKey,
       sshPrivateKey: encryptedPrivateKey,
+      agentToken: encryptedAgentToken,
+      agentTokenHash: rawAgentToken ? await agentTokenHash(rawAgentToken) : null,
+      connectionMode,
+      agentUrl: connectionMode === "outbound" ? `outbound:${id}` : null,
       status: "pending",
+      statusMessage:
+        connectionMode === "outbound" ? "Waiting for outbound agent to connect…" : null,
       createdAt: now,
       updatedAt: now,
     })
@@ -498,7 +574,20 @@ servers.post("/", async (c) => {
     return c.json({ error: "Failed to create server" }, 500);
   }
 
-  return c.json(await sanitizeServer(created), 201);
+  return c.json(
+    await sanitizeServer(
+      created,
+      rawAgentToken
+        ? {
+            agentInstallCommand: outboundInstallCommand({
+              apiOrigin: apiOriginFromRequest(c.req.raw),
+              token: rawAgentToken,
+            }),
+          }
+        : {},
+    ),
+    201,
+  );
 });
 
 servers.post("/:id/provision", async (c) => {
@@ -509,6 +598,14 @@ servers.post("/:id/provision", async (c) => {
   }
 
   const id = c.req.param("id");
+  const row = await ownedServer(id, organizationId);
+  if (!row) return c.json({ error: "Server not found" }, 404);
+  if (row.connectionMode === "outbound") {
+    return c.json(
+      { error: "Outbound servers connect from the server and do not use SSH provisioning" },
+      400,
+    );
+  }
 
   // Atomically claim the row: only a server that is not already provisioning can
   // be (re-)provisioned. The conditional update is the concurrency lock.
@@ -608,6 +705,9 @@ servers.post("/:id/check-connection", async (c) => {
   }
 
   const connection = await connectionFromServer(row);
+  if (!isSshConnection(connection)) {
+    return c.json({ error: "Outbound servers do not accept SSH connection checks" }, 400);
+  }
   const result = await probeReachable(connection);
 
   if (result.fingerprint && result.fingerprint !== row.hostKeyFingerprint) {

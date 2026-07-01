@@ -8,6 +8,9 @@ import (
 
 // Config holds the agent's runtime settings, all sourced from the environment.
 type Config struct {
+	// Mode controls how the control plane reaches this agent. "serve" is the
+	// default SSH-tunnel mode; "outbound" additionally polls the control plane.
+	Mode string
 	// Port the HTTP server listens on. The control plane reaches this over an
 	// SSH local-port-forward, so the container publishes it to host loopback only.
 	Port string
@@ -16,6 +19,8 @@ type Config struct {
 	Token string
 	// DockerHost is the Docker Engine API socket path.
 	DockerHost string
+	// ControlPlaneURL is required when Mode is "outbound".
+	ControlPlaneURL string
 
 	// Proxy (Caddy) settings.
 	CaddyImage     string // image the agent runs as the proxy
@@ -41,19 +46,27 @@ func (c Config) InitConfigPath() string {
 // Load reads configuration from the environment and validates it.
 func Load() (Config, error) {
 	cfg := Config{
-		Port:           envOr("BASSE_AGENT_PORT", "8888"),
-		Token:          os.Getenv("BASSE_AGENT_TOKEN"),
-		DockerHost:     envOr("BASSE_DOCKER_SOCKET", "/var/run/docker.sock"),
-		CaddyImage:     envOr("BASSE_CADDY_IMAGE", "caddy:2"),
-		CaddyContainer: envOr("BASSE_CADDY_CONTAINER", "basse-caddy"),
-		ProxyNetwork:   envOr("BASSE_PROXY_NETWORK", "basse"),
-		DataVolume:     envOr("BASSE_CADDY_DATA_VOLUME", "basse_caddy_data"),
-		AdminVolume:    envOr("BASSE_CADDY_ADMIN_VOLUME", "basse_caddy_admin"),
-		AdminDir:       envOr("BASSE_CADDY_ADMIN_DIR", "/run/caddy-admin"),
+		Mode:            envOr("BASSE_AGENT_MODE", "serve"),
+		Port:            envOr("BASSE_AGENT_PORT", "8888"),
+		Token:           os.Getenv("BASSE_AGENT_TOKEN"),
+		DockerHost:      envOr("BASSE_DOCKER_SOCKET", "/var/run/docker.sock"),
+		ControlPlaneURL: os.Getenv("BASSE_CONTROL_PLANE_URL"),
+		CaddyImage:      envOr("BASSE_CADDY_IMAGE", "caddy:2"),
+		CaddyContainer:  envOr("BASSE_CADDY_CONTAINER", "basse-caddy"),
+		ProxyNetwork:    envOr("BASSE_PROXY_NETWORK", "basse"),
+		DataVolume:      envOr("BASSE_CADDY_DATA_VOLUME", "basse_caddy_data"),
+		AdminVolume:     envOr("BASSE_CADDY_ADMIN_VOLUME", "basse_caddy_admin"),
+		AdminDir:        envOr("BASSE_CADDY_ADMIN_DIR", "/run/caddy-admin"),
 	}
 
 	if cfg.Token == "" {
 		return Config{}, fmt.Errorf("BASSE_AGENT_TOKEN is required")
+	}
+	if cfg.Mode != "serve" && cfg.Mode != "outbound" {
+		return Config{}, fmt.Errorf("BASSE_AGENT_MODE must be serve or outbound")
+	}
+	if cfg.Mode == "outbound" && cfg.ControlPlaneURL == "" {
+		return Config{}, fmt.Errorf("BASSE_CONTROL_PLANE_URL is required in outbound mode")
 	}
 
 	return cfg, nil

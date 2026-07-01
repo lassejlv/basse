@@ -1,11 +1,8 @@
 import { appServer, db, server } from "@basse/db";
 import { eq, inArray } from "drizzle-orm";
+import { removeApp } from "./agent-client";
+import { decryptSecret } from "./crypto";
 import { connectionFromServer } from "./server-connection";
-import { runScript } from "./ssh";
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
 
 export async function removeAppContainers(appIds: string[]): Promise<void> {
   const ids = [...new Set(appIds)].filter(Boolean);
@@ -22,11 +19,8 @@ export async function removeAppContainers(appIds: string[]): Promise<void> {
       if (row.server.status !== "active" || !row.server.agentToken) return;
 
       const connection = await connectionFromServer(row.server);
-      await runScript(
-        connection,
-        `docker rm -f ${shellQuote(`basse-app-${row.appId}`)} >/dev/null 2>&1 || true`,
-        { timeoutMs: 30_000 },
-      );
+      const token = await decryptSecret(row.server.agentToken);
+      await removeApp(connection, token, row.appId);
     }),
   );
 }

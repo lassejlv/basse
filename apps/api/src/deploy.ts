@@ -14,7 +14,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deployApp, ensureProxy, execAppCommand } from "./agent-client";
+import { deployApp, ensureProxy, execAppCommand, type AgentConnection } from "./agent-client";
 import {
   buildImage,
   buildImageOnServer,
@@ -115,6 +115,10 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+function isSshConnection(connection: AgentConnection): connection is SshConnection {
+  return !("mode" in connection);
+}
+
 function databaseImage(appRow: typeof app.$inferSelect): string {
   const kind = (appRow.databaseKind ?? "postgres") as DatabaseKind;
   if (kind === "postgres") return `postgres:${appRow.databaseVersion ?? DEFAULT_POSTGRES_VERSION}`;
@@ -146,7 +150,7 @@ function databaseVolume(appId: string, kind: DatabaseKind, version: string | nul
 }
 
 async function verifyRedisAuth(
-  connection: SshConnection,
+  connection: AgentConnection,
   agentToken: string,
   appId: string,
   password: string,
@@ -315,6 +319,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         return;
       }
       imageRef = appRow.imageRef || databaseImage(appRow);
+      pullImage = true;
       if (!imageRef) {
         log.line("No database image configured for this app.");
         await log.done();
@@ -332,6 +337,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         return;
       }
       imageRef = appRow.imageRef;
+      pullImage = true;
       log.line(`Using prebuilt Docker image ${imageRef}.`);
     } else {
       // Clone.
@@ -398,6 +404,12 @@ export async function runDeployment(deploymentId: string): Promise<void> {
           `Building with ${kind === "dockerfile" ? "Dockerfile" : "Railpack"} on ${buildServer.name}…`,
         );
         const connection = await connectionFromServer(buildServer);
+        if (!isSshConnection(connection)) {
+          log.line("Selected-server builds require SSH. Use Depot builds for outbound servers.");
+          await log.done();
+          await setStatus(deploymentId, "failed");
+          return;
+        }
         const built = await buildImageOnServer({
           kind,
           ctxDir: buildPaths.buildDir,
@@ -517,12 +529,14 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       }
       if (appRow.sourceType === "image") {
         log.line(`Pulling ${imageRef} on ${srv.name}…`);
-        const pull = await runScript(connection, `docker pull ${shellQuote(imageRef)}`, {
-          onLine: log.line,
-          timeoutMs: 300_000,
-        });
-        if (pull.exitCode !== 0) {
-          throw new Error(`pull image on ${srv.name} failed`);
+        if (isSshConnection(connection)) {
+          const pull = await runScript(connection, `docker pull ${shellQuote(imageRef)}`, {
+            onLine: log.line,
+            timeoutMs: 300_000,
+          });
+          if (pull.exitCode !== 0) {
+            throw new Error(`pull image on ${srv.name} failed`);
+          }
         }
       }
       const result = await deployApp(connection, agentToken, {

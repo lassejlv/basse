@@ -537,6 +537,7 @@ export type GitHubRepositoryList = {
 };
 
 export type ServerStatus = "pending" | "provisioning" | "active" | "error" | "unreachable";
+export type ServerConnectionMode = "ssh" | "outbound";
 
 // Server DTO returned to the client. Secrets (private key, raw agent token) are
 // never included — only the public key and a last-4 token hint.
@@ -548,11 +549,14 @@ export type Server = {
   sshPort: number;
   sshUser: string;
   sshPublicKey: string;
+  connectionMode: ServerConnectionMode;
   agentUrl: string | null;
   status: ServerStatus;
   statusMessage: string | null;
   hostKeyFingerprint: string | null;
   agentTokenHint?: string;
+  // Returned only immediately after creating an outbound server.
+  agentInstallCommand?: string;
   lastSeenAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -604,6 +608,7 @@ export type CreateServerInput = {
   sshHost: string;
   sshPort?: number;
   sshUser?: string;
+  connectionMode?: ServerConnectionMode;
   sshKeyId?: string;
   // Optional: paste an existing private key to reuse one already trusted on the
   // server. When omitted, Basse generates a new per-server keypair.

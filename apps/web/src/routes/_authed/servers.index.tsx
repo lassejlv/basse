@@ -5,7 +5,13 @@ import { ServerStatusBadge } from "@/components/server-status-badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectItem,
+  SelectPopup,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { authClient } from "@/lib/auth-client";
 import { createServer, listServers } from "@/lib/servers";
@@ -13,6 +19,7 @@ import { listSshKeys } from "@/lib/ssh-keys";
 import { toast } from "@/lib/toast";
 
 type KeySource = "generate" | "saved" | "paste";
+type ConnectionMode = "ssh" | "outbound";
 
 export const Route = createFileRoute("/_authed/servers/")({
   component: ServersRoute,
@@ -28,9 +35,11 @@ function ServersRoute() {
   const [sshHost, setSshHost] = useState("");
   const [sshUser, setSshUser] = useState("root");
   const [sshPort, setSshPort] = useState("22");
+  const [connectionMode, setConnectionMode] = useState<ConnectionMode>("ssh");
   const [keySource, setKeySource] = useState<KeySource>("generate");
   const [sshKeyId, setSshKeyId] = useState("");
   const [privateKey, setPrivateKey] = useState("");
+  const [installCommand, setInstallCommand] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const servers = useQuery({
@@ -50,19 +59,22 @@ function ServersRoute() {
       createServer({
         name,
         sshHost,
-        sshUser,
-        sshPort: Number(sshPort),
-        sshKeyId: keySource === "saved" ? sshKeyId : undefined,
-        privateKey: keySource === "paste" ? privateKey : undefined,
+        connectionMode,
+        sshUser: connectionMode === "ssh" ? sshUser : undefined,
+        sshPort: connectionMode === "ssh" ? Number(sshPort) : undefined,
+        sshKeyId: connectionMode === "ssh" && keySource === "saved" ? sshKeyId : undefined,
+        privateKey: connectionMode === "ssh" && keySource === "paste" ? privateKey : undefined,
       }),
-    onSuccess: async () => {
+    onSuccess: async (created) => {
       setName("");
       setSshHost("");
       setSshUser("root");
       setSshPort("22");
+      setConnectionMode("ssh");
       setKeySource("generate");
       setSshKeyId("");
       setPrivateKey("");
+      setInstallCommand(created.agentInstallCommand ?? "");
       setError(null);
       await queryClient.invalidateQueries({ queryKey });
       toast.success("Server added");
@@ -104,7 +116,9 @@ function ServersRoute() {
                   <div className="min-w-0">
                     <p className="truncate font-medium">{srv.name}</p>
                     <p className="truncate font-mono text-muted-foreground text-xs">
-                      {srv.sshUser}@{srv.sshHost}:{srv.sshPort}
+                      {srv.connectionMode === "outbound"
+                        ? `outbound · ${srv.sshHost}`
+                        : `${srv.sshUser}@${srv.sshHost}:${srv.sshPort}`}
                     </p>
                   </div>
                   <ServerStatusBadge status={srv.status} />
@@ -117,6 +131,41 @@ function ServersRoute() {
 
       <form className="max-w-2xl space-y-4 rounded-lg border bg-card p-6" onSubmit={handleSubmit}>
         <h2 className="text-lg font-semibold">Add a server</h2>
+        <fieldset className="space-y-2">
+          <Label>Connection</Label>
+          <div className="flex flex-col gap-2">
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                checked={connectionMode === "ssh"}
+                className="mt-0.5"
+                name="connection-mode"
+                onChange={() => setConnectionMode("ssh")}
+                type="radio"
+              />
+              <span>
+                <span className="font-medium">SSH</span>
+                <span className="block text-muted-foreground text-xs">
+                  Basse connects to the server over SSH and provisions the agent.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                checked={connectionMode === "outbound"}
+                className="mt-0.5"
+                name="connection-mode"
+                onChange={() => setConnectionMode("outbound")}
+                type="radio"
+              />
+              <span>
+                <span className="font-medium">Outbound agent</span>
+                <span className="block text-muted-foreground text-xs">
+                  Run a Docker command on the server; no inbound SSH access is required.
+                </span>
+              </span>
+            </label>
+          </div>
+        </fieldset>
         <div className="space-y-2">
           <Label htmlFor="server-name">Name</Label>
           <Input
@@ -129,7 +178,9 @@ function ServersRoute() {
         </div>
         <div className="flex gap-3">
           <div className="flex-1 space-y-2">
-            <Label htmlFor="server-host">SSH host</Label>
+            <Label htmlFor="server-host">
+              {connectionMode === "outbound" ? "Server address" : "SSH host"}
+            </Label>
             <Input
               id="server-host"
               value={sshHost}
@@ -138,123 +189,154 @@ function ServersRoute() {
               required
             />
           </div>
-          <div className="w-28 space-y-2">
-            <Label htmlFor="server-port">Port</Label>
-            <Input
-              id="server-port"
-              type="number"
-              value={sshPort}
-              onChange={(event) => setSshPort(event.currentTarget.value)}
-              required
-            />
-          </div>
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="server-user">SSH user</Label>
-          <Input
-            id="server-user"
-            value={sshUser}
-            onChange={(event) => setSshUser(event.currentTarget.value)}
-            placeholder="root"
-            required
-          />
-        </div>
-
-        <fieldset className="space-y-2">
-          <Label>SSH key</Label>
-          <div className="flex flex-col gap-2">
-            <label className="flex items-start gap-2 text-sm">
-              <input
-                checked={keySource === "generate"}
-                className="mt-0.5"
-                name="key-source"
-                onChange={() => setKeySource("generate")}
-                type="radio"
+          {connectionMode === "ssh" ? (
+            <div className="w-28 space-y-2">
+              <Label htmlFor="server-port">Port</Label>
+              <Input
+                id="server-port"
+                type="number"
+                value={sshPort}
+                onChange={(event) => setSshPort(event.currentTarget.value)}
+                required
               />
-              <span>
-                <span className="font-medium">Generate a new key</span>
-                <span className="block text-muted-foreground text-xs">
-                  Basse creates a keypair; you add the public key to the server.
-                </span>
-              </span>
-            </label>
-            <label className="flex items-start gap-2 text-sm">
-              <input
-                checked={keySource === "saved"}
-                className="mt-0.5"
-                disabled={storedKeys.length === 0}
-                name="key-source"
-                onChange={() => {
-                  setKeySource("saved");
-                  setSshKeyId((current) => current || storedKeys[0]?.id || "");
-                }}
-                type="radio"
-              />
-              <span>
-                <span className="font-medium">Use a saved key</span>
-                <span className="block text-muted-foreground text-xs">
-                  Select a private key saved in Secrets.
-                </span>
-              </span>
-            </label>
-            <label className="flex items-start gap-2 text-sm">
-              <input
-                checked={keySource === "paste"}
-                className="mt-0.5"
-                name="key-source"
-                onChange={() => setKeySource("paste")}
-                type="radio"
-              />
-              <span>
-                <span className="font-medium">Use my own key</span>
-                <span className="block text-muted-foreground text-xs">
-                  Paste a private key already trusted on the server.
-                </span>
-              </span>
-            </label>
-          </div>
-          {keySource === "saved" ? (
-            <div className="space-y-2">
-              <Select value={sshKeyId} onValueChange={(value) => setSshKeyId(value ?? "")}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Select SSH key">
-                    {(value: string) =>
-                      storedKeys.find((key) => key.id === value)?.name ?? "Select SSH key"
-                    }
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectPopup>
-                  {storedKeys.map((key) => (
-                    <SelectItem key={key.id} value={key.id}>
-                      {key.name}
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-              {storedKeys.length === 0 ? (
-                <p className="text-muted-foreground text-xs">
-                  Add a private SSH key in Secrets before using this option.
-                </p>
-              ) : null}
             </div>
           ) : null}
-          {keySource === "paste" ? (
-            <Textarea
-              aria-label="Private key"
-              className="font-mono text-xs"
-              onChange={(event) => setPrivateKey(event.currentTarget.value)}
-              placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+        </div>
+        {connectionMode === "ssh" ? (
+          <div className="space-y-2">
+            <Label htmlFor="server-user">SSH user</Label>
+            <Input
+              id="server-user"
+              value={sshUser}
+              onChange={(event) => setSshUser(event.currentTarget.value)}
+              placeholder="root"
               required
-              rows={5}
-              value={privateKey}
             />
-          ) : null}
-        </fieldset>
+          </div>
+        ) : null}
+
+        {connectionMode === "ssh" ? (
+          <fieldset className="space-y-2">
+            <Label>SSH key</Label>
+            <div className="flex flex-col gap-2">
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  checked={keySource === "generate"}
+                  className="mt-0.5"
+                  name="key-source"
+                  onChange={() => setKeySource("generate")}
+                  type="radio"
+                />
+                <span>
+                  <span className="font-medium">Generate a new key</span>
+                  <span className="block text-muted-foreground text-xs">
+                    Basse creates a keypair; you add the public key to the server.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  checked={keySource === "saved"}
+                  className="mt-0.5"
+                  disabled={storedKeys.length === 0}
+                  name="key-source"
+                  onChange={() => {
+                    setKeySource("saved");
+                    setSshKeyId((current) => current || storedKeys[0]?.id || "");
+                  }}
+                  type="radio"
+                />
+                <span>
+                  <span className="font-medium">Use a saved key</span>
+                  <span className="block text-muted-foreground text-xs">
+                    Select a private key saved in Secrets.
+                  </span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  checked={keySource === "paste"}
+                  className="mt-0.5"
+                  name="key-source"
+                  onChange={() => setKeySource("paste")}
+                  type="radio"
+                />
+                <span>
+                  <span className="font-medium">Use my own key</span>
+                  <span className="block text-muted-foreground text-xs">
+                    Paste a private key already trusted on the server.
+                  </span>
+                </span>
+              </label>
+            </div>
+            {keySource === "saved" ? (
+              <div className="space-y-2">
+                <Select value={sshKeyId} onValueChange={(value) => setSshKeyId(value ?? "")}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Select SSH key">
+                      {(value: string) =>
+                        storedKeys.find((key) => key.id === value)?.name ?? "Select SSH key"
+                      }
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {storedKeys.map((key) => (
+                      <SelectItem key={key.id} value={key.id}>
+                        {key.name}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+                {storedKeys.length === 0 ? (
+                  <p className="text-muted-foreground text-xs">
+                    Add a private SSH key in Secrets before using this option.
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+            {keySource === "paste" ? (
+              <Textarea
+                aria-label="Private key"
+                className="font-mono text-xs"
+                onChange={(event) => setPrivateKey(event.currentTarget.value)}
+                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                required
+                rows={5}
+                value={privateKey}
+              />
+            ) : null}
+          </fieldset>
+        ) : null}
+
+        {installCommand ? (
+          <div className="space-y-2 rounded-md border bg-muted/30 p-3">
+            <Label htmlFor="outbound-install">Outbound install command</Label>
+            <Textarea
+              className="font-mono text-xs"
+              id="outbound-install"
+              readOnly
+              rows={8}
+              value={installCommand}
+            />
+            <Button
+              onClick={() => {
+                void navigator.clipboard.writeText(installCommand);
+                toast.success("Install command copied");
+              }}
+              type="button"
+              variant="secondary"
+            >
+              Copy command
+            </Button>
+          </div>
+        ) : null}
 
         {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
 
         <Button
-          disabled={!organizationId || (keySource === "saved" && !sshKeyId)}
+          disabled={
+            !organizationId || (connectionMode === "ssh" && keySource === "saved" && !sshKeyId)
+          }
           loading={add.isPending}
           type="submit"
         >

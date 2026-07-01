@@ -26,6 +26,7 @@ import {
   getAppMetrics as getAgentAppMetrics,
   importContainer,
   listImportableContainers,
+  type AgentConnection,
 } from "./agent-client";
 import {
   DEFAULT_BUILD_ROOT_DIRECTORY,
@@ -35,7 +36,7 @@ import {
 } from "./build-paths";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { connectionFromServer } from "./server-connection";
-import { runScript } from "./ssh";
+import { runScript, type SshConnection } from "./ssh";
 import { resolveActiveWorkspace } from "./workspace";
 
 type AppRow = typeof app.$inferSelect;
@@ -248,6 +249,10 @@ function parseVolumes(value: string): AppVolume[] {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function isSshConnection(connection: AgentConnection): connection is SshConnection {
+  return !("mode" in connection);
 }
 
 export function toApp(
@@ -927,6 +932,9 @@ apps.post("/:id/stop", async (c) => {
     typeof body?.serverId === "string" ? body.serverId : undefined,
   );
   if (!target.server) return c.json({ error: target.error }, 400);
+  if (!isSshConnection(target.connection!)) {
+    return c.json({ error: "Stopping apps on outbound servers is not supported yet" }, 400);
+  }
 
   const container = `basse-app-${appId}`;
   const result = await runScript(

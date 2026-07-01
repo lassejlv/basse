@@ -2,12 +2,17 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -66,6 +71,10 @@ func Run(cfg config.Config, version string) error {
 		}
 	}()
 
+	if cfg.Mode == "outbound" {
+		go runOutboundPoller(ctx, cfg)
+	}
+
 	select {
 	case err := <-errCh:
 		return err
@@ -74,5 +83,154 @@ func Run(cfg config.Config, version string) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
+	}
+}
+
+type outboundCommand struct {
+	ID     string          `json:"id"`
+	Method string          `json:"method"`
+	Path   string          `json:"path"`
+	Body   json.RawMessage `json:"body"`
+}
+
+type outboundResult struct {
+	Status int    `json:"status"`
+	Body   string `json:"body,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+func runOutboundPoller(ctx context.Context, cfg config.Config) {
+	client := &http.Client{Timeout: 10 * time.Second}
+	baseURL := strings.TrimRight(cfg.ControlPlaneURL, "/")
+	localBaseURL := "http://127.0.0.1:" + cfg.Port
+
+	slog.Info("outbound agent polling enabled", "controlPlane", baseURL)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		cmd, err := pollOutboundCommand(ctx, client, baseURL, cfg.Token)
+		if err != nil {
+			slog.Warn("outbound poll failed", "error", err)
+			sleepContext(ctx, 3*time.Second)
+			continue
+		}
+		if cmd == nil {
+			sleepContext(ctx, 2*time.Second)
+			continue
+		}
+
+		result := executeOutboundCommand(ctx, client, localBaseURL, cfg.Token, *cmd)
+		if err := postOutboundResult(ctx, client, baseURL, cfg.Token, cmd.ID, result); err != nil {
+			slog.Warn("outbound result post failed", "command", cmd.ID, "error", err)
+			sleepContext(ctx, 2*time.Second)
+		}
+	}
+}
+
+func pollOutboundCommand(ctx context.Context, client *http.Client, baseURL string, token string) (*outboundCommand, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/agent/outbound/poll", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNoContent {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("poll returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var cmd outboundCommand
+	if err := json.NewDecoder(resp.Body).Decode(&cmd); err != nil {
+		return nil, err
+	}
+	if cmd.ID == "" || cmd.Method == "" || cmd.Path == "" || !strings.HasPrefix(cmd.Path, "/") {
+		return nil, fmt.Errorf("invalid outbound command")
+	}
+	return &cmd, nil
+}
+
+func executeOutboundCommand(ctx context.Context, client *http.Client, localBaseURL string, token string, cmd outboundCommand) outboundResult {
+	method := strings.ToUpper(cmd.Method)
+	if method == "" {
+		method = http.MethodGet
+	}
+
+	var body io.Reader
+	if len(cmd.Body) > 0 && string(cmd.Body) != "null" {
+		body = bytes.NewReader(cmd.Body)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, localBaseURL+cmd.Path, body)
+	if err != nil {
+		return outboundResult{Status: http.StatusBadGateway, Error: err.Error()}
+	}
+	if strings.HasPrefix(cmd.Path, "/v1/") {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return outboundResult{Status: http.StatusBadGateway, Error: err.Error()}
+	}
+	defer resp.Body.Close()
+
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return outboundResult{Status: http.StatusBadGateway, Error: err.Error()}
+	}
+	return outboundResult{Status: resp.StatusCode, Body: string(responseBody)}
+}
+
+func postOutboundResult(ctx context.Context, client *http.Client, baseURL string, token string, commandID string, result outboundResult) error {
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		baseURL+"/api/agent/outbound/commands/"+commandID+"/result",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("result returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
 	}
 }
