@@ -72,8 +72,9 @@ function makeLogger(deploymentId: string) {
       .set({ logs: (row?.logs ?? "") + chunk, updatedAt: new Date() })
       .where(eq(deployment.id, deploymentId));
     // Live build logs reach clients via realtime (throttled server-side);
-    // there is no client-side polling fallback.
-    void publishForDeployment(deploymentId);
+    // there is no client-side polling fallback. "logs" events refresh only the
+    // deployment list — not the app/canvas queries that status changes touch.
+    void publishForDeployment(deploymentId, "logs");
   };
 
   return {

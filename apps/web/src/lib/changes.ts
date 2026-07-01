@@ -24,6 +24,8 @@ export type {
   StagedChangeHistoryEntry,
 };
 
+import { apiClientHeader } from "./api";
+
 const apiBaseUrl = import.meta.env.VITE_API_URL ?? "";
 
 async function parseError(response: Response): Promise<string> {
@@ -71,6 +73,7 @@ export async function applyProjectChanges(
   const response = await fetch(`${apiBaseUrl}/api/projects/${projectId}/changes/apply`, {
     method: "POST",
     credentials: "include",
+    headers: apiClientHeader,
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<ProjectApplyStagedChangesResult>;
@@ -80,6 +83,7 @@ export async function discardProjectChanges(projectId: string): Promise<ProjectS
   const response = await fetch(`${apiBaseUrl}/api/projects/${projectId}/changes/discard`, {
     method: "POST",
     credentials: "include",
+    headers: apiClientHeader,
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<ProjectStagedChanges>;
@@ -92,6 +96,7 @@ export async function discardProjectChange(
   const response = await fetch(`${apiBaseUrl}/api/projects/${projectId}/changes/${changeId}`, {
     method: "DELETE",
     credentials: "include",
+    headers: apiClientHeader,
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<ProjectStagedChanges>;
@@ -104,7 +109,7 @@ export async function stageAppChanges(
   const response = await fetch(`${apiBaseUrl}/api/apps/${appId}/changes/app`, {
     method: "POST",
     credentials: "include",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...apiClientHeader },
     body: JSON.stringify(input),
   });
   if (!response.ok) throw new Error(await parseError(response));
@@ -118,7 +123,7 @@ export async function stageEnvVars(
   const response = await fetch(`${apiBaseUrl}/api/apps/${appId}/changes/env`, {
     method: "POST",
     credentials: "include",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...apiClientHeader },
     body: JSON.stringify(input),
   });
   if (!response.ok) throw new Error(await parseError(response));
@@ -132,7 +137,7 @@ export async function stageDomainChange(
   const response = await fetch(`${apiBaseUrl}/api/apps/${appId}/changes/domain`, {
     method: "POST",
     credentials: "include",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...apiClientHeader },
     body: JSON.stringify(input),
   });
   if (!response.ok) throw new Error(await parseError(response));
@@ -151,6 +156,7 @@ export async function stagePreviewDomain(appId: string): Promise<AppStagedChange
   const response = await fetch(`${apiBaseUrl}/api/apps/${appId}/changes/preview-domain`, {
     method: "POST",
     credentials: "include",
+    headers: apiClientHeader,
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<AppStagedChanges>;
@@ -169,6 +175,7 @@ export async function applyChanges(appId: string): Promise<ApplyStagedChangesRes
   const response = await fetch(`${apiBaseUrl}/api/apps/${appId}/changes/apply`, {
     method: "POST",
     credentials: "include",
+    headers: apiClientHeader,
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<ApplyStagedChangesResult>;
@@ -178,6 +185,7 @@ export async function discardChanges(appId: string): Promise<AppStagedChanges> {
   const response = await fetch(`${apiBaseUrl}/api/apps/${appId}/changes/discard`, {
     method: "POST",
     credentials: "include",
+    headers: apiClientHeader,
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<AppStagedChanges>;
@@ -187,6 +195,7 @@ export async function discardChange(appId: string, changeId: string): Promise<Ap
   const response = await fetch(`${apiBaseUrl}/api/apps/${appId}/changes/${changeId}`, {
     method: "DELETE",
     credentials: "include",
+    headers: apiClientHeader,
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<AppStagedChanges>;

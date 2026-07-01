@@ -60,7 +60,7 @@ app.use(
   "*",
   cors({
     origin: (origin) => (allowedOrigins.has(origin) ? origin : null),
-    allowHeaders: ["content-type", "authorization"],
+    allowHeaders: ["content-type", "authorization", "x-basse-client"],
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
   }),

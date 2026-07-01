@@ -28,7 +28,7 @@ import {
 } from "@/components/ui/sheet";
 import type { App } from "@/lib/apps";
 import { getAppLogs, getAppMetrics } from "@/lib/apps";
-import { rollbackDeployment } from "@/lib/deployments";
+import { getDeployment, rollbackDeployment } from "@/lib/deployments";
 import { formatBytes, relativeTime } from "@/lib/format";
 import { listServers } from "@/lib/servers";
 import { toast } from "@/lib/toast";
@@ -221,6 +221,16 @@ function DeploymentSummary({ deployment }: { deployment: Deployment }) {
 
 function DeploymentBuildLog({ deployment }: { deployment: Deployment }) {
   const inFlight = ["queued", "building", "deploying"].includes(deployment.status);
+  // The list endpoint only carries logs for the newest and in-flight rows;
+  // older deployments load their (immutable) logs on demand.
+  const detail = useQuery({
+    queryKey: ["deployment", deployment.id],
+    queryFn: () => getDeployment(deployment.id),
+    enabled: !inFlight && deployment.logs === null,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  const logs = deployment.logs ?? detail.data?.logs ?? "";
+
   return (
     <section>
       <div className="mb-2 flex items-center justify-between gap-3">
@@ -233,10 +243,16 @@ function DeploymentBuildLog({ deployment }: { deployment: Deployment }) {
       </div>
       <LogExplorer
         downloadName={`build-${deployment.id.slice(0, 8)}.log`}
-        emptyText={inFlight ? "Waiting for logs…" : "No build logs recorded."}
+        emptyText={
+          inFlight
+            ? "Waiting for logs…"
+            : detail.isFetching
+              ? "Loading logs…"
+              : "No build logs recorded."
+        }
         live={inFlight}
         maxHeight="22rem"
-        text={deployment.logs ?? ""}
+        text={logs}
       />
     </section>
   );

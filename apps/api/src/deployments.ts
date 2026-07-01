@@ -141,13 +141,39 @@ deployments.get("/", async (c) => {
     return c.json({ error: "App not found" }, 404);
   }
 
+  // The list is refetched on every realtime deployment event, so it must stay
+  // light: build logs (which grow to hundreds of KB) are only included for the
+  // newest row and any in-flight rows — the ones whose logs the UI streams.
+  // Older rows return logs: null; the detail endpoint serves them on demand.
   const rows = await db
-    .select()
+    .select({
+      id: deployment.id,
+      appId: deployment.appId,
+      status: deployment.status,
+      commitSha: deployment.commitSha,
+      imageRef: deployment.imageRef,
+      buildId: deployment.buildId,
+      buildNoCache: deployment.buildNoCache,
+      createdAt: deployment.createdAt,
+      updatedAt: deployment.updatedAt,
+    })
     .from(deployment)
     .where(eq(deployment.appId, appId))
-    .orderBy(desc(deployment.createdAt));
+    .orderBy(desc(deployment.createdAt))
+    .limit(50);
 
-  return c.json(rows.map(toDeployment));
+  const logIds = rows
+    .filter((row, index) => index === 0 || ["queued", "building", "deploying"].includes(row.status))
+    .map((row) => row.id);
+  const logRows = logIds.length
+    ? await db
+        .select({ id: deployment.id, logs: deployment.logs })
+        .from(deployment)
+        .where(inArray(deployment.id, logIds))
+    : [];
+  const logsById = new Map(logRows.map((row) => [row.id, row.logs]));
+
+  return c.json(rows.map((row) => toDeployment({ ...row, logs: logsById.get(row.id) ?? null })));
 });
 
 deployments.post("/", async (c) => {
