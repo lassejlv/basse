@@ -2,6 +2,7 @@ import { db, server } from "@basse/db";
 import { eq } from "drizzle-orm";
 import { AGENT_PORT, checkAgentHealth, ensureProxy, type AgentConnection } from "./agent-client";
 import { decryptSecret, encryptSecret } from "./crypto";
+import { publishForServer } from "./realtime";
 import { syncServerDomains } from "./proxy-sync";
 import { connectionFromServer } from "./server-connection";
 import { probeReachable, runScript, writeRemoteFile, type SshConnection } from "./ssh";
@@ -35,6 +36,7 @@ async function setStatus(
     .update(server)
     .set({ status, statusMessage, updatedAt: new Date(), ...extra })
     .where(eq(server.id, id));
+  void publishForServer(id);
 }
 
 /** A 32-byte base64url bearer token for the agent. */

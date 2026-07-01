@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/sidebar";
 import { getAlertsOverview } from "@/lib/alerts";
 import { authClient } from "@/lib/auth-client";
+import { useRealtime } from "@/lib/realtime";
 
 export const Route = createFileRoute("/_authed")({
   beforeLoad: async ({ location }) => {
@@ -77,6 +78,7 @@ function AuthedLayout() {
   const initials = getInitials(displayName);
   const { data: organizations } = authClient.useListOrganizations();
   const { data: activeOrganization } = authClient.useActiveOrganization();
+  useRealtime(activeOrganization?.id);
   const alertsOverview = useQuery({
     queryKey: ["alerts-overview", activeOrganization?.id],
     queryFn: getAlertsOverview,

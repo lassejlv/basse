@@ -19,6 +19,7 @@ import { loadBalancers } from "./load-balancers";
 import { startMonitor } from "./monitor";
 import { outboundAgent } from "./outbound-agent";
 import { projects } from "./projects";
+import { realtimeRoutes, websocket } from "./realtime";
 import { s3 } from "./s3";
 import { actionsQueue } from "./queue/queue";
 import { reconcileProvisioningServers } from "./queue/reconcile";
@@ -85,6 +86,7 @@ app.route("/api/servers", servers);
 app.route("/api/domains", domains);
 app.route("/api/load-balancers", loadBalancers);
 app.route("/api/s3", s3);
+app.route("/api/ws", realtimeRoutes);
 app.route("/api/workspace", workspaceSettingsRoutes);
 app.route("/api/alerts", alerts);
 app.route("/api/agent/outbound", outboundAgent);
@@ -141,4 +143,6 @@ export default {
   port: Number(Bun.env.API_PORT ?? 3000),
   hostname: Bun.env.API_HOST ?? "127.0.0.1",
   fetch: app.fetch,
+  // Bun's WebSocket handler for /api/ws upgrades (see realtime.ts).
+  websocket,
 };

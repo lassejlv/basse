@@ -14,6 +14,7 @@ import { and, desc, eq, inArray, lt } from "drizzle-orm";
 import { checkAgentHealth, getAppMetrics, getAppStatus } from "./agent-client";
 import { decryptSecret } from "./crypto";
 import { sendAlertEmail } from "./email";
+import { publishRealtime } from "./realtime";
 import { connectionFromServer } from "./server-connection";
 
 type ServerRow = typeof server.$inferSelect;
@@ -87,6 +88,7 @@ export async function raiseAlert(issue: MonitorIssue): Promise<void> {
         updatedAt: now,
       })
       .where(eq(alert.id, existing.id));
+    publishRealtime(issue.organizationId, { type: "alert" });
     return;
   }
 
@@ -111,6 +113,7 @@ export async function raiseAlert(issue: MonitorIssue): Promise<void> {
     })
     .returning();
   await recordEvent(issue);
+  publishRealtime(issue.organizationId, { type: "alert" });
   if (created) {
     await sendAlertEmail({
       id: created.id,
@@ -153,6 +156,7 @@ export async function resolveAlert(
         inArray(alert.status, ["open", "acknowledged"]),
       ),
     );
+  publishRealtime(organizationId, { type: "alert" });
 
   await recordEvent({
     organizationId,

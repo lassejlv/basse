@@ -27,6 +27,7 @@ import { ownedApp, requireAgentTarget } from "./apps";
 import { decryptSecret } from "./crypto";
 import { raiseAlert, recordEvent, resolveAlert } from "./monitor";
 import { enqueueAction } from "./queue/queue";
+import { publishForApp } from "./realtime";
 import { ownedS3Connection, s3ClientForConnection } from "./s3";
 import { connectionFromServer } from "./server-connection";
 import { type SshConnection, withTunnel } from "./ssh";
@@ -90,6 +91,11 @@ function toSettings(row: AppRow): DatabaseBackupSettings {
     retention: row.backupRetention,
     s3ConnectionId: row.backupS3ConnectionId,
   };
+}
+
+/** Realtime hint so open Backups tabs refetch. Fire-and-forget. */
+function publishBackupEvent(appId: string): void {
+  void publishForApp(appId, { type: "backup", appId });
 }
 
 async function organizationIdForApp(appId: string): Promise<string | null> {
@@ -245,6 +251,7 @@ backups.post("/:id/backups", async (c) => {
     return c.json({ error: "Backup queue is unavailable" }, 503);
   }
 
+  publishBackupEvent(appId);
   return c.json(toBackup(created), 202);
 });
 
@@ -534,6 +541,7 @@ export async function runDatabaseBackup(backupId: string): Promise<void> {
       .update(databaseBackup)
       .set({ status: "failed", error: message, completedAt: new Date(), updatedAt: new Date() })
       .where(eq(databaseBackup.id, backupId));
+    publishBackupEvent(backup.appId);
     await notifyBackupOutcome({ kind: "backup", backup, appName, ok: false, message });
   };
 
@@ -558,6 +566,7 @@ export async function runDatabaseBackup(backupId: string): Promise<void> {
       .update(databaseBackup)
       .set({ status: "running", startedAt: new Date(), updatedAt: new Date() })
       .where(eq(databaseBackup.id, backupId));
+    publishBackupEvent(backup.appId);
 
     const connection = await connectionFromServer(serverRow);
     const token = await decryptSecret(serverRow.agentToken);
@@ -575,6 +584,7 @@ export async function runDatabaseBackup(backupId: string): Promise<void> {
         updatedAt: new Date(),
       })
       .where(eq(databaseBackup.id, backupId));
+    publishBackupEvent(backup.appId);
 
     await notifyBackupOutcome({
       kind: "backup",
@@ -634,6 +644,7 @@ export async function runBackupUpload(backupId: string): Promise<void> {
       .update(databaseBackup)
       .set({ s3Status: "failed", s3Error: message, updatedAt: new Date() })
       .where(eq(databaseBackup.id, backupId));
+    publishBackupEvent(backup.appId);
     await notifyBackupOutcome({ kind: "upload", backup, appName, ok: false, message });
   };
 
@@ -702,6 +713,7 @@ export async function runBackupUpload(backupId: string): Promise<void> {
         updatedAt: new Date(),
       })
       .where(eq(databaseBackup.id, backupId));
+    publishBackupEvent(backup.appId);
 
     await notifyBackupOutcome({
       kind: "upload",
@@ -798,7 +810,10 @@ async function runSchedulerOnce(): Promise<void> {
           updatedAt: now,
         })
         .returning();
-      if (created) await enqueueAction("database-backup", created.id);
+      if (created) {
+        await enqueueAction("database-backup", created.id);
+        publishBackupEvent(appRow.id);
+      }
     } catch (error) {
       console.error("[backup-scheduler]", appRow.id, error);
     }

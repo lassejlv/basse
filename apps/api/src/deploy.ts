@@ -28,6 +28,7 @@ import { loadResolvedEnvMap } from "./env-resolver";
 import { resolveGitHubCloneToken } from "./github";
 import { gitHubHttpsCloneUrl, parseGitHubOwner } from "./github-utils";
 import { syncServerDomains } from "./proxy-sync";
+import { publishForDeployment } from "./realtime";
 import { connectionFromServer } from "./server-connection";
 import { runScript, type SshConnection } from "./ssh";
 
@@ -49,6 +50,7 @@ async function setStatus(
     .update(deployment)
     .set({ status, updatedAt: new Date(), ...extra })
     .where(eq(deployment.id, id));
+  void publishForDeployment(id);
 }
 
 /** Debounced append into deployment.logs so a chatty build doesn't hammer the DB. */
@@ -229,6 +231,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       .where(and(eq(deployment.id, deploymentId), inArray(deployment.status, ["queued", "failed"])))
       .returning({ id: deployment.id });
     if (!claimed[0]) return;
+    void publishForDeployment(deploymentId);
 
     const [dep] = await db
       .select()

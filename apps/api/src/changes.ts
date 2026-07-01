@@ -45,6 +45,7 @@ import { decryptSecret, encryptSecret } from "./crypto";
 import { enqueueDeploy, toDeployment } from "./deployments";
 import { validateHost, validateUpstream } from "./domains";
 import { enqueueOrRunDomainSync } from "./proxy-sync";
+import { publishRealtime } from "./realtime";
 import { resolveActiveWorkspace } from "./workspace";
 
 type AppRow = typeof app.$inferSelect;
@@ -137,10 +138,17 @@ function uniqueConstraint(error: unknown): string | null {
 }
 
 /** Standard response after any change to the staging set: the list + the draft. */
-async function respondWithChanges(c: Context, existing: AppRow): Promise<Response> {
+async function respondWithChanges(
+  c: Context,
+  existing: AppRow,
+  options: { notify?: boolean; organizationId?: string } = {},
+): Promise<Response> {
   const rows = await loadStagedRows(existing.id);
   const changes = await Promise.all(rows.map(toStagedChange));
   const draft = await buildDraft(existing, rows);
+  if (options.notify && options.organizationId) {
+    publishRealtime(options.organizationId, { type: "staged-changes", appId: existing.id });
+  }
   return c.json({ changes, draft } satisfies AppStagedChanges);
 }
 
@@ -600,6 +608,7 @@ projectChanges.get("/:id/changes", async (c) => {
   }
 
   const changes = await loadProjectStagedChanges(projectId, organizationId);
+  publishRealtime(organizationId, { type: "staged-changes", projectId });
   return c.json({ changes } satisfies ProjectStagedChanges);
 });
 
@@ -645,6 +654,7 @@ projectChanges.post("/:id/changes/apply", async (c) => {
     });
   }
 
+  publishRealtime(organizationId, { type: "staged-changes", projectId });
   return c.json({ deployments } satisfies ProjectApplyStagedChangesResult);
 });
 
@@ -680,6 +690,7 @@ projectChanges.post("/:id/changes/discard", async (c) => {
   }
 
   const changes = await loadProjectStagedChanges(projectId, organizationId);
+  publishRealtime(organizationId, { type: "staged-changes", projectId });
   return c.json({ changes } satisfies ProjectStagedChanges);
 });
 
@@ -716,6 +727,7 @@ projectChanges.delete("/:id/changes/:changeId", async (c) => {
   }
 
   const changes = await loadProjectStagedChanges(projectId, organizationId);
+  publishRealtime(organizationId, { type: "staged-changes", projectId });
   return c.json({ changes } satisfies ProjectStagedChanges);
 });
 
@@ -851,7 +863,7 @@ changes.post("/:id/changes/app", async (c) => {
     }
   });
 
-  return respondWithChanges(c, existing);
+  return respondWithChanges(c, existing, { notify: true, organizationId });
 });
 
 // POST /api/apps/:id/changes/env — stage the full desired env-var set. The set
@@ -918,7 +930,7 @@ changes.post("/:id/changes/env", async (c) => {
     if (inserts.length > 0) await tx.insert(stagedChange).values(inserts);
   });
 
-  return respondWithChanges(c, existing);
+  return respondWithChanges(c, existing, { notify: true, organizationId });
 });
 
 // GET /api/apps/:id/changes/preview-domain — cloud preview URL settings for
@@ -965,7 +977,7 @@ changes.post("/:id/changes/preview-domain", async (c) => {
   const upstream = `basse-app-${existing.id}:${draft.port}`;
   if (stagedPreview) {
     if (stagedPreview.host === host && stagedPreview.serverId === serverId) {
-      return respondWithChanges(c, existing);
+      return respondWithChanges(c, existing, { notify: true, organizationId });
     }
     return c.json({ error: "This app already has a staged preview domain" }, 409);
   }
@@ -987,7 +999,7 @@ changes.post("/:id/changes/preview-domain", async (c) => {
     now,
   );
 
-  return respondWithChanges(c, existing);
+  return respondWithChanges(c, existing, { notify: true, organizationId });
 });
 
 // POST /api/apps/:id/changes/domain — stage a domain create/delete. Applying
@@ -1038,7 +1050,7 @@ changes.post("/:id/changes/domain", async (c) => {
               eq(stagedChange.field, field),
             ),
           );
-        return respondWithChanges(c, existing);
+        return respondWithChanges(c, existing, { notify: true, organizationId });
       }
       await upsertDomainChange(
         db,
@@ -1049,7 +1061,7 @@ changes.post("/:id/changes/domain", async (c) => {
         serializeDomainChangePayload(domainToPayload(liveDomain)),
         now,
       );
-      return respondWithChanges(c, existing);
+      return respondWithChanges(c, existing, { notify: true, organizationId });
     }
 
     await upsertDomainChange(
@@ -1067,7 +1079,7 @@ changes.post("/:id/changes/domain", async (c) => {
       null,
       now,
     );
-    return respondWithChanges(c, existing);
+    return respondWithChanges(c, existing, { notify: true, organizationId });
   }
 
   if (body?.action === "delete") {
@@ -1096,7 +1108,7 @@ changes.post("/:id/changes/domain", async (c) => {
       serializeDomainChangePayload(domainToPayload(liveDomain.domain)),
       now,
     );
-    return respondWithChanges(c, existing);
+    return respondWithChanges(c, existing, { notify: true, organizationId });
   }
 
   return c.json({ error: "Invalid domain change" }, 400);
@@ -1115,6 +1127,7 @@ changes.post("/:id/changes/apply", async (c) => {
 
   const result = await applyStagedChangesForApp(existing, organizationId);
   if (!result.ok) return c.json({ error: result.error }, result.status);
+  publishRealtime(organizationId, { type: "staged-changes", appId: existing.id });
   return c.json(result.result);
 });
 
@@ -1134,7 +1147,7 @@ changes.post("/:id/changes/discard", async (c) => {
       await tx.delete(stagedChange).where(eq(stagedChange.appId, existing.id));
     });
   }
-  return respondWithChanges(c, existing);
+  return respondWithChanges(c, existing, { notify: true, organizationId });
 });
 
 // DELETE /api/apps/:id/changes/:changeId — discard a single staged change.
@@ -1158,7 +1171,7 @@ changes.delete("/:id/changes/:changeId", async (c) => {
       await tx.delete(stagedChange).where(eq(stagedChange.id, row.id));
     });
   }
-  return respondWithChanges(c, existing);
+  return respondWithChanges(c, existing, { notify: true, organizationId });
 });
 
 async function buildPreviewDomainConfig(existing: AppRow): Promise<PreviewDomainConfig> {
