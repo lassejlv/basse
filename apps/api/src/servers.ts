@@ -1,4 +1,4 @@
-import { db, domain, server, sshKey } from "@basse/db";
+import { db, domain, member, server, sshKey, verification } from "@basse/db";
 import type {
   AgentInfo,
   AgentLogs,
@@ -10,7 +10,9 @@ import type {
 import { and, eq, ne } from "drizzle-orm";
 import { Hono } from "hono";
 import { checkAgentHealth, getAgentInfo } from "./agent-client";
+import { auth } from "./auth";
 import { decryptSecret, encryptSecret } from "./crypto";
+import { sendServerDeleteCodeEmail } from "./email";
 import { AGENT_IMAGE, IMAGE_REF_PATTERN } from "./provision";
 import { enqueueOrRunDomainSync } from "./proxy-sync";
 import { enqueueAction } from "./queue/queue";
@@ -20,6 +22,13 @@ import { probeReachable, runScript } from "./ssh";
 import { resolveActiveWorkspace } from "./workspace";
 
 type ServerRow = typeof server.$inferSelect;
+type ActiveWorkspaceUser = {
+  organizationId: string;
+  userId: string;
+  email: string;
+};
+
+const SERVER_DELETE_CODE_TTL_MS = 10 * 60 * 1000;
 
 /**
  * Maps a DB row to the client-facing DTO. Never exposes the private key or the
@@ -65,6 +74,35 @@ async function ownedServer(serverId: string, organizationId: string): Promise<Se
     .where(and(eq(server.id, serverId), eq(server.organizationId, organizationId)))
     .limit(1);
   return row ?? null;
+}
+
+async function resolveActiveWorkspaceUser(headers: Headers): Promise<ActiveWorkspaceUser | Response> {
+  const session = await auth.api.getSession({ headers });
+
+  if (!session) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
+  const organizationId = session.session.activeOrganizationId;
+  if (!organizationId) {
+    return new Response("No active workspace", { status: 400 });
+  }
+
+  const [membership] = await db
+    .select({ id: member.id })
+    .from(member)
+    .where(and(eq(member.organizationId, organizationId), eq(member.userId, session.user.id)))
+    .limit(1);
+
+  if (!membership) {
+    return new Response("Forbidden", { status: 403 });
+  }
+
+  return {
+    organizationId,
+    userId: session.user.id,
+    email: session.user.email,
+  };
 }
 
 async function requireAgent(row: ServerRow) {
@@ -143,6 +181,31 @@ function imageIdFromOutput(output: string, key: string): string | null {
   const line = output.split("\n").find((candidate) => candidate.startsWith(`${key}=`));
   const value = line?.slice(key.length + 1).trim();
   return value || null;
+}
+
+function deleteVerificationIdentifier(input: {
+  organizationId: string;
+  serverId: string;
+  userId: string;
+}): string {
+  return `server-delete:${input.organizationId}:${input.serverId}:${input.userId}`;
+}
+
+function deleteCode(): string {
+  const [value = 0] = crypto.getRandomValues(new Uint32Array(1));
+  return String(value % 1_000_000).padStart(6, "0");
+}
+
+async function hashDeleteCode(code: string): Promise<string> {
+  const secret = Bun.env.BETTER_AUTH_SECRET;
+  if (!secret) throw new Error("BETTER_AUTH_SECRET is required");
+  const bytes = new TextEncoder().encode(`${secret}:server-delete:${code}`);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Buffer.from(digest).toString("hex");
+}
+
+function normalizeDeleteCode(value: unknown): string {
+  return typeof value === "string" ? value.trim().replace(/\s+/g, "") : "";
 }
 
 servers.get("/", async (c) => {
@@ -561,21 +624,86 @@ servers.post("/:id/check-connection", async (c) => {
   });
 });
 
-servers.delete("/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+servers.post("/:id/delete-code", async (c) => {
+  const active = await resolveActiveWorkspaceUser(c.req.raw.headers);
+  if (active instanceof Response) return active;
 
-  if (organizationId instanceof Response) {
-    return organizationId;
+  const row = await ownedServer(c.req.param("id"), active.organizationId);
+  if (!row) {
+    return c.json({ error: "Server not found" }, 404);
+  }
+
+  const code = deleteCode();
+  const identifier = deleteVerificationIdentifier({
+    organizationId: active.organizationId,
+    serverId: row.id,
+    userId: active.userId,
+  });
+  const now = new Date();
+  await db.transaction(async (tx) => {
+    await tx.delete(verification).where(eq(verification.identifier, identifier));
+    await tx.insert(verification).values({
+      id: crypto.randomUUID(),
+      identifier,
+      value: await hashDeleteCode(code),
+      expiresAt: new Date(now.getTime() + SERVER_DELETE_CODE_TTL_MS),
+      createdAt: now,
+      updatedAt: now,
+    });
+  });
+
+  await sendServerDeleteCodeEmail({
+    email: active.email,
+    code,
+    serverName: row.name,
+  });
+
+  return c.json({ ok: true });
+});
+
+servers.delete("/:id", async (c) => {
+  const active = await resolveActiveWorkspaceUser(c.req.raw.headers);
+
+  if (active instanceof Response) {
+    return active;
+  }
+
+  const body = (await c.req.json().catch(() => null)) as { code?: unknown } | null;
+  const code = normalizeDeleteCode(body?.code);
+  if (!/^\d{6}$/.test(code)) {
+    return c.json({ error: "Enter the 6-digit code sent to your email" }, 400);
+  }
+
+  const identifier = deleteVerificationIdentifier({
+    organizationId: active.organizationId,
+    serverId: c.req.param("id"),
+    userId: active.userId,
+  });
+  const [challenge] = await db
+    .select()
+    .from(verification)
+    .where(eq(verification.identifier, identifier))
+    .limit(1);
+
+  if (!challenge || challenge.expiresAt <= new Date()) {
+    if (challenge) await db.delete(verification).where(eq(verification.id, challenge.id));
+    return c.json({ error: "Delete code expired. Send a new code and try again." }, 400);
+  }
+
+  if (challenge.value !== (await hashDeleteCode(code))) {
+    return c.json({ error: "Delete code is incorrect" }, 400);
   }
 
   const [deleted] = await db
     .delete(server)
-    .where(and(eq(server.id, c.req.param("id")), eq(server.organizationId, organizationId)))
+    .where(and(eq(server.id, c.req.param("id")), eq(server.organizationId, active.organizationId)))
     .returning({ id: server.id });
 
   if (!deleted) {
     return c.json({ error: "Server not found" }, 404);
   }
+
+  await db.delete(verification).where(eq(verification.id, challenge.id));
 
   return c.body(null, 204);
 });

@@ -87,6 +87,40 @@ export async function sendOtpEmail(params: {
   );
 }
 
+export async function sendServerDeleteCodeEmail(params: {
+  email: string;
+  code: string;
+  serverName: string;
+}): Promise<void> {
+  const { email, code, serverName } = params;
+  const client = getEmailClient();
+  const subject = "Confirm server deletion";
+  const text = [
+    `Use this code to delete ${serverName}: ${code}`,
+    "",
+    "This code expires in 10 minutes. If you did not request this, ignore this email.",
+  ].join("\n");
+  const html = `<p>Use this code to delete <strong>${escapeHtml(serverName)}</strong>:</p><p style="font-size:24px;font-weight:700;letter-spacing:4px">${code}</p><p>This code expires in 10 minutes. If you did not request this, ignore this email.</p>`;
+
+  if (!client) {
+    console.warn(`[email] server delete code for ${email} (${serverName}): ${code}`);
+    return;
+  }
+
+  await client.send(
+    {
+      from: Bun.env.EMAIL_FROM!,
+      to: email,
+      subject,
+      text,
+      html,
+    },
+    {
+      metadata: { kind: "server-delete" },
+    },
+  );
+}
+
 async function organizationRecipients(organizationId: string): Promise<string[]> {
   const rows = await db
     .select({ email: user.email })
@@ -95,6 +129,14 @@ async function organizationRecipients(organizationId: string): Promise<string[]>
     .where(eq(member.organizationId, organizationId));
 
   return [...new Set(rows.map((row) => row.email).filter(Boolean))];
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 export async function sendAlertEmail(alert: AlertEmail): Promise<void> {

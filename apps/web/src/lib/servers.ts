@@ -126,10 +126,23 @@ export async function updateAgent(id: string): Promise<void> {
   if (!response.ok) throw new Error(await parseError(response));
 }
 
-export async function deleteServer(id: string): Promise<void> {
+export async function sendServerDeleteCode(id: string): Promise<void> {
+  const response = await fetch(`${apiBaseUrl}/api/servers/${id}/delete-code`, {
+    method: "POST",
+    credentials: "include",
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+}
+
+export async function deleteServer(id: string, code: string): Promise<void> {
   const response = await fetch(`${apiBaseUrl}/api/servers/${id}`, {
     method: "DELETE",
     credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code }),
   });
 
   if (!response.ok) {

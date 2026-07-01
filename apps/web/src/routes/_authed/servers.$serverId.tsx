@@ -10,6 +10,16 @@ import { XAxis } from "@/components/charts/x-axis";
 import { ServerStatusBadge } from "@/components/server-status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogClose,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
@@ -24,6 +34,7 @@ import {
   getAgentMetrics,
   getServer,
   provisionServer,
+  sendServerDeleteCode,
   updateAgent,
 } from "@/lib/servers";
 import { toast, toMessage } from "@/lib/toast";
@@ -38,6 +49,9 @@ function ServerDetailRoute() {
   const queryClient = useQueryClient();
   const { data: activeOrganization } = authClient.useActiveOrganization();
   const [copied, setCopied] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteCode, setDeleteCode] = useState("");
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const server = useQuery({
     queryKey: ["server", serverId],
@@ -50,15 +64,22 @@ function ServerDetailRoute() {
   });
 
   const remove = useMutation({
-    mutationFn: () => deleteServer(serverId),
+    mutationFn: () => deleteServer(serverId, deleteCode),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["servers", activeOrganization?.id] });
       toast.success("Server removed");
       navigate({ to: "/servers" });
     },
-    onError: (error) => {
-      toast.error("Couldn't remove server", { description: toMessage(error) });
+    onError: (error) => setDeleteError(toMessage(error)),
+  });
+
+  const requestDeleteCode = useMutation({
+    mutationFn: () => sendServerDeleteCode(serverId),
+    onSuccess: () => {
+      setDeleteError(null);
+      toast.success("Delete code sent");
     },
+    onError: (error) => setDeleteError(toMessage(error)),
   });
 
   const test = useMutation({
@@ -197,15 +218,68 @@ function ServerDetailRoute() {
           Deleting a server removes it from Basse and discards its access key. Any running agent
           container is left in place.
         </p>
-        <Button
-          className="mt-4"
-          loading={remove.isPending}
-          onClick={() => remove.mutate()}
-          variant="destructive"
-        >
+        <Button className="mt-4" onClick={() => setDeleteDialogOpen(true)} variant="destructive">
           Delete server
         </Button>
       </div>
+      <Dialog
+        open={deleteDialogOpen}
+        onOpenChange={(open) => {
+          setDeleteDialogOpen(open);
+          if (!open) {
+            setDeleteCode("");
+            setDeleteError(null);
+          }
+        }}
+      >
+        <DialogPopup>
+          <DialogHeader>
+            <DialogTitle>Delete server</DialogTitle>
+            <DialogDescription>
+              Send a confirmation code to your email, then enter it to delete {data.name}.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel className="space-y-4">
+            <Button
+              loading={requestDeleteCode.isPending}
+              onClick={() => requestDeleteCode.mutate()}
+              type="button"
+              variant="outline"
+            >
+              Send code
+            </Button>
+            <div className="space-y-2">
+              <Label htmlFor="server-delete-code">Confirmation code</Label>
+              <Input
+                autoComplete="one-time-code"
+                id="server-delete-code"
+                inputMode="numeric"
+                maxLength={6}
+                onChange={(event) =>
+                  setDeleteCode(event.currentTarget.value.replace(/\D/g, "").slice(0, 6))
+                }
+                placeholder="000000"
+                value={deleteCode}
+              />
+            </div>
+            {deleteError ? (
+              <p className="text-destructive-foreground text-sm">{deleteError}</p>
+            ) : null}
+          </DialogPanel>
+          <DialogFooter>
+            <DialogClose render={<Button type="button" variant="outline">Cancel</Button>} />
+            <Button
+              disabled={deleteCode.length !== 6}
+              loading={remove.isPending}
+              onClick={() => remove.mutate()}
+              type="button"
+              variant="destructive"
+            >
+              Confirm delete
+            </Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
     </section>
   );
 }
