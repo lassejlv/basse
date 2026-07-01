@@ -84,6 +84,93 @@ These still require SSH today:
 For source-based apps on outbound servers, use Depot builds. Prebuilt images and
 managed database images deploy through the agent.
 
+## Set up without SSH
+
+Use outbound mode when the server can make HTTPS requests to Basse, but Basse
+cannot connect back to the server over SSH or any public ingress port.
+
+### Requirements
+
+- Docker is already installed and running on the target server.
+- The user running the install command can mount `/var/run/docker.sock`.
+- The Basse API is reachable from the server over HTTPS.
+- `API_ORIGIN` is set correctly for the API process in production. This is what
+  the dashboard uses when it generates the outbound install command.
+- For source-based app builds, Depot is connected. Selected-server builds still
+  need SSH because they upload and build the source tree on the host over SSH.
+
+### Cloud setup
+
+1. Set the public API origin on the API service:
+
+   ```sh
+   API_ORIGIN=https://basse.sh
+   ```
+
+2. Deploy the API and web app.
+3. Open the Basse dashboard.
+4. Go to **Servers**.
+5. Choose **Add a server**.
+6. Select **Outbound agent**.
+7. Enter a server name and the server address. The address is used for display,
+   DNS, and public database connection strings; it is not used for SSH.
+8. Create the server.
+9. Copy the generated install command.
+10. Run it on the target server.
+11. Wait for the server status to become active. The agent marks itself active
+    when its first poll reaches the API.
+
+The generated command includes the raw `BASSE_AGENT_TOKEN`. Treat it like a
+secret. It is shown once by the dashboard, then only an encrypted copy and a
+lookup hash are stored by the API.
+
+### Local development setup
+
+For local development, the server still needs to reach your local API. The
+simple path is an HTTPS tunnel to the API port:
+
+```sh
+# terminal 1
+bun run dev:api
+
+# terminal 2, using any HTTPS tunnel provider
+cloudflared tunnel --url http://127.0.0.1:3000
+```
+
+Start the API with `API_ORIGIN` set to the HTTPS tunnel URL before creating the
+outbound server:
+
+```sh
+API_ORIGIN=https://your-tunnel.example.com bun run dev:api
+```
+
+Then create the server from the dashboard with **Outbound agent**, copy the
+install command, and run it on a machine that can reach that tunnel URL.
+
+### Verify it connected
+
+On the server:
+
+```sh
+docker ps --filter name=basse-agent
+docker logs --tail 100 basse-agent
+```
+
+In Basse:
+
+- The server should move from pending to active.
+- Server agent info should show Docker and engine details.
+- Deploying a prebuilt image should pull and run through the agent.
+- Domains should sync through the proxy agent endpoints.
+
+If it stays pending, check that:
+
+- `BASSE_CONTROL_PLANE_URL` in the container points at the public API origin.
+- The API route `/api/agent/outbound/poll` is reachable from the server.
+- The container has the expected `BASSE_AGENT_TOKEN`.
+- The API process has the migration that creates `agent_command` and
+  `server.connection_mode`.
+
 ## Endpoints
 
 | Method | Path          | Auth   | Purpose                                       |
