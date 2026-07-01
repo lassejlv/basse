@@ -76,11 +76,13 @@ import {
   getChangeHistory,
   getChanges,
   getEnvDraft,
+  getPreviewDomainConfig,
   getProjectChangeHistory,
   getProjectChanges,
   stageAppChanges,
   stageDomainChange,
   stageEnvVars,
+  stagePreviewDomain,
 } from "@/lib/changes";
 import { listDeployments, rollbackDeployment, triggerDeploy } from "@/lib/deployments";
 import { listDomains, resyncProxy, type Domain } from "@/lib/domains";
@@ -2194,6 +2196,7 @@ async function cacheDomainStage(
   await Promise.all([
     queryClient.invalidateQueries({ queryKey: ["changes", appId] }),
     queryClient.invalidateQueries({ queryKey: ["change-history", appId] }),
+    queryClient.invalidateQueries({ queryKey: ["preview-domain", appId] }),
     ...(projectId
       ? [
           queryClient.invalidateQueries({ queryKey: ["project-changes", projectId] }),
@@ -2227,6 +2230,10 @@ function AppDomainsSection({
     refetchInterval: (query) =>
       (query.state.data ?? []).some((d) => d.status === "pending") ? 2000 : false,
   });
+  const previewConfig = useQuery({
+    queryKey: ["preview-domain", app.id],
+    queryFn: () => getPreviewDomainConfig(app.id),
+  });
 
   const add = useMutation({
     mutationFn: () =>
@@ -2256,6 +2263,9 @@ function AppDomainsSection({
 
   const addPreview = useMutation({
     mutationFn: () => {
+      if (previewConfig.data?.enabled) {
+        return stagePreviewDomain(app.id);
+      }
       const ip = selectedServer?.sshHost ?? "";
       const previewDomainHost = `${app.slug}-${app.id.slice(0, 8)}.${ip}.sslip.io`;
       return stageDomainChange(app.id, {
@@ -2269,6 +2279,7 @@ function AppDomainsSection({
       setError(null);
       toast.success("Preview domain staged");
       await cacheDomainStage(queryClient, app.id, projectId, data);
+      await queryClient.invalidateQueries({ queryKey: ["preview-domain", app.id] });
     },
     onError: (e: Error) => setError(e.message),
   });
@@ -2349,10 +2360,26 @@ function AppDomainsSection({
     ),
   ];
   const selectedServer = (servers.data ?? []).find((s) => s.id === serverId);
-  const canGeneratePreview = Boolean(selectedServer?.sshHost.match(/^\d{1,3}(?:\.\d{1,3}){3}$/));
-  const previewHost = selectedServer
+  const cloudPreviewEnabled = previewConfig.data?.enabled === true;
+  const canGenerateSslipPreview = Boolean(
+    selectedServer?.sshHost.match(/^\d{1,3}(?:\.\d{1,3}){3}$/),
+  );
+  const sslipPreviewHost = selectedServer
     ? `${app.slug}-${app.id.slice(0, 8)}.${selectedServer.sshHost}.sslip.io`
     : "";
+  const previewHost = previewConfig.isPending
+    ? ""
+    : cloudPreviewEnabled
+      ? (previewConfig.data?.host ?? "")
+      : sslipPreviewHost;
+  const canGeneratePreview =
+    !previewConfig.isPending && (cloudPreviewEnabled || canGenerateSslipPreview);
+  const previewUnavailableText =
+    previewConfig.isPending
+      ? "Loading..."
+      : cloudPreviewEnabled
+        ? `Waiting for ${previewConfig.data?.rootDomain ?? "preview domain"}`
+        : "Requires an IPv4 server address";
 
   return (
     <Card className="p-6">
@@ -2380,7 +2407,7 @@ function AppDomainsSection({
           <div className="min-w-0">
             <p className="font-medium text-sm">Preview domain</p>
             <p className="truncate font-mono text-muted-foreground text-xs">
-              {previewHost || "Requires an IPv4 server address"}
+              {previewHost || previewUnavailableText}
             </p>
           </div>
           <Button
@@ -2390,7 +2417,7 @@ function AppDomainsSection({
             size="sm"
             variant="outline"
           >
-            Generate sslip.io
+            {cloudPreviewEnabled ? "Generate preview" : "Generate sslip.io"}
           </Button>
         </div>
       </div>

@@ -19,6 +19,7 @@ import type {
   ProjectStagedChange,
   ProjectStagedChangeHistoryEntry,
   ProjectStagedChanges,
+  PreviewDomainConfig,
   SetEnvVarsInput,
   StageDomainChangeInput,
   StagedChange,
@@ -31,6 +32,15 @@ import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { buildAppUpdates, loadAppServerIds, ownedApp, slugify, toApp } from "./apps";
+import {
+  cloudPreviewEnabled,
+  cloudPreviewReservedHostMessage,
+  cloudPreviewRootDomain,
+  deleteCloudPreviewDns,
+  generatedCloudPreviewHost,
+  isCloudPreviewHost,
+  upsertCloudPreviewDns,
+} from "./cloud-preview";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { enqueueDeploy, toDeployment } from "./deployments";
 import { validateHost, validateUpstream } from "./domains";
@@ -285,6 +295,13 @@ async function applyStagedChangesForApp(
         if (singleServerMove) {
           const oldServerId = currentServerIds[0]!;
           const newServerId = serverIds[0]!;
+          const movedDomains = await tx
+            .select()
+            .from(domain)
+            .where(and(eq(domain.appId, existing.id), eq(domain.serverId, oldServerId)));
+          for (const movedDomain of movedDomains) {
+            await upsertCloudPreviewDns(movedDomain.host, newServerId);
+          }
           await tx
             .update(domain)
             .set({
@@ -299,12 +316,28 @@ async function applyStagedChangesForApp(
           domainSyncServerIds.add(newServerId);
           const staleServerIds = removedDomainServerIds.filter((serverId) => serverId !== oldServerId);
           if (staleServerIds.length > 0) {
+            const staleDomains = await tx
+              .select()
+              .from(domain)
+              .where(and(eq(domain.appId, existing.id), inArray(domain.serverId, staleServerIds)));
+            for (const staleDomain of staleDomains) {
+              await deleteCloudPreviewDns(staleDomain.host);
+            }
             await tx
               .delete(domain)
               .where(and(eq(domain.appId, existing.id), inArray(domain.serverId, staleServerIds)));
             for (const serverId of staleServerIds) domainSyncServerIds.add(serverId);
           }
         } else if (removedDomainServerIds.length > 0) {
+          const removedDomains = await tx
+            .select()
+            .from(domain)
+            .where(
+              and(eq(domain.appId, existing.id), inArray(domain.serverId, removedDomainServerIds)),
+            );
+          for (const removedDomain of removedDomains) {
+            await deleteCloudPreviewDns(removedDomain.host);
+          }
           await tx
             .delete(domain)
             .where(
@@ -355,6 +388,7 @@ async function applyStagedChangesForApp(
         if (row.action === "delete") {
           const payload = parseDomainChangePayload(row.previousValue);
           if (!payload) continue;
+          await deleteCloudPreviewDns(payload.host);
           await tx
             .delete(domain)
             .where(
@@ -377,6 +411,7 @@ async function applyStagedChangesForApp(
           organizationId,
         );
         if (!serverAttached) throw new Error("Domain server is not attached to this app");
+        await upsertCloudPreviewDns(payload.host, payload.serverId);
         if (row.action === "update") {
           await tx
             .update(domain)
@@ -427,6 +462,13 @@ async function applyStagedChangesForApp(
     }
     if (error instanceof Error && error.message === "Domain server is not attached to this app") {
       return { ok: false, error: error.message, status: 400 };
+    }
+    if (error instanceof Error && error.message.startsWith("Cloud preview")) {
+      const status = error.message.includes("Cloudflare:") ? 500 : 400;
+      return { ok: false, error: error.message, status };
+    }
+    if (error instanceof Error && error.message.startsWith("Cloudflare:")) {
+      return { ok: false, error: `Cloud preview DNS sync failed: ${error.message}`, status: 500 };
     }
     throw error;
   }
@@ -877,6 +919,75 @@ changes.post("/:id/changes/env", async (c) => {
   return respondWithChanges(c, existing);
 });
 
+// GET /api/apps/:id/changes/preview-domain — cloud preview URL settings for
+// single-server apps. Disabled in self-hosted installs unless env is configured.
+changes.get("/:id/changes/preview-domain", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const existing = await ownedApp(c.req.param("id"), organizationId);
+  if (!existing) return c.json({ error: "App not found" }, 404);
+
+  return c.json(await buildPreviewDomainConfig(existing));
+});
+
+// POST /api/apps/:id/changes/preview-domain — stage the one allowed managed
+// preview domain. Applying the staged change writes the Cloudflare A record.
+changes.post("/:id/changes/preview-domain", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const existing = await ownedApp(c.req.param("id"), organizationId);
+  if (!existing) return c.json({ error: "App not found" }, 404);
+  if (!cloudPreviewEnabled()) {
+    return c.json({ error: "Cloud preview domains are not enabled" }, 404);
+  }
+
+  const currentServerIds = (await loadAppServerIds([existing.id])).get(existing.id) ?? [];
+  if (currentServerIds.length !== 1) {
+    return c.json({ error: "Preview domains require exactly one attached server" }, 400);
+  }
+
+  const livePreview = await loadLivePreviewDomain(existing.id);
+  if (livePreview) {
+    return c.json({ error: "This app already has a preview domain" }, 409);
+  }
+
+  const rows = await loadStagedRows(existing.id);
+  const draft = await buildDraft(existing, rows);
+  const stagedPreview = findStagedPreviewPayload(rows);
+  const host = generatedCloudPreviewHost(draft.slug, existing.id);
+  if (!host) return c.json({ error: "Cloud preview domains are not enabled" }, 404);
+
+  const serverId = currentServerIds[0]!;
+  const upstream = `basse-app-${existing.id}:${draft.port}`;
+  if (stagedPreview) {
+    if (stagedPreview.host === host && stagedPreview.serverId === serverId) {
+      return respondWithChanges(c, existing);
+    }
+    return c.json({ error: "This app already has a staged preview domain" }, 409);
+  }
+
+  const now = new Date();
+  await upsertDomainChange(
+    db,
+    existing.id,
+    "create",
+    domainChangeField(serverId, host),
+    serializeDomainChangePayload({
+      id: null,
+      serverId,
+      appId: existing.id,
+      host,
+      upstream,
+    }),
+    null,
+    now,
+  );
+
+  return respondWithChanges(c, existing);
+});
+
 // POST /api/apps/:id/changes/domain — stage a domain create/delete. Applying
 // the batch commits the domain table change and queues a proxy sync.
 changes.post("/:id/changes/domain", async (c) => {
@@ -895,6 +1006,9 @@ changes.post("/:id/changes/domain", async (c) => {
     const upstream = typeof body.upstream === "string" ? body.upstream.trim() : "";
     const hostError = validateHost(host);
     if (hostError) return c.json({ error: hostError }, 400);
+    if (isCloudPreviewHost(host)) {
+      return c.json({ error: cloudPreviewReservedHostMessage() }, 400);
+    }
     const upstreamError = validateUpstream(upstream);
     if (upstreamError) return c.json({ error: upstreamError }, 400);
     if (!(await appServerBelongsToWorkspaceApp(serverId, existing.id, organizationId))) {
@@ -1044,6 +1158,41 @@ changes.delete("/:id/changes/:changeId", async (c) => {
   }
   return respondWithChanges(c, existing);
 });
+
+async function buildPreviewDomainConfig(existing: AppRow): Promise<PreviewDomainConfig> {
+  const rootDomain = cloudPreviewRootDomain();
+  if (!rootDomain || !cloudPreviewEnabled()) {
+    return { enabled: false, rootDomain, host: null };
+  }
+
+  const rows = await loadStagedRows(existing.id);
+  const draft = await buildDraft(existing, rows);
+  const livePreview = await loadLivePreviewDomain(existing.id);
+  const stagedPreview = findStagedPreviewPayload(rows);
+  return {
+    enabled: true,
+    rootDomain,
+    host: livePreview?.host ?? stagedPreview?.host ?? generatedCloudPreviewHost(draft.slug, existing.id),
+  };
+}
+
+async function loadLivePreviewDomain(appId: string): Promise<DomainRow | null> {
+  const rows = await db
+    .select()
+    .from(domain)
+    .where(eq(domain.appId, appId))
+    .orderBy(domain.createdAt);
+  return rows.find((row) => isCloudPreviewHost(row.host)) ?? null;
+}
+
+function findStagedPreviewPayload(rows: StagedChangeRow[]): DomainChangePayload | null {
+  for (const row of rows) {
+    if (row.resource !== "domain" || row.action === "delete") continue;
+    const payload = parseDomainChangePayload(row.value);
+    if (payload && isCloudPreviewHost(payload.host)) return payload;
+  }
+  return null;
+}
 
 function upsertAppChange(
   tx: DbTransaction,

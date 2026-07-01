@@ -36,6 +36,13 @@ type CloudflareLoadBalancer = {
   id: string;
 };
 
+type CloudflareDnsRecord = {
+  id: string;
+  name: string;
+  type: string;
+  content: string;
+};
+
 type SyncTarget = {
   serverId: string;
   name: string;
@@ -156,6 +163,59 @@ export async function testCloudflareToken(token: string): Promise<void> {
   await client.envelope<CloudflareZone[]>("/zones?per_page=1&page=1");
 }
 
+export async function upsertCloudflareARecord(
+  token: string,
+  host: string,
+  address: string,
+): Promise<void> {
+  const client = new CloudflareClient(token);
+  const zone = await resolveZone(client, host);
+  const records = await listARecords(client, zone.id, host);
+  const body = {
+    type: "A",
+    name: host,
+    content: address,
+    ttl: 1,
+    proxied: false,
+  };
+
+  const existing = records[0];
+  if (existing) {
+    await client.put<CloudflareDnsRecord>(
+      `/zones/${encodeURIComponent(zone.id)}/dns_records/${encodeURIComponent(existing.id)}`,
+      body,
+    );
+    await Promise.all(
+      records
+        .slice(1)
+        .map((record) =>
+          client.delete(
+            `/zones/${encodeURIComponent(zone.id)}/dns_records/${encodeURIComponent(record.id)}`,
+          ),
+        ),
+    );
+    return;
+  }
+
+  await client.post<CloudflareDnsRecord>(
+    `/zones/${encodeURIComponent(zone.id)}/dns_records`,
+    body,
+  );
+}
+
+export async function deleteCloudflareARecord(token: string, host: string): Promise<void> {
+  const client = new CloudflareClient(token);
+  const zone = await resolveZone(client, host);
+  const records = await listARecords(client, zone.id, host);
+  await Promise.all(
+    records.map((record) =>
+      client.delete(
+        `/zones/${encodeURIComponent(zone.id)}/dns_records/${encodeURIComponent(record.id)}`,
+      ),
+    ),
+  );
+}
+
 export async function deleteCloudflareLoadBalancer(token: string, providerResourceId: string) {
   const ref = parseResourceRef(providerResourceId);
   const client = new CloudflareClient(token);
@@ -246,6 +306,21 @@ async function listZones(client: CloudflareClient): Promise<CloudflareZone[]> {
   }
 
   return zones;
+}
+
+async function listARecords(
+  client: CloudflareClient,
+  zoneId: string,
+  host: string,
+): Promise<CloudflareDnsRecord[]> {
+  const params = new URLSearchParams({
+    type: "A",
+    name: host,
+    per_page: "100",
+  });
+  return client.get<CloudflareDnsRecord[]>(
+    `/zones/${encodeURIComponent(zoneId)}/dns_records?${params}`,
+  );
 }
 
 async function upsertMonitor(

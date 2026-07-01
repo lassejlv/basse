@@ -333,6 +333,12 @@ export type StageDomainChangeInput =
       domainId: string;
     };
 
+export type PreviewDomainConfig = {
+  enabled: boolean;
+  rootDomain: string | null;
+  host: string | null;
+};
+
 // Result of applying staged changes: the deployment that was triggered, or null
 // when the app has no server attached and could not be deployed.
 export type ApplyStagedChangesResult = {

@@ -2,6 +2,7 @@ import type {
   AppStagedChanges,
   ApplyStagedChangesResult,
   EnvVarPlain,
+  PreviewDomainConfig,
   ProjectApplyStagedChangesResult,
   ProjectStagedChangeHistoryEntry,
   ProjectStagedChanges,
@@ -15,6 +16,7 @@ import type {
 export type {
   AppStagedChanges,
   ApplyStagedChangesResult,
+  PreviewDomainConfig,
   ProjectApplyStagedChangesResult,
   ProjectStagedChangeHistoryEntry,
   ProjectStagedChanges,
@@ -132,6 +134,23 @@ export async function stageDomainChange(
     credentials: "include",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<AppStagedChanges>;
+}
+
+export async function getPreviewDomainConfig(appId: string): Promise<PreviewDomainConfig> {
+  const response = await fetch(`${apiBaseUrl}/api/apps/${appId}/changes/preview-domain`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<PreviewDomainConfig>;
+}
+
+export async function stagePreviewDomain(appId: string): Promise<AppStagedChanges> {
+  const response = await fetch(`${apiBaseUrl}/api/apps/${appId}/changes/preview-domain`, {
+    method: "POST",
+    credentials: "include",
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<AppStagedChanges>;

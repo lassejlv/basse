@@ -2,6 +2,11 @@ import { db, domain, server } from "@basse/db";
 import type { CreateDomainInput, Domain } from "@basse/shared";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
+import {
+  cloudPreviewReservedHostMessage,
+  deleteCloudPreviewDns,
+  isCloudPreviewHost,
+} from "./cloud-preview";
 import { enqueueOrRunDomainSync } from "./proxy-sync";
 import { resolveActiveWorkspace } from "./workspace";
 
@@ -92,6 +97,9 @@ domains.post("/", async (c) => {
 
   const hostError = validateHost(host);
   if (hostError) return c.json({ error: hostError }, 400);
+  if (isCloudPreviewHost(host)) {
+    return c.json({ error: cloudPreviewReservedHostMessage() }, 400);
+  }
   const upstreamError = validateUpstream(upstream);
   if (upstreamError) return c.json({ error: upstreamError }, 400);
 
@@ -141,7 +149,7 @@ domains.delete("/:id", async (c) => {
 
   // Join domain->server to enforce ownership (domain has no organizationId).
   const [row] = await db
-    .select({ id: domain.id, serverId: domain.serverId })
+    .select({ id: domain.id, serverId: domain.serverId, host: domain.host })
     .from(domain)
     .innerJoin(server, eq(domain.serverId, server.id))
     .where(and(eq(domain.id, c.req.param("id")), eq(server.organizationId, organizationId)))
@@ -149,6 +157,15 @@ domains.delete("/:id", async (c) => {
 
   if (!row) {
     return c.json({ error: "Domain not found" }, 404);
+  }
+
+  try {
+    await deleteCloudPreviewDns(row.host);
+  } catch (error) {
+    return c.json(
+      { error: error instanceof Error ? error.message : "Failed to delete preview DNS record" },
+      502,
+    );
   }
 
   await db.delete(domain).where(eq(domain.id, row.id));
