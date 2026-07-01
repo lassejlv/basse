@@ -1,7 +1,11 @@
 import {
+  app as appTable,
   db,
+  environment,
   githubAppInstallation,
   githubAppIntegration,
+  githubWebhookDelivery,
+  project,
 } from "@basse/db";
 import type {
   CompleteGitHubAppManifestInput,
@@ -9,13 +13,26 @@ import type {
   GitHubAppIntegration,
   GitHubAppManifest,
   GitHubRepository,
+  GitHubRepositoryList,
   SaveGitHubAppInstallationInput,
 } from "@basse/shared";
 import { and, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { createSign } from "node:crypto";
 import { decryptSecret, encryptSecret } from "./crypto";
-import { createGitHubAppManifest, parseGitHubOwner, resolveManifestOrigin } from "./github-utils";
+import {
+  createGitHubAppManifest,
+  createGitHubManifestState,
+  gitHubPushTarget,
+  gitHubRepositoryFullName,
+  gitHubWebhookUrl,
+  parseGitHubOwner,
+  resolveApiOrigin,
+  resolveManifestOrigin,
+  verifyGitHubManifestState,
+  verifyWebhookSignature,
+} from "./github-utils";
+import { enqueueDeploy } from "./deployments";
 import { resolveActiveWorkspace } from "./workspace";
 
 const GITHUB_API = "https://api.github.com";
@@ -31,6 +48,7 @@ type GitHubManifestConversion = {
   name: string;
   client_id?: string;
   pem: string;
+  webhook_secret?: string;
 };
 
 type GitHubInstallationResponse = {
@@ -60,6 +78,23 @@ type GitHubError = {
   message?: string;
 };
 
+type GitHubPushPayload = {
+  ref?: string;
+  deleted?: boolean;
+  repository?: {
+    full_name?: string;
+    clone_url?: string;
+    html_url?: string;
+  };
+};
+
+type GitHubWebhookPayload = GitHubPushPayload & {
+  action?: string;
+  installation?: {
+    id?: number | string;
+  };
+};
+
 export const github = new Hono();
 
 github.get("/integration", async (c) => {
@@ -67,25 +102,37 @@ github.get("/integration", async (c) => {
   if (organizationId instanceof Response) return organizationId;
 
   const integration = await getIntegration(organizationId);
-  return c.json(toIntegration(integration));
+  return c.json(
+    toIntegration(
+      integration,
+      resolveRequestOrigin(c.req.url, c.req.header("origin")),
+      resolveApiOrigin(c.req.url, c.req.raw.headers),
+    ),
+  );
 });
 
 github.get("/manifest", async (c) => {
   const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
   if (organizationId instanceof Response) return organizationId;
 
-  return c.json(createManifest(c.req.url, c.req.header("origin")));
+  return c.json(
+    createManifest(organizationId, c.req.url, c.req.header("origin"), c.req.raw.headers),
+  );
 });
 
 github.post("/manifest/complete", async (c) => {
   const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
   if (organizationId instanceof Response) return organizationId;
 
-  const body = (await c.req.json().catch(() => null)) as
-    | Partial<CompleteGitHubAppManifestInput>
-    | null;
+  const body = (await c.req
+    .json()
+    .catch(() => null)) as Partial<CompleteGitHubAppManifestInput> | null;
   const code = typeof body?.code === "string" ? body.code.trim() : "";
   if (!code) return c.json({ error: "code is required" }, 400);
+  const state = typeof body?.state === "string" ? body.state.trim() : "";
+  if (!state || !verifyGitHubManifestState(state, organizationId)) {
+    return c.json({ error: "Invalid GitHub App setup state" }, 400);
+  }
 
   const convertedResult = await tryGitHub(() =>
     githubRequest<GitHubManifestConversion>(
@@ -98,6 +145,9 @@ github.post("/manifest/complete", async (c) => {
   const converted = convertedResult.value;
   const now = new Date();
   const encryptedPrivateKey = await encryptSecret(converted.pem);
+  const encryptedWebhookSecret = converted.webhook_secret
+    ? await encryptSecret(converted.webhook_secret)
+    : null;
 
   const [existing] = await db
     .select()
@@ -118,7 +168,7 @@ github.post("/manifest/complete", async (c) => {
           name: converted.name,
           clientId: converted.client_id ?? null,
           privateKey: encryptedPrivateKey,
-          webhookSecret: null,
+          webhookSecret: encryptedWebhookSecret,
           updatedAt: now,
         })
         .where(eq(githubAppIntegration.id, existing.id))
@@ -136,7 +186,7 @@ github.post("/manifest/complete", async (c) => {
         name: converted.name,
         clientId: converted.client_id ?? null,
         privateKey: encryptedPrivateKey,
-        webhookSecret: null,
+        webhookSecret: encryptedWebhookSecret,
         createdAt: now,
         updatedAt: now,
       })
@@ -145,7 +195,123 @@ github.post("/manifest/complete", async (c) => {
   });
 
   if (!row) return c.json({ error: "Failed to save GitHub App" }, 500);
-  return c.json(toIntegration(row));
+  return c.json(
+    toIntegration(
+      row,
+      resolveRequestOrigin(c.req.url, c.req.header("origin")),
+      resolveApiOrigin(c.req.url, c.req.raw.headers),
+    ),
+  );
+});
+
+github.post("/webhook", async (c) => {
+  const event = c.req.header("x-github-event") ?? "";
+  const delivery = c.req.header("x-github-delivery") ?? "";
+  const appId = c.req.header("x-github-hook-installation-target-id") ?? "";
+  const signature = c.req.header("x-hub-signature-256") ?? "";
+  const rawBody = await c.req.text();
+
+  if (event === "ping") return c.json({ ok: true });
+  if (!appId) return c.json({ error: "Missing GitHub App id" }, 400);
+
+  const integration = await getIntegrationByAppId(appId);
+  if (!integration?.webhookSecret) return c.json({ error: "GitHub webhook not configured" }, 404);
+
+  const webhookSecret = await decryptSecret(integration.webhookSecret);
+  if (!verifyWebhookSignature(rawBody, signature, webhookSecret)) {
+    return c.json({ error: "Invalid GitHub webhook signature" }, 401);
+  }
+
+  if (delivery) {
+    const [createdDelivery] = await db
+      .insert(githubWebhookDelivery)
+      .values({
+        id: crypto.randomUUID(),
+        integrationId: integration.id,
+        deliveryId: delivery,
+        event,
+        createdAt: new Date(),
+      })
+      .onConflictDoNothing({
+        target: [githubWebhookDelivery.integrationId, githubWebhookDelivery.deliveryId],
+      })
+      .returning({ id: githubWebhookDelivery.id });
+
+    if (!createdDelivery) return c.json({ ok: true, delivery, duplicate: true });
+  }
+
+  let payload: GitHubWebhookPayload;
+  try {
+    payload = JSON.parse(rawBody) as GitHubWebhookPayload;
+  } catch {
+    return c.json({ error: "Invalid GitHub webhook payload" }, 400);
+  }
+
+  if (event === "installation") {
+    const installationId =
+      payload.installation?.id === undefined ? "" : String(payload.installation.id);
+    if (payload.action === "deleted" && installationId) {
+      await db
+        .delete(githubAppInstallation)
+        .where(
+          and(
+            eq(githubAppInstallation.integrationId, integration.id),
+            eq(githubAppInstallation.installationId, installationId),
+          ),
+        );
+      return c.json({ ok: true, delivery, installationId, removed: true });
+    }
+
+    return c.json({
+      ok: true,
+      delivery,
+      ignored: `installation:${payload.action ?? "unknown"}`,
+    });
+  }
+
+  if (event !== "push") return c.json({ ok: true, delivery, ignored: event || "unknown" });
+
+  const target = gitHubPushTarget(payload);
+  if (!target) return c.json({ ok: true, ignored: "non-branch-push" });
+
+  const rows = await db
+    .select({
+      id: appTable.id,
+      repositoryUrl: appTable.repositoryUrl,
+    })
+    .from(appTable)
+    .innerJoin(environment, eq(appTable.environmentId, environment.id))
+    .innerJoin(project, eq(environment.projectId, project.id))
+    .where(
+      and(
+        eq(project.organizationId, integration.organizationId),
+        eq(appTable.sourceType, "repository"),
+        eq(appTable.branch, target.branch),
+      ),
+    );
+
+  const matched = rows.filter(
+    (row) => gitHubRepositoryFullName(row.repositoryUrl) === target.fullName,
+  );
+  const queued: string[] = [];
+  const errors: { appId: string; error: string }[] = [];
+
+  for (const row of matched) {
+    const result = await enqueueDeploy(row.id);
+    if ("error" in result) {
+      errors.push({ appId: row.id, error: result.error });
+    } else {
+      queued.push(result.deployment.id);
+    }
+  }
+
+  return c.json({
+    ok: true,
+    delivery,
+    matched: matched.length,
+    queued,
+    errors,
+  });
 });
 
 github.get("/installations", async (c) => {
@@ -168,9 +334,9 @@ github.post("/installations", async (c) => {
   const integration = await getIntegration(organizationId);
   if (!integration) return c.json({ error: "Create a GitHub App first" }, 400);
 
-  const body = (await c.req.json().catch(() => null)) as
-    | Partial<SaveGitHubAppInstallationInput>
-    | null;
+  const body = (await c.req
+    .json()
+    .catch(() => null)) as Partial<SaveGitHubAppInstallationInput> | null;
   const installationId =
     typeof body?.installationId === "string" && body.installationId.trim()
       ? body.installationId.trim()
@@ -208,10 +374,7 @@ github.post("/installations", async (c) => {
       updatedAt: now,
     })
     .onConflictDoUpdate({
-      target: [
-        githubAppInstallation.integrationId,
-        githubAppInstallation.installationId,
-      ],
+      target: [githubAppInstallation.integrationId, githubAppInstallation.installationId],
       set: {
         accountLogin: remote.account.login,
         accountType: remote.account.type ?? null,
@@ -225,6 +388,22 @@ github.post("/installations", async (c) => {
   return c.json(toInstallation(row), 201);
 });
 
+github.delete("/installations/:id", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  await db
+    .delete(githubAppInstallation)
+    .where(
+      and(
+        eq(githubAppInstallation.id, c.req.param("id")),
+        eq(githubAppInstallation.organizationId, organizationId),
+      ),
+    );
+
+  return c.body(null, 204);
+});
+
 github.get("/repositories", async (c) => {
   const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
   if (organizationId instanceof Response) return organizationId;
@@ -232,15 +411,16 @@ github.get("/repositories", async (c) => {
   const repositoriesResult = await tryGitHub(() => listInstalledRepositories(organizationId));
   if (!repositoriesResult.ok) return c.json({ error: repositoriesResult.error }, 502);
 
-  const repositories = repositoriesResult.value;
-  return c.json(repositories);
+  return c.json(repositoriesResult.value);
 });
 
 github.delete("/integration", async (c) => {
   const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
   if (organizationId instanceof Response) return organizationId;
 
-  await db.delete(githubAppIntegration).where(eq(githubAppIntegration.organizationId, organizationId));
+  await db
+    .delete(githubAppIntegration)
+    .where(eq(githubAppIntegration.organizationId, organizationId));
 
   return c.body(null, 204);
 });
@@ -276,13 +456,26 @@ export async function resolveGitHubCloneToken(
   return createInstallationToken(row.installation.installationId, jwt);
 }
 
-function createManifest(requestUrl: string, headerOrigin?: string): GitHubAppManifest {
-  const url = new URL(requestUrl);
-  const origin = resolveManifestOrigin(requestUrl, headerOrigin, url.searchParams.get("origin"));
+function createManifest(
+  organizationId: string,
+  requestUrl: string,
+  headerOrigin?: string,
+  headers?: Headers,
+): GitHubAppManifest {
+  const origin = resolveRequestOrigin(requestUrl, headerOrigin);
+  const apiOrigin = resolveApiOrigin(requestUrl, headers);
+  const state = createGitHubManifestState(organizationId);
   return {
-    actionUrl: GITHUB_APP_CREATE_URL,
-    manifest: JSON.stringify(createGitHubAppManifest(origin)),
+    actionUrl: `${GITHUB_APP_CREATE_URL}?state=${encodeURIComponent(state)}`,
+    manifest: JSON.stringify(createGitHubAppManifest(origin, apiOrigin)),
+    state,
+    webhookUrl: gitHubWebhookUrl(origin, apiOrigin),
   };
+}
+
+function resolveRequestOrigin(requestUrl: string, headerOrigin?: string): string {
+  const url = new URL(requestUrl);
+  return resolveManifestOrigin(requestUrl, headerOrigin, url.searchParams.get("origin"));
 }
 
 async function getIntegration(organizationId: string): Promise<GitHubIntegrationRow | null> {
@@ -294,14 +487,33 @@ async function getIntegration(organizationId: string): Promise<GitHubIntegration
   return row ?? null;
 }
 
-function toIntegration(row: GitHubIntegrationRow | null): GitHubAppIntegration {
-  if (!row) return { connected: false };
+async function getIntegrationByAppId(appId: string): Promise<GitHubIntegrationRow | null> {
+  const [row] = await db
+    .select()
+    .from(githubAppIntegration)
+    .where(eq(githubAppIntegration.appId, appId))
+    .limit(1);
+  return row ?? null;
+}
+
+function toIntegration(
+  row: GitHubIntegrationRow | null,
+  origin?: string,
+  webhookOrigin?: string,
+): GitHubAppIntegration {
+  if (!row) {
+    return {
+      connected: false,
+      webhookUrl: origin ? gitHubWebhookUrl(origin, webhookOrigin) : undefined,
+    };
+  }
   return {
     connected: true,
     appName: row.name,
     appSlug: row.slug,
     appId: row.appId,
     installUrl: `https://github.com/apps/${row.slug}/installations/new`,
+    webhookUrl: origin ? gitHubWebhookUrl(origin, webhookOrigin) : undefined,
     updatedAt: row.updatedAt.toISOString(),
   };
 }
@@ -318,7 +530,7 @@ function toInstallation(row: GitHubInstallationRow): GitHubAppInstallation {
   };
 }
 
-async function listInstalledRepositories(organizationId: string): Promise<GitHubRepository[]> {
+async function listInstalledRepositories(organizationId: string): Promise<GitHubRepositoryList> {
   const rows = await db
     .select({
       integration: githubAppIntegration,
@@ -370,7 +582,10 @@ async function listInstalledRepositories(organizationId: string): Promise<GitHub
     throw new Error(`Could not list GitHub repositories: ${errors.join("; ")}`);
   }
 
-  return repositories.sort((a, b) => a.fullName.localeCompare(b.fullName));
+  return {
+    repositories: repositories.sort((a, b) => a.fullName.localeCompare(b.fullName)),
+    errors,
+  };
 }
 
 async function createInstallationToken(installationId: string, jwt: string): Promise<string> {

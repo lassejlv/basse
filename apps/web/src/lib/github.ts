@@ -3,7 +3,7 @@ import type {
   GitHubAppInstallation,
   GitHubAppIntegration,
   GitHubAppManifest,
-  GitHubRepository,
+  GitHubRepositoryList,
   SaveGitHubAppInstallationInput,
 } from "@basse/shared";
 
@@ -73,10 +73,18 @@ export async function saveGitHubAppInstallation(
   return response.json() as Promise<GitHubAppInstallation>;
 }
 
-export async function listGitHubRepositories(): Promise<GitHubRepository[]> {
+export async function deleteGitHubAppInstallation(id: string): Promise<void> {
+  const response = await fetch(`${apiBaseUrl}/api/github/installations/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+}
+
+export async function listGitHubRepositories(): Promise<GitHubRepositoryList> {
   const response = await fetch(`${apiBaseUrl}/api/github/repositories`, {
     credentials: "include",
   });
   if (!response.ok) throw new Error(await parseError(response));
-  return response.json() as Promise<GitHubRepository[]>;
+  return response.json() as Promise<GitHubRepositoryList>;
 }

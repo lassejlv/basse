@@ -235,10 +235,7 @@ function ProjectDetailRoute() {
         entries={projectChangeHistory.data ?? []}
         isPending={projectChangeHistory.isPending}
       />
-      <ProjectStagedChangesBar
-        projectId={projectId}
-        changes={projectChanges.data?.changes ?? []}
-      />
+      <ProjectStagedChangesBar projectId={projectId} changes={projectChanges.data?.changes ?? []} />
     </section>
   );
 }
@@ -878,7 +875,8 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
   }
 
   const serverList = servers.data ?? [];
-  const githubRepoList = githubRepositories.data ?? [];
+  const githubRepoList = githubRepositories.data?.repositories ?? [];
+  const githubRepoErrors = githubRepositories.data?.errors ?? [];
 
   function updateDatabaseKind(kind: DatabaseKind) {
     setDatabaseKind(kind);
@@ -979,7 +977,7 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
                   <>
                     {githubRepoList.length > 0 ? (
                       <GitHubRepositorySelect
-                        label="GitHub repository"
+                        label="Private GitHub repository"
                         onSelect={(repository) => {
                           setRepositoryUrl(repository.cloneUrl);
                           setBranch(repository.defaultBranch);
@@ -993,9 +991,30 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
                         Couldn't load installed GitHub repositories:{" "}
                         {toMessage(githubRepositories.error)}
                       </p>
+                    ) : githubRepoErrors.length > 0 ? (
+                      <p className="text-muted-foreground text-sm">
+                        Some GitHub installations could not be loaded: {githubRepoErrors.join("; ")}
+                      </p>
+                    ) : !githubRepositories.isPending && githubRepoList.length === 0 ? (
+                      <p className="text-muted-foreground text-sm">
+                        Need a private repository?{" "}
+                        <Link
+                          className="underline underline-offset-4"
+                          search={{
+                            code: undefined,
+                            installation_id: undefined,
+                            setup_action: undefined,
+                            state: undefined,
+                          }}
+                          to="/secrets"
+                        >
+                          Install the GitHub App in Secrets
+                        </Link>
+                        .
+                      </p>
                     ) : null}
                     <div className="space-y-2">
-                      <Label htmlFor="app-repo">Repository URL</Label>
+                      <Label htmlFor="app-repo">Public or manual repository URL</Label>
                       <Input
                         id="app-repo"
                         onChange={(event) => setRepositoryUrl(event.currentTarget.value)}

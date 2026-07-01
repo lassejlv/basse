@@ -490,9 +490,7 @@ function DeployButton({
         loading={deploy.isPending}
         onClick={() => deploy.mutate()}
         title={
-          hasStagedChanges
-            ? "You have unsaved changes — deploy them from the bar below"
-            : undefined
+          hasStagedChanges ? "You have unsaved changes — deploy them from the bar below" : undefined
         }
       >
         <RocketIcon />
@@ -1243,7 +1241,8 @@ function BuildSettingsCard({ app }: { app: App }) {
     onError: (e: Error) => setError(e.message),
   });
   const localBuildInvalid = app.buildRunner === "server" && app.serverIds.length !== 1;
-  const githubRepoList = githubRepositories.data ?? [];
+  const githubRepoList = githubRepositories.data?.repositories ?? [];
+  const githubRepoErrors = githubRepositories.data?.errors ?? [];
 
   return (
     <Card className="p-6">
@@ -1287,7 +1286,7 @@ function BuildSettingsCard({ app }: { app: App }) {
           <>
             {githubRepoList.length > 0 ? (
               <GitHubRepositorySelect
-                label="GitHub repository"
+                label="Private GitHub repository"
                 onSelect={(repository) => {
                   setRepositoryUrl(repository.cloneUrl);
                   setBranch(repository.defaultBranch);
@@ -1300,9 +1299,30 @@ function BuildSettingsCard({ app }: { app: App }) {
               <p className="text-destructive-foreground text-sm">
                 Couldn't load installed GitHub repositories: {toMessage(githubRepositories.error)}
               </p>
+            ) : githubRepoErrors.length > 0 ? (
+              <p className="text-muted-foreground text-sm">
+                Some GitHub installations could not be loaded: {githubRepoErrors.join("; ")}
+              </p>
+            ) : !githubRepositories.isPending && githubRepoList.length === 0 ? (
+              <p className="text-muted-foreground text-sm">
+                Need a private repository?{" "}
+                <Link
+                  className="underline underline-offset-4"
+                  search={{
+                    code: undefined,
+                    installation_id: undefined,
+                    setup_action: undefined,
+                    state: undefined,
+                  }}
+                  to="/secrets"
+                >
+                  Install the GitHub App in Secrets
+                </Link>
+                .
+              </p>
             ) : null}
             <div className="space-y-2">
-              <Label htmlFor="app-source-repo">Repository URL</Label>
+              <Label htmlFor="app-source-repo">Public or manual repository URL</Label>
               <Input
                 id="app-source-repo"
                 onChange={(event) => setRepositoryUrl(event.currentTarget.value)}
@@ -1523,7 +1543,9 @@ function ResourceLimitsCard({ app }: { app: App }) {
             <div className="flex items-center justify-between gap-3">
               <Label htmlFor="resource-cpu">CPU cores</Label>
               <span className="font-mono text-muted-foreground text-sm">
-                {cpuCores.trim() ? formatCpuCores(Math.round(Number(cpuCores) * 1000)) : "Unlimited"}
+                {cpuCores.trim()
+                  ? formatCpuCores(Math.round(Number(cpuCores) * 1000))
+                  : "Unlimited"}
               </span>
             </div>
             {cpuCap ? (
@@ -1894,10 +1916,7 @@ function EnvVarsCard({ appId, stagedChanges }: { appId: string; stagedChanges: S
             className="min-h-56 font-mono text-xs leading-relaxed"
             onChange={(event) => {
               setDraft(event.currentTarget.value);
-              updateReferenceQuery(
-                event.currentTarget.value,
-                event.currentTarget.selectionStart,
-              );
+              updateReferenceQuery(event.currentTarget.value, event.currentTarget.selectionStart);
             }}
             onKeyUp={(event) =>
               updateReferenceQuery(event.currentTarget.value, event.currentTarget.selectionStart)
@@ -2281,7 +2300,10 @@ function ManagedLoadBalancerSection({ app }: { app: App }) {
             </div>
             <div className="space-y-2">
               <Label>Provider</Label>
-              <Select value={integrationId} onValueChange={(value) => setIntegrationId(value ?? "")}>
+              <Select
+                value={integrationId}
+                onValueChange={(value) => setIntegrationId(value ?? "")}
+              >
                 <SelectTrigger className="w-full">
                   <SelectValue placeholder="Provider">
                     {(value: string) =>
@@ -2342,7 +2364,11 @@ function ManagedLoadBalancerSection({ app }: { app: App }) {
               : "Cloudflare creates the public hostname directly in your zone. Point the domain to Cloudflare nameservers first."}
           </p>
           {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
-          <Button disabled={!integrationId || !host.trim()} loading={create.isPending} type="submit">
+          <Button
+            disabled={!integrationId || !host.trim()}
+            loading={create.isPending}
+            type="submit"
+          >
             <PlusIcon />
             Create load balancer
           </Button>
@@ -2453,7 +2479,11 @@ function ManagedLoadBalancerCard({
       ) : (
         <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
           <DnsRecord label="A record" value={loadBalancer.endpointIpv4} host={loadBalancer.host} />
-          <DnsRecord label="AAAA record" value={loadBalancer.endpointIpv6} host={loadBalancer.host} />
+          <DnsRecord
+            label="AAAA record"
+            value={loadBalancer.endpointIpv6}
+            host={loadBalancer.host}
+          />
         </div>
       )}
 
@@ -2496,15 +2526,7 @@ function ManagedLoadBalancerCard({
   );
 }
 
-function DnsRecord({
-  label,
-  value,
-  host,
-}: {
-  label: string;
-  value: string | null;
-  host: string;
-}) {
+function DnsRecord({ label, value, host }: { label: string; value: string | null; host: string }) {
   return (
     <div className="rounded-md border bg-background p-3">
       <p className="text-muted-foreground">{label}</p>

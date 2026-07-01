@@ -24,7 +24,7 @@ import {
 import { decryptSecret } from "./crypto";
 import { loadResolvedEnvMap } from "./env-resolver";
 import { resolveGitHubCloneToken } from "./github";
-import { gitHubHttpsCloneUrl } from "./github-utils";
+import { gitHubHttpsCloneUrl, parseGitHubOwner } from "./github-utils";
 import { connectionFromServer } from "./server-connection";
 import { runScript, type SshConnection } from "./ssh";
 
@@ -334,21 +334,35 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       log.line(`Cloning ${appRow.repositoryUrl} (${appRow.branch})…`);
       ctxDir = await mkdtemp(join(tmpdir(), "basse-build-"));
       const organizationId = await resolveAppOrganizationId(appRow);
+      const gitHubOwner = parseGitHubOwner(appRow.repositoryUrl);
       const authToken = organizationId
         ? await resolveGitHubCloneToken(organizationId, appRow.repositoryUrl)
         : null;
       if (authToken) {
         log.line("Using GitHub App installation token for repository access.");
+      } else if (gitHubOwner) {
+        log.line(
+          `No GitHub App installation matched ${gitHubOwner}. If this repository is private, connect GitHub in Secrets and install the app on the repository.`,
+        );
       }
-      const commitSha = await cloneRepo({
-        repositoryUrl: authToken
-          ? (gitHubHttpsCloneUrl(appRow.repositoryUrl) ?? appRow.repositoryUrl)
-          : appRow.repositoryUrl,
-        branch: appRow.branch,
-        ctxDir,
-        authToken,
-        onLine: log.line,
-      });
+      const cloneUrl = gitHubHttpsCloneUrl(appRow.repositoryUrl) ?? appRow.repositoryUrl;
+      let commitSha: string;
+      try {
+        commitSha = await cloneRepo({
+          repositoryUrl: cloneUrl,
+          branch: appRow.branch,
+          ctxDir,
+          authToken,
+          onLine: log.line,
+        });
+      } catch (error) {
+        if (authToken && gitHubOwner) {
+          log.line(
+            `GitHub App authentication was available for ${gitHubOwner}, but cloning failed. Check that the app installation includes this repository and branch.`,
+          );
+        }
+        throw error;
+      }
       await setStatus(deploymentId, "building", { commitSha });
 
       const kind = resolveBuildKind(appRow.buildMode, ctxDir);

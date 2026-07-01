@@ -222,7 +222,12 @@ function AuthedLayout() {
                     render={
                       <Link
                         to="/secrets"
-                        search={{ code: undefined, installation_id: undefined, setup_action: undefined }}
+                        search={{
+                          code: undefined,
+                          installation_id: undefined,
+                          setup_action: undefined,
+                          state: undefined,
+                        }}
                       />
                     }
                     tooltip="Secrets"

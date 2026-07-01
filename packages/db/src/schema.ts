@@ -642,6 +642,26 @@ export const githubAppInstallation = pgTable(
   ],
 );
 
+export const githubWebhookDelivery = pgTable(
+  "github_webhook_delivery",
+  {
+    id: text("id").primaryKey(),
+    integrationId: text("integration_id")
+      .notNull()
+      .references(() => githubAppIntegration.id, { onDelete: "cascade" }),
+    deliveryId: text("delivery_id").notNull(),
+    event: text("event").notNull(),
+    createdAt: timestamp("created_at").notNull(),
+  },
+  (table) => [
+    index("github_webhook_delivery_integrationId_idx").on(table.integrationId),
+    uniqueIndex("github_webhook_delivery_integrationId_deliveryId_uidx").on(
+      table.integrationId,
+      table.deliveryId,
+    ),
+  ],
+);
+
 // Workspace-level credentials for third-party traffic providers. Tokens are
 // encrypted by the API before they reach this table.
 export const loadBalancerIntegration = pgTable(

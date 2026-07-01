@@ -1,4 +1,5 @@
 import type { GitHubRepository } from "@basse/shared";
+import { useEffect, useMemo, useState } from "react";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -20,27 +21,61 @@ export function GitHubRepositorySelect({
   value: string;
 }) {
   const selected = repositories.find((repository) => repository.cloneUrl === value);
+  const accounts = useMemo(
+    () => [...new Set(repositories.map((repository) => repository.accountLogin))].sort(),
+    [repositories],
+  );
+  const [account, setAccount] = useState(selected?.accountLogin ?? accounts[0] ?? "");
+  const accountRepositories = repositories.filter(
+    (repository) => repository.accountLogin === account,
+  );
+  const selectedInAccount =
+    selected?.accountLogin === account && accountRepositories.includes(selected) ? selected : null;
+
+  useEffect(() => {
+    if (selected?.accountLogin) {
+      setAccount(selected.accountLogin);
+      return;
+    }
+    if (!account && accounts[0]) setAccount(accounts[0]);
+  }, [account, accounts, selected?.accountLogin]);
 
   return (
     <div className="space-y-2">
       <Label>{label}</Label>
+      {accounts.length > 0 ? (
+        <Select value={account} onValueChange={(next) => setAccount(next ?? "")}>
+          <SelectTrigger className="w-full">
+            <SelectValue placeholder="Select GitHub account">
+              {(selectedAccount: string) => selectedAccount || "Select GitHub account"}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectPopup>
+            {accounts.map((accountLogin) => (
+              <SelectItem key={accountLogin} value={accountLogin}>
+                {accountLogin}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+      ) : null}
       <Select
-        value={selected?.cloneUrl ?? ""}
+        value={selectedInAccount?.cloneUrl ?? ""}
         onValueChange={(next) => {
-          const repository = repositories.find((candidate) => candidate.cloneUrl === next);
+          const repository = accountRepositories.find((candidate) => candidate.cloneUrl === next);
           if (repository) onSelect(repository);
         }}
       >
         <SelectTrigger className="w-full">
           <SelectValue placeholder="Select installed repository">
             {(selectedValue: string) =>
-              repositories.find((repository) => repository.cloneUrl === selectedValue)?.fullName ??
-              "Select installed repository"
+              accountRepositories.find((repository) => repository.cloneUrl === selectedValue)
+                ?.fullName ?? "Select installed repository"
             }
           </SelectValue>
         </SelectTrigger>
         <SelectPopup>
-          {repositories.map((repository) => (
+          {accountRepositories.map((repository) => (
             <SelectItem
               key={`${repository.installationId}:${repository.id}`}
               value={repository.cloneUrl}

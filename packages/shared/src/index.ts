@@ -454,16 +454,20 @@ export type GitHubAppIntegration = {
   appSlug?: string;
   appId?: string;
   installUrl?: string;
+  webhookUrl?: string;
   updatedAt?: string;
 };
 
 export type GitHubAppManifest = {
   actionUrl: string;
   manifest: string;
+  state: string;
+  webhookUrl: string;
 };
 
 export type CompleteGitHubAppManifestInput = {
   code: string;
+  state: string;
 };
 
 export type GitHubAppInstallation = {
@@ -488,6 +492,11 @@ export type GitHubRepository = {
   cloneUrl: string;
   defaultBranch: string;
   private: boolean;
+};
+
+export type GitHubRepositoryList = {
+  repositories: GitHubRepository[];
+  errors: string[];
 };
 
 export type ServerStatus = "pending" | "provisioning" | "active" | "error" | "unreachable";

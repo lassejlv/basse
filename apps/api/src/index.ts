@@ -31,10 +31,19 @@ import { workspaceSettingsRoutes } from "./workspace-settings";
 const app = new Hono();
 const webDist = Bun.env.WEB_DIST ?? "./apps/web/dist";
 const allowedOrigins = new Set(
-  ["http://localhost:5173", "http://127.0.0.1:5173", Bun.env.WEB_ORIGIN].filter(
+  ["http://localhost:5173", "http://127.0.0.1:5173", normalizeOrigin(Bun.env.WEB_ORIGIN)].filter(
     (origin): origin is string => Boolean(origin),
   ),
 );
+
+function normalizeOrigin(origin?: string): string | undefined {
+  if (!origin) return undefined;
+  try {
+    return new URL(origin).origin;
+  } catch {
+    return origin;
+  }
+}
 
 app.use(logger());
 app.use(

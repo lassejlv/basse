@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { ExternalLinkIcon, TrashIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, ExternalLinkIcon, TrashIcon } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,7 @@ import { authClient } from "@/lib/auth-client";
 import { disconnectDepot, getDepotConnection, saveDepotConnection } from "@/lib/depot";
 import {
   completeGitHubAppManifest,
+  deleteGitHubAppInstallation,
   disconnectGitHubApp,
   getGitHubAppIntegration,
   getGitHubAppManifest,
@@ -22,6 +23,7 @@ import { createSshKey, deleteSshKey, listSshKeys } from "@/lib/ssh-keys";
 export const Route = createFileRoute("/_authed/secrets")({
   validateSearch: (search: Record<string, unknown>) => ({
     code: typeof search.code === "string" ? search.code : undefined,
+    state: typeof search.state === "string" ? search.state : undefined,
     installation_id:
       typeof search.installation_id === "string" ? search.installation_id : undefined,
     setup_action: typeof search.setup_action === "string" ? search.setup_action : undefined,
@@ -55,6 +57,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
   const search = Route.useSearch();
   const processedCode = useRef<string | null>(null);
   const processedInstallation = useRef<string | null>(null);
+  const [copiedWebhook, setCopiedWebhook] = useState(false);
   const integrationKey = ["github-app-integration", organizationId];
   const installationsKey = ["github-app-installations", organizationId];
 
@@ -77,7 +80,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
   });
 
   const completeManifest = useMutation({
-    mutationFn: (code: string) => completeGitHubAppManifest({ code }),
+    mutationFn: (input: { code: string; state: string }) => completeGitHubAppManifest(input),
     onSuccess: async () => {
       toast.success("GitHub App connected");
       await Promise.all([
@@ -87,7 +90,8 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
       ]);
       await clearGitHubCallbackSearch(navigate);
     },
-    onError: (error) => toast.error("Couldn't connect GitHub App", { description: toMessage(error) }),
+    onError: (error) =>
+      toast.error("Couldn't connect GitHub App", { description: toMessage(error) }),
   });
 
   const saveInstallation = useMutation({
@@ -119,14 +123,28 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
         queryClient.invalidateQueries({ queryKey: ["github-repositories"] }),
       ]);
     },
-    onError: (error) => toast.error("Couldn't disconnect GitHub", { description: toMessage(error) }),
+    onError: (error) =>
+      toast.error("Couldn't disconnect GitHub", { description: toMessage(error) }),
+  });
+
+  const removeInstallation = useMutation({
+    mutationFn: deleteGitHubAppInstallation,
+    onSuccess: async () => {
+      toast.success("GitHub installation removed");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: installationsKey }),
+        queryClient.invalidateQueries({ queryKey: ["github-repositories"] }),
+      ]);
+    },
+    onError: (error) =>
+      toast.error("Couldn't remove GitHub installation", { description: toMessage(error) }),
   });
 
   useEffect(() => {
     if (!search.code || processedCode.current === search.code) return;
     processedCode.current = search.code;
-    completeManifest.mutate(search.code);
-  }, [completeManifest, search.code]);
+    completeManifest.mutate({ code: search.code, state: search.state ?? "" });
+  }, [completeManifest, search.code, search.state]);
 
   useEffect(() => {
     if (!search.installation_id || processedInstallation.current === search.installation_id) return;
@@ -140,7 +158,15 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
 
   const connected = integration.data?.connected;
   const installUrl = integration.data?.installUrl;
+  const webhookUrl = integration.data?.webhookUrl ?? manifest.data?.webhookUrl;
   const savedInstallations = installations.data ?? [];
+
+  async function copyWebhookUrl() {
+    if (!webhookUrl) return;
+    await navigator.clipboard.writeText(webhookUrl);
+    setCopiedWebhook(true);
+    window.setTimeout(() => setCopiedWebhook(false), 1500);
+  }
 
   return (
     <div className="max-w-2xl rounded-lg border bg-card p-6">
@@ -150,12 +176,51 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
         short-lived installation tokens.
       </p>
 
+      {integration.isError ? (
+        <p className="mt-4 text-destructive-foreground text-sm">
+          Couldn't load GitHub integration: {toMessage(integration.error)}
+        </p>
+      ) : null}
+      {manifest.isError ? (
+        <p className="mt-4 text-destructive-foreground text-sm">
+          Couldn't prepare GitHub App setup: {toMessage(manifest.error)}
+        </p>
+      ) : null}
+      {installations.isError ? (
+        <p className="mt-4 text-destructive-foreground text-sm">
+          Couldn't load GitHub installations: {toMessage(installations.error)}
+        </p>
+      ) : null}
+
       {connected ? (
         <div className="mt-5 rounded-md border px-3 py-2 text-sm">
           <p className="font-medium">{integration.data?.appName}</p>
           <p className="font-mono text-muted-foreground text-xs">
             github.com/apps/{integration.data?.appSlug}
           </p>
+        </div>
+      ) : null}
+
+      {connected && webhookUrl ? (
+        <div className="mt-4 space-y-2">
+          <Label htmlFor="github-webhook-url">Webhook URL</Label>
+          <div className="flex gap-2">
+            <Input
+              className="font-mono text-xs"
+              id="github-webhook-url"
+              readOnly
+              value={webhookUrl}
+            />
+            <Button
+              aria-label="Copy GitHub webhook URL"
+              onClick={copyWebhookUrl}
+              size="icon"
+              type="button"
+              variant="outline"
+            >
+              {copiedWebhook ? <CheckIcon /> : <CopyIcon />}
+            </Button>
+          </div>
         </div>
       ) : null}
 
@@ -173,6 +238,24 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
                   {installation.repositorySelection ?? "repositories"}
                 </p>
               </div>
+              <Button
+                aria-label={`Remove ${installation.accountLogin} installation`}
+                loading={removeInstallation.isPending}
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      `Remove ${installation.accountLogin} from this workspace's GitHub installations?`,
+                    )
+                  ) {
+                    removeInstallation.mutate(installation.id);
+                  }
+                }}
+                size="icon"
+                type="button"
+                variant="outline"
+              >
+                <TrashIcon />
+              </Button>
             </li>
           ))}
         </ul>
@@ -181,13 +264,26 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
       ) : null}
 
       <div className="mt-6 flex flex-wrap gap-2 border-t pt-6">
-        <form action={manifest.data?.actionUrl} method="post">
+        <form
+          action={manifest.data?.actionUrl}
+          method="post"
+          onSubmit={(event) => {
+            if (
+              connected &&
+              !window.confirm(
+                "Replace the connected GitHub App? This clears saved installations for this workspace.",
+              )
+            ) {
+              event.preventDefault();
+            }
+          }}
+        >
           <input name="manifest" type="hidden" value={manifest.data?.manifest ?? ""} />
           <Button
             disabled={!organizationId || manifest.isPending || !manifest.data?.manifest}
             type="submit"
           >
-            {connected ? "Create another GitHub App" : "Create GitHub App"}
+            {connected ? "Replace GitHub App" : "Create GitHub App"}
           </Button>
         </form>
 
@@ -221,7 +317,12 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
 async function clearGitHubCallbackSearch(navigate: ReturnType<typeof useNavigate>) {
   await navigate({
     replace: true,
-    search: { code: undefined, installation_id: undefined, setup_action: undefined },
+    search: {
+      code: undefined,
+      installation_id: undefined,
+      setup_action: undefined,
+      state: undefined,
+    },
     to: "/secrets",
   });
 }
