@@ -513,7 +513,7 @@ function toIntegration(
     appName: row.name,
     appSlug: row.slug,
     appId: row.appId,
-    installUrl: `https://github.com/apps/${row.slug}/installations/new`,
+    installUrl: `https://github.com/apps/${row.slug}/installations/select_target`,
     webhookUrl: origin ? gitHubWebhookUrl(origin, webhookOrigin) : undefined,
     updatedAt: row.updatedAt.toISOString(),
   };

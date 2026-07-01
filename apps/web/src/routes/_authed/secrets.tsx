@@ -167,6 +167,8 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
   const installUrl = integration.data?.installUrl;
   const webhookUrl = integration.data?.webhookUrl ?? manifest.data?.webhookUrl;
   const savedInstallations = installations.data ?? [];
+  const installCallbackMissingId =
+    Boolean(search.setup_action) && !search.installation_id && !search.code;
 
   async function copyWebhookUrl() {
     if (!webhookUrl) return;
@@ -231,6 +233,12 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
       {installations.isError ? (
         <p className="mt-4 text-destructive-foreground text-sm">
           Couldn't load GitHub installations: {toMessage(installations.error)}
+        </p>
+      ) : null}
+      {installCallbackMissingId ? (
+        <p className="mt-4 text-muted-foreground text-sm">
+          GitHub returned from setup without an installation id. Choose an account and repository
+          access on GitHub, then complete the installation.
         </p>
       ) : null}
 
