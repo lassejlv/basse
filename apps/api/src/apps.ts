@@ -481,17 +481,20 @@ export async function buildAppUpdates(
     updates.name = body.name.trim();
     updates.slug = slugify(body.name);
   }
-  if (typeof body?.repositoryUrl === "string") {
+  const nextSourceType = SOURCE_TYPES.includes(body?.sourceType as AppSourceType)
+    ? (body?.sourceType as AppSourceType)
+    : existing.sourceType;
+  if (SOURCE_TYPES.includes(body?.sourceType as AppSourceType)) {
+    updates.sourceType = body?.sourceType as AppSourceType;
+  }
+  if (typeof body?.repositoryUrl === "string" && nextSourceType === "repository") {
     const repoError = validateRepositoryUrl(body.repositoryUrl.trim());
     if (repoError) return { ok: false, error: repoError, status: 400 };
     updates.repositoryUrl = body.repositoryUrl.trim();
   }
-  if (SOURCE_TYPES.includes(body?.sourceType as AppSourceType)) {
-    updates.sourceType = body?.sourceType as AppSourceType;
-  }
   if (typeof body?.imageRef === "string" || body?.imageRef === null) {
     const imageRef = typeof body.imageRef === "string" ? body.imageRef.trim() : "";
-    if ((updates.sourceType ?? existing.sourceType) === "image") {
+    if (nextSourceType === "image") {
       const imageError = validateImageRef(imageRef);
       if (imageError) return { ok: false, error: imageError, status: 400 };
     }

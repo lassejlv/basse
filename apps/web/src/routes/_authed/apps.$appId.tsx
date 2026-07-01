@@ -1341,17 +1341,25 @@ function BuildSettingsCard({ app }: { app: App }) {
         className="mt-4 space-y-4"
         onSubmit={(event) => {
           event.preventDefault();
-          update.mutate({
-            sourceType,
-            repositoryUrl,
-            imageRef: sourceType === "image" ? imageRef : null,
-            branch,
-            port: Number(port),
-            buildMode,
-            buildRootDirectory,
-            dockerfilePath,
-            autoRedeployEnabled,
-          });
+          update.mutate(
+            sourceType === "image"
+              ? {
+                  sourceType,
+                  imageRef,
+                  port: Number(port),
+                }
+              : {
+                  sourceType,
+                  repositoryUrl,
+                  imageRef: null,
+                  branch,
+                  port: Number(port),
+                  buildMode,
+                  buildRootDirectory,
+                  dockerfilePath,
+                  autoRedeployEnabled,
+                },
+          );
         }}
       >
         <div className="space-y-2">
