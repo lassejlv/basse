@@ -320,6 +320,10 @@ function OutboundInstallSection({ serverId }: { serverId: string }) {
     <div className="max-w-2xl rounded-lg border bg-card p-6">
       <h2 className="text-lg font-semibold">Outbound agent</h2>
       <p className="mt-1 text-muted-foreground text-sm">
+        Experimental mode for servers where SSH is not possible. SSH mode is recommended when the
+        server can accept it.
+      </p>
+      <p className="mt-2 text-muted-foreground text-sm">
         Run the install command on the server. The token is embedded in the command and should be
         treated like a secret.
       </p>
