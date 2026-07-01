@@ -319,9 +319,9 @@ Features:
 
 Basse parity:
 
-- v0: database dump to local disk.
-- v1: S3-compatible destination.
-- later: encrypted backups, retention policies, restore drill UI, per-resource backup schedules.
+- v0: database dump to local disk. DONE — pg_dump via agent onto the database's data volume, manual + scheduled (per-app interval), retention pruning, restore, streamed download, success/failure alerts.
+- v1: S3-compatible destination. DONE — workspace S3 connections (`/s3` page, encrypted credentials, Bun native S3 client), auto/manual upload per backup, S3 download fallback, object cleanup on delete.
+- later: encrypted backups, restore drill UI, per-resource cron expressions, backups for Redis/MySQL, downloads/uploads for outbound-mode servers.
 
 ## Logs And Observability
 

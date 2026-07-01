@@ -18,7 +18,7 @@ import { connectionFromServer } from "./server-connection";
 
 type ServerRow = typeof server.$inferSelect;
 
-type MonitorIssue = {
+export type MonitorIssue = {
   organizationId: string;
   severity: MonitorSeverity;
   code: string;
@@ -46,7 +46,7 @@ const PRESSURE_FAILURE_THRESHOLD = envNumber("MONITOR_RESOURCE_FAILURE_THRESHOLD
 const OUTBOUND_HEARTBEAT_GRACE_MS =
   envNumber("MONITOR_OUTBOUND_HEARTBEAT_GRACE_SECONDS", 90) * 1000;
 
-async function recordEvent(issue: MonitorIssue): Promise<void> {
+export async function recordEvent(issue: MonitorIssue): Promise<void> {
   await db.insert(monitorEvent).values({
     id: crypto.randomUUID(),
     organizationId: issue.organizationId,
@@ -62,7 +62,7 @@ async function recordEvent(issue: MonitorIssue): Promise<void> {
   });
 }
 
-async function raiseAlert(issue: MonitorIssue): Promise<void> {
+export async function raiseAlert(issue: MonitorIssue): Promise<void> {
   const now = new Date();
   const [existing] = await db
     .select()
@@ -124,7 +124,7 @@ async function raiseAlert(issue: MonitorIssue): Promise<void> {
   }
 }
 
-async function resolveAlert(
+export async function resolveAlert(
   organizationId: string,
   fingerprint: string,
   recovery: Omit<MonitorIssue, "organizationId" | "fingerprint">,

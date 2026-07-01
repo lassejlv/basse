@@ -1,4 +1,13 @@
-import { app, appServer, databaseBackup, db, s3Connection, server } from "@basse/db";
+import {
+  app,
+  appServer,
+  databaseBackup,
+  db,
+  environment,
+  project,
+  s3Connection,
+  server,
+} from "@basse/db";
 import type {
   DatabaseBackup,
   DatabaseBackupList,
@@ -16,6 +25,7 @@ import {
 } from "./agent-client";
 import { ownedApp, requireAgentTarget } from "./apps";
 import { decryptSecret } from "./crypto";
+import { raiseAlert, recordEvent, resolveAlert } from "./monitor";
 import { enqueueAction } from "./queue/queue";
 import { ownedS3Connection, s3ClientForConnection } from "./s3";
 import { connectionFromServer } from "./server-connection";
@@ -80,6 +90,78 @@ function toSettings(row: AppRow): DatabaseBackupSettings {
     retention: row.backupRetention,
     s3ConnectionId: row.backupS3ConnectionId,
   };
+}
+
+async function organizationIdForApp(appId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ organizationId: project.organizationId })
+    .from(app)
+    .innerJoin(environment, eq(app.environmentId, environment.id))
+    .innerJoin(project, eq(environment.projectId, project.id))
+    .where(eq(app.id, appId))
+    .limit(1);
+  return row?.organizationId ?? null;
+}
+
+/**
+ * Backup success/failure notifications (coolify.md "Backups" spec) through the
+ * shared monitor pipeline: failures raise a deduped alert (+ email), successes
+ * resolve it and log an info event. Always best effort — a notification error
+ * must never change a backup's outcome.
+ */
+async function notifyBackupOutcome(input: {
+  kind: "backup" | "upload";
+  backup: BackupRow;
+  appName: string | null;
+  ok: boolean;
+  message: string;
+}): Promise<void> {
+  try {
+    const organizationId = await organizationIdForApp(input.backup.appId);
+    if (!organizationId) return;
+
+    const code = input.kind === "backup" ? "backup_failed" : "backup_upload_failed";
+    const fingerprint = `${code}:${input.backup.appId}`;
+    const name = input.appName ?? "database";
+    const scope = { serverId: input.backup.serverId, appId: input.backup.appId };
+
+    if (!input.ok) {
+      await raiseAlert({
+        organizationId,
+        severity: "warning",
+        code,
+        title:
+          input.kind === "backup"
+            ? `Backup failed for ${name}`
+            : `Backup upload to S3 failed for ${name}`,
+        message: input.message,
+        fingerprint,
+        ...scope,
+      });
+      return;
+    }
+
+    await resolveAlert(organizationId, fingerprint, {
+      severity: "info",
+      code: input.kind === "backup" ? "backup_succeeded" : "backup_upload_succeeded",
+      title:
+        input.kind === "backup" ? `Backup succeeded for ${name}` : `Backup uploaded for ${name}`,
+      message: input.message,
+      ...scope,
+    });
+    await recordEvent({
+      organizationId,
+      severity: "info",
+      code: input.kind === "backup" ? "backup_completed" : "backup_uploaded",
+      title:
+        input.kind === "backup" ? `Backup completed for ${name}` : `Backup uploaded for ${name}`,
+      message: input.message,
+      fingerprint,
+      ...scope,
+    });
+  } catch (error) {
+    console.error("[backup-notify]", input.backup.id, error);
+  }
 }
 
 async function ownedBackup(backupId: string, appId: string): Promise<BackupRow | null> {
@@ -247,9 +329,36 @@ backups.get("/:id/backups/:backupId/download", async (c) => {
     return c.json({ error: "Backup is not completed" }, 400);
   }
 
+  const timestamp = backup.createdAt.toISOString().replaceAll(":", "-").slice(0, 19);
+  const filename = `${row.slug}-${timestamp}.dump`;
+
+  // Serve from S3 when the copy is there. Streams the uploaded object when the
+  // server copy is unreachable (server gone, outbound mode, file pruned).
+  const s3Fallback = async (): Promise<Response | null> => {
+    if (backup.s3Status !== "uploaded" || !backup.s3Key || !backup.s3ConnectionId) return null;
+    const [connectionRow] = await db
+      .select()
+      .from(s3Connection)
+      .where(eq(s3Connection.id, backup.s3ConnectionId))
+      .limit(1);
+    if (!connectionRow) return null;
+    try {
+      const client = await s3ClientForConnection(connectionRow);
+      const file = client.file(backup.s3Key);
+      if (!(await file.exists())) return null;
+      c.header("content-type", "application/octet-stream");
+      c.header("content-disposition", `attachment; filename="${filename}"`);
+      return c.body(file.stream());
+    } catch {
+      return null;
+    }
+  };
+
   const agent = await requireAgentTarget(appId, backup.serverId);
-  if (!agent.server) return c.json({ error: agent.error }, 400);
-  if (!isSshConnection(agent.connection!)) {
+  if (!agent.server || !isSshConnection(agent.connection!)) {
+    const fromS3 = await s3Fallback();
+    if (fromS3) return fromS3;
+    if (!agent.server) return c.json({ error: agent.error }, 400);
     return c.json({ error: "Backup downloads are not supported on outbound servers yet" }, 400);
   }
 
@@ -286,18 +395,21 @@ backups.get("/:id/backups/:backupId/download", async (c) => {
   try {
     status = await head;
   } catch {
+    const fromS3 = await s3Fallback();
+    if (fromS3) return fromS3;
     return c.json({ error: "Could not reach the server" }, 502);
   }
   if (status !== 200) {
+    const fromS3 = await s3Fallback();
+    if (fromS3) return fromS3;
     return c.json(
       { error: status === 404 ? "Backup file not found on server" : "Download failed" },
       502,
     );
   }
 
-  const timestamp = backup.createdAt.toISOString().replaceAll(":", "-").slice(0, 19);
   c.header("content-type", "application/octet-stream");
-  c.header("content-disposition", `attachment; filename="${row.slug}-${timestamp}.dump"`);
+  c.header("content-disposition", `attachment; filename="${filename}"`);
   return c.body(stream.readable);
 });
 
@@ -416,16 +528,19 @@ export async function runDatabaseBackup(backupId: string): Promise<void> {
     .limit(1);
   if (!backup || backup.status !== "queued") return;
 
+  let appName: string | null = null;
   const fail = async (message: string) => {
     await db
       .update(databaseBackup)
       .set({ status: "failed", error: message, completedAt: new Date(), updatedAt: new Date() })
       .where(eq(databaseBackup.id, backupId));
+    await notifyBackupOutcome({ kind: "backup", backup, appName, ok: false, message });
   };
 
   try {
     const [appRow] = await db.select().from(app).where(eq(app.id, backup.appId)).limit(1);
     if (!appRow) return fail("App no longer exists");
+    appName = appRow.name;
     const target = backupTarget(appRow);
     if (!target) return fail("App is not a postgres database");
 
@@ -460,6 +575,14 @@ export async function runDatabaseBackup(backupId: string): Promise<void> {
         updatedAt: new Date(),
       })
       .where(eq(databaseBackup.id, backupId));
+
+    await notifyBackupOutcome({
+      kind: "backup",
+      backup,
+      appName,
+      ok: true,
+      message: `pg_dump finished (${result.sizeBytes} bytes).`,
+    });
 
     // Auto-offload to S3 when the app has a destination configured.
     if (appRow.backupS3ConnectionId) {
@@ -505,11 +628,13 @@ export async function runBackupUpload(backupId: string): Promise<void> {
     .limit(1);
   if (!backup || backup.status !== "completed" || backup.s3Status !== "uploading") return;
 
+  let appName: string | null = null;
   const fail = async (message: string) => {
     await db
       .update(databaseBackup)
       .set({ s3Status: "failed", s3Error: message, updatedAt: new Date() })
       .where(eq(databaseBackup.id, backupId));
+    await notifyBackupOutcome({ kind: "upload", backup, appName, ok: false, message });
   };
 
   try {
@@ -523,6 +648,7 @@ export async function runBackupUpload(backupId: string): Promise<void> {
 
     const [appRow] = await db.select().from(app).where(eq(app.id, backup.appId)).limit(1);
     if (!appRow) return fail("App no longer exists");
+    appName = appRow.name;
     const target = backupTarget(appRow);
     if (!target) return fail("App is not a postgres database");
 
@@ -576,6 +702,14 @@ export async function runBackupUpload(backupId: string): Promise<void> {
         updatedAt: new Date(),
       })
       .where(eq(databaseBackup.id, backupId));
+
+    await notifyBackupOutcome({
+      kind: "upload",
+      backup,
+      appName,
+      ok: true,
+      message: `Uploaded to ${connectionRow.bucket}/${key}.`,
+    });
   } catch (error) {
     await fail(error instanceof Error ? error.message : "Upload failed");
   }
