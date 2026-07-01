@@ -78,7 +78,6 @@ Checked against the current repo on 2026-06-30.
 
 ### Next Implementation Targets
 
-- [ ] App health checks (HTTP path + expected status + interval + timeout) gating deploy cutover and monitored continuously.
 - [ ] Deploy webhooks + success/failure notifications.
 - [ ] Scoped API tokens for automation.
 - [ ] Redis backups (BGSAVE via the existing backup plumbing).
@@ -215,7 +214,7 @@ Important behavior:
 
 Basse parity:
 
-- v0: HTTP path + expected status + interval + timeout.
+- v0: HTTP path + expected status + interval + timeout. DONE — opt-in per app (off by default), probed via curl/wget inside the container, gates deploy cutover and runs continuously in the monitor with alerts.
 - v1: Dockerfile/compose healthcheck detection.
 - later: readiness vs liveness distinction, health history, health event timeline.
 

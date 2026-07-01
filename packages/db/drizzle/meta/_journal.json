@@ -218,6 +218,13 @@
       "when": 1782948266434,
       "tag": "0030_wet_grandmaster",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1782948980499,
+      "tag": "0031_black_bullseye",
+      "breakpoints": true
     }
   ]
 }

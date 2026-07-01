@@ -298,6 +298,13 @@ export function toApp(
       cpuMillicores: row.cpuLimitMillicores,
       memoryBytes: row.memoryLimitBytes,
     },
+    healthCheck: {
+      enabled: row.healthCheckEnabled,
+      path: row.healthCheckPath,
+      expectedStatus: row.healthCheckStatus,
+      timeoutSeconds: row.healthCheckTimeoutSeconds,
+      intervalSeconds: row.healthCheckIntervalSeconds,
+    },
     database,
     latestDeploymentStatus,
     createdAt: row.createdAt.toISOString(),
@@ -533,6 +540,50 @@ export async function buildAppUpdates(
   }
   if (typeof body?.autoRedeployEnabled === "boolean") {
     updates.autoRedeployEnabled = body.autoRedeployEnabled;
+  }
+  if (typeof body?.healthCheckEnabled === "boolean") {
+    updates.healthCheckEnabled = body.healthCheckEnabled;
+  }
+  if (typeof body?.healthCheckPath === "string") {
+    const path = body.healthCheckPath.trim() || "/";
+    if (!path.startsWith("/") || path.length > 500 || /\s/.test(path)) {
+      return {
+        ok: false,
+        error: "Health check path must start with / and contain no spaces",
+        status: 400,
+      };
+    }
+    updates.healthCheckPath = path;
+  }
+  if (typeof body?.healthCheckStatus === "number") {
+    if (
+      !Number.isInteger(body.healthCheckStatus) ||
+      body.healthCheckStatus < 100 ||
+      body.healthCheckStatus > 599
+    ) {
+      return { ok: false, error: "Expected status must be 100-599", status: 400 };
+    }
+    updates.healthCheckStatus = body.healthCheckStatus;
+  }
+  if (typeof body?.healthCheckTimeoutSeconds === "number") {
+    if (
+      !Number.isInteger(body.healthCheckTimeoutSeconds) ||
+      body.healthCheckTimeoutSeconds < 1 ||
+      body.healthCheckTimeoutSeconds > 60
+    ) {
+      return { ok: false, error: "Health check timeout must be 1-60 seconds", status: 400 };
+    }
+    updates.healthCheckTimeoutSeconds = body.healthCheckTimeoutSeconds;
+  }
+  if (typeof body?.healthCheckIntervalSeconds === "number") {
+    if (
+      !Number.isInteger(body.healthCheckIntervalSeconds) ||
+      body.healthCheckIntervalSeconds < 10 ||
+      body.healthCheckIntervalSeconds > 3600
+    ) {
+      return { ok: false, error: "Health check interval must be 10-3600 seconds", status: 400 };
+    }
+    updates.healthCheckIntervalSeconds = body.healthCheckIntervalSeconds;
   }
   if (existing.appKind === "database") {
     const existingDatabaseKind = (existing.databaseKind ?? "postgres") as DatabaseKind;

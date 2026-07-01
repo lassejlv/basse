@@ -53,6 +53,14 @@ export type AppResourceLimits = {
   memoryBytes: number | null;
 };
 
+export type AppHealthCheck = {
+  enabled: boolean;
+  path: string;
+  expectedStatus: number;
+  timeoutSeconds: number;
+  intervalSeconds: number;
+};
+
 export type AppDatabase = {
   kind: DatabaseKind;
   version: string;
@@ -84,6 +92,7 @@ export type App = {
   imageRef: string | null;
   volumes: AppVolume[];
   resourceLimits: AppResourceLimits;
+  healthCheck: AppHealthCheck;
   database: AppDatabase | null;
   createdAt: string;
   updatedAt: string;
@@ -151,6 +160,11 @@ export type ImportDockerContainerInput = {
 };
 
 export type UpdateAppInput = {
+  healthCheckEnabled?: boolean;
+  healthCheckPath?: string;
+  healthCheckStatus?: number;
+  healthCheckTimeoutSeconds?: number;
+  healthCheckIntervalSeconds?: number;
   name?: string;
   repositoryUrl?: string;
   branch?: string;

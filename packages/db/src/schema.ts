@@ -171,6 +171,13 @@ export const app = pgTable(
     databasePassword: text("database_password"),
     databasePublicEnabled: boolean("database_public_enabled").notNull().default(false),
     databasePublicPort: integer("database_public_port"),
+    // HTTP health check (service apps): probed inside the container via the
+    // agent (curl/wget), gating deploy cutover and monitored continuously.
+    healthCheckEnabled: boolean("health_check_enabled").notNull().default(false),
+    healthCheckPath: text("health_check_path").notNull().default("/"),
+    healthCheckStatus: integer("health_check_status").notNull().default(200),
+    healthCheckTimeoutSeconds: integer("health_check_timeout_seconds").notNull().default(5),
+    healthCheckIntervalSeconds: integer("health_check_interval_seconds").notNull().default(30),
     // Scheduled pg_dump backups (postgres databases only).
     backupScheduleEnabled: boolean("backup_schedule_enabled").notNull().default(false),
     backupIntervalHours: integer("backup_interval_hours").notNull().default(24),

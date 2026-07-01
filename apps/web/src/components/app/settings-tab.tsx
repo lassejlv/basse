@@ -46,6 +46,7 @@ export function AppSettingsTab({ app, draft }: { app: App; draft: App }) {
       ) : (
         <BuildSettingsCard app={draft} />
       )}
+      {app.appKind === "service" ? <HealthCheckCard app={draft} /> : null}
       <ServerCard app={draft} />
       <ResourceLimitsCard app={draft} />
       {app.appKind === "service" ? <VolumesCard app={draft} /> : null}
@@ -101,6 +102,118 @@ function DeleteAppCard({ app }: { app: App }) {
         <TrashIcon />
         Delete app
       </Button>
+    </Card>
+  );
+}
+
+function HealthCheckCard({ app }: { app: App }) {
+  const queryClient = useQueryClient();
+  const healthCheck = app.healthCheck;
+  const [enabled, setEnabled] = useState(healthCheck.enabled);
+  const [path, setPath] = useState(healthCheck.path);
+  const [expectedStatus, setExpectedStatus] = useState(String(healthCheck.expectedStatus));
+  const [timeoutSeconds, setTimeoutSeconds] = useState(String(healthCheck.timeoutSeconds));
+  const [intervalSeconds, setIntervalSeconds] = useState(String(healthCheck.intervalSeconds));
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setEnabled(healthCheck.enabled);
+    setPath(healthCheck.path);
+    setExpectedStatus(String(healthCheck.expectedStatus));
+    setTimeoutSeconds(String(healthCheck.timeoutSeconds));
+    setIntervalSeconds(String(healthCheck.intervalSeconds));
+  }, [
+    healthCheck.enabled,
+    healthCheck.path,
+    healthCheck.expectedStatus,
+    healthCheck.timeoutSeconds,
+    healthCheck.intervalSeconds,
+  ]);
+
+  const stage = useMutation({
+    mutationFn: () =>
+      stageAppChanges(app.id, {
+        healthCheckEnabled: enabled,
+        healthCheckPath: path.trim() || "/",
+        healthCheckStatus: Number(expectedStatus),
+        healthCheckTimeoutSeconds: Number(timeoutSeconds),
+        healthCheckIntervalSeconds: Number(intervalSeconds),
+      }),
+    onSuccess: (data) => {
+      setError(null);
+      toast.success("Health check change staged");
+      queryClient.setQueryData(["changes", app.id], data);
+      void queryClient.invalidateQueries({ queryKey: ["project-changes"] });
+    },
+    onError: (mutationError: Error) => setError(mutationError.message),
+  });
+
+  return (
+    <Card className="p-6">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="font-semibold text-lg">Health check</h2>
+          <p className="mt-1 text-muted-foreground text-sm">
+            Probed inside the container after each deploy (gating cutover) and continuously by the
+            monitor. Requires curl or wget in the image.
+          </p>
+        </div>
+        <Switch checked={enabled} onCheckedChange={setEnabled} />
+      </div>
+      <form
+        className="mt-4 space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          stage.mutate();
+        }}
+      >
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="health-path">Path</Label>
+            <Input
+              disabled={!enabled}
+              id="health-path"
+              onChange={(event) => setPath(event.currentTarget.value)}
+              placeholder="/healthz"
+              value={path}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="health-status">Expected status</Label>
+            <Input
+              disabled={!enabled}
+              id="health-status"
+              onChange={(event) => setExpectedStatus(event.currentTarget.value)}
+              type="number"
+              value={expectedStatus}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="health-timeout">Timeout (seconds)</Label>
+            <Input
+              disabled={!enabled}
+              id="health-timeout"
+              onChange={(event) => setTimeoutSeconds(event.currentTarget.value)}
+              type="number"
+              value={timeoutSeconds}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="health-interval">Interval (seconds)</Label>
+            <Input
+              disabled={!enabled}
+              id="health-interval"
+              onChange={(event) => setIntervalSeconds(event.currentTarget.value)}
+              type="number"
+              value={intervalSeconds}
+            />
+          </div>
+        </div>
+        {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+        <Button loading={stage.isPending} type="submit">
+          Stage health check changes
+        </Button>
+      </form>
     </Card>
   );
 }

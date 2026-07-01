@@ -14,6 +14,7 @@ import { and, desc, eq, inArray, lt } from "drizzle-orm";
 import { checkAgentHealth, getAppMetrics, getAppStatus } from "./agent-client";
 import { decryptSecret } from "./crypto";
 import { sendAlertEmail } from "./email";
+import { probeAppHttp } from "./health";
 import { publishForDeployment, publishRealtime } from "./realtime";
 import { connectionFromServer } from "./server-connection";
 
@@ -33,6 +34,10 @@ export type MonitorIssue = {
 
 const IN_FLIGHT_DEPLOYMENTS = ["queued", "building", "deploying"] as const;
 const pressureCounts = new Map<string, number>();
+// HTTP health check pacing (per app+server) and consecutive-failure counters.
+const healthProbeAt = new Map<string, number>();
+const healthFailCounts = new Map<string, number>();
+const HEALTH_FAILURE_THRESHOLD = 2;
 
 function envNumber(name: string, fallback: number): number {
   const value = Number(Bun.env[name]);
@@ -382,6 +387,48 @@ async function checkAppsOnServer(row: ServerRow): Promise<void> {
         appId: attached.app.id,
         deploymentId: latest.id,
       });
+
+      // Continuous HTTP health check for service apps that configured one,
+      // paced by the app's interval (never faster than the monitor tick).
+      // Alerts after two consecutive failures to ride out one-off blips.
+      if (attached.app.healthCheckEnabled && attached.app.appKind === "service") {
+        const probeKey = `${attached.app.id}:${row.id}`;
+        const intervalMs = attached.app.healthCheckIntervalSeconds * 1000;
+        const lastProbe = healthProbeAt.get(probeKey) ?? 0;
+        if (Date.now() - lastProbe >= intervalMs) {
+          healthProbeAt.set(probeKey, Date.now());
+          const unhealthyFingerprint = `app_unhealthy:${attached.app.id}:${row.id}`;
+          const probe = await probeAppHttp(conn, token, attached.app);
+          if (probe.ok) {
+            healthFailCounts.delete(probeKey);
+            await resolveAlert(attached.project.organizationId, unhealthyFingerprint, {
+              severity: "info",
+              code: "app_healthy",
+              title: `${attached.app.name} is healthy again`,
+              message: `${attached.app.healthCheckPath} returns ${probe.status} on ${row.name}.`,
+              serverId: row.id,
+              appId: attached.app.id,
+              deploymentId: latest.id,
+            });
+          } else {
+            const failures = (healthFailCounts.get(probeKey) ?? 0) + 1;
+            healthFailCounts.set(probeKey, failures);
+            if (failures >= HEALTH_FAILURE_THRESHOLD) {
+              await raiseAlert({
+                organizationId: attached.project.organizationId,
+                severity: "critical",
+                code: "app_unhealthy",
+                title: `${attached.app.name} is failing its health check`,
+                message: `${attached.app.healthCheckPath} on ${row.name}: ${probe.reason}`,
+                fingerprint: unhealthyFingerprint,
+                serverId: row.id,
+                appId: attached.app.id,
+                deploymentId: latest.id,
+              });
+            }
+          }
+        }
+      }
 
       const metrics = await getAppMetrics(conn, token, attached.app.id);
       const pressureFingerprint = `resource_pressure:${attached.app.id}:${row.id}`;

@@ -46,6 +46,11 @@ const APP_FIELD_LABELS: Record<string, string> = {
   volumes: "Volumes",
   cpuLimitMillicores: "CPU limit",
   memoryLimitBytes: "Memory limit",
+  healthCheckEnabled: "Health check",
+  healthCheckPath: "Health check path",
+  healthCheckStatus: "Health check status",
+  healthCheckTimeoutSeconds: "Health check timeout",
+  healthCheckIntervalSeconds: "Health check interval",
   databaseVersion: "Database version",
   databasePublicEnabled: "Public access",
   databasePublicPort: "Public port",
@@ -105,6 +110,10 @@ function formatAppValue(field: string, raw: string | null): string {
     return typeof value === "string" && value ? value : "Dockerfile";
   }
   if (field === "autoRedeployEnabled") return value ? "enabled" : "disabled";
+  if (field === "healthCheckEnabled") return value ? "enabled" : "disabled";
+  if (field === "healthCheckTimeoutSeconds" || field === "healthCheckIntervalSeconds") {
+    return `${value}s`;
+  }
   if (field === "databasePublicEnabled") return value ? "enabled" : "disabled";
   return String(value);
 }

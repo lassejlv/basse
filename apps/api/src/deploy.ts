@@ -34,6 +34,7 @@ import { decryptSecret } from "./crypto";
 import { loadResolvedEnvMap } from "./env-resolver";
 import { resolveGitHubCloneToken } from "./github";
 import { gitHubHttpsCloneUrl, parseGitHubOwner } from "./github-utils";
+import { waitForHealthy } from "./health";
 import { syncServerDomains } from "./proxy-sync";
 import { publishForDeployment } from "./realtime";
 import { connectionFromServer } from "./server-connection";
@@ -749,14 +750,31 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         running &&= auth.ok;
       }
       if (running && appRow.appKind !== "database") {
-        // Catch immediate crash loops before routing traffic and reporting
-        // healthy: give the app a moment to boot, then confirm it is still up.
-        line(`Verifying the container stays up on ${srv.name}…`);
-        await Bun.sleep(5000);
-        const status = await getAppStatus(connection, agentToken, appRow.id);
-        if (!status.running) {
-          line(`Container exited shortly after starting on ${srv.name} — check the runtime logs.`);
-          running = false;
+        if (appRow.healthCheckEnabled) {
+          // Health-check-gated cutover: the deploy only goes green (and proxy
+          // routes only refresh) once the app answers with the expected status.
+          line(
+            `Waiting for ${appRow.healthCheckPath} to return ${appRow.healthCheckStatus} on ${srv.name}…`,
+          );
+          const health = await waitForHealthy(connection, agentToken, appRow, { onLine: line });
+          if (health.ok) {
+            line(`Health check passed on ${srv.name} (status ${health.status}).`);
+          } else {
+            line(`Health check failed on ${srv.name}: ${health.reason}`);
+            running = false;
+          }
+        } else {
+          // No health check configured: catch immediate crash loops before
+          // routing traffic — give the app a moment, then confirm it's up.
+          line(`Verifying the container stays up on ${srv.name}…`);
+          await Bun.sleep(5000);
+          const status = await getAppStatus(connection, agentToken, appRow.id);
+          if (!status.running) {
+            line(
+              `Container exited shortly after starting on ${srv.name} — check the runtime logs.`,
+            );
+            running = false;
+          }
         }
       }
 
