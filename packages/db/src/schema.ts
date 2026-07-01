@@ -247,6 +247,7 @@ export const deployment = pgTable("deployment", {
   commitSha: text("commit_sha"),
   imageRef: text("image_ref"),
   buildId: text("build_id"),
+  buildNoCache: boolean("build_no_cache").notNull().default(false),
   // Append-only build + deploy log shown in the UI.
   logs: text("logs"),
   createdAt: timestamp("created_at").notNull(),

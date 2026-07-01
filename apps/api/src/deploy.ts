@@ -304,6 +304,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 
     if (dep.imageRef) {
       imageRef = dep.imageRef;
+      buildId = dep.buildId;
       registry = await resolveDepotRegistryForImage(appRow, imageRef);
       log.line(`Using saved deployment image ${imageRef}.`);
     } else if (appRow.appKind === "database") {
@@ -334,6 +335,9 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       log.line(`Using prebuilt Docker image ${imageRef}.`);
     } else {
       // Clone.
+      if (dep.buildNoCache) {
+        log.line("Building without cache.");
+      }
       log.line(`Cloning ${appRow.repositoryUrl} (${appRow.branch})…`);
       ctxDir = await mkdtemp(join(tmpdir(), "basse-build-"));
       const organizationId = await resolveAppOrganizationId(appRow);
@@ -400,6 +404,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
           dockerfilePath: buildPaths.dockerfilePathRelative,
           connection,
           deploymentId,
+          noCache: dep.buildNoCache,
           onLine: log.line,
         });
         imageRef = built.imageRef;
@@ -442,6 +447,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
           projectId: depot.projectId,
           deploymentId,
           metadataFile,
+          noCache: dep.buildNoCache,
           onLine: log.line,
         });
         buildId = built.buildId;

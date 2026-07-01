@@ -357,9 +357,16 @@ export type Deployment = {
   commitSha: string | null;
   imageRef: string | null;
   buildId: string | null;
+  buildNoCache: boolean;
   logs: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type TriggerDeploymentInput = {
+  appId: string;
+  useLatestImage?: boolean;
+  noCache?: boolean;
 };
 
 export type MonitorSeverity = "info" | "warning" | "critical";

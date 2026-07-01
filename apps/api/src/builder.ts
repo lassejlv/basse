@@ -155,6 +155,7 @@ export async function buildImage(opts: {
   projectId: string;
   deploymentId: string;
   metadataFile: string;
+  noCache?: boolean;
   onLine?: BuildLogger;
 }): Promise<{ buildId: string | null }> {
   const env = { DEPOT_TOKEN: opts.depotToken };
@@ -196,6 +197,7 @@ export async function buildImage(opts: {
       "linux/amd64",
       "--progress",
       "plain",
+      ...(opts.noCache ? ["--no-cache"] : []),
       ...dockerfileArg,
       opts.ctxDir,
     ],
@@ -239,6 +241,7 @@ export async function buildImageOnServer(opts: {
   dockerfilePath?: string;
   connection: SshConnection;
   deploymentId: string;
+  noCache?: boolean;
   onLine?: BuildLogger;
 }): Promise<{ imageRef: string }> {
   if (opts.kind === "railpack") {
@@ -256,6 +259,7 @@ export async function buildImageOnServer(opts: {
       : `--build-arg BUILDKIT_SYNTAX=${shellQuote(RAILPACK_FRONTEND)} -f ${shellQuote(
           `${remoteDir}/railpack-plan.json`,
         )}`;
+  const noCacheArg = opts.noCache ? "--no-cache " : "";
 
   const result = await runScript(
     opts.connection,
@@ -263,7 +267,7 @@ export async function buildImageOnServer(opts: {
 cleanup() { rm -rf ${shellQuote(remoteDir)}; }
 trap cleanup EXIT
 cd ${shellQuote(remoteDir)}
-DOCKER_BUILDKIT=1 docker build ${dockerfileArg} -t ${shellQuote(imageRef)} .
+DOCKER_BUILDKIT=1 docker build ${noCacheArg}${dockerfileArg} -t ${shellQuote(imageRef)} .
 `,
     { onLine: opts.onLine, timeoutMs: 1_200_000 },
   );

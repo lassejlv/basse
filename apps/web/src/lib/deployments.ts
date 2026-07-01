@@ -1,4 +1,4 @@
-import type { Deployment } from "@basse/shared";
+import type { Deployment, TriggerDeploymentInput } from "@basse/shared";
 
 export type { Deployment };
 
@@ -23,12 +23,15 @@ export async function getDeployment(id: string): Promise<Deployment> {
   return response.json() as Promise<Deployment>;
 }
 
-export async function triggerDeploy(appId: string): Promise<Deployment> {
+export async function triggerDeploy(
+  appId: string,
+  options: Omit<TriggerDeploymentInput, "appId"> = {},
+): Promise<Deployment> {
   const response = await fetch(`${apiBaseUrl}/api/deployments`, {
     method: "POST",
     credentials: "include",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ appId }),
+    body: JSON.stringify({ appId, ...options }),
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<Deployment>;

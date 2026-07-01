@@ -170,8 +170,8 @@ function AppDetailRoute() {
         <Breadcrumb app={data} />
         <AppHeader
           app={data}
-          appId={appId}
           canDeploy={canDeploy}
+          deployments={list}
           hasStagedChanges={hasStagedChanges}
           status={status}
         />
@@ -344,14 +344,14 @@ function Breadcrumb({ app }: { app: App }) {
 
 function AppHeader({
   app,
-  appId,
   canDeploy,
+  deployments,
   status,
   hasStagedChanges,
 }: {
   app: App;
-  appId: string;
   canDeploy: boolean;
+  deployments: Deployment[];
   status: Deployment["status"] | null;
   hasStagedChanges: boolean;
 }) {
@@ -367,7 +367,12 @@ function AppHeader({
           <h1 className="truncate font-semibold text-2xl tracking-tight">{app.name}</h1>
           <DeployStatusBadge status={status} />
         </div>
-        <DeployButton appId={appId} canDeploy={canDeploy} hasStagedChanges={hasStagedChanges} />
+        <DeployButton
+          app={app}
+          canDeploy={canDeploy}
+          deployments={deployments}
+          hasStagedChanges={hasStagedChanges}
+        />
       </div>
 
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-muted-foreground text-xs">
@@ -469,44 +474,91 @@ function useLiveUrl(app: App): string | null {
   return active ? `https://${active.host}` : null;
 }
 
+type DeployMode = "default" | "latest-image" | "no-cache";
+
 function DeployButton({
-  appId,
+  app,
   canDeploy,
+  deployments,
   hasStagedChanges,
 }: {
-  appId: string;
+  app: App;
   canDeploy: boolean;
+  deployments: Deployment[];
   hasStagedChanges: boolean;
 }) {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
+  const reusableImage = deployments.find(
+    (deployment) =>
+      deployment.imageRef && (deployment.status === "healthy" || deployment.status === "superseded"),
+  );
+  const disabledTitle = hasStagedChanges
+    ? "You have unsaved changes — deploy them from the bar below"
+    : undefined;
 
   const deploy = useMutation({
-    mutationFn: () => triggerDeploy(appId),
-    onSuccess: async () => {
+    mutationFn: (mode: DeployMode) =>
+      triggerDeploy(app.id, {
+        useLatestImage: mode === "latest-image",
+        noCache: mode === "no-cache",
+      }),
+    onSuccess: async (_deployment, mode) => {
       setError(null);
-      toast.success("Deployment queued");
-      await queryClient.invalidateQueries({ queryKey: ["deployments", appId] });
+      toast.success(
+        mode === "latest-image"
+          ? "Redeploy queued"
+          : mode === "no-cache"
+            ? "No-cache deployment queued"
+            : "Deployment queued",
+      );
+      await queryClient.invalidateQueries({ queryKey: ["deployments", app.id] });
     },
     onError: (mutationError: Error) => setError(mutationError.message),
   });
 
   return (
-    <div className="flex flex-col items-end gap-1">
+    <div className="flex flex-col items-end gap-2">
       {/* While changes are staged, deploying goes through the staged-changes bar
           (apply + deploy); this button would otherwise ship the live config and
           silently skip the staged edits. */}
-      <Button
-        disabled={!canDeploy || hasStagedChanges}
-        loading={deploy.isPending}
-        onClick={() => deploy.mutate()}
-        title={
-          hasStagedChanges ? "You have unsaved changes — deploy them from the bar below" : undefined
-        }
-      >
-        <RocketIcon />
-        Deploy
-      </Button>
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button
+          disabled={!canDeploy || hasStagedChanges || deploy.isPending}
+          loading={deploy.isPending && deploy.variables === "default"}
+          onClick={() => deploy.mutate("default")}
+          title={disabledTitle}
+        >
+          <RocketIcon />
+          Deploy
+        </Button>
+        {app.sourceType === "repository" ? (
+          <>
+            <Button
+              disabled={!canDeploy || hasStagedChanges || deploy.isPending || !reusableImage}
+              loading={deploy.isPending && deploy.variables === "latest-image"}
+              onClick={() => deploy.mutate("latest-image")}
+              size="sm"
+              title={disabledTitle ?? (!reusableImage ? "No successful image to redeploy yet" : undefined)}
+              variant="outline"
+            >
+              <RotateCcwIcon />
+              Skip build
+            </Button>
+            <Button
+              disabled={!canDeploy || hasStagedChanges || deploy.isPending}
+              loading={deploy.isPending && deploy.variables === "no-cache"}
+              onClick={() => deploy.mutate("no-cache")}
+              size="sm"
+              title={disabledTitle}
+              variant="outline"
+            >
+              <RocketIcon />
+              No cache
+            </Button>
+          </>
+        ) : null}
+      </div>
       {hasStagedChanges ? (
         <p className="text-muted-foreground text-xs">Deploy staged changes from the bar below.</p>
       ) : error ? (

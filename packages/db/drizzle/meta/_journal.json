@@ -183,6 +183,13 @@
       "when": 1782905235843,
       "tag": "0025_nebulous_preak",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1782924573028,
+      "tag": "0026_bored_adam_destine",
+      "breakpoints": true
     }
   ]
 }

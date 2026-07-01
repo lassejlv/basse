@@ -1,7 +1,7 @@
-import { appServer, db, deployment } from "@basse/db";
-import type { RollbackDeploymentInput } from "@basse/shared";
+import { app, appServer, db, deployment } from "@basse/db";
+import type { RollbackDeploymentInput, TriggerDeploymentInput } from "@basse/shared";
 import type { Deployment } from "@basse/shared";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import { Hono } from "hono";
 import { ownedApp } from "./apps";
 import { enqueueAction } from "./queue/queue";
@@ -17,6 +17,7 @@ export function toDeployment(row: DeploymentRow): Deployment {
     commitSha: row.commitSha,
     imageRef: row.imageRef,
     buildId: row.buildId,
+    buildNoCache: row.buildNoCache,
     logs: row.logs,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -30,13 +31,61 @@ export function toDeployment(row: DeploymentRow): Deployment {
  */
 export async function enqueueDeploy(
   appId: string,
+  options: Omit<TriggerDeploymentInput, "appId"> = {},
 ): Promise<{ deployment: DeploymentRow } | { error: string; status: 400 | 503 }> {
+  if (options.useLatestImage && options.noCache) {
+    return { error: "Choose either skip build or no-cache build, not both", status: 400 };
+  }
+
+  const [appRow] = await db.select().from(app).where(eq(app.id, appId)).limit(1);
+  if (!appRow) {
+    return { error: "App not found", status: 400 };
+  }
+  if (options.noCache && appRow.sourceType !== "repository") {
+    return { error: "No-cache deploys are only available for repository apps", status: 400 };
+  }
+
   const targetServers = await db
     .select({ serverId: appServer.serverId })
     .from(appServer)
     .where(eq(appServer.appId, appId));
   if (targetServers.length === 0) {
     return { error: "Attach at least one server to the app before deploying", status: 400 };
+  }
+
+  let seed: Pick<DeploymentRow, "commitSha" | "imageRef" | "buildId" | "logs"> = {
+    commitSha: null,
+    imageRef: null,
+    buildId: null,
+    logs: null,
+  };
+  if (options.useLatestImage) {
+    const [latestImage] = await db
+      .select({
+        id: deployment.id,
+        commitSha: deployment.commitSha,
+        imageRef: deployment.imageRef,
+        buildId: deployment.buildId,
+      })
+      .from(deployment)
+      .where(
+        and(
+          eq(deployment.appId, appId),
+          inArray(deployment.status, ["healthy", "superseded"]),
+          isNotNull(deployment.imageRef),
+        ),
+      )
+      .orderBy(desc(deployment.createdAt))
+      .limit(1);
+    if (!latestImage?.imageRef) {
+      return { error: "No previous deployment image is available to redeploy", status: 400 };
+    }
+    seed = {
+      commitSha: latestImage.commitSha,
+      imageRef: latestImage.imageRef,
+      buildId: latestImage.buildId,
+      logs: `Redeploying saved image from deployment ${latestImage.id} (${latestImage.imageRef}).\n`,
+    };
   }
 
   const now = new Date();
@@ -46,6 +95,11 @@ export async function enqueueDeploy(
       id: crypto.randomUUID(),
       appId,
       status: "queued",
+      commitSha: seed.commitSha,
+      imageRef: seed.imageRef,
+      buildId: seed.buildId,
+      buildNoCache: options.noCache === true,
+      logs: seed.logs,
       createdAt: now,
       updatedAt: now,
     })
@@ -100,13 +154,16 @@ deployments.post("/", async (c) => {
   const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
   if (organizationId instanceof Response) return organizationId;
 
-  const body = (await c.req.json().catch(() => null)) as { appId?: unknown } | null;
+  const body = (await c.req.json().catch(() => null)) as Partial<TriggerDeploymentInput> | null;
   const appId = typeof body?.appId === "string" ? body.appId : "";
 
   const appRow = await ownedApp(appId, organizationId);
   if (!appRow) return c.json({ error: "App not found" }, 404);
 
-  const result = await enqueueDeploy(appRow.id);
+  const result = await enqueueDeploy(appRow.id, {
+    useLatestImage: body?.useLatestImage === true,
+    noCache: body?.noCache === true,
+  });
   if ("error" in result) return c.json({ error: result.error }, result.status);
 
   return c.json(toDeployment(result.deployment), 201);
