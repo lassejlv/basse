@@ -143,7 +143,7 @@ function ServersRoute() {
                 type="radio"
               />
               <span>
-                <span className="font-medium">SSH</span>
+                <span className="font-medium">SSH (recommended)</span>
                 <span className="block text-muted-foreground text-xs">
                   Basse connects to the server over SSH and provisions the agent.
                 </span>
@@ -158,9 +158,9 @@ function ServersRoute() {
                 type="radio"
               />
               <span>
-                <span className="font-medium">Outbound agent</span>
+                <span className="font-medium">Outbound agent (experimental)</span>
                 <span className="block text-muted-foreground text-xs">
-                  Run a Docker command on the server; no inbound SSH access is required.
+                  Run a Docker command on the server when SSH is not possible.
                 </span>
               </span>
             </label>

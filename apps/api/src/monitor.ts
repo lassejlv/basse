@@ -43,6 +43,8 @@ const DEPLOYMENT_STUCK_MINUTES = envNumber("MONITOR_DEPLOYMENT_STUCK_MINUTES", 3
 const CPU_PRESSURE_PERCENT = envNumber("MONITOR_CPU_PRESSURE_PERCENT", 90);
 const MEMORY_PRESSURE_PERCENT = envNumber("MONITOR_MEMORY_PRESSURE_PERCENT", 90);
 const PRESSURE_FAILURE_THRESHOLD = envNumber("MONITOR_RESOURCE_FAILURE_THRESHOLD", 3);
+const OUTBOUND_HEARTBEAT_GRACE_MS =
+  envNumber("MONITOR_OUTBOUND_HEARTBEAT_GRACE_SECONDS", 90) * 1000;
 
 async function recordEvent(issue: MonitorIssue): Promise<void> {
   await db.insert(monitorEvent).values({
@@ -163,9 +165,24 @@ async function checkServer(row: ServerRow): Promise<boolean> {
   if (!row.agentToken) return false;
 
   const fingerprint = `server_unreachable:${row.id}`;
-  const token = await decryptSecret(row.agentToken);
-  const health = await checkAgentHealth(await connectionFromServer(row), token, { attempts: 1 });
   const now = new Date();
+  let health: { reachable: boolean; ready: boolean; error?: string };
+
+  if (row.connectionMode === "outbound") {
+    const lastSeenAt = row.lastSeenAt?.getTime() ?? 0;
+    const ageMs = lastSeenAt ? now.getTime() - lastSeenAt : Number.POSITIVE_INFINITY;
+    const fresh = ageMs <= OUTBOUND_HEARTBEAT_GRACE_MS;
+    health = {
+      reachable: fresh,
+      ready: fresh,
+      error: lastSeenAt
+        ? `Outbound agent has not polled in ${Math.round(ageMs / 1000)}s`
+        : "Outbound agent has not connected yet",
+    };
+  } else {
+    const token = await decryptSecret(row.agentToken);
+    health = await checkAgentHealth(await connectionFromServer(row), token, { attempts: 1 });
+  }
 
   if (!health.reachable || !health.ready) {
     await db
@@ -251,10 +268,16 @@ async function resolveFinishedDeploymentAlerts(): Promise<void> {
     .innerJoin(app, eq(deployment.appId, app.id))
     .innerJoin(environment, eq(app.environmentId, environment.id))
     .innerJoin(project, eq(environment.projectId, project.id))
-    .where(and(eq(alert.code, "deployment_stuck"), inArray(alert.status, ["open", "acknowledged"])));
+    .where(
+      and(eq(alert.code, "deployment_stuck"), inArray(alert.status, ["open", "acknowledged"])),
+    );
 
   for (const row of rows) {
-    if (IN_FLIGHT_DEPLOYMENTS.includes(row.deployment.status as (typeof IN_FLIGHT_DEPLOYMENTS)[number])) {
+    if (
+      IN_FLIGHT_DEPLOYMENTS.includes(
+        row.deployment.status as (typeof IN_FLIGHT_DEPLOYMENTS)[number],
+      )
+    ) {
       continue;
     }
     await resolveAlert(row.project.organizationId, row.alert.fingerprint, {

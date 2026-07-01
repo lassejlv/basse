@@ -2,15 +2,31 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
+  ArrowUpRightIcon,
   BoxIcon,
-  ChevronRightIcon,
   DownloadIcon,
+  HardDriveIcon,
+  HistoryIcon,
+  KeyRoundIcon,
+  MaximizeIcon,
+  MinusIcon,
   PencilIcon,
   PlusIcon,
   RefreshCwIcon,
+  RocketIcon,
+  SettingsIcon,
   TrashIcon,
+  XIcon,
 } from "lucide-react";
-import { FormEvent, useEffect, useState } from "react";
+import {
+  FormEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type {
   App,
   AppBuildMode,
@@ -21,11 +37,10 @@ import type {
   ImportableDockerContainer,
 } from "@basse/shared";
 import { DatabaseIcon, databaseEngineLabel } from "@/components/database-icon";
-import { DeployStatusBadge, StatusDot } from "@/components/deploy-status";
+import { DeployStatusBadge, StatusDot, deployState } from "@/components/deploy-status";
 import { GitHubRepositorySelect } from "@/components/github-repository-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   ProjectStagedChangesBar,
@@ -52,6 +67,7 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
 import {
   Select,
   SelectItem,
@@ -68,7 +84,7 @@ import {
   listImportableDockerContainers,
 } from "@/lib/apps";
 import { getProjectChangeHistory, getProjectChanges } from "@/lib/changes";
-import { triggerDeploy } from "@/lib/deployments";
+import { listDeployments, triggerDeploy } from "@/lib/deployments";
 import { createEnvironment, listEnvironments } from "@/lib/environments";
 import {
   listEnvironmentSharedEnvVars,
@@ -86,17 +102,20 @@ import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
 import { deleteProject, getProject } from "@/lib/projects";
 import { listServers } from "@/lib/servers";
 import { toast, toMessage } from "@/lib/toast";
+import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_authed/projects/$projectId")({
   component: ProjectDetailRoute,
 });
+
+type SettingsDialog = "project-vars" | "environment-vars" | "history";
 
 function ProjectDetailRoute() {
   const { projectId } = Route.useParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [activeEnv, setActiveEnv] = useState<string | null>(null);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [settingsDialog, setSettingsDialog] = useState<SettingsDialog | null>(null);
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -117,16 +136,17 @@ function ProjectDetailRoute() {
 
   const envList = environments.data ?? [];
   const selectedEnv = activeEnv ?? envList[0]?.id ?? null;
+  const selectedEnvName = envList.find((env) => env.id === selectedEnv)?.name ?? "Environment";
 
   const removeProject = useMutation({
     mutationFn: () => deleteProject(projectId),
     onSuccess: async () => {
-      setDeleteError(null);
       await queryClient.invalidateQueries({ queryKey: ["projects"] });
       await navigate({ to: "/projects" });
       toast.success("Project deleted");
     },
-    onError: (mutationError: Error) => setDeleteError(mutationError.message),
+    onError: (mutationError: Error) =>
+      toast.error("Couldn't delete project", { description: mutationError.message }),
   });
 
   function confirmDeleteProject() {
@@ -149,99 +169,784 @@ function ProjectDetailRoute() {
   }
 
   return (
-    <section className="flex flex-1 flex-col gap-7 p-4 md:p-6">
-      <div>
-        <Link
-          className="inline-flex items-center gap-1.5 text-muted-foreground text-sm transition hover:text-foreground"
-          to="/projects"
+    <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2 md:px-4">
+        <Button
+          aria-label="Back to projects"
+          render={<Link to="/projects" />}
+          size="icon-sm"
+          variant="ghost"
         >
-          <ArrowLeftIcon className="size-4" />
-          Projects
-        </Link>
-        <div className="mt-3 flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <p className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
-              Project
-            </p>
-            <h1 className="mt-1 font-semibold text-2xl tracking-tight md:text-3xl">
-              {project.data.name}
-            </h1>
-            <p className="mt-1 font-mono text-muted-foreground text-xs">
-              {project.data.slug} · created {relativeTime(project.data.createdAt)}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              loading={removeProject.isPending}
-              onClick={confirmDeleteProject}
-              variant="destructive-outline"
-            >
-              <TrashIcon />
-              Delete
-            </Button>
-            {selectedEnv ? (
-              <>
-                <ImportContainerDialog environmentId={selectedEnv} />
-                <CreateAppDialog environmentId={selectedEnv} />
-              </>
-            ) : null}
-          </div>
-        </div>
-        {deleteError ? (
-          <p className="mt-3 text-destructive-foreground text-sm">{deleteError}</p>
-        ) : null}
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
+          <ArrowLeftIcon />
+        </Button>
+        <h1 className="min-w-0 truncate font-semibold text-sm tracking-tight">
+          {project.data.name}
+        </h1>
+        <div className="mx-1 h-4 w-px shrink-0 bg-border" aria-hidden />
         {environments.isPending ? (
-          <div className="h-9 w-40 animate-pulse rounded-lg bg-muted/50" aria-hidden />
+          <div className="h-8 w-36 animate-pulse rounded-lg bg-muted/50" aria-hidden />
         ) : (
-          <Tabs onValueChange={(value) => setActiveEnv(value as string)} value={selectedEnv ?? ""}>
-            <TabsList>
-              {envList.map((env) => (
-                <TabsTab key={env.id} value={env.id}>
-                  {env.name}
-                </TabsTab>
-              ))}
-            </TabsList>
-          </Tabs>
+          <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto">
+            <Tabs
+              onValueChange={(value) => setActiveEnv(value as string)}
+              value={selectedEnv ?? ""}
+            >
+              <TabsList>
+                {envList.map((env) => (
+                  <TabsTab key={env.id} value={env.id}>
+                    {env.name}
+                  </TabsTab>
+                ))}
+              </TabsList>
+            </Tabs>
+            <NewEnvironmentDialog projectId={projectId} />
+          </div>
         )}
-        <NewEnvironmentDialog projectId={projectId} />
+        <div className="ml-auto flex items-center gap-2">
+          <Menu>
+            <MenuTrigger
+              render={
+                <Button aria-label="Project settings" size="icon" variant="outline">
+                  <SettingsIcon />
+                </Button>
+              }
+            />
+            <MenuPopup align="end">
+              <MenuItem onClick={() => setSettingsDialog("project-vars")}>
+                <KeyRoundIcon />
+                Shared variables
+              </MenuItem>
+              <MenuItem
+                disabled={!selectedEnv}
+                onClick={() => setSettingsDialog("environment-vars")}
+              >
+                <KeyRoundIcon />
+                {selectedEnvName} variables
+              </MenuItem>
+              <MenuItem onClick={() => setSettingsDialog("history")}>
+                <HistoryIcon />
+                Change history
+              </MenuItem>
+              <MenuSeparator />
+              <MenuItem onClick={confirmDeleteProject} variant="destructive">
+                <TrashIcon />
+                Delete project
+              </MenuItem>
+            </MenuPopup>
+          </Menu>
+          {selectedEnv ? (
+            <>
+              <ImportContainerDialog environmentId={selectedEnv} />
+              <CreateAppDialog environmentId={selectedEnv} />
+            </>
+          ) : null}
+        </div>
       </div>
 
-      {selectedEnv ? (
-        <div className="grid gap-4 xl:grid-cols-2">
-          <SharedEnvVarsCard
-            description="Available to every app in this project as {{shared.KEY}}."
-            listQueryKey={["project-shared-env-vars", projectId]}
-            listVars={() => listProjectSharedEnvVars(projectId)}
-            revealVars={() => revealProjectSharedEnvVars(projectId)}
-            saveVars={(vars) => setProjectSharedEnvVars(projectId, vars)}
-            title="Shared variables"
-          />
-          <SharedEnvVarsCard
-            description="Available to apps in the selected environment as {{env.KEY}}."
-            listQueryKey={["environment-shared-env-vars", selectedEnv]}
-            listVars={() => listEnvironmentSharedEnvVars(selectedEnv)}
-            revealVars={() => revealEnvironmentSharedEnvVars(selectedEnv)}
-            saveVars={(vars) => setEnvironmentSharedEnvVars(selectedEnv, vars)}
-            title={`${envList.find((env) => env.id === selectedEnv)?.name ?? "Environment"} variables`}
-          />
+      <div className="relative min-h-0 flex-1">
+        {selectedEnv ? (
+          <EnvironmentCanvas environmentId={selectedEnv} />
+        ) : environments.isPending ? null : (
+          <p className="p-6 text-muted-foreground text-sm">No environments in this project.</p>
+        )}
+        <div className="pointer-events-none absolute inset-x-0 bottom-2 z-20 flex justify-center px-4">
+          <div className="pointer-events-auto w-full max-w-xl">
+            <ProjectStagedChangesBar
+              changes={projectChanges.data?.changes ?? []}
+              projectId={projectId}
+            />
+          </div>
         </div>
-      ) : null}
+      </div>
 
-      {selectedEnv ? <EnvironmentApps environmentId={selectedEnv} /> : null}
-
-      <ProjectStagedChangesHistory
-        entries={projectChangeHistory.data ?? []}
-        isPending={projectChangeHistory.isPending}
+      <SharedEnvVarsDialog
+        description="Available to every app in this project as {{shared.KEY}}."
+        listQueryKey={["project-shared-env-vars", projectId]}
+        listVars={() => listProjectSharedEnvVars(projectId)}
+        onOpenChange={(open) => setSettingsDialog(open ? "project-vars" : null)}
+        open={settingsDialog === "project-vars"}
+        revealVars={() => revealProjectSharedEnvVars(projectId)}
+        saveVars={(vars) => setProjectSharedEnvVars(projectId, vars)}
+        title="Shared variables"
       />
-      <ProjectStagedChangesBar projectId={projectId} changes={projectChanges.data?.changes ?? []} />
+      {selectedEnv ? (
+        <SharedEnvVarsDialog
+          description="Available to apps in the selected environment as {{env.KEY}}."
+          listQueryKey={["environment-shared-env-vars", selectedEnv]}
+          listVars={() => listEnvironmentSharedEnvVars(selectedEnv)}
+          onOpenChange={(open) => setSettingsDialog(open ? "environment-vars" : null)}
+          open={settingsDialog === "environment-vars"}
+          revealVars={() => revealEnvironmentSharedEnvVars(selectedEnv)}
+          saveVars={(vars) => setEnvironmentSharedEnvVars(selectedEnv, vars)}
+          title={`${selectedEnvName} variables`}
+        />
+      ) : null}
+      <Dialog
+        onOpenChange={(open) => setSettingsDialog(open ? "history" : null)}
+        open={settingsDialog === "history"}
+      >
+        <DialogPopup className="h-fit max-w-2xl">
+          <DialogTitle className="sr-only">Project change history</DialogTitle>
+          <DialogPanel className="max-h-[70vh] overflow-y-auto">
+            <ProjectStagedChangesHistory
+              entries={projectChangeHistory.data ?? []}
+              isPending={projectChangeHistory.isPending}
+            />
+          </DialogPanel>
+          <DialogFooter>
+            <DialogClose render={<Button variant="outline">Close</Button>} />
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
     </section>
   );
 }
 
-function SharedEnvVarsCard({
+// --- Canvas ---------------------------------------------------------------
+
+type CanvasView = { x: number; y: number; scale: number };
+type NodePosition = { x: number; y: number };
+
+const NODE_WIDTH = 248;
+const NODE_BASE_HEIGHT = 92;
+const VOLUME_TAB_HEIGHT = 30;
+const GRID_SIZE = 24;
+const MIN_SCALE = 0.35;
+const MAX_SCALE = 1.75;
+const FIT_PADDING = 80;
+
+function clampScale(scale: number): number {
+  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
+}
+
+function autoPosition(index: number): NodePosition {
+  const column = index % 3;
+  const row = Math.floor(index / 3);
+  return { x: column * (NODE_WIDTH + 64), y: row * (NODE_BASE_HEIGHT + 84) };
+}
+
+function nodeHeight(app: App): number {
+  return NODE_BASE_HEIGHT + (app.volumes.length > 0 ? VOLUME_TAB_HEIGHT : 0);
+}
+
+function appSourceLabel(app: App): string {
+  if (app.appKind === "database" && app.database) {
+    return `${databaseEngineLabel(app.database.kind)} ${app.database.version}`.trim();
+  }
+  if (app.sourceType === "image") return app.imageRef ?? "";
+  return app.repositoryUrl.replace(/^https?:\/\//, "");
+}
+
+function positionsStorageKey(environmentId: string): string {
+  return `basse:canvas:${environmentId}`;
+}
+
+function readStoredPositions(environmentId: string): Record<string, NodePosition> {
+  try {
+    const raw = localStorage.getItem(positionsStorageKey(environmentId));
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, NodePosition>;
+    const valid: Record<string, NodePosition> = {};
+    for (const [id, position] of Object.entries(parsed)) {
+      if (
+        position &&
+        typeof position.x === "number" &&
+        typeof position.y === "number" &&
+        Number.isFinite(position.x) &&
+        Number.isFinite(position.y)
+      ) {
+        valid[id] = position;
+      }
+    }
+    return valid;
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredPositions(environmentId: string, positions: Record<string, NodePosition>) {
+  try {
+    localStorage.setItem(positionsStorageKey(environmentId), JSON.stringify(positions));
+  } catch {
+    // Position persistence is a convenience; ignore quota/privacy-mode failures.
+  }
+}
+
+type PointerGesture = {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  originX: number;
+  originY: number;
+  moved: boolean;
+};
+
+function EnvironmentCanvas({ environmentId }: { environmentId: string }) {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const panRef = useRef<PointerGesture | null>(null);
+  const fittedRef = useRef(false);
+  const [view, setView] = useState<CanvasView>({ x: 0, y: 0, scale: 1 });
+  const [panning, setPanning] = useState(false);
+  const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
+  const [stored, setStored] = useState<Record<string, NodePosition>>(() =>
+    readStoredPositions(environmentId),
+  );
+
+  const apps = useQuery({
+    queryKey: ["apps", environmentId],
+    queryFn: () => listApps(environmentId),
+    refetchInterval: 15_000,
+  });
+  const appList = useMemo(() => apps.data ?? [], [apps.data]);
+  const selectedApp = appList.find((app) => app.id === selectedAppId) ?? null;
+
+  const nodes = useMemo(
+    () =>
+      appList.map((app, index) => ({
+        app,
+        position: stored[app.id] ?? autoPosition(index),
+      })),
+    [appList, stored],
+  );
+
+  useEffect(() => {
+    setStored(readStoredPositions(environmentId));
+    setSelectedAppId(null);
+    fittedRef.current = false;
+  }, [environmentId]);
+
+  const fitView = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || nodes.length === 0) return;
+    const rect = viewport.getBoundingClientRect();
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const node of nodes) {
+      minX = Math.min(minX, node.position.x);
+      minY = Math.min(minY, node.position.y);
+      maxX = Math.max(maxX, node.position.x + NODE_WIDTH);
+      maxY = Math.max(maxY, node.position.y + nodeHeight(node.app));
+    }
+    const width = Math.max(maxX - minX, 1);
+    const height = Math.max(maxY - minY, 1);
+    const scale = clampScale(
+      Math.min(
+        (rect.width - FIT_PADDING * 2) / width,
+        (rect.height - FIT_PADDING * 2) / height,
+        1,
+      ),
+    );
+    setView({
+      scale,
+      x: (rect.width - width * scale) / 2 - minX * scale,
+      y: (rect.height - height * scale) / 2 - minY * scale,
+    });
+  }, [nodes]);
+
+  useLayoutEffect(() => {
+    if (fittedRef.current || apps.isPending) return;
+    fittedRef.current = true;
+    fitView();
+  }, [apps.isPending, fitView]);
+
+  // Wheel: trackpad scroll pans, pinch (ctrl/cmd + wheel) zooms toward cursor.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    function onWheel(event: WheelEvent) {
+      event.preventDefault();
+      if (event.ctrlKey || event.metaKey) {
+        const rect = viewport!.getBoundingClientRect();
+        const pointX = event.clientX - rect.left;
+        const pointY = event.clientY - rect.top;
+        setView((current) => {
+          const scale = clampScale(current.scale * Math.exp(-event.deltaY * 0.01));
+          const ratio = scale / current.scale;
+          return {
+            scale,
+            x: pointX - (pointX - current.x) * ratio,
+            y: pointY - (pointY - current.y) * ratio,
+          };
+        });
+      } else {
+        setView((current) => ({
+          ...current,
+          x: current.x - event.deltaX,
+          y: current.y - event.deltaY,
+        }));
+      }
+    }
+    viewport.addEventListener("wheel", onWheel, { passive: false });
+    return () => viewport.removeEventListener("wheel", onWheel);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedAppId) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setSelectedAppId(null);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedAppId]);
+
+  function zoomBy(factor: number) {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const rect = viewport.getBoundingClientRect();
+    const centerX = rect.width / 2;
+    const centerY = rect.height / 2;
+    setView((current) => {
+      const scale = clampScale(current.scale * factor);
+      const ratio = scale / current.scale;
+      return {
+        scale,
+        x: centerX - (centerX - current.x) * ratio,
+        y: centerY - (centerY - current.y) * ratio,
+      };
+    });
+  }
+
+  function moveNode(appId: string, position: NodePosition) {
+    setStored((current) => ({ ...current, [appId]: position }));
+  }
+
+  function persistPositions() {
+    setStored((current) => {
+      writeStoredPositions(environmentId, current);
+      return current;
+    });
+  }
+
+  return (
+    <div className="absolute inset-0 overflow-hidden bg-background">
+      <div
+        className={cn(
+          "absolute inset-0 touch-none select-none",
+          panning ? "cursor-grabbing" : "cursor-grab",
+        )}
+        onPointerDown={(event) => {
+          if (event.button !== 0 && event.button !== 1) return;
+          panRef.current = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            originX: view.x,
+            originY: view.y,
+            moved: false,
+          };
+          setPanning(true);
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerMove={(event) => {
+          const gesture = panRef.current;
+          if (!gesture || gesture.pointerId !== event.pointerId) return;
+          const deltaX = event.clientX - gesture.startX;
+          const deltaY = event.clientY - gesture.startY;
+          if (!gesture.moved && Math.hypot(deltaX, deltaY) < 3) return;
+          gesture.moved = true;
+          setView((current) => ({
+            ...current,
+            x: gesture.originX + deltaX,
+            y: gesture.originY + deltaY,
+          }));
+        }}
+        onPointerUp={(event) => {
+          const gesture = panRef.current;
+          if (gesture?.pointerId === event.pointerId) {
+            if (!gesture.moved) setSelectedAppId(null);
+            panRef.current = null;
+            setPanning(false);
+          }
+        }}
+        onPointerCancel={() => {
+          panRef.current = null;
+          setPanning(false);
+        }}
+        ref={viewportRef}
+        style={{
+          backgroundImage: "radial-gradient(var(--color-border) 1px, transparent 1px)",
+          backgroundSize: `${GRID_SIZE * view.scale}px ${GRID_SIZE * view.scale}px`,
+          backgroundPosition: `${view.x}px ${view.y}px`,
+        }}
+      >
+        <div
+          className="absolute top-0 left-0 will-change-transform"
+          style={{
+            transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
+            transformOrigin: "0 0",
+          }}
+        >
+          {nodes.map(({ app, position }) => (
+            <CanvasNode
+              app={app}
+              key={app.id}
+              onMove={moveNode}
+              onMoveEnd={persistPositions}
+              onSelect={setSelectedAppId}
+              position={position}
+              scale={view.scale}
+              selected={app.id === selectedAppId}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0 bg-[radial-gradient(130%_130%_at_50%_40%,transparent_60%,var(--color-background)_100%)] opacity-60"
+      />
+
+      {apps.isPending ? (
+        <div className="absolute inset-0 grid place-items-center">
+          <p className="text-muted-foreground text-sm">Loading apps…</p>
+        </div>
+      ) : apps.isError ? (
+        <div className="absolute inset-0 grid place-items-center">
+          <p className="text-destructive-foreground text-sm">{toMessage(apps.error)}</p>
+        </div>
+      ) : appList.length === 0 ? (
+        <div className="absolute inset-0 z-10 grid place-items-center p-6">
+          <Empty className="max-w-md rounded-2xl border border-dashed bg-card/80 backdrop-blur">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <BoxIcon />
+              </EmptyMedia>
+              <EmptyTitle>No apps in this environment</EmptyTitle>
+              <EmptyDescription>
+                Deploy from a Git repository or a prebuilt Docker image.
+              </EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent className="flex flex-wrap items-center justify-center gap-2">
+              <ImportContainerDialog environmentId={environmentId} />
+              <CreateAppDialog environmentId={environmentId} />
+            </EmptyContent>
+          </Empty>
+        </div>
+      ) : null}
+
+      {appList.length > 0 ? (
+        <div className="absolute bottom-4 left-4 z-10 flex flex-col divide-y overflow-hidden rounded-lg border bg-card shadow-sm">
+          <Button
+            aria-label="Zoom in"
+            className="rounded-none"
+            onClick={() => zoomBy(1.25)}
+            size="icon-sm"
+            variant="ghost"
+          >
+            <PlusIcon />
+          </Button>
+          <Button
+            aria-label="Zoom out"
+            className="rounded-none"
+            onClick={() => zoomBy(1 / 1.25)}
+            size="icon-sm"
+            variant="ghost"
+          >
+            <MinusIcon />
+          </Button>
+          <Button
+            aria-label="Fit view"
+            className="rounded-none"
+            onClick={fitView}
+            size="icon-sm"
+            variant="ghost"
+          >
+            <MaximizeIcon />
+          </Button>
+        </div>
+      ) : null}
+
+      {selectedApp ? (
+        <AppPanel
+          app={selectedApp}
+          environmentId={environmentId}
+          key={selectedApp.id}
+          onClose={() => setSelectedAppId(null)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function CanvasNode({
+  app,
+  position,
+  scale,
+  selected,
+  onSelect,
+  onMove,
+  onMoveEnd,
+}: {
+  app: App;
+  position: NodePosition;
+  scale: number;
+  selected: boolean;
+  onSelect: (appId: string) => void;
+  onMove: (appId: string, position: NodePosition) => void;
+  onMoveEnd: () => void;
+}) {
+  const dragRef = useRef<PointerGesture | null>(null);
+  const database = app.appKind === "database" ? app.database : null;
+  const state = deployState(app.latestDeploymentStatus);
+  const volumeLabel =
+    app.volumes.length === 1
+      ? (app.volumes[0]?.containerPath ?? "")
+      : `${app.volumes.length} volumes`;
+
+  return (
+    <div className="absolute" style={{ left: position.x, top: position.y, width: NODE_WIDTH }}>
+      <button
+        className={cn(
+          "relative z-10 w-full rounded-xl border bg-card p-3.5 text-left shadow-sm outline-none transition-[border-color,box-shadow]",
+          "hover:border-muted-foreground/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+          selected && "border-primary/50 ring-2 ring-primary/20",
+        )}
+        onClick={(event) => {
+          // Pointer clicks are handled in pointerup (to distinguish drags);
+          // detail === 0 means keyboard activation.
+          if (event.detail === 0) onSelect(app.id);
+        }}
+        onPointerCancel={() => {
+          dragRef.current = null;
+        }}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          event.stopPropagation();
+          dragRef.current = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            originX: position.x,
+            originY: position.y,
+            moved: false,
+          };
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerMove={(event) => {
+          const gesture = dragRef.current;
+          if (!gesture || gesture.pointerId !== event.pointerId) return;
+          const deltaX = event.clientX - gesture.startX;
+          const deltaY = event.clientY - gesture.startY;
+          if (!gesture.moved && Math.hypot(deltaX, deltaY) < 4) return;
+          gesture.moved = true;
+          onMove(app.id, {
+            x: gesture.originX + deltaX / scale,
+            y: gesture.originY + deltaY / scale,
+          });
+        }}
+        onPointerUp={(event) => {
+          const gesture = dragRef.current;
+          dragRef.current = null;
+          if (!gesture || gesture.pointerId !== event.pointerId) return;
+          if (gesture.moved) {
+            onMoveEnd();
+          } else {
+            onSelect(app.id);
+          }
+        }}
+        type="button"
+      >
+        <div className="flex items-center gap-2.5">
+          <StatusDot status={app.latestDeploymentStatus} />
+          <span className="min-w-0 flex-1 truncate font-medium text-sm">{app.name}</span>
+          {database ? (
+            <DatabaseIcon className="size-4 shrink-0 opacity-70" kind={database.kind} />
+          ) : (
+            <BoxIcon className="size-4 shrink-0 text-muted-foreground/70" />
+          )}
+        </div>
+        <p className="mt-1.5 truncate font-mono text-muted-foreground text-xs">
+          {appSourceLabel(app)}
+        </p>
+        <div className="mt-2.5 flex items-center justify-between gap-2">
+          <span className="text-muted-foreground text-xs">{state.label}</span>
+          <span className="font-mono text-[11px] text-muted-foreground/70">:{app.port}</span>
+        </div>
+      </button>
+      {app.volumes.length > 0 ? (
+        <div className="mx-4 flex items-center gap-1.5 rounded-b-lg border border-t-0 bg-card/70 px-2.5 py-1.5 font-mono text-[11px] text-muted-foreground">
+          <HardDriveIcon className="size-3 shrink-0" />
+          <span className="truncate">{volumeLabel}</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AppPanel({
+  app,
+  environmentId,
+  onClose,
+}: {
+  app: App;
+  environmentId: string;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const database = app.appKind === "database" ? app.database : null;
+
+  const deployments = useQuery({
+    queryKey: ["deployments", app.id, "canvas-panel"],
+    queryFn: () => listDeployments(app.id),
+    refetchInterval: 10_000,
+  });
+  const deploymentList = (deployments.data ?? []).slice(0, 5);
+
+  const deploy = useMutation({
+    mutationFn: () => triggerDeploy(app.id),
+    onSuccess: async () => {
+      toast.success("Deploy queued");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["apps", environmentId] }),
+        queryClient.invalidateQueries({ queryKey: ["deployments", app.id, "canvas-panel"] }),
+      ]);
+    },
+    onError: (mutationError: Error) =>
+      toast.error("Couldn't queue deploy", { description: mutationError.message }),
+  });
+
+  return (
+    <aside
+      aria-label={`${app.name} overview`}
+      className="fade-in-0 slide-in-from-right-4 absolute inset-y-3 right-3 z-20 flex w-[min(24rem,calc(100%-1.5rem))] animate-in flex-col overflow-hidden rounded-xl border bg-card shadow-xl duration-200 motion-reduce:animate-none"
+    >
+      <div className="flex items-start gap-3 border-b p-4">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <StatusDot status={app.latestDeploymentStatus} />
+            <h2 className="truncate font-semibold text-base">{app.name}</h2>
+          </div>
+          <p className="mt-1 truncate font-mono text-muted-foreground text-xs">
+            {appSourceLabel(app)}
+          </p>
+        </div>
+        <Button aria-label="Close panel" onClick={onClose} size="icon-sm" variant="ghost">
+          <XIcon />
+        </Button>
+      </div>
+
+      <div className="flex items-center gap-2 border-b p-3">
+        <Button loading={deploy.isPending} onClick={() => deploy.mutate()} size="sm">
+          <RocketIcon />
+          Deploy
+        </Button>
+        <Button
+          render={<Link params={{ appId: app.id }} to="/apps/$appId" />}
+          size="sm"
+          variant="outline"
+        >
+          <ArrowUpRightIcon />
+          Open app
+        </Button>
+        <span className="ml-auto">
+          <DeployStatusBadge size="sm" status={app.latestDeploymentStatus} />
+        </span>
+      </div>
+
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
+          <PanelMeta label="Port" mono value={`:${app.port}`} />
+          {database ? (
+            <PanelMeta
+              label="Engine"
+              value={`${databaseEngineLabel(database.kind)} ${database.version}`}
+            />
+          ) : app.sourceType === "repository" ? (
+            <PanelMeta label="Branch" mono value={app.branch} />
+          ) : (
+            <PanelMeta label="Source" value="Docker image" />
+          )}
+          <PanelMeta
+            label="Servers"
+            value={`${app.serverIds.length} ${app.serverIds.length === 1 ? "server" : "servers"}`}
+          />
+          <PanelMeta
+            label="Volumes"
+            value={app.volumes.length === 0 ? "None" : String(app.volumes.length)}
+          />
+          <PanelMeta label="Created" value={relativeTime(app.createdAt)} />
+          {database?.publicEnabled && database.publicPort ? (
+            <PanelMeta label="Public port" mono value={`:${database.publicPort}`} />
+          ) : null}
+        </dl>
+
+        {app.volumes.length > 0 ? (
+          <div>
+            <h3 className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+              Volumes
+            </h3>
+            <ul className="mt-2 divide-y rounded-lg border">
+              {app.volumes.map((volume) => (
+                <li
+                  className="flex items-center gap-2 px-3 py-2 font-mono text-xs"
+                  key={`${volume.hostPath}:${volume.containerPath}`}
+                >
+                  <HardDriveIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{volume.containerPath}</span>
+                  {volume.readOnly ? (
+                    <span className="ml-auto shrink-0 text-muted-foreground">ro</span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        <div>
+          <h3 className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+            Recent deployments
+          </h3>
+          {deployments.isPending ? (
+            <div className="mt-2 h-24 animate-pulse rounded-lg border bg-muted/30" aria-hidden />
+          ) : deploymentList.length === 0 ? (
+            <p className="mt-2 rounded-lg border border-dashed px-3 py-5 text-center text-muted-foreground text-sm">
+              No deployments yet. Deploy starts the first release.
+            </p>
+          ) : (
+            <ul className="mt-2 divide-y rounded-lg border">
+              {deploymentList.map((deployment) => (
+                <li className="flex items-center gap-3 px-3 py-2" key={deployment.id}>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-mono text-xs">
+                      {deployment.commitSha?.slice(0, 7) ??
+                        deployment.imageRef ??
+                        deployment.id.slice(0, 8)}
+                    </p>
+                    <p className="mt-0.5 text-muted-foreground text-xs">
+                      {relativeTime(deployment.createdAt)}
+                    </p>
+                  </div>
+                  <DeployStatusBadge size="sm" status={deployment.status} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function PanelMeta({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <dt className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+        {label}
+      </dt>
+      <dd className={cn("mt-0.5 truncate text-sm", mono && "font-mono text-xs leading-5")}>
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+// --- Settings dialogs -------------------------------------------------------
+
+function SharedEnvVarsDialog({
+  open,
+  onOpenChange,
   title,
   description,
   listQueryKey,
@@ -249,6 +954,8 @@ function SharedEnvVarsCard({
   revealVars,
   saveVars,
 }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   title: string;
   description: string;
   listQueryKey: unknown[];
@@ -257,7 +964,7 @@ function SharedEnvVarsCard({
   saveVars: (vars: { key: string; value: string }[]) => Promise<void>;
 }) {
   const queryClient = useQueryClient();
-  const vars = useQuery({ queryKey: listQueryKey, queryFn: listVars });
+  const vars = useQuery({ queryKey: listQueryKey, queryFn: listVars, enabled: open });
   const [editing, setEditing] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -292,158 +999,89 @@ function SharedEnvVarsCard({
   }
 
   return (
-    <Card className="p-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="font-semibold text-base">{title}</h2>
-          <p className="mt-1 text-muted-foreground text-sm">{description}</p>
-        </div>
-        {!editing ? (
-          <Button loading={preparing} onClick={startEdit} size="sm" variant="outline">
-            <PencilIcon />
-            Edit
-          </Button>
-        ) : null}
-      </div>
-
-      {editing ? (
-        <form
-          className="mt-4 space-y-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            save.mutate();
-          }}
-        >
-          <Textarea
-            autoFocus
-            className="min-h-40 font-mono text-xs leading-relaxed"
-            onChange={(event) => setDraft(event.currentTarget.value)}
-            spellCheck={false}
-            value={draft}
-          />
-          <p className="text-muted-foreground text-xs">
-            One <code className="font-mono">KEY=value</code> per line. App variables can reference
-            these values with the tokens shown above.
-          </p>
-          {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
-          <div className="flex gap-2">
-            <Button loading={save.isPending} type="submit">
-              Save variables
-            </Button>
-            <Button
-              onClick={() => {
-                setEditing(false);
-                setError(null);
-              }}
-              type="button"
-              variant="outline"
-            >
-              Cancel
-            </Button>
-          </div>
-        </form>
-      ) : vars.isPending ? (
-        <p className="mt-4 text-muted-foreground text-sm">Loading…</p>
-      ) : list.length === 0 ? (
-        <p className="mt-4 text-muted-foreground text-sm">No variables set.</p>
-      ) : (
-        <ul className="mt-4 divide-y rounded-md border">
-          {list.map((item) => (
-            <li key={item.key} className="flex items-center justify-between gap-3 px-3 py-2">
-              <span className="min-w-0 truncate font-mono text-sm">{item.key}</span>
-              <span className="shrink-0 font-mono text-muted-foreground text-xs">
-                {item.valueHint}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </Card>
-  );
-}
-
-function EnvironmentApps({ environmentId }: { environmentId: string }) {
-  const apps = useQuery({
-    queryKey: ["apps", environmentId],
-    queryFn: () => listApps(environmentId),
-  });
-  const appList = apps.data ?? [];
-
-  if (apps.isPending) {
-    return <div className="h-40 animate-pulse rounded-2xl border bg-muted/30" aria-hidden />;
-  }
-
-  if (appList.length === 0) {
-    return (
-      <Empty className="rounded-2xl border border-dashed">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <BoxIcon />
-          </EmptyMedia>
-          <EmptyTitle>No apps in this environment</EmptyTitle>
-          <EmptyDescription>
-            Deploy from a Git repository or a prebuilt Docker image.
-          </EmptyDescription>
-        </EmptyHeader>
-        <EmptyContent className="flex flex-wrap items-center justify-center gap-2">
-          <ImportContainerDialog environmentId={environmentId} />
-          <CreateAppDialog environmentId={environmentId} />
-        </EmptyContent>
-      </Empty>
-    );
-  }
-
-  return (
-    <Card className="divide-y overflow-hidden p-0">
-      {appList.map((app) => (
-        <AppRow key={app.id} app={app} />
-      ))}
-    </Card>
-  );
-}
-
-function AppRow({ app }: { app: App }) {
-  const database = app.appKind === "database" ? app.database : null;
-  const source = database
-    ? `${databaseEngineLabel(database.kind)} ${database.version ?? ""}`
-    : app.sourceType === "image"
-      ? app.imageRef
-      : app.repositoryUrl;
-  return (
-    <Link
-      className="group flex items-center gap-4 px-4 py-3.5 transition hover:bg-accent/40"
-      params={{ appId: app.id }}
-      to="/apps/$appId"
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        onOpenChange(next);
+        if (!next) {
+          setEditing(false);
+          setError(null);
+        }
+      }}
     >
-      <StatusDot status={app.latestDeploymentStatus} />
-      <div className="min-w-0 flex-1">
-        <p className="truncate font-medium text-sm">{app.name}</p>
-        <p className="truncate font-mono text-muted-foreground text-xs">
-          {database ? (
-            <span className="inline-flex max-w-full items-center gap-1.5 align-middle">
-              <DatabaseIcon className="size-3.5" kind={database.kind} />
-              <span className="truncate">{source}</span>
-            </span>
+      <DialogPopup className="h-fit max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <DialogPanel className="space-y-3">
+          {editing ? (
+            <>
+              <Textarea
+                autoFocus
+                className="min-h-40 font-mono text-xs leading-relaxed"
+                onChange={(event) => setDraft(event.currentTarget.value)}
+                spellCheck={false}
+                value={draft}
+              />
+              <p className="text-muted-foreground text-xs">
+                One <code className="font-mono">KEY=value</code> per line. App variables can
+                reference these values with the token shown above.
+              </p>
+            </>
+          ) : vars.isPending ? (
+            <p className="text-muted-foreground text-sm">Loading…</p>
+          ) : list.length === 0 ? (
+            <p className="rounded-lg border border-dashed px-3 py-5 text-center text-muted-foreground text-sm">
+              No variables set.
+            </p>
           ) : (
-            source
+            <ul className="divide-y rounded-md border">
+              {list.map((item) => (
+                <li className="flex items-center justify-between gap-3 px-3 py-2" key={item.key}>
+                  <span className="min-w-0 truncate font-mono text-sm">{item.key}</span>
+                  <span className="shrink-0 font-mono text-muted-foreground text-xs">
+                    {item.valueHint}
+                  </span>
+                </li>
+              ))}
+            </ul>
           )}
-        </p>
-      </div>
-      <div className="hidden shrink-0 items-center gap-2 sm:flex">
-        {app.appKind === "database" ? (
-          <Badge size="sm" variant="outline">
-            database
-          </Badge>
-        ) : null}
-        <DeployStatusBadge size="sm" status={app.latestDeploymentStatus} />
-        <Badge size="sm" variant="outline">
-          :{app.port}
-        </Badge>
-      </div>
-      <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground/50 transition group-hover:translate-x-0.5 group-hover:text-muted-foreground" />
-    </Link>
+          {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+        </DialogPanel>
+        <DialogFooter>
+          {editing ? (
+            <>
+              <Button
+                onClick={() => {
+                  setEditing(false);
+                  setError(null);
+                }}
+                type="button"
+                variant="outline"
+              >
+                Cancel
+              </Button>
+              <Button loading={save.isPending} onClick={() => save.mutate()} type="button">
+                Save variables
+              </Button>
+            </>
+          ) : (
+            <>
+              <DialogClose render={<Button variant="outline">Close</Button>} />
+              <Button loading={preparing} onClick={startEdit} type="button">
+                <PencilIcon />
+                Edit
+              </Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
   );
 }
+
+// --- Create / import dialogs ------------------------------------------------
 
 function firstContainerPort(container: ImportableDockerContainer): number {
   return container.ports.find((port) => port.privatePort > 0)?.privatePort ?? 3000;
@@ -714,9 +1352,8 @@ function NewEnvironmentDialog({ projectId }: { projectId: string }) {
     >
       <DialogTrigger
         render={
-          <Button size="sm" variant="outline">
+          <Button aria-label="New environment" size="icon-sm" variant="ghost">
             <PlusIcon />
-            Environment
           </Button>
         }
       />
