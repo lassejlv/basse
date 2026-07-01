@@ -16,6 +16,7 @@ import {
   getGitHubAppManifest,
   listGitHubAppInstallations,
   saveGitHubAppInstallation,
+  syncGitHubAppInstallations,
 } from "@/lib/github";
 import { toast, toMessage } from "@/lib/toast";
 import { createSshKey, deleteSshKey, listSshKeys } from "@/lib/ssh-keys";
@@ -57,6 +58,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
   const search = Route.useSearch();
   const processedCode = useRef<string | null>(null);
   const processedInstallation = useRef<string | null>(null);
+  const processedSetupCallback = useRef<string | null>(null);
   const [copiedWebhook, setCopiedWebhook] = useState(false);
   const [startingGitHubSetup, setStartingGitHubSetup] = useState(false);
   const integrationKey = ["github-app-integration", organizationId];
@@ -114,6 +116,27 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
       toast.error("Couldn't save GitHub installation", { description: toMessage(error) }),
   });
 
+  const syncInstallations = useMutation({
+    mutationFn: syncGitHubAppInstallations,
+    onSuccess: async (synced) => {
+      if (synced.length > 0) {
+        toast.success("GitHub installation saved");
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: installationsKey }),
+          queryClient.invalidateQueries({ queryKey: ["github-repositories"] }),
+        ]);
+        await clearGitHubCallbackSearch(navigate);
+        return;
+      }
+
+      toast.warning("GitHub installation is not active yet", {
+        description: "If this was an organization install request, an owner may still need to approve it.",
+      });
+    },
+    onError: (error) =>
+      toast.error("Couldn't sync GitHub installations", { description: toMessage(error) }),
+  });
+
   const disconnect = useMutation({
     mutationFn: disconnectGitHubApp,
     onSuccess: async () => {
@@ -162,6 +185,20 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
       setupAction: search.setup_action,
     });
   }, [organizationId, saveInstallation, search.installation_id, search.setup_action]);
+
+  useEffect(() => {
+    if (!organizationId || !search.setup_action || search.code || search.installation_id) return;
+    const key = search.setup_action;
+    if (processedSetupCallback.current === key) return;
+    processedSetupCallback.current = key;
+    syncInstallations.mutate();
+  }, [
+    organizationId,
+    search.code,
+    search.installation_id,
+    search.setup_action,
+    syncInstallations,
+  ]);
 
   const connected = integration.data?.connected;
   const installUrl = integration.data?.installUrl;

@@ -74,6 +74,15 @@ export async function saveGitHubAppInstallation(
   return response.json() as Promise<GitHubAppInstallation>;
 }
 
+export async function syncGitHubAppInstallations(): Promise<GitHubAppInstallation[]> {
+  const response = await fetch(`${apiBaseUrl}/api/github/installations/sync`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<GitHubAppInstallation[]>;
+}
+
 export async function deleteGitHubAppInstallation(id: string): Promise<void> {
   const response = await fetch(`${apiBaseUrl}/api/github/installations/${id}`, {
     method: "DELETE",

@@ -357,36 +357,28 @@ github.post("/installations", async (c) => {
   );
   if (!remoteResult.ok) return c.json({ error: remoteResult.error }, 502);
 
-  const remote = remoteResult.value;
-  if (!remote.account?.login) return c.json({ error: "GitHub installation has no account" }, 400);
-
-  const now = new Date();
-  const [row] = await db
-    .insert(githubAppInstallation)
-    .values({
-      id: crypto.randomUUID(),
-      organizationId,
-      integrationId: integration.id,
-      installationId: String(installationId),
-      accountLogin: remote.account.login,
-      accountType: remote.account.type ?? null,
-      repositorySelection: remote.repository_selection ?? null,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: [githubAppInstallation.integrationId, githubAppInstallation.installationId],
-      set: {
-        accountLogin: remote.account.login,
-        accountType: remote.account.type ?? null,
-        repositorySelection: remote.repository_selection ?? null,
-        updatedAt: now,
-      },
-    })
-    .returning();
-
-  if (!row) return c.json({ error: "Failed to save GitHub installation" }, 500);
+  const row = await saveRemoteInstallation(organizationId, integration, remoteResult.value);
+  if (!row) return c.json({ error: "GitHub installation has no account" }, 400);
   return c.json(toInstallation(row), 201);
+});
+
+github.post("/installations/sync", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  if (organizationId instanceof Response) return organizationId;
+
+  const integration = await getIntegration(organizationId);
+  if (!integration) return c.json({ error: "Create a GitHub App first" }, 400);
+
+  const remoteResult = await tryGitHub(() => listAppInstallations(integration));
+  if (!remoteResult.ok) return c.json({ error: remoteResult.error }, 502);
+
+  const rows: GitHubInstallationRow[] = [];
+  for (const remote of remoteResult.value) {
+    const row = await saveRemoteInstallation(organizationId, integration, remote);
+    if (row) rows.push(row);
+  }
+
+  return c.json(rows.map(toInstallation));
 });
 
 github.delete("/installations/:id", async (c) => {
@@ -529,6 +521,62 @@ function toInstallation(row: GitHubInstallationRow): GitHubAppInstallation {
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+async function saveRemoteInstallation(
+  organizationId: string,
+  integration: GitHubIntegrationRow,
+  remote: GitHubInstallationResponse,
+): Promise<GitHubInstallationRow | null> {
+  if (!remote.account?.login) return null;
+
+  const now = new Date();
+  const [row] = await db
+    .insert(githubAppInstallation)
+    .values({
+      id: crypto.randomUUID(),
+      organizationId,
+      integrationId: integration.id,
+      installationId: String(remote.id),
+      accountLogin: remote.account.login,
+      accountType: remote.account.type ?? null,
+      repositorySelection: remote.repository_selection ?? null,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [githubAppInstallation.integrationId, githubAppInstallation.installationId],
+      set: {
+        accountLogin: remote.account.login,
+        accountType: remote.account.type ?? null,
+        repositorySelection: remote.repository_selection ?? null,
+        updatedAt: now,
+      },
+    })
+    .returning();
+
+  return row ?? null;
+}
+
+async function listAppInstallations(
+  integration: GitHubIntegrationRow,
+): Promise<GitHubInstallationResponse[]> {
+  const jwt = await createAppJwt(integration);
+  const installations: GitHubInstallationResponse[] = [];
+  let page = 1;
+
+  while (page) {
+    const parsed = await githubRequest<GitHubInstallationResponse[]>(
+      "GET",
+      `/app/installations?per_page=100&page=${page}`,
+      undefined,
+      jwt,
+    );
+    installations.push(...parsed);
+    page = parsed.length === 100 ? page + 1 : 0;
+  }
+
+  return installations;
 }
 
 async function listInstalledRepositories(organizationId: string): Promise<GitHubRepositoryList> {
