@@ -142,20 +142,26 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
   });
 
   useEffect(() => {
-    if (!search.code || processedCode.current === search.code) return;
+    if (!organizationId || !search.code || processedCode.current === search.code) return;
     processedCode.current = search.code;
     completeManifest.mutate({ code: search.code, state: search.state ?? "" });
-  }, [completeManifest, search.code, search.state]);
+  }, [completeManifest, organizationId, search.code, search.state]);
 
   useEffect(() => {
-    if (!search.installation_id || processedInstallation.current === search.installation_id) return;
+    if (
+      !organizationId ||
+      !search.installation_id ||
+      processedInstallation.current === search.installation_id
+    ) {
+      return;
+    }
     if (!/^\d+$/.test(search.installation_id)) return;
     processedInstallation.current = search.installation_id;
     saveInstallation.mutate({
       installationId: search.installation_id,
       setupAction: search.setup_action,
     });
-  }, [saveInstallation, search.installation_id, search.setup_action]);
+  }, [organizationId, saveInstallation, search.installation_id, search.setup_action]);
 
   const connected = integration.data?.connected;
   const installUrl = integration.data?.installUrl;
@@ -313,10 +319,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
 
         {installUrl ? (
           <>
-            <Button
-              render={<a href={installUrl} rel="noreferrer" target="_blank" />}
-              variant="outline"
-            >
+            <Button render={<a href={installUrl} />} variant="outline">
               {savedInstallations.length > 0 ? "Install or update access" : "Install app"}
               <ExternalLinkIcon />
             </Button>
