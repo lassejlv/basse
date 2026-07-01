@@ -156,7 +156,7 @@ function ServerDetailRoute() {
       </Card>
 
       <div className="grid items-start gap-6 xl:grid-cols-[2fr_1fr]">
-        <div className="flex flex-col gap-6">
+        <div className="flex min-w-0 flex-col gap-6">
           <AgentSection
             connectionMode={data.connectionMode}
             enabled={Boolean(data.agentTokenHint)}
@@ -165,7 +165,7 @@ function ServerDetailRoute() {
           <DomainsSection serverId={serverId} sshHost={data.sshHost} />
         </div>
 
-        <div className="flex flex-col gap-6">
+        <div className="flex min-w-0 flex-col gap-6">
           {data.connectionMode === "outbound" ? (
             <OutboundInstallSection serverId={serverId} />
           ) : (
@@ -174,18 +174,19 @@ function ServerDetailRoute() {
 
           <section>
             <SectionHeading title="Danger zone" />
-            <Card className="border-destructive/24 p-5">
-              <p className="text-muted-foreground text-sm">
-                Deleting a server removes it from Basse and discards its access key. Any running
-                agent container is left in place.
+            <Card className="flex flex-row items-center justify-between gap-3 border-destructive/24 p-4">
+              <p className="min-w-0 text-muted-foreground text-xs">
+                Removes the server and discards its access key. Running containers are left in
+                place.
               </p>
               <Button
-                className="mt-4"
+                className="shrink-0"
                 onClick={() => setDeleteDialogOpen(true)}
+                size="sm"
                 variant="destructive-outline"
               >
                 <TrashIcon />
-                Delete server
+                Delete
               </Button>
             </Card>
           </section>
@@ -302,7 +303,7 @@ function SshSetupSection({
           Add this public key to <code className="font-mono">~/.ssh/authorized_keys</code> on the
           server (as <code className="font-mono">{data.sshUser}</code>), then provision it.
         </p>
-        <pre className="mt-3 overflow-x-auto rounded-lg border bg-muted/30 p-3 font-mono text-xs">
+        <pre className="mt-3 max-h-32 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-3 font-mono text-xs">
           {data.sshPublicKey}
         </pre>
         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -514,43 +515,43 @@ function AgentSection({
           </p>
         ) : (
           <>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <div className="min-w-0 rounded-lg border p-3">
-                <p className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
+              <div className="min-w-0">
+                <dt className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
                   Version
-                </p>
-                <p className="mt-1 truncate font-mono text-xs leading-5">
+                </dt>
+                <dd className="mt-0.5 truncate font-mono text-xs leading-5">
                   {info.data?.version ?? "unknown"}
-                </p>
+                </dd>
               </div>
-              <div className="min-w-0 rounded-lg border p-3">
-                <p className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+              <div className="min-w-0">
+                <dt className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
                   Target image
-                </p>
-                <p
-                  className="mt-1 truncate font-mono text-xs leading-5"
+                </dt>
+                <dd
+                  className="mt-0.5 truncate font-mono text-xs leading-5"
                   title={info.data?.targetImage}
                 >
                   {info.data?.targetImage ?? "unknown"}
-                </p>
+                </dd>
               </div>
-              <div className="min-w-0 rounded-lg border p-3">
-                <p className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+              <div className="min-w-0">
+                <dt className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
                   Docker
-                </p>
-                <p className="mt-1 truncate text-sm">
+                </dt>
+                <dd className="mt-0.5 truncate text-sm">
                   {info.data?.docker
                     ? `${info.data.docker.containersRunning}/${info.data.docker.containers} running`
                     : "unknown"}
-                </p>
+                </dd>
               </div>
-              <div className="min-w-0 rounded-lg border p-3">
-                <p className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+              <div className="min-w-0">
+                <dt className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
                   Engine
-                </p>
-                <p className="mt-1 truncate text-sm">{info.data?.engine?.version ?? "unknown"}</p>
+                </dt>
+                <dd className="mt-0.5 truncate text-sm">{info.data?.engine?.version ?? "unknown"}</dd>
               </div>
-            </div>
+            </dl>
 
             {supportsHostAgentOps ? (
               <>

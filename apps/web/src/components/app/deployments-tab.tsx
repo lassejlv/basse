@@ -29,7 +29,7 @@ import {
 import type { App } from "@/lib/apps";
 import { getAppLogs, getAppMetrics } from "@/lib/apps";
 import { rollbackDeployment } from "@/lib/deployments";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, relativeTime } from "@/lib/format";
 import { listServers } from "@/lib/servers";
 import { toast } from "@/lib/toast";
 import { formatCpuCores } from "./shared";
@@ -82,43 +82,57 @@ export function DeploymentsPanel({
           </p>
         ) : (
           <Card className="divide-y overflow-hidden p-0">
-            {deployments.map((deployment) => (
-              <div key={deployment.id} className="flex items-center gap-3 px-4 py-3">
-                <button
-                  className="-m-2 flex min-w-0 flex-1 items-center gap-3 rounded-md p-2 text-left transition hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  onClick={() => setSelectedDeploymentId(deployment.id)}
-                  type="button"
-                >
-                  <StatusDot className="size-2.5" status={deployment.status} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate font-mono text-muted-foreground text-xs">
-                      {new Date(deployment.createdAt).toLocaleString()}
-                      {deployment.commitSha ? ` · ${deployment.commitSha.slice(0, 7)}` : ""}
+            {deployments.map((deployment) => {
+              const canRollback =
+                deployment.id !== latest?.id &&
+                Boolean(deployment.imageRef) &&
+                ["healthy", "superseded"].includes(deployment.status);
+              const imageTail =
+                deployment.imageRef?.split("/").pop() ?? deployment.buildId ?? "no image yet";
+              return (
+                <div key={deployment.id} className="group flex items-center gap-2.5 px-3 py-2">
+                  <StatusDot className="size-2" status={deployment.status} />
+                  <button
+                    className="min-w-0 flex-1 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onClick={() => setSelectedDeploymentId(deployment.id)}
+                    type="button"
+                  >
+                    <span className="flex items-baseline gap-2">
+                      <span className="font-medium font-mono text-xs">
+                        {deployment.commitSha?.slice(0, 7) ?? deployment.id.slice(0, 7)}
+                      </span>
+                      <span
+                        className="text-muted-foreground text-xs"
+                        title={new Date(deployment.createdAt).toLocaleString()}
+                      >
+                        {relativeTime(deployment.createdAt)}
+                      </span>
                     </span>
-                    <span className="block truncate text-muted-foreground/75 text-xs">
-                      {deployment.imageRef ?? deployment.buildId ?? "No image recorded yet"}
+                    <span
+                      className="block truncate font-mono text-[11px] text-muted-foreground/70"
+                      title={deployment.imageRef ?? undefined}
+                    >
+                      {imageTail}
                     </span>
-                  </span>
-                </button>
-                <DeployStatusBadge size="sm" status={deployment.status} />
-                <Button
-                  disabled={
-                    rollback.isPending ||
-                    deployment.id === latest?.id ||
-                    !deployment.imageRef ||
-                    !["healthy", "superseded"].includes(deployment.status)
-                  }
-                  loading={rollback.isPending && rollback.variables === deployment.id}
-                  onClick={() => rollback.mutate(deployment.id)}
-                  size="sm"
-                  title="Roll back to this deployment"
-                  variant="outline"
-                >
-                  <RotateCcwIcon />
-                  Rollback
-                </Button>
-              </div>
-            ))}
+                  </button>
+                  <DeployStatusBadge size="sm" status={deployment.status} />
+                  {canRollback ? (
+                    <Button
+                      aria-label="Roll back to this deployment"
+                      className="opacity-0 transition group-focus-within:opacity-100 group-hover:opacity-100"
+                      disabled={rollback.isPending}
+                      loading={rollback.isPending && rollback.variables === deployment.id}
+                      onClick={() => rollback.mutate(deployment.id)}
+                      size="icon-xs"
+                      title="Roll back to this deployment"
+                      variant="ghost"
+                    >
+                      <RotateCcwIcon />
+                    </Button>
+                  ) : null}
+                </div>
+              );
+            })}
           </Card>
         )}
         {rollbackError ? (

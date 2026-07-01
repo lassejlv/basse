@@ -36,3 +36,17 @@ export function formatBytes(value: number | null | undefined): string {
   const precision = size >= 10 || unitIndex === 0 ? 0 : 1;
   return `${size.toFixed(precision)} ${units[unitIndex]}`;
 }
+
+/** Redact a host for list surfaces — the full address belongs on the server
+ * detail page only. IPs keep the first two octets, hostnames the first label. */
+export function maskHost(host: string): string {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+    const octets = host.split(".");
+    return `${octets[0]}.${octets[1]}.•••.•••`;
+  }
+  const labels = host.split(".");
+  if (labels.length <= 1) {
+    return host.length > 4 ? `${host.slice(0, 4)}•••` : host;
+  }
+  return `${labels[0]}.•••`;
+}

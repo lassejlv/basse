@@ -25,22 +25,20 @@ import {
   useRef,
   useState,
 } from "react";
-import type {
-  App,
-  AppBuildMode,
-  AppBuildRunner,
-  AppKind,
-  AppSourceType,
-  DatabaseKind,
-  ImportableDockerContainer,
-} from "@basse/shared";
+import type { App, ImportableDockerContainer } from "@basse/shared";
 import { AppPanel } from "@/components/app/app-panel";
+import { NewAppPalette } from "@/components/new-app-palette";
+import {
+  ContextMenu,
+  ContextMenuItem,
+  ContextMenuPopup,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { DatabaseIcon, databaseEngineLabel } from "@/components/database-icon";
 import { StatusDot, deployState } from "@/components/deploy-status";
-import { GitHubRepositorySelect } from "@/components/github-repository-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   ProjectStagedChangesBar,
   ProjectStagedChangesHistory,
@@ -92,13 +90,11 @@ import {
 } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  createApp,
   importDockerContainer,
   listApps,
   listImportableDockerContainers,
 } from "@/lib/apps";
 import { getProjectChangeHistory, getProjectChanges } from "@/lib/changes";
-import { triggerDeploy } from "@/lib/deployments";
 import { createEnvironment, listEnvironments } from "@/lib/environments";
 import {
   listEnvironmentSharedEnvVars,
@@ -110,7 +106,6 @@ import {
   type SharedEnvVarMasked,
   type SharedEnvVarPlain,
 } from "@/lib/env-vars";
-import { listGitHubRepositories } from "@/lib/github";
 import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
 import { deleteProject, getProject } from "@/lib/projects";
 import { listServers } from "@/lib/servers";
@@ -142,6 +137,8 @@ function ProjectDetailRoute() {
   const [settingsDialog, setSettingsDialog] = useState<SettingsDialog | null>(null);
   const [newEnvOpen, setNewEnvOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
+  const [newAppOpen, setNewAppOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
 
   const selectedAppId = search.app ?? null;
 
@@ -330,7 +327,10 @@ function ProjectDetailRoute() {
           {selectedEnv ? (
             <>
               <ImportContainerDialog environmentId={selectedEnv} />
-              <CreateAppDialog environmentId={selectedEnv} />
+              <Button onClick={() => setNewAppOpen(true)}>
+                <PlusIcon />
+                New app
+              </Button>
             </>
           ) : null}
         </div>
@@ -340,6 +340,8 @@ function ProjectDetailRoute() {
         {selectedEnv ? (
           <EnvironmentCanvas
             environmentId={selectedEnv}
+            onRequestImport={() => setImportOpen(true)}
+            onRequestNewApp={() => setNewAppOpen(true)}
             onSelectApp={selectApp}
             selectedAppId={selectedAppId}
           />
@@ -404,6 +406,22 @@ function ProjectDetailRoute() {
         open={newEnvOpen}
         projectId={projectId}
       />
+      {selectedEnv ? (
+        <>
+          <NewAppPalette
+            environmentId={selectedEnv}
+            onCreated={(appId) => selectApp(appId)}
+            onOpenChange={setNewAppOpen}
+            onRequestImport={() => setImportOpen(true)}
+            open={newAppOpen}
+          />
+          <ImportContainerDialog
+            environmentId={selectedEnv}
+            onOpenChange={setImportOpen}
+            open={importOpen}
+          />
+        </>
+      ) : null}
     </section>
   );
 }
@@ -491,10 +509,14 @@ function EnvironmentCanvas({
   environmentId,
   selectedAppId,
   onSelectApp,
+  onRequestNewApp,
+  onRequestImport,
 }: {
   environmentId: string;
   selectedAppId: string | null;
   onSelectApp: (appId: string | null) => void;
+  onRequestNewApp: () => void;
+  onRequestImport: () => void;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const panRef = useRef<PointerGesture | null>(null);
@@ -623,7 +645,8 @@ function EnvironmentCanvas({
 
   return (
     <div className="absolute inset-0 overflow-hidden bg-background">
-      <div
+      <ContextMenu>
+        <ContextMenuTrigger
         className={cn(
           "absolute inset-0 touch-none select-none",
           panning ? "cursor-grabbing" : "cursor-grab",
@@ -693,7 +716,23 @@ function EnvironmentCanvas({
             />
           ))}
         </div>
-      </div>
+        </ContextMenuTrigger>
+        <ContextMenuPopup className="min-w-44">
+          <ContextMenuItem onClick={onRequestNewApp}>
+            <PlusIcon />
+            New app
+          </ContextMenuItem>
+          <ContextMenuItem onClick={onRequestImport}>
+            <DownloadIcon />
+            Import container
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem onClick={fitView}>
+            <MaximizeIcon />
+            Fit view
+          </ContextMenuItem>
+        </ContextMenuPopup>
+      </ContextMenu>
 
       <div
         aria-hidden
@@ -721,8 +760,14 @@ function EnvironmentCanvas({
               </EmptyDescription>
             </EmptyHeader>
             <EmptyContent className="flex flex-wrap items-center justify-center gap-2">
-              <ImportContainerDialog environmentId={environmentId} />
-              <CreateAppDialog environmentId={environmentId} />
+              <Button onClick={onRequestImport} variant="outline">
+                <DownloadIcon />
+                Import
+              </Button>
+              <Button onClick={onRequestNewApp}>
+                <PlusIcon />
+                New app
+              </Button>
             </EmptyContent>
           </Empty>
         </div>
@@ -860,7 +905,7 @@ function CanvasNode({
         </div>
       </button>
       {app.volumes.length > 0 ? (
-        <div className="mx-4 flex items-center gap-1.5 rounded-b-lg border border-t-0 bg-card/70 px-2.5 py-1.5 font-mono text-[11px] text-muted-foreground">
+        <div className="-mt-2 mx-4 flex items-center gap-1.5 rounded-b-lg border bg-card px-2.5 pt-[13px] pb-1.5 font-mono text-[11px] text-muted-foreground">
           <HardDriveIcon className="size-3 shrink-0" />
           <span className="truncate">{volumeLabel}</span>
         </div>
@@ -1025,9 +1070,19 @@ function containerPortsLabel(container: ImportableDockerContainer): string {
   return ports.length > 0 ? ports.join(", ") : "No exposed ports";
 }
 
-function ImportContainerDialog({ environmentId }: { environmentId: string }) {
+function ImportContainerDialog({
+  environmentId,
+  open: openProp,
+  onOpenChange,
+}: {
+  environmentId: string;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}) {
   const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = openProp ?? internalOpen;
+  const setOpen = onOpenChange ?? setInternalOpen;
   const [serverId, setServerId] = useState("");
   const [containerId, setContainerId] = useState("");
   const [name, setName] = useState("");
@@ -1113,14 +1168,16 @@ function ImportContainerDialog({ environmentId }: { environmentId: string }) {
         if (!next) reset();
       }}
     >
-      <DialogTrigger
-        render={
-          <Button variant="outline">
-            <DownloadIcon />
-            Import
-          </Button>
-        }
-      />
+      {openProp === undefined ? (
+        <DialogTrigger
+          render={
+            <Button variant="outline">
+              <DownloadIcon />
+              Import
+            </Button>
+          }
+        />
+      ) : null}
       <DialogPopup className="h-fit max-w-2xl">
         <form onSubmit={submit}>
           <DialogHeader>
@@ -1321,549 +1378,3 @@ function NewEnvironmentDialog({
   );
 }
 
-function CreateAppDialog({ environmentId }: { environmentId: string }) {
-  const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
-
-  const servers = useQuery({ queryKey: ["servers", "for-apps"], queryFn: listServers });
-  const githubRepositories = useQuery({
-    queryKey: ["github-repositories", "create-app"],
-    queryFn: listGitHubRepositories,
-  });
-
-  const [name, setName] = useState("");
-  const [appKind, setAppKind] = useState<AppKind>("service");
-  const [databaseKind, setDatabaseKind] = useState<DatabaseKind>("postgres");
-  const [sourceType, setSourceType] = useState<AppSourceType>("repository");
-  const [repositoryUrl, setRepositoryUrl] = useState("");
-  const [imageRef, setImageRef] = useState("");
-  const [branch, setBranch] = useState("main");
-  const [port, setPort] = useState("3000");
-  const [serverIds, setServerIds] = useState<string[]>([]);
-  const [buildMode, setBuildMode] = useState<AppBuildMode>("auto");
-  const [buildRootDirectory, setBuildRootDirectory] = useState("");
-  const [dockerfilePath, setDockerfilePath] = useState("Dockerfile");
-  const [buildRunner, setBuildRunner] = useState<AppBuildRunner>("depot");
-  const [databaseVersion, setDatabaseVersion] = useState("18");
-  const [databaseName, setDatabaseName] = useState("");
-  const [databaseUser, setDatabaseUser] = useState("postgres");
-  const [databasePassword, setDatabasePassword] = useState("");
-  const [databasePublicEnabled, setDatabasePublicEnabled] = useState(false);
-  const [databasePublicPort, setDatabasePublicPort] = useState("5432");
-  const [error, setError] = useState<string | null>(null);
-
-  function reset() {
-    setName("");
-    setAppKind("service");
-    setDatabaseKind("postgres");
-    setSourceType("repository");
-    setRepositoryUrl("");
-    setImageRef("");
-    setBranch("main");
-    setPort("3000");
-    setServerIds([]);
-    setBuildMode("auto");
-    setBuildRootDirectory("");
-    setDockerfilePath("Dockerfile");
-    setBuildRunner("depot");
-    setDatabaseVersion("18");
-    setDatabaseName("");
-    setDatabaseUser("postgres");
-    setDatabasePassword("");
-    setDatabasePublicEnabled(false);
-    setDatabasePublicPort("5432");
-    setError(null);
-  }
-
-  const localBuildInvalid =
-    appKind === "service" && buildRunner === "server" && serverIds.length !== 1;
-  const databaseServerInvalid = appKind === "database" && serverIds.length !== 1;
-  const add = useMutation({
-    mutationFn: async () => {
-      if (appKind === "database") {
-        const created = await createApp({
-          environmentId,
-          name,
-          appKind: "database",
-          serverIds,
-          databaseKind,
-          databaseVersion,
-          databaseName: databaseKind === "postgres" ? databaseName : undefined,
-          databaseUser: databaseKind === "postgres" ? databaseUser : undefined,
-          databasePassword: databasePassword || undefined,
-          databasePublicEnabled,
-          databasePublicPort: databasePublicEnabled ? Number(databasePublicPort) : null,
-        });
-        await triggerDeploy(created.id);
-        return created;
-      }
-
-      return createApp({
-        environmentId,
-        name,
-        sourceType,
-        repositoryUrl,
-        imageRef,
-        branch,
-        port: Number(port),
-        serverIds,
-        buildMode,
-        buildRootDirectory,
-        dockerfilePath,
-        buildRunner,
-      });
-    },
-    onSuccess: async () => {
-      const kind = appKind;
-      reset();
-      setOpen(false);
-      await queryClient.invalidateQueries({ queryKey: ["apps", environmentId] });
-      toast.success(kind === "database" ? "Database created" : "App created");
-    },
-    onError: (mutationError: Error) => setError(mutationError.message),
-  });
-
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (localBuildInvalid) {
-      setError("Selected-server builds require exactly one server.");
-      return;
-    }
-    if (databaseServerInvalid) {
-      setError("Databases require exactly one server.");
-      return;
-    }
-    add.mutate();
-  }
-
-  function toggleServer(serverId: string, checked: boolean) {
-    setServerIds((current) =>
-      appKind === "database"
-        ? checked
-          ? [serverId]
-          : []
-        : checked
-          ? [...new Set([...current, serverId])]
-          : current.filter((selectedServerId) => selectedServerId !== serverId),
-    );
-  }
-
-  const serverList = servers.data ?? [];
-  const githubRepoList = githubRepositories.data?.repositories ?? [];
-  const githubRepoErrors = githubRepositories.data?.errors ?? [];
-
-  function updateDatabaseKind(kind: DatabaseKind) {
-    setDatabaseKind(kind);
-    if (kind === "postgres") {
-      setDatabaseVersion("18");
-      setDatabaseUser("postgres");
-      setDatabasePublicPort("5432");
-    } else {
-      setDatabaseVersion("8");
-      setDatabaseName("");
-      setDatabaseUser("");
-      setDatabasePublicPort("6379");
-    }
-  }
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next);
-        if (!next) setError(null);
-      }}
-    >
-      <DialogTrigger
-        render={
-          <Button>
-            <PlusIcon />
-            New app
-          </Button>
-        }
-      />
-      <DialogPopup className="h-fit max-w-lg">
-        <form onSubmit={handleSubmit}>
-          <DialogHeader>
-            <DialogTitle>New app</DialogTitle>
-            <DialogDescription>
-              Deploy an application or create a managed database.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogPanel className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="app-name">Name</Label>
-              <Input
-                autoFocus
-                id="app-name"
-                onChange={(event) => setName(event.currentTarget.value)}
-                placeholder="web"
-                required
-                value={name}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Type</Label>
-              <Select
-                value={appKind}
-                onValueChange={(value) => {
-                  setAppKind((value ?? "service") as AppKind);
-                  setServerIds([]);
-                }}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Type">
-                    {(value: AppKind) =>
-                      value === "database" ? "Managed database" : "Application"
-                    }
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectPopup>
-                  <SelectItem value="service">Application</SelectItem>
-                  <SelectItem value="database">Managed database</SelectItem>
-                </SelectPopup>
-              </Select>
-            </div>
-            {appKind === "service" ? (
-              <>
-                <div className="space-y-2">
-                  <Label>Source</Label>
-                  <Select
-                    value={sourceType}
-                    onValueChange={(value) =>
-                      setSourceType((value ?? "repository") as AppSourceType)
-                    }
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue placeholder="Source">
-                        {(value: AppSourceType) =>
-                          value === "image" ? "Prebuilt Docker image" : "Git repository"
-                        }
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectPopup>
-                      <SelectItem value="repository">Git repository</SelectItem>
-                      <SelectItem value="image">Prebuilt Docker image</SelectItem>
-                    </SelectPopup>
-                  </Select>
-                </div>
-                {sourceType === "repository" ? (
-                  <>
-                    {githubRepoList.length > 0 ? (
-                      <GitHubRepositorySelect
-                        label="Private GitHub repository"
-                        onSelect={(repository) => {
-                          setRepositoryUrl(repository.cloneUrl);
-                          setBranch(repository.defaultBranch);
-                        }}
-                        repositories={githubRepoList}
-                        value={repositoryUrl}
-                      />
-                    ) : null}
-                    {githubRepositories.isError ? (
-                      <p className="text-destructive-foreground text-sm">
-                        Couldn't load installed GitHub repositories:{" "}
-                        {toMessage(githubRepositories.error)}
-                      </p>
-                    ) : githubRepoErrors.length > 0 ? (
-                      <p className="text-muted-foreground text-sm">
-                        Some GitHub installations could not be loaded: {githubRepoErrors.join("; ")}
-                      </p>
-                    ) : !githubRepositories.isPending && githubRepoList.length === 0 ? (
-                      <p className="text-muted-foreground text-sm">
-                        Need a private repository?{" "}
-                        <Link
-                          className="underline underline-offset-4"
-                          search={{
-                            code: undefined,
-                            installation_id: undefined,
-                            setup_action: undefined,
-                            state: undefined,
-                          }}
-                          to="/secrets"
-                        >
-                          Install the GitHub App in Secrets
-                        </Link>
-                        .
-                      </p>
-                    ) : null}
-                    <div className="space-y-2">
-                      <Label htmlFor="app-repo">Public or manual repository URL</Label>
-                      <Input
-                        id="app-repo"
-                        onChange={(event) => setRepositoryUrl(event.currentTarget.value)}
-                        placeholder="https://github.com/user/repo"
-                        required
-                        value={repositoryUrl}
-                      />
-                    </div>
-                    <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
-                      <div className="space-y-2">
-                        <Label htmlFor="app-branch">Branch</Label>
-                        <Input
-                          id="app-branch"
-                          onChange={(event) => setBranch(event.currentTarget.value)}
-                          value={branch}
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="app-port">Port</Label>
-                        <Input
-                          id="app-port"
-                          onChange={(event) => setPort(event.currentTarget.value)}
-                          type="number"
-                          value={port}
-                        />
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Build mode</Label>
-                      <Select
-                        value={buildMode}
-                        onValueChange={(value) =>
-                          setBuildMode((value ?? "auto") as AppBuildMode)
-                        }
-                      >
-                        <SelectTrigger className="w-full">
-                          <SelectValue placeholder="Build mode">
-                            {(value: AppBuildMode) =>
-                              value === "dockerfile"
-                                ? "Force Dockerfile"
-                                : value === "railpack"
-                                  ? "Force Railpack"
-                                  : "Auto detect"
-                            }
-                          </SelectValue>
-                        </SelectTrigger>
-                        <SelectPopup>
-                          <SelectItem value="auto">Auto detect</SelectItem>
-                          <SelectItem value="dockerfile">Force Dockerfile</SelectItem>
-                          <SelectItem value="railpack">Force Railpack</SelectItem>
-                        </SelectPopup>
-                      </Select>
-                    </div>
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <div className="space-y-2">
-                        <Label htmlFor="app-build-root">Root directory</Label>
-                        <Input
-                          id="app-build-root"
-                          onChange={(event) => setBuildRootDirectory(event.currentTarget.value)}
-                          placeholder="."
-                          value={buildRootDirectory}
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="app-dockerfile-path">Dockerfile path</Label>
-                        <Input
-                          id="app-dockerfile-path"
-                          onChange={(event) => setDockerfilePath(event.currentTarget.value)}
-                          placeholder="Dockerfile"
-                          value={dockerfilePath}
-                        />
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
-                    <div className="space-y-2">
-                      <Label htmlFor="app-image">Docker image</Label>
-                      <Input
-                        id="app-image"
-                        onChange={(event) => setImageRef(event.currentTarget.value)}
-                        placeholder="nginx:alpine"
-                        required
-                        value={imageRef}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="app-image-port">Port</Label>
-                      <Input
-                        id="app-image-port"
-                        onChange={(event) => setPort(event.currentTarget.value)}
-                        type="number"
-                        value={port}
-                      />
-                    </div>
-                  </div>
-                )}
-              </>
-            ) : (
-              <>
-                <div className="space-y-2">
-                  <Label>Engine</Label>
-                  <Select
-                    value={databaseKind}
-                    onValueChange={(value) =>
-                      updateDatabaseKind((value ?? "postgres") as DatabaseKind)
-                    }
-                  >
-                    <SelectTrigger className="w-full">
-                      <SelectValue placeholder="Engine">
-                        {(value: DatabaseKind) => (
-                          <span className="flex items-center gap-2">
-                            <DatabaseIcon className="size-4" kind={value} />
-                            <span>{databaseEngineLabel(value)}</span>
-                          </span>
-                        )}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectPopup>
-                      <SelectItem value="postgres">
-                        <span className="flex items-center gap-2">
-                          <DatabaseIcon className="size-4" kind="postgres" />
-                          <span>Postgres</span>
-                        </span>
-                      </SelectItem>
-                      <SelectItem value="redis">
-                        <span className="flex items-center gap-2">
-                          <DatabaseIcon className="size-4" kind="redis" />
-                          <span>Redis</span>
-                        </span>
-                      </SelectItem>
-                    </SelectPopup>
-                  </Select>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
-                  {databaseKind === "postgres" ? (
-                    <div className="space-y-2">
-                      <Label htmlFor="database-name">Database name</Label>
-                      <Input
-                        id="database-name"
-                        onChange={(event) => setDatabaseName(event.currentTarget.value)}
-                        placeholder={name || "app"}
-                        value={databaseName}
-                      />
-                    </div>
-                  ) : null}
-                  <div className="space-y-2">
-                    <Label htmlFor="database-version">Version</Label>
-                    <Input
-                      id="database-version"
-                      onChange={(event) => setDatabaseVersion(event.currentTarget.value)}
-                      value={databaseVersion}
-                    />
-                  </div>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {databaseKind === "postgres" ? (
-                    <div className="space-y-2">
-                      <Label htmlFor="database-user">User</Label>
-                      <Input
-                        id="database-user"
-                        onChange={(event) => setDatabaseUser(event.currentTarget.value)}
-                        value={databaseUser}
-                      />
-                    </div>
-                  ) : null}
-                  <div className="space-y-2">
-                    <Label htmlFor="database-password">Password</Label>
-                    <Input
-                      id="database-password"
-                      onChange={(event) => setDatabasePassword(event.currentTarget.value)}
-                      placeholder="Generate"
-                      type="password"
-                      value={databasePassword}
-                    />
-                  </div>
-                </div>
-                <label className="flex items-center gap-2 text-sm">
-                  <Checkbox
-                    checked={databasePublicEnabled}
-                    onCheckedChange={(value) => setDatabasePublicEnabled(value === true)}
-                  />
-                  <span>Enable public TCP access</span>
-                </label>
-                {databasePublicEnabled ? (
-                  <div className="max-w-40 space-y-2">
-                    <Label htmlFor="database-public-port">Public port</Label>
-                    <Input
-                      id="database-public-port"
-                      onChange={(event) => setDatabasePublicPort(event.currentTarget.value)}
-                      type="number"
-                      value={databasePublicPort}
-                    />
-                  </div>
-                ) : null}
-              </>
-            )}
-            <div className="space-y-2">
-              <Label>Servers</Label>
-              {servers.isPending ? (
-                <p className="text-muted-foreground text-sm">Loading servers…</p>
-              ) : serverList.length === 0 ? (
-                <p className="text-muted-foreground text-sm">
-                  No servers yet —{" "}
-                  <Link className="font-medium text-foreground underline" to="/servers">
-                    add one
-                  </Link>{" "}
-                  first (you can also attach it later).
-                </p>
-              ) : (
-                <div className="flex flex-col gap-2">
-                  {serverList.map((server) => (
-                    <label
-                      key={server.id}
-                      className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm"
-                    >
-                      <span className="min-w-0">
-                        <span className="block truncate font-medium">{server.name}</span>
-                        <span className="text-muted-foreground">{server.status}</span>
-                      </span>
-                      <Checkbox
-                        checked={serverIds.includes(server.id)}
-                        onCheckedChange={(value) => toggleServer(server.id, value === true)}
-                      />
-                    </label>
-                  ))}
-                </div>
-              )}
-            </div>
-            {appKind === "service" && sourceType === "repository" ? (
-              <div className="space-y-2">
-                <Label>Build location</Label>
-                <Select
-                  value={buildRunner}
-                  onValueChange={(value) => setBuildRunner((value ?? "depot") as AppBuildRunner)}
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue placeholder="Build location">
-                      {(value: AppBuildRunner) =>
-                        value === "server" ? "Selected server" : "Depot"
-                      }
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup>
-                    <SelectItem value="depot">Depot</SelectItem>
-                    <SelectItem value="server">Selected server</SelectItem>
-                  </SelectPopup>
-                </Select>
-                {localBuildInvalid ? (
-                  <p className="text-warning-foreground text-sm">
-                    Selected-server builds require exactly one server. Use Depot for multiple
-                    servers.
-                  </p>
-                ) : null}
-              </div>
-            ) : null}
-            {databaseServerInvalid ? (
-              <p className="text-warning-foreground text-sm">
-                Databases require exactly one server.
-              </p>
-            ) : null}
-            {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
-          </DialogPanel>
-          <DialogFooter>
-            <DialogClose render={<Button variant="outline">Cancel</Button>} />
-            <Button
-              disabled={!name.trim() || localBuildInvalid || databaseServerInvalid}
-              loading={add.isPending}
-              type="submit"
-            >
-              {appKind === "database" ? "Create database" : "Create app"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogPopup>
-    </Dialog>
-  );
-}

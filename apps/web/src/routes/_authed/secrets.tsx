@@ -70,7 +70,7 @@ function SecretsRoute() {
         </p>
       </div>
 
-      <div className="grid max-w-6xl items-start gap-4 xl:grid-cols-2">
+      <div className="grid max-w-5xl items-start gap-4 xl:grid-cols-2">
         <GitHubSection organizationId={organizationId} />
         <div className="flex flex-col gap-4">
           <SshKeysSection organizationId={organizationId} />
@@ -95,17 +95,17 @@ function SectionCard({
   children: ReactNode;
 }) {
   return (
-    <Card className="p-6">
+    <Card className="p-5">
       <div className="flex items-start gap-3">
-        <span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border bg-muted/30 text-foreground/80">
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border bg-muted/30 text-foreground/80">
           {icon}
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="font-semibold text-base">{title}</h2>
+            <h2 className="font-semibold text-sm">{title}</h2>
             {badge}
           </div>
-          <p className="mt-0.5 text-muted-foreground text-sm">{description}</p>
+          <p className="mt-0.5 text-muted-foreground text-xs leading-relaxed">{description}</p>
         </div>
       </div>
       {children}
@@ -429,12 +429,13 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
         </p>
       ) : null}
 
-      <div className="mt-6 flex flex-wrap gap-2 border-t pt-5">
+      <div className="mt-5 flex flex-wrap gap-2 border-t pt-4">
         <form action={manifest.data?.actionUrl} method="post" onSubmit={submitGitHubManifest}>
           <input name="manifest" type="hidden" value={manifest.data?.manifest ?? ""} />
           <Button
             disabled={!organizationId || manifest.isPending || startingGitHubSetup}
             loading={startingGitHubSetup}
+            size="sm"
             type="submit"
             variant={connected ? "outline" : "default"}
           >
@@ -444,7 +445,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
 
         {installUrl ? (
           <>
-            <Button render={<a href={installUrl} />} variant="outline">
+            <Button render={<a href={installUrl} />} size="sm" variant="outline">
               {savedInstallations.length > 0 ? "Install or update access" : "Install app"}
               <ExternalLinkIcon />
             </Button>
@@ -455,6 +456,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
                   disconnect.mutate();
                 }
               }}
+              size="sm"
               variant="outline"
             >
               Disconnect

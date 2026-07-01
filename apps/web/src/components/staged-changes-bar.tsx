@@ -511,14 +511,6 @@ function historyTitle(entry: StagedChangeHistoryEntry): string {
   return `${entry.outcome === "applied" ? "Applied" : "Discarded"} ${entry.changes.length} ${noun}`;
 }
 
-function HistoryChangeRow({ change }: { change: StagedChangeHistoryItem }) {
-  return (
-    <li className="px-3 py-2 text-sm">
-      <ChangeSummary change={change} />
-    </li>
-  );
-}
-
 export function StagedChangesHistory({
   entries,
   isPending,
@@ -526,73 +518,18 @@ export function StagedChangesHistory({
   entries: StagedChangeHistoryEntry[];
   isPending: boolean;
 }) {
-  if (isPending) {
-    return (
-      <Card className="p-6">
-        <h2 className="font-semibold text-lg">Change history</h2>
-        <p className="mt-2 text-muted-foreground text-sm">Loading change history…</p>
-      </Card>
-    );
-  }
-
-  if (entries.length === 0) {
-    return (
-      <Card className="p-6">
-        <h2 className="font-semibold text-lg">Change history</h2>
-        <p className="mt-2 text-muted-foreground text-sm">
-          Applied and discarded staged changes will show up here.
-        </p>
-      </Card>
-    );
-  }
-
   return (
-    <Card className="p-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="font-semibold text-lg">Change history</h2>
-          <p className="mt-1 text-muted-foreground text-sm">
-            Applied and discarded staged changes for this app.
-          </p>
-        </div>
-        <span className="rounded-md border px-2 py-1 text-muted-foreground text-xs">
-          Latest {entries.length}
-        </span>
-      </div>
-
-      <div className="mt-5 flex flex-col gap-3">
-        {entries.map((entry) => {
-          const visible = entry.changes.filter((change) => !isHidden(change));
-          return (
-            <div className="rounded-md border" key={entry.id}>
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
-                <div>
-                  <p className="font-medium text-sm">{historyTitle(entry)}</p>
-                  <p className="text-muted-foreground text-xs">
-                    {new Date(entry.createdAt).toLocaleString()}
-                    {entry.deploymentId ? ` · deployment ${entry.deploymentId.slice(0, 8)}` : ""}
-                  </p>
-                </div>
-                <span className="rounded-md bg-muted px-2 py-1 text-muted-foreground text-xs">
-                  {entry.outcome}
-                </span>
-              </div>
-              {visible.length > 0 ? (
-                <ul className="divide-y">
-                  {visible.map((change) => (
-                    <HistoryChangeRow change={change} key={change.id} />
-                  ))}
-                </ul>
-              ) : (
-                <p className="px-3 py-2 text-muted-foreground text-sm">
-                  Only derived changes were recorded.
-                </p>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </Card>
+    <HistoryTimeline
+      emptyText="Applied and discarded staged changes will show up here."
+      entries={entries.map((entry) => ({
+        id: entry.id,
+        title: historyTitle(entry),
+        meta: metaLine(entry),
+        outcome: entry.outcome,
+        changes: entry.changes,
+      }))}
+      isPending={isPending}
+    />
   );
 }
 
@@ -603,73 +540,93 @@ export function ProjectStagedChangesHistory({
   entries: ProjectStagedChangeHistoryEntry[];
   isPending: boolean;
 }) {
+  return (
+    <HistoryTimeline
+      emptyText="Applied and discarded staged changes from this project will show up here."
+      entries={entries.map((entry) => ({
+        id: entry.id,
+        title: historyTitle(entry),
+        meta: metaLine(entry, `${entry.environmentName} / ${entry.appName}`),
+        outcome: entry.outcome,
+        changes: entry.changes,
+      }))}
+      isPending={isPending}
+    />
+  );
+}
+
+function metaLine(
+  entry: { createdAt: string; deploymentId: string | null },
+  scope?: string,
+): string {
+  const parts: string[] = [];
+  if (scope) parts.push(scope);
+  parts.push(new Date(entry.createdAt).toLocaleString());
+  if (entry.deploymentId) parts.push(`deploy ${entry.deploymentId.slice(0, 8)}`);
+  return parts.join(" · ");
+}
+
+// The activity timeline: a quiet rail with outcome dots. No card chrome —
+// the hosting panel or sheet provides the surface.
+function HistoryTimeline({
+  entries,
+  isPending,
+  emptyText,
+}: {
+  entries: {
+    id: string;
+    title: string;
+    meta: string;
+    outcome: string;
+    changes: StagedChangeHistoryItem[];
+  }[];
+  isPending: boolean;
+  emptyText: string;
+}) {
   if (isPending) {
-    return (
-      <Card className="p-6">
-        <h2 className="font-semibold text-lg">Project change history</h2>
-        <p className="mt-2 text-muted-foreground text-sm">Loading change history…</p>
-      </Card>
-    );
+    return <div className="h-24 animate-pulse rounded-lg border bg-muted/30" aria-hidden />;
   }
 
   if (entries.length === 0) {
     return (
-      <Card className="p-6">
-        <h2 className="font-semibold text-lg">Project change history</h2>
-        <p className="mt-2 text-muted-foreground text-sm">
-          Applied and discarded staged changes from this project will show up here.
-        </p>
-      </Card>
+      <p className="rounded-lg border border-dashed px-3 py-8 text-center text-muted-foreground text-sm">
+        {emptyText}
+      </p>
     );
   }
 
   return (
-    <Card className="p-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="font-semibold text-lg">Project change history</h2>
-          <p className="mt-1 text-muted-foreground text-sm">
-            Applied and discarded staged changes across this project.
-          </p>
-        </div>
-        <span className="rounded-md border px-2 py-1 text-muted-foreground text-xs">
-          Latest {entries.length}
-        </span>
-      </div>
-
-      <div className="mt-5 flex flex-col gap-3">
-        {entries.map((entry) => {
-          const visible = entry.changes.filter((change) => !isHidden(change));
-          return (
-            <div className="rounded-md border" key={entry.id}>
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
-                <div>
-                  <p className="font-medium text-sm">{historyTitle(entry)}</p>
-                  <p className="text-muted-foreground text-xs">
-                    {entry.environmentName} / {entry.appName} ·{" "}
-                    {new Date(entry.createdAt).toLocaleString()}
-                    {entry.deploymentId ? ` · deployment ${entry.deploymentId.slice(0, 8)}` : ""}
-                  </p>
-                </div>
-                <span className="rounded-md bg-muted px-2 py-1 text-muted-foreground text-xs">
-                  {entry.outcome}
-                </span>
-              </div>
-              {visible.length > 0 ? (
-                <ul className="divide-y">
-                  {visible.map((change) => (
-                    <HistoryChangeRow change={change} key={change.id} />
-                  ))}
-                </ul>
-              ) : (
-                <p className="px-3 py-2 text-muted-foreground text-sm">
-                  Only derived changes were recorded.
-                </p>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </Card>
+    <ol className="ms-1.5 flex flex-col gap-6 border-s ps-5">
+      {entries.map((entry) => {
+        const visible = entry.changes.filter((change) => !isHidden(change));
+        return (
+          <li className="relative" key={entry.id}>
+            <span
+              aria-hidden
+              className={
+                entry.outcome === "applied"
+                  ? "absolute top-1 -start-[26.5px] size-3 rounded-full border-2 border-background bg-success"
+                  : "absolute top-1 -start-[26.5px] size-3 rounded-full border-2 border-background bg-muted-foreground/50"
+              }
+            />
+            <p className="font-medium text-sm leading-tight">{entry.title}</p>
+            <p className="mt-0.5 text-muted-foreground text-xs">{entry.meta}</p>
+            {visible.length > 0 ? (
+              <ul className="mt-2 flex flex-col gap-1 text-sm">
+                {visible.map((change) => (
+                  <li className="text-[13px] leading-relaxed" key={change.id}>
+                    <ChangeSummary change={change} />
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-1.5 text-muted-foreground text-xs">
+                Only derived changes were recorded.
+              </p>
+            )}
+          </li>
+        );
+      })}
+    </ol>
   );
 }

@@ -15,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { listAlerts } from "@/lib/alerts";
 import { authClient } from "@/lib/auth-client";
-import { relativeTime } from "@/lib/format";
+import { maskHost, relativeTime } from "@/lib/format";
 import { listProjects } from "@/lib/projects";
 import { listServers } from "@/lib/servers";
 import { cn } from "@/lib/utils";
@@ -94,7 +94,7 @@ function DashboardRoute() {
       </Card>
 
       <div className="grid gap-6 xl:grid-cols-[2fr_1fr]">
-        <section>
+        <section className="min-w-0">
           <SectionHeading
             action={
               <Link
@@ -157,7 +157,7 @@ function DashboardRoute() {
           )}
         </section>
 
-        <div className="flex flex-col gap-6">
+        <div className="flex min-w-0 flex-col gap-6">
           <section>
             <SectionHeading
               action={
@@ -195,7 +195,7 @@ function DashboardRoute() {
                     <div className="min-w-0 flex-1">
                       <p className="truncate font-medium text-sm">{server.name}</p>
                       <p className="truncate font-mono text-muted-foreground text-xs">
-                        {server.sshHost}
+                        {maskHost(server.sshHost)}
                         {server.lastSeenAt ? ` · seen ${relativeTime(server.lastSeenAt)}` : ""}
                       </p>
                     </div>

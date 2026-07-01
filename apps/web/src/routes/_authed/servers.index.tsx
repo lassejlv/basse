@@ -35,7 +35,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { authClient } from "@/lib/auth-client";
-import { relativeTime } from "@/lib/format";
+import { maskHost, relativeTime } from "@/lib/format";
 import { createServer, listServers } from "@/lib/servers";
 import { listSshKeys } from "@/lib/ssh-keys";
 import { toast } from "@/lib/toast";
@@ -112,8 +112,8 @@ function ServersRoute() {
               </div>
               <p className="mt-1 truncate font-mono text-muted-foreground text-xs">
                 {server.connectionMode === "outbound"
-                  ? server.sshHost
-                  : `${server.sshUser}@${server.sshHost}:${server.sshPort}`}
+                  ? maskHost(server.sshHost)
+                  : `${server.sshUser}@${maskHost(server.sshHost)}:${server.sshPort}`}
               </p>
               <div className="mt-3 flex items-center gap-2">
                 <Badge size="sm" variant="outline">

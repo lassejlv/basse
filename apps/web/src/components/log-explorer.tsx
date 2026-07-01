@@ -1,6 +1,7 @@
 import {
   ArrowDownToLineIcon,
   CheckIcon,
+  ChevronRightIcon,
   CopyIcon,
   RefreshCwIcon,
   SearchIcon,
@@ -18,6 +19,8 @@ export type LogLine = {
   time: string | null;
   level: LogLevel;
   text: string;
+  /** Pretty-printed structured payload for JSON lines — expandable in the UI. */
+  detail?: string;
 };
 
 // eslint-disable-next-line no-control-regex
@@ -32,8 +35,92 @@ export function detectLogLevel(text: string): LogLevel {
   return "info";
 }
 
+function levelFromJson(value: unknown): LogLevel | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.toLowerCase();
+  if (["error", "err", "fatal", "panic", "crit", "critical"].includes(normalized)) return "error";
+  if (["warn", "warning"].includes(normalized)) return "warn";
+  if (["info", "debug", "trace", "notice"].includes(normalized)) return "info";
+  return null;
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function timeFromJson(obj: Record<string, unknown>): string | null {
+  // Unix seconds (Caddy's `ts`) or an ISO string under common keys.
+  const numeric = obj.ts ?? obj.timestamp;
+  if (typeof numeric === "number" && Number.isFinite(numeric)) {
+    const date = new Date(numeric > 1e12 ? numeric : numeric * 1000);
+    return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
+  }
+  const iso = obj.time ?? obj.timestamp ?? obj["@timestamp"];
+  if (typeof iso === "string") {
+    const date = new Date(iso);
+    if (!Number.isNaN(date.getTime())) {
+      return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
+    }
+  }
+  return null;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 0.001) return `${(seconds * 1_000_000).toFixed(0)}µs`;
+  if (seconds < 1) return `${(seconds * 1000).toFixed(1)}ms`;
+  return `${seconds.toFixed(2)}s`;
+}
+
+/** One readable line out of a structured log object: the message first, then
+ * the request facts everyone actually scans for (method, path, status, time). */
+function summarizeJson(obj: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const message = obj.msg ?? obj.message ?? obj.event;
+  const logger = obj.logger ?? obj.component;
+  if (typeof logger === "string" && logger.length > 0) parts.push(`[${logger}]`);
+  if (typeof message === "string" && message.length > 0) parts.push(message);
+
+  const request = (obj.request ?? {}) as Record<string, unknown>;
+  const method = request.method ?? obj.method;
+  const uri = request.uri ?? obj.uri ?? obj.path;
+  if (typeof method === "string" && typeof uri === "string") {
+    parts.push(`${method} ${uri}`);
+  }
+  const status = obj.status ?? obj.status_code;
+  if (typeof status === "number") parts.push(`→ ${status}`);
+  const duration = obj.duration;
+  if (typeof duration === "number") parts.push(`in ${formatDuration(duration)}`);
+
+  const error = obj.error ?? obj.err;
+  if (typeof error === "string" && error.length > 0) parts.push(`error=${error}`);
+
+  return parts.join(" ");
+}
+
+function parseJsonLine(
+  text: string,
+): { time: string | null; level: LogLevel | null; text: string; detail: string } | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
+  try {
+    const obj = JSON.parse(trimmed) as unknown;
+    if (typeof obj !== "object" || obj === null || Array.isArray(obj)) return null;
+    const record = obj as Record<string, unknown>;
+    const summary = summarizeJson(record);
+    return {
+      time: timeFromJson(record),
+      level: levelFromJson(record.level ?? record.severity ?? record.lvl),
+      text: summary.length > 0 ? summary : trimmed.slice(0, 200),
+      detail: JSON.stringify(record, null, 2),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Parse raw log text into display lines: strips ANSI color codes, lifts a
- * leading ISO timestamp into the time column, classifies severity. */
+ * leading ISO timestamp into the time column, classifies severity, and turns
+ * valid JSON lines into a summary with an expandable pretty-printed payload. */
 export function parseLogs(raw: string): LogLine[] {
   return raw
     .replace(ANSI_PATTERN, "")
@@ -42,6 +129,18 @@ export function parseLogs(raw: string): LogLine[] {
     .map((line, index) => {
       const match = line.match(ISO_TIME_PATTERN);
       const text = match ? line.slice(match[0].length) : line;
+
+      const json = parseJsonLine(text);
+      if (json) {
+        return {
+          id: index,
+          time: json.time ?? (match ? (match[2] ?? null) : null),
+          level: json.level ?? detectLogLevel(json.text),
+          text: json.text,
+          detail: json.detail,
+        };
+      }
+
       return {
         id: index,
         time: match ? (match[2] ?? null) : null,
@@ -118,6 +217,7 @@ export function LogExplorer({
   const [query, setQuery] = useState("");
   const [levelFilter, setLevelFilter] = useState<LogLevel | null>(null);
   const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
   const searchRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const followRef = useRef(true);
@@ -137,7 +237,13 @@ export function LogExplorer({
     const needle = query.trim().toLowerCase();
     return allLines.filter((line) => {
       if (levelFilter && line.level !== levelFilter) return false;
-      if (needle && !line.text.toLowerCase().includes(needle)) return false;
+      if (
+        needle &&
+        !line.text.toLowerCase().includes(needle) &&
+        !line.detail?.toLowerCase().includes(needle)
+      ) {
+        return false;
+      }
       return true;
     });
   }, [allLines, levelFilter, query]);
@@ -287,27 +393,71 @@ export function LogExplorer({
           </p>
         ) : (
           <div className="py-1.5">
-            {visible.map((line) => (
-              <div
-                className="group flex gap-2.5 px-2.5 py-px font-mono text-xs leading-relaxed hover:bg-accent/30"
-                key={line.id}
-              >
-                <span
-                  aria-hidden
-                  className={cn("w-0.5 shrink-0 self-stretch rounded-full", railColor[line.level])}
-                />
-                {line.time ? (
-                  <span className="shrink-0 select-none pt-px text-muted-foreground/60">
-                    {line.time}
+            {visible.map((line) => {
+              const isExpanded = Boolean(line.detail) && expanded.has(line.id);
+              const row = (
+                <>
+                  <span
+                    aria-hidden
+                    className={cn(
+                      "w-0.5 shrink-0 self-stretch rounded-full",
+                      railColor[line.level],
+                    )}
+                  />
+                  {line.time ? (
+                    <span className="shrink-0 select-none pt-px text-muted-foreground/60">
+                      {line.time}
+                    </span>
+                  ) : null}
+                  <span
+                    className={cn("min-w-0 whitespace-pre-wrap break-all", textColor[line.level])}
+                  >
+                    <HighlightedText query={query.trim()} text={line.text} />
                   </span>
-                ) : null}
-                <span
-                  className={cn("min-w-0 whitespace-pre-wrap break-all", textColor[line.level])}
+                  {line.detail ? (
+                    <ChevronRightIcon
+                      aria-hidden
+                      className={cn(
+                        "ml-auto size-3 shrink-0 self-center text-muted-foreground/50 transition-transform",
+                        isExpanded && "rotate-90",
+                      )}
+                    />
+                  ) : null}
+                </>
+              );
+
+              return line.detail ? (
+                <div key={line.id}>
+                  <button
+                    aria-expanded={isExpanded}
+                    className="flex w-full gap-2.5 px-2.5 py-px text-left font-mono text-xs leading-relaxed outline-none hover:bg-accent/30 focus-visible:bg-accent/30"
+                    onClick={() =>
+                      setExpanded((current) => {
+                        const next = new Set(current);
+                        if (next.has(line.id)) next.delete(line.id);
+                        else next.add(line.id);
+                        return next;
+                      })
+                    }
+                    type="button"
+                  >
+                    {row}
+                  </button>
+                  {isExpanded ? (
+                    <pre className="mx-2.5 my-1 overflow-x-auto rounded-md border bg-muted/20 p-2.5 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                      {line.detail}
+                    </pre>
+                  ) : null}
+                </div>
+              ) : (
+                <div
+                  className="flex gap-2.5 px-2.5 py-px font-mono text-xs leading-relaxed hover:bg-accent/30"
+                  key={line.id}
                 >
-                  <HighlightedText query={query.trim()} text={line.text} />
-                </span>
-              </div>
-            ))}
+                  {row}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
