@@ -1,6 +1,13 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CheckIcon, ChevronDownIcon, ChevronUpIcon, RocketIcon, XIcon } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
+  EllipsisVerticalIcon,
+  RocketIcon,
+  XIcon,
+} from "lucide-react";
+import { type ReactNode, useEffect, useState } from "react";
 import type {
   AppStagedChanges,
   ProjectStagedChange,
@@ -12,6 +19,7 @@ import type {
 } from "@basse/shared";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "@/components/ui/menu";
 import {
   applyChanges,
   applyProjectChanges,
@@ -20,6 +28,7 @@ import {
   discardProjectChange,
   discardProjectChanges,
 } from "@/lib/changes";
+import { toast } from "@/lib/toast";
 
 const APP_FIELD_LABELS: Record<string, string> = {
   name: "Name",
@@ -364,19 +373,20 @@ function ProjectChangeRow({
   );
 }
 
-export function ProjectStagedChangesBar({
-  projectId,
-  changes,
-}: {
-  projectId: string;
-  changes: ProjectStagedChange[];
-}) {
+/**
+ * Shared project staged-change actions (apply / discard all / discard one) with
+ * the full cross-query invalidation set. The caller decides how outcomes are
+ * surfaced (inline notice vs toast).
+ */
+function useProjectChangeMutations(
+  projectId: string,
+  handlers: {
+    onError: (message: string) => void;
+    onApplied: (notice: string | null) => void;
+    onDiscardedAll?: () => void;
+  },
+) {
   const queryClient = useQueryClient();
-  const [expanded, setExpanded] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const visible = changes.filter((change) => !isHidden(change));
-  const deployableChanges = hasDeployableChanges(visible);
 
   function cacheChanges(data: ProjectStagedChanges) {
     queryClient.setQueryData(["project-changes", projectId], data);
@@ -399,9 +409,8 @@ export function ProjectStagedChangesBar({
   const apply = useMutation({
     mutationFn: () => applyProjectChanges(projectId),
     onSuccess: async (result) => {
-      setError(null);
       const domainSyncs = result.deployments.reduce((total, item) => total + item.domainSyncs, 0);
-      setNotice(
+      handlers.onApplied(
         result.deployments.some((item) => item.deployment === null && item.domainSyncs === 0)
           ? "Some changes were saved without deploys because those apps have no deploy target."
           : domainSyncs > 0 && result.deployments.every((item) => item.deployment === null)
@@ -410,34 +419,63 @@ export function ProjectStagedChangesBar({
       );
       await invalidateProjectChanges();
     },
-    onError: (e: Error) => setError(e.message),
+    onError: (e: Error) => handlers.onError(e.message),
   });
 
   const discardAll = useMutation({
     mutationFn: () => discardProjectChanges(projectId),
     onSuccess: async (data) => {
-      setError(null);
-      setNotice(null);
-      setExpanded(false);
+      handlers.onDiscardedAll?.();
       cacheChanges(data);
       await invalidateProjectChanges();
     },
-    onError: (e: Error) => setError(e.message),
+    onError: (e: Error) => handlers.onError(e.message),
   });
 
   const discardOne = useMutation({
     mutationFn: (changeId: string) => discardProjectChange(projectId, changeId),
     onSuccess: async (data) => {
-      setError(null);
       cacheChanges(data);
       await invalidateProjectChanges();
     },
-    onError: (e: Error) => setError(e.message),
+    onError: (e: Error) => handlers.onError(e.message),
+  });
+
+  return {
+    apply,
+    discardAll,
+    discardOne,
+    busy: apply.isPending || discardAll.isPending || discardOne.isPending,
+  };
+}
+
+export function ProjectStagedChangesBar({
+  projectId,
+  changes,
+}: {
+  projectId: string;
+  changes: ProjectStagedChange[];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const visible = changes.filter((change) => !isHidden(change));
+  const deployableChanges = hasDeployableChanges(visible);
+
+  const { apply, discardAll, discardOne, busy } = useProjectChangeMutations(projectId, {
+    onError: setError,
+    onApplied: (message) => {
+      setError(null);
+      setNotice(message);
+    },
+    onDiscardedAll: () => {
+      setError(null);
+      setNotice(null);
+      setExpanded(false);
+    },
   });
 
   if (visible.length === 0) return null;
-
-  const busy = apply.isPending || discardAll.isPending || discardOne.isPending;
 
   return (
     <div className="sticky bottom-4 z-20 mt-2">
@@ -502,6 +540,117 @@ export function ProjectStagedChangesBar({
           <p className="border-t px-3 py-2 text-muted-foreground text-sm">{notice}</p>
         ) : null}
       </Card>
+    </div>
+  );
+}
+
+/**
+ * Railway-style staged-changes pill, floated top-center over the project
+ * canvas: "Apply N changes · Details · Deploy ⇧+Enter · ⋮". Shift+Enter
+ * deploys from anywhere on the page (except while typing in a field).
+ */
+export function ProjectChangesPill({
+  projectId,
+  changes,
+}: {
+  projectId: string;
+  changes: ProjectStagedChange[];
+}) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const visible = changes.filter((change) => !isHidden(change));
+  const deployableChanges = hasDeployableChanges(visible);
+
+  const { apply, discardAll, discardOne, busy } = useProjectChangeMutations(projectId, {
+    onError: (message) => toast.error(message),
+    onApplied: (notice) => {
+      setDetailsOpen(false);
+      if (notice) toast.message(notice);
+      else toast.success("Changes deployed");
+    },
+    onDiscardedAll: () => {
+      setDetailsOpen(false);
+      toast.message("Changes discarded");
+    },
+  });
+
+  const count = visible.length;
+  const canApply = count > 0 && !busy;
+
+  // Railway parity: ⇧+Enter applies from anywhere, unless focus is in a field.
+  useEffect(() => {
+    if (count === 0) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Enter" || !event.shiftKey) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (canApply) apply.mutate();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [count, canApply, apply.mutate]);
+
+  if (count === 0) return null;
+
+  return (
+    <div className="pointer-events-none absolute inset-x-0 top-3 z-30 flex justify-center">
+      <div className="pointer-events-auto relative">
+        <div className="fade-in-0 slide-in-from-top-2 flex animate-in items-center gap-2 rounded-xl border border-primary/30 bg-card/95 p-1.5 pl-4 shadow-lg backdrop-blur duration-200 motion-reduce:animate-none">
+          <button
+            className="cursor-pointer font-medium text-primary text-sm"
+            onClick={() => setDetailsOpen((value) => !value)}
+            type="button"
+          >
+            Apply {count} {count === 1 ? "change" : "changes"}
+          </button>
+          <Button onClick={() => setDetailsOpen((value) => !value)} size="sm" variant="outline">
+            Details
+          </Button>
+          <Button
+            disabled={discardAll.isPending}
+            loading={apply.isPending}
+            onClick={() => apply.mutate()}
+            size="sm"
+          >
+            {deployableChanges ? "Deploy" : "Apply"}
+            <span className="font-normal text-primary-foreground/70 text-xs">⇧+Enter</span>
+          </Button>
+          <Menu>
+            <MenuTrigger
+              render={
+                <Button aria-label="More actions" disabled={busy} size="icon-sm" variant="ghost">
+                  <EllipsisVerticalIcon />
+                </Button>
+              }
+            />
+            <MenuPopup align="end">
+              <MenuItem onClick={() => discardAll.mutate()} variant="destructive">
+                Discard all changes
+              </MenuItem>
+            </MenuPopup>
+          </Menu>
+        </div>
+
+        {detailsOpen ? (
+          <Card className="fade-in-0 slide-in-from-top-1 absolute top-full left-1/2 mt-2 w-[26rem] max-w-[90vw] -translate-x-1/2 animate-in gap-0 overflow-hidden p-0 shadow-xl duration-150 motion-reduce:animate-none">
+            <ul className="max-h-72 divide-y overflow-y-auto">
+              {visible.map((change) => (
+                <ProjectChangeRow
+                  key={change.id}
+                  busy={busy}
+                  change={change}
+                  onDiscard={() => discardOne.mutate(change.id)}
+                />
+              ))}
+            </ul>
+          </Card>
+        ) : null}
+      </div>
     </div>
   );
 }

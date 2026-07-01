@@ -39,10 +39,7 @@ import { DatabaseIcon, databaseEngineLabel } from "@/components/database-icon";
 import { StatusDot, deployState } from "@/components/deploy-status";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  ProjectStagedChangesBar,
-  ProjectStagedChangesHistory,
-} from "@/components/staged-changes-bar";
+import { ProjectChangesPill, ProjectStagedChangesHistory } from "@/components/staged-changes-bar";
 import {
   Dialog,
   DialogClose,
@@ -333,6 +330,7 @@ function ProjectDetailRoute() {
       </div>
 
       <div className="relative min-h-0 flex-1">
+        <ProjectChangesPill changes={projectChanges.data?.changes ?? []} projectId={projectId} />
         {selectedEnv ? (
           <EnvironmentCanvas
             environmentId={selectedEnv}
@@ -382,14 +380,10 @@ function ProjectDetailRoute() {
           <SheetHeader>
             <SheetTitle>Activity</SheetTitle>
             <SheetDescription>
-              Staged changes and applied history for this project.
+              Applied and discarded change history for this project.
             </SheetDescription>
           </SheetHeader>
           <SheetPanel className="space-y-5">
-            <ProjectStagedChangesBar
-              changes={projectChanges.data?.changes ?? []}
-              projectId={projectId}
-            />
             <ProjectStagedChangesHistory
               entries={projectChangeHistory.data ?? []}
               isPending={projectChangeHistory.isPending}

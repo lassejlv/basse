@@ -136,6 +136,7 @@ function DatabaseSettingsCard({ app }: { app: App }) {
       setError(null);
       toast.success("Database change staged");
       queryClient.setQueryData(["changes", app.id], data);
+      void queryClient.invalidateQueries({ queryKey: ["project-changes"] });
     },
     onError: (mutationError: Error) => setError(mutationError.message),
   });
@@ -201,6 +202,7 @@ function ServerCard({ app }: { app: App }) {
     onSuccess: (data) => {
       toast.success("Server change staged");
       queryClient.setQueryData(["changes", app.id], data);
+      void queryClient.invalidateQueries({ queryKey: ["project-changes"] });
     },
     onError: (error: Error) =>
       toast.error("Couldn't stage servers", { description: toMessage(error) }),
@@ -321,6 +323,7 @@ function BuildSettingsCard({ app }: { app: App }) {
       setError(null);
       toast.success("Build change staged");
       queryClient.setQueryData(["changes", app.id], data);
+      void queryClient.invalidateQueries({ queryKey: ["project-changes"] });
     },
     onError: (e: Error) => setError(e.message),
   });
@@ -646,6 +649,7 @@ function ResourceLimitsCard({ app }: { app: App }) {
       setError(null);
       toast.success("Resource limits staged");
       queryClient.setQueryData(["changes", app.id], data);
+      void queryClient.invalidateQueries({ queryKey: ["project-changes"] });
     },
     onError: (saveError: Error) => setError(saveError.message),
   });
@@ -790,6 +794,7 @@ function VolumesCard({ app }: { app: App }) {
       setError(null);
       toast.success("Volumes staged");
       queryClient.setQueryData(["changes", app.id], data);
+      void queryClient.invalidateQueries({ queryKey: ["project-changes"] });
     },
     onError: (e: Error) => setError(e.message),
   });
