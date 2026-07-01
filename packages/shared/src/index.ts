@@ -615,6 +615,10 @@ export type CreateServerInput = {
   privateKey?: string;
 };
 
+export type ServerInstallCommand = {
+  agentInstallCommand: string;
+};
+
 export type DomainStatus = "pending" | "active" | "error";
 
 // A custom domain routed by a server's Caddy proxy to an upstream.

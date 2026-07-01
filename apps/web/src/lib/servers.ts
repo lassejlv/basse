@@ -5,6 +5,7 @@ import type {
   AgentUpdateCheck,
   CreateServerInput,
   Server,
+  ServerInstallCommand,
 } from "@basse/shared";
 
 export type { Server };
@@ -83,6 +84,19 @@ export async function provisionServer(id: string): Promise<void> {
   if (!response.ok) {
     throw new Error(await parseError(response));
   }
+}
+
+export async function getServerInstallCommand(id: string): Promise<ServerInstallCommand> {
+  const response = await fetch(`${apiBaseUrl}/api/servers/${id}/install-command`, {
+    method: "POST",
+    credentials: "include",
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+
+  return response.json() as Promise<ServerInstallCommand>;
 }
 
 export async function getAgentInfo(id: string): Promise<AgentInfo> {

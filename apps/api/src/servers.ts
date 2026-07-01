@@ -6,6 +6,7 @@ import type {
   AgentUpdateCheck,
   CreateServerInput,
   Server,
+  ServerInstallCommand,
 } from "@basse/shared";
 import { and, eq, ne } from "drizzle-orm";
 import { Hono } from "hono";
@@ -588,6 +589,31 @@ servers.post("/", async (c) => {
     ),
     201,
   );
+});
+
+servers.post("/:id/install-command", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+
+  if (organizationId instanceof Response) {
+    return organizationId;
+  }
+
+  const row = await ownedServer(c.req.param("id"), organizationId);
+  if (!row) return c.json({ error: "Server not found" }, 404);
+  if (row.connectionMode !== "outbound") {
+    return c.json({ error: "Install commands are only available for outbound servers" }, 400);
+  }
+  if (!row.agentToken) {
+    return c.json({ error: "Outbound server is missing an agent token" }, 400);
+  }
+
+  const token = await decryptSecret(row.agentToken);
+  return c.json({
+    agentInstallCommand: outboundInstallCommand({
+      apiOrigin: apiOriginFromRequest(c.req.raw),
+      token,
+    }),
+  } satisfies ServerInstallCommand);
 });
 
 servers.post("/:id/provision", async (c) => {

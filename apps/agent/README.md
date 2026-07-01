@@ -121,8 +121,8 @@ cannot connect back to the server over SSH or any public ingress port.
     when its first poll reaches the API.
 
 The generated command includes the raw `BASSE_AGENT_TOKEN`. Treat it like a
-secret. It is shown once by the dashboard, then only an encrypted copy and a
-lookup hash are stored by the API.
+secret. The dashboard can show the install command again for outbound servers;
+the API stores the token encrypted plus a lookup hash.
 
 The generated command downloads `apps/agent/install.sh` and passes the token,
 API origin, and agent image as environment variables. The installer:

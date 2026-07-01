@@ -33,6 +33,7 @@ import {
   getAgentLogs,
   getAgentMetrics,
   getServer,
+  getServerInstallCommand,
   provisionServer,
   sendServerDeleteCode,
   updateAgent,
@@ -139,76 +140,90 @@ function ServerDetailRoute() {
           <ServerStatusBadge status={data.status} />
         </div>
         <p className="mt-2 font-mono text-muted-foreground text-sm">
-          {data.sshUser}@{data.sshHost}:{data.sshPort}
+          {data.connectionMode === "outbound"
+            ? `outbound · ${data.sshHost}`
+            : `${data.sshUser}@${data.sshHost}:${data.sshPort}`}
         </p>
         {data.statusMessage ? (
           <p className="mt-2 text-muted-foreground text-sm">{data.statusMessage}</p>
         ) : null}
       </div>
 
-      <div className="max-w-2xl rounded-lg border bg-card p-6">
-        <h2 className="text-lg font-semibold">Install the access key</h2>
-        <p className="mt-1 text-muted-foreground text-sm">
-          Add this public key to <code className="font-mono">~/.ssh/authorized_keys</code> on the
-          server (as <code className="font-mono">{data.sshUser}</code>), then provision it.
-        </p>
-        <pre className="mt-4 overflow-x-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
-          {data.sshPublicKey}
-        </pre>
-        <div className="mt-3 flex items-center gap-2">
-          <Button onClick={copyPublicKey} size="sm" variant="outline">
-            {copied ? "Copied" : "Copy key"}
-          </Button>
-          <Button
-            loading={test.isPending}
-            onClick={() => test.mutate()}
-            size="sm"
-            variant="outline"
-          >
-            Test connection
-          </Button>
-          {test.data ? (
-            test.data.ok ? (
-              <span className="text-success-foreground text-sm">Reachable</span>
-            ) : (
-              <span className="text-destructive-foreground text-sm">
-                {test.data.error ?? "Unreachable"}
-              </span>
-            )
-          ) : null}
-        </div>
-      </div>
+      {data.connectionMode === "outbound" ? (
+        <OutboundInstallSection serverId={serverId} />
+      ) : (
+        <>
+          <div className="max-w-2xl rounded-lg border bg-card p-6">
+            <h2 className="text-lg font-semibold">Install the access key</h2>
+            <p className="mt-1 text-muted-foreground text-sm">
+              Add this public key to <code className="font-mono">~/.ssh/authorized_keys</code> on
+              the server (as <code className="font-mono">{data.sshUser}</code>), then provision it.
+            </p>
+            <pre className="mt-4 overflow-x-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
+              {data.sshPublicKey}
+            </pre>
+            <div className="mt-3 flex items-center gap-2">
+              <Button onClick={copyPublicKey} size="sm" variant="outline">
+                {copied ? "Copied" : "Copy key"}
+              </Button>
+              <Button
+                loading={test.isPending}
+                onClick={() => test.mutate()}
+                size="sm"
+                variant="outline"
+              >
+                Test connection
+              </Button>
+              {test.data ? (
+                test.data.ok ? (
+                  <span className="text-success-foreground text-sm">Reachable</span>
+                ) : (
+                  <span className="text-destructive-foreground text-sm">
+                    {test.data.error ?? "Unreachable"}
+                  </span>
+                )
+              ) : null}
+            </div>
+          </div>
 
-      <div className="max-w-2xl rounded-lg border bg-card p-6">
-        <h2 className="text-lg font-semibold">Provisioning</h2>
-        <p className="mt-1 text-muted-foreground text-sm">
-          Installs Docker (if missing) and runs the Basse agent over SSH. Safe to run again.
-        </p>
-        {data.status === "active" ? (
-          <p className="mt-3 text-success-foreground text-sm">
-            Agent active
-            {data.lastSeenAt ? ` · last seen ${new Date(data.lastSeenAt).toLocaleString()}` : null}
-          </p>
-        ) : null}
-        <div className="mt-4 flex items-center gap-2">
-          <Button
-            loading={provision.isPending || data.status === "provisioning"}
-            onClick={() => provision.mutate()}
-            disabled={data.status === "provisioning"}
-          >
-            {data.status === "active" || data.status === "unreachable"
-              ? "Re-provision"
-              : "Provision"}
-          </Button>
-          {provision.isError ? (
-            <span className="text-destructive-foreground text-sm">
-              {(provision.error as Error).message}
-            </span>
-          ) : null}
-        </div>
-      </div>
+          <div className="max-w-2xl rounded-lg border bg-card p-6">
+            <h2 className="text-lg font-semibold">Provisioning</h2>
+            <p className="mt-1 text-muted-foreground text-sm">
+              Installs Docker (if missing) and runs the Basse agent over SSH. Safe to run again.
+            </p>
+            {data.status === "active" ? (
+              <p className="mt-3 text-success-foreground text-sm">
+                Agent active
+                {data.lastSeenAt
+                  ? ` · last seen ${new Date(data.lastSeenAt).toLocaleString()}`
+                  : null}
+              </p>
+            ) : null}
+            <div className="mt-4 flex items-center gap-2">
+              <Button
+                loading={provision.isPending || data.status === "provisioning"}
+                onClick={() => provision.mutate()}
+                disabled={data.status === "provisioning"}
+              >
+                {data.status === "active" || data.status === "unreachable"
+                  ? "Re-provision"
+                  : "Provision"}
+              </Button>
+              {provision.isError ? (
+                <span className="text-destructive-foreground text-sm">
+                  {(provision.error as Error).message}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        </>
+      )}
 
-      <AgentSection serverId={serverId} enabled={Boolean(data.agentTokenHint)} />
+      <AgentSection
+        serverId={serverId}
+        enabled={Boolean(data.agentTokenHint)}
+        connectionMode={data.connectionMode}
+      />
 
       <DomainsSection serverId={serverId} sshHost={data.sshHost} />
 
@@ -284,8 +299,64 @@ function ServerDetailRoute() {
   );
 }
 
-function AgentSection({ serverId, enabled }: { serverId: string; enabled: boolean }) {
+function OutboundInstallSection({ serverId }: { serverId: string }) {
+  const [command, setCommand] = useState("");
+
+  const install = useMutation({
+    mutationFn: () => getServerInstallCommand(serverId),
+    onSuccess: (result) => setCommand(result.agentInstallCommand),
+    onError: (error) => {
+      toast.error("Couldn't load install command", { description: toMessage(error) });
+    },
+  });
+
+  async function copyCommand() {
+    if (!command) return;
+    await navigator.clipboard.writeText(command);
+    toast.success("Install command copied");
+  }
+
+  return (
+    <div className="max-w-2xl rounded-lg border bg-card p-6">
+      <h2 className="text-lg font-semibold">Outbound agent</h2>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Run the install command on the server. The token is embedded in the command and should be
+        treated like a secret.
+      </p>
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <Button loading={install.isPending} onClick={() => install.mutate()} variant="outline">
+          {command ? "Refresh command" : "Show install command"}
+        </Button>
+        {command ? (
+          <Button onClick={copyCommand} type="button">
+            Copy command
+          </Button>
+        ) : null}
+      </div>
+      {command ? (
+        <pre className="mt-4 max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/40 p-3 font-mono text-xs">
+          {command}
+        </pre>
+      ) : (
+        <p className="mt-4 text-muted-foreground text-sm">
+          The server becomes active after the installed agent reaches Basse for the first time.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function AgentSection({
+  serverId,
+  enabled,
+  connectionMode,
+}: {
+  serverId: string;
+  enabled: boolean;
+  connectionMode: "ssh" | "outbound";
+}) {
   const queryClient = useQueryClient();
+  const supportsHostAgentOps = connectionMode === "ssh";
   const [samples, setSamples] = useState<
     {
       date: Date;
@@ -306,14 +377,14 @@ function AgentSection({ serverId, enabled }: { serverId: string; enabled: boolea
   const metrics = useQuery({
     queryKey: ["agent-metrics", serverId],
     queryFn: () => getAgentMetrics(serverId),
-    enabled,
+    enabled: enabled && supportsHostAgentOps,
     refetchInterval: 5000,
   });
 
   const logs = useQuery({
     queryKey: ["agent-logs", serverId],
     queryFn: () => getAgentLogs(serverId),
-    enabled,
+    enabled: enabled && supportsHostAgentOps,
     refetchInterval: 10000,
   });
 
@@ -392,75 +463,90 @@ function AgentSection({ serverId, enabled }: { serverId: string; enabled: boolea
             </div>
           </div>
 
-          <div className="mt-5 h-56 overflow-hidden rounded-md border bg-muted/20 p-3">
-            {samples.length > 1 ? (
-              <LineChart
-                animationDuration={700}
-                aspectRatio={undefined}
-                className="h-full"
-                data={samples}
-                margin={{ bottom: 28, left: 28, right: 20, top: 18 }}
-                xDataKey="date"
-              >
-                <Grid horizontal />
-                <Line dataKey="cpuPercent" stroke={chartCssVars.linePrimary} strokeWidth={2.5} />
-                <Line
-                  dataKey="memoryPercent"
-                  stroke={chartCssVars.lineSecondary}
-                  strokeWidth={2.5}
-                />
-                <XAxis />
-                <ChartTooltip
-                  rows={(point) => [
-                    {
-                      color: chartCssVars.linePrimary,
-                      label: "CPU",
-                      value: `${Number(point.cpuPercent).toFixed(1)}%`,
-                    },
-                    {
-                      color: chartCssVars.lineSecondary,
-                      label: "Memory",
-                      value: `${formatBytes(Number(point.memoryBytes))} / ${formatBytes(
-                        Number(point.memoryLimitBytes),
-                      )}`,
-                    },
-                  ]}
-                />
-              </LineChart>
-            ) : (
-              <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
-                {metrics.isError ? "Metrics unavailable." : "Collecting metrics…"}
+          {supportsHostAgentOps ? (
+            <>
+              <div className="mt-5 h-56 overflow-hidden rounded-md border bg-muted/20 p-3">
+                {samples.length > 1 ? (
+                  <LineChart
+                    animationDuration={700}
+                    aspectRatio={undefined}
+                    className="h-full"
+                    data={samples}
+                    margin={{ bottom: 28, left: 28, right: 20, top: 18 }}
+                    xDataKey="date"
+                  >
+                    <Grid horizontal />
+                    <Line
+                      dataKey="cpuPercent"
+                      stroke={chartCssVars.linePrimary}
+                      strokeWidth={2.5}
+                    />
+                    <Line
+                      dataKey="memoryPercent"
+                      stroke={chartCssVars.lineSecondary}
+                      strokeWidth={2.5}
+                    />
+                    <XAxis />
+                    <ChartTooltip
+                      rows={(point) => [
+                        {
+                          color: chartCssVars.linePrimary,
+                          label: "CPU",
+                          value: `${Number(point.cpuPercent).toFixed(1)}%`,
+                        },
+                        {
+                          color: chartCssVars.lineSecondary,
+                          label: "Memory",
+                          value: `${formatBytes(Number(point.memoryBytes))} / ${formatBytes(
+                            Number(point.memoryLimitBytes),
+                          )}`,
+                        },
+                      ]}
+                    />
+                  </LineChart>
+                ) : (
+                  <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
+                    {metrics.isError ? "Metrics unavailable." : "Collecting metrics…"}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
 
-          <div className="mt-5 flex flex-wrap items-center gap-2">
-            <Button
-              loading={checkUpdate.isPending}
-              onClick={() => checkUpdate.mutate()}
-              size="sm"
-              variant="outline"
-            >
-              Check updates
-            </Button>
-            <Button loading={runUpdate.isPending} onClick={() => runUpdate.mutate()} size="sm">
-              Update agent
-            </Button>
-            {checkUpdate.data ? (
-              <span className="text-sm">
-                {checkUpdate.data.updateAvailable ? "Update available" : "Agent image is current"}
-              </span>
-            ) : null}
-          </div>
-          {checkUpdate.isError ? (
-            <p className="mt-2 text-destructive-foreground text-sm">
-              {(checkUpdate.error as Error).message}
+              <div className="mt-5 flex flex-wrap items-center gap-2">
+                <Button
+                  loading={checkUpdate.isPending}
+                  onClick={() => checkUpdate.mutate()}
+                  size="sm"
+                  variant="outline"
+                >
+                  Check updates
+                </Button>
+                <Button loading={runUpdate.isPending} onClick={() => runUpdate.mutate()} size="sm">
+                  Update agent
+                </Button>
+                {checkUpdate.data ? (
+                  <span className="text-sm">
+                    {checkUpdate.data.updateAvailable
+                      ? "Update available"
+                      : "Agent image is current"}
+                  </span>
+                ) : null}
+              </div>
+              {checkUpdate.isError ? (
+                <p className="mt-2 text-destructive-foreground text-sm">
+                  {(checkUpdate.error as Error).message}
+                </p>
+              ) : null}
+
+              <pre className="mt-5 max-h-72 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
+                {logs.data?.logs ?? "Loading logs…"}
+              </pre>
+            </>
+          ) : (
+            <p className="mt-5 text-muted-foreground text-sm">
+              Outbound agents report health and Docker info here. Host-level agent logs, host
+              metrics, and automatic agent updates require SSH.
             </p>
-          ) : null}
-
-          <pre className="mt-5 max-h-72 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
-            {logs.data?.logs ?? "Loading logs…"}
-          </pre>
+          )}
         </>
       )}
     </div>
