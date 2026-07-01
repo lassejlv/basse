@@ -75,7 +75,10 @@ export type App = {
   branch: string;
   port: number;
   buildMode: AppBuildMode;
+  buildRootDirectory: string;
+  dockerfilePath: string;
   buildRunner: AppBuildRunner;
+  autoRedeployEnabled: boolean;
   appKind: AppKind;
   sourceType: AppSourceType;
   imageRef: string | null;
@@ -100,7 +103,10 @@ export type CreateAppInput = {
   branch?: string;
   port?: number;
   buildMode?: AppBuildMode;
+  buildRootDirectory?: string;
+  dockerfilePath?: string;
   buildRunner?: AppBuildRunner;
+  autoRedeployEnabled?: boolean;
   appKind?: AppKind;
   sourceType?: AppSourceType;
   imageRef?: string | null;
@@ -150,7 +156,10 @@ export type UpdateAppInput = {
   branch?: string;
   port?: number;
   buildMode?: AppBuildMode;
+  buildRootDirectory?: string;
+  dockerfilePath?: string;
   buildRunner?: AppBuildRunner;
+  autoRedeployEnabled?: boolean;
   appKind?: AppKind;
   sourceType?: AppSourceType;
   imageRef?: string | null;

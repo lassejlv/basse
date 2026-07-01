@@ -17,6 +17,10 @@ export type BuildLogger = (line: string) => void;
 
 type SpawnResult = { exitCode: number; output: string };
 
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 async function run(
   cmd: string[],
   options: { cwd?: string; env?: Record<string, string>; onLine?: BuildLogger; timeoutMs?: number },
@@ -130,10 +134,11 @@ export async function cloneRepo(opts: {
 export function resolveBuildKind(
   buildMode: "auto" | "dockerfile" | "railpack",
   ctxDir: string,
+  dockerfilePath = join(ctxDir, "Dockerfile"),
 ): "dockerfile" | "railpack" {
   if (buildMode === "dockerfile") return "dockerfile";
   if (buildMode === "railpack") return "railpack";
-  return existsSync(join(ctxDir, "Dockerfile")) ? "dockerfile" : "railpack";
+  return existsSync(dockerfilePath) ? "dockerfile" : "railpack";
 }
 
 /**
@@ -145,6 +150,7 @@ export function resolveBuildKind(
 export async function buildImage(opts: {
   kind: "dockerfile" | "railpack";
   ctxDir: string;
+  dockerfilePath?: string;
   depotToken: string;
   projectId: string;
   deploymentId: string;
@@ -167,7 +173,7 @@ export async function buildImage(opts: {
 
   const dockerfileArg =
     opts.kind === "dockerfile"
-      ? ["-f", join(opts.ctxDir, "Dockerfile")]
+      ? ["-f", opts.dockerfilePath ?? join(opts.ctxDir, "Dockerfile")]
       : [
           "--build-arg",
           `BUILDKIT_SYNTAX=${RAILPACK_FRONTEND}`,
@@ -230,6 +236,7 @@ export async function prepareRailpackPlan(opts: {
 export async function buildImageOnServer(opts: {
   kind: "dockerfile" | "railpack";
   ctxDir: string;
+  dockerfilePath?: string;
   connection: SshConnection;
   deploymentId: string;
   onLine?: BuildLogger;
@@ -245,16 +252,18 @@ export async function buildImageOnServer(opts: {
 
   const dockerfileArg =
     opts.kind === "dockerfile"
-      ? `-f '${remoteDir}/Dockerfile'`
-      : `--build-arg BUILDKIT_SYNTAX='${RAILPACK_FRONTEND}' -f '${remoteDir}/railpack-plan.json'`;
+      ? `-f ${shellQuote(`${remoteDir}/${opts.dockerfilePath ?? "Dockerfile"}`)}`
+      : `--build-arg BUILDKIT_SYNTAX=${shellQuote(RAILPACK_FRONTEND)} -f ${shellQuote(
+          `${remoteDir}/railpack-plan.json`,
+        )}`;
 
   const result = await runScript(
     opts.connection,
     `set -euo pipefail
-cleanup() { rm -rf '${remoteDir}'; }
+cleanup() { rm -rf ${shellQuote(remoteDir)}; }
 trap cleanup EXIT
-cd '${remoteDir}'
-DOCKER_BUILDKIT=1 docker build ${dockerfileArg} -t '${imageRef}' .
+cd ${shellQuote(remoteDir)}
+DOCKER_BUILDKIT=1 docker build ${dockerfileArg} -t ${shellQuote(imageRef)} .
 `,
     { onLine: opts.onLine, timeoutMs: 1_200_000 },
   );

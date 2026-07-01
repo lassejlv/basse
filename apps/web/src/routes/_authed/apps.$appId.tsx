@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { FormEvent, useEffect, useRef, useState } from "react";
 import type {
+  AppBuildMode,
   AppBuildRunner,
   AppSourceType,
   AppVolume,
@@ -45,6 +46,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
+import { Switch } from "@/components/ui/switch";
 import {
   Sheet,
   SheetDescription,
@@ -1211,6 +1213,10 @@ function BuildSettingsCard({ app }: { app: App }) {
   const [imageRef, setImageRef] = useState(app.imageRef ?? "");
   const [branch, setBranch] = useState(app.branch);
   const [port, setPort] = useState(String(app.port));
+  const [buildMode, setBuildMode] = useState<AppBuildMode>(app.buildMode);
+  const [buildRootDirectory, setBuildRootDirectory] = useState(app.buildRootDirectory);
+  const [dockerfilePath, setDockerfilePath] = useState(app.dockerfilePath);
+  const [autoRedeployEnabled, setAutoRedeployEnabled] = useState(app.autoRedeployEnabled);
   const [error, setError] = useState<string | null>(null);
 
   // Re-seed only when the underlying draft values change, not on every draft
@@ -1222,7 +1228,21 @@ function BuildSettingsCard({ app }: { app: App }) {
     setImageRef(app.imageRef ?? "");
     setBranch(app.branch);
     setPort(String(app.port));
-  }, [app.sourceType, app.repositoryUrl, app.imageRef, app.branch, app.port]);
+    setBuildMode(app.buildMode);
+    setBuildRootDirectory(app.buildRootDirectory);
+    setDockerfilePath(app.dockerfilePath);
+    setAutoRedeployEnabled(app.autoRedeployEnabled);
+  }, [
+    app.sourceType,
+    app.repositoryUrl,
+    app.imageRef,
+    app.branch,
+    app.port,
+    app.buildMode,
+    app.buildRootDirectory,
+    app.dockerfilePath,
+    app.autoRedeployEnabled,
+  ]);
 
   const update = useMutation({
     mutationFn: (input: {
@@ -1231,7 +1251,11 @@ function BuildSettingsCard({ app }: { app: App }) {
       imageRef?: string | null;
       branch?: string;
       port?: number;
+      buildMode?: AppBuildMode;
+      buildRootDirectory?: string;
+      dockerfilePath?: string;
       buildRunner?: AppBuildRunner;
+      autoRedeployEnabled?: boolean;
     }) => stageAppChanges(app.id, input),
     onSuccess: (data) => {
       setError(null);
@@ -1260,6 +1284,10 @@ function BuildSettingsCard({ app }: { app: App }) {
             imageRef: sourceType === "image" ? imageRef : null,
             branch,
             port: Number(port),
+            buildMode,
+            buildRootDirectory,
+            dockerfilePath,
+            autoRedeployEnabled,
           });
         }}
       >
@@ -1348,6 +1376,62 @@ function BuildSettingsCard({ app }: { app: App }) {
                 />
               </div>
             </div>
+            <div className="space-y-2">
+              <Label>Build mode</Label>
+              <Select
+                value={buildMode}
+                onValueChange={(value) => setBuildMode((value ?? "auto") as AppBuildMode)}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Build mode">
+                    {(value: AppBuildMode) =>
+                      value === "dockerfile"
+                        ? "Force Dockerfile"
+                        : value === "railpack"
+                          ? "Force Railpack"
+                          : "Auto detect"
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup>
+                  <SelectItem value="auto">Auto detect</SelectItem>
+                  <SelectItem value="dockerfile">Force Dockerfile</SelectItem>
+                  <SelectItem value="railpack">Force Railpack</SelectItem>
+                </SelectPopup>
+              </Select>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="app-build-root">Root directory</Label>
+                <Input
+                  id="app-build-root"
+                  onChange={(event) => setBuildRootDirectory(event.currentTarget.value)}
+                  placeholder="."
+                  value={buildRootDirectory}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="app-dockerfile-path">Dockerfile path</Label>
+                <Input
+                  id="app-dockerfile-path"
+                  onChange={(event) => setDockerfilePath(event.currentTarget.value)}
+                  placeholder="Dockerfile"
+                  value={dockerfilePath}
+                />
+              </div>
+            </div>
+            <label className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+              <span className="min-w-0">
+                <span className="block font-medium text-sm">Auto redeploy</span>
+                <span className="block text-muted-foreground text-xs">
+                  Deploy this app automatically when GitHub receives a push on this branch.
+                </span>
+              </span>
+              <Switch
+                checked={autoRedeployEnabled}
+                onCheckedChange={setAutoRedeployEnabled}
+              />
+            </label>
           </>
         ) : (
           <div className="grid gap-3 sm:grid-cols-[1fr_120px]">

@@ -13,6 +13,7 @@ import {
 import { FormEvent, useEffect, useState } from "react";
 import type {
   App,
+  AppBuildMode,
   AppBuildRunner,
   AppKind,
   AppSourceType,
@@ -775,6 +776,9 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
   const [branch, setBranch] = useState("main");
   const [port, setPort] = useState("3000");
   const [serverIds, setServerIds] = useState<string[]>([]);
+  const [buildMode, setBuildMode] = useState<AppBuildMode>("auto");
+  const [buildRootDirectory, setBuildRootDirectory] = useState("");
+  const [dockerfilePath, setDockerfilePath] = useState("Dockerfile");
   const [buildRunner, setBuildRunner] = useState<AppBuildRunner>("depot");
   const [databaseVersion, setDatabaseVersion] = useState("18");
   const [databaseName, setDatabaseName] = useState("");
@@ -794,6 +798,9 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
     setBranch("main");
     setPort("3000");
     setServerIds([]);
+    setBuildMode("auto");
+    setBuildRootDirectory("");
+    setDockerfilePath("Dockerfile");
     setBuildRunner("depot");
     setDatabaseVersion("18");
     setDatabaseName("");
@@ -836,6 +843,9 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
         branch,
         port: Number(port),
         serverIds,
+        buildMode,
+        buildRootDirectory,
+        dockerfilePath,
         buildRunner,
       });
     },
@@ -1039,6 +1049,52 @@ function CreateAppDialog({ environmentId }: { environmentId: string }) {
                           onChange={(event) => setPort(event.currentTarget.value)}
                           type="number"
                           value={port}
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Build mode</Label>
+                      <Select
+                        value={buildMode}
+                        onValueChange={(value) =>
+                          setBuildMode((value ?? "auto") as AppBuildMode)
+                        }
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue placeholder="Build mode">
+                            {(value: AppBuildMode) =>
+                              value === "dockerfile"
+                                ? "Force Dockerfile"
+                                : value === "railpack"
+                                  ? "Force Railpack"
+                                  : "Auto detect"
+                            }
+                          </SelectValue>
+                        </SelectTrigger>
+                        <SelectPopup>
+                          <SelectItem value="auto">Auto detect</SelectItem>
+                          <SelectItem value="dockerfile">Force Dockerfile</SelectItem>
+                          <SelectItem value="railpack">Force Railpack</SelectItem>
+                        </SelectPopup>
+                      </Select>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label htmlFor="app-build-root">Root directory</Label>
+                        <Input
+                          id="app-build-root"
+                          onChange={(event) => setBuildRootDirectory(event.currentTarget.value)}
+                          placeholder="."
+                          value={buildRootDirectory}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="app-dockerfile-path">Dockerfile path</Label>
+                        <Input
+                          id="app-dockerfile-path"
+                          onChange={(event) => setDockerfilePath(event.currentTarget.value)}
+                          placeholder="Dockerfile"
+                          value={dockerfilePath}
                         />
                       </div>
                     </div>

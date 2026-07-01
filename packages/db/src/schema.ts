@@ -109,11 +109,14 @@ export const app = pgTable(
     })
       .notNull()
       .default("auto"),
+    buildRootDirectory: text("build_root_directory").notNull().default(""),
+    dockerfilePath: text("dockerfile_path").notNull().default("Dockerfile"),
     buildRunner: text("build_runner", {
       enum: ["depot", "server"],
     })
       .notNull()
       .default("depot"),
+    autoRedeployEnabled: boolean("auto_redeploy_enabled").notNull().default(true),
     appKind: text("app_kind", {
       enum: ["service", "database"],
     })

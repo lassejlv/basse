@@ -279,6 +279,7 @@ github.post("/webhook", async (c) => {
     .select({
       id: appTable.id,
       repositoryUrl: appTable.repositoryUrl,
+      autoRedeployEnabled: appTable.autoRedeployEnabled,
     })
     .from(appTable)
     .innerJoin(environment, eq(appTable.environmentId, environment.id))
@@ -294,10 +295,11 @@ github.post("/webhook", async (c) => {
   const matched = rows.filter(
     (row) => gitHubRepositoryFullName(row.repositoryUrl) === target.fullName,
   );
+  const deployable = matched.filter((row) => row.autoRedeployEnabled);
   const queued: string[] = [];
   const errors: { appId: string; error: string }[] = [];
 
-  for (const row of matched) {
+  for (const row of deployable) {
     const result = await enqueueDeploy(row.id);
     if ("error" in result) {
       errors.push({ appId: row.id, error: result.error });
@@ -310,6 +312,7 @@ github.post("/webhook", async (c) => {
     ok: true,
     delivery,
     matched: matched.length,
+    skippedAutoRedeployDisabled: matched.length - deployable.length,
     queued,
     errors,
   });

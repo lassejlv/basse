@@ -29,7 +29,10 @@ const APP_FIELD_LABELS: Record<string, string> = {
   sourceType: "Source",
   imageRef: "Image",
   buildMode: "Build mode",
+  buildRootDirectory: "Root directory",
+  dockerfilePath: "Dockerfile path",
   buildRunner: "Build location",
+  autoRedeployEnabled: "Auto redeploy",
   serverIds: "Servers",
   volumes: "Volumes",
   cpuLimitMillicores: "CPU limit",
@@ -76,6 +79,18 @@ function formatAppValue(field: string, raw: string | null): string {
   if (field === "memoryLimitBytes") {
     return typeof value === "number" ? `${Math.round(value / 1048576)} MB` : "host default";
   }
+  if (field === "buildMode") {
+    if (value === "dockerfile") return "Dockerfile";
+    if (value === "railpack") return "Railpack";
+    return "auto";
+  }
+  if (field === "buildRootDirectory") {
+    return typeof value === "string" && value ? value : ".";
+  }
+  if (field === "dockerfilePath") {
+    return typeof value === "string" && value ? value : "Dockerfile";
+  }
+  if (field === "autoRedeployEnabled") return value ? "enabled" : "disabled";
   if (field === "databasePublicEnabled") return value ? "enabled" : "disabled";
   return String(value);
 }

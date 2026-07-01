@@ -169,6 +169,20 @@
       "when": 1782863153268,
       "tag": "0023_curvy_bedlam",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1782904737492,
+      "tag": "0024_simple_leo",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1782905235843,
+      "tag": "0025_nebulous_preak",
+      "breakpoints": true
     }
   ]
 }

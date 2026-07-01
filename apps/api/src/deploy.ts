@@ -10,6 +10,7 @@ import {
 } from "@basse/db";
 import type { DatabaseKind } from "@basse/shared";
 import { and, eq, inArray, ne } from "drizzle-orm";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,7 @@ import {
   mintPullToken,
   resolveBuildKind,
 } from "./builder";
+import { resolveBuildPaths } from "./build-paths";
 import { decryptSecret } from "./crypto";
 import { loadResolvedEnvMap } from "./env-resolver";
 import { resolveGitHubCloneToken } from "./github";
@@ -365,7 +367,25 @@ export async function runDeployment(deploymentId: string): Promise<void> {
       }
       await setStatus(deploymentId, "building", { commitSha });
 
-      const kind = resolveBuildKind(appRow.buildMode, ctxDir);
+      const buildPaths = resolveBuildPaths(
+        ctxDir,
+        appRow.buildRootDirectory,
+        appRow.dockerfilePath,
+      );
+      if (appRow.buildRootDirectory) {
+        log.line(`Using build root ${appRow.buildRootDirectory}.`);
+      }
+      const kind = resolveBuildKind(
+        appRow.buildMode,
+        buildPaths.buildDir,
+        buildPaths.dockerfilePath,
+      );
+      if (kind === "dockerfile") {
+        if (!existsSync(buildPaths.dockerfilePath)) {
+          throw new Error(`Dockerfile not found: ${buildPaths.dockerfilePathRelative}`);
+        }
+        log.line(`Using Dockerfile ${buildPaths.dockerfilePathRelative}.`);
+      }
 
       if (appRow.buildRunner === "server") {
         const buildServer = targetServers[0]!;
@@ -375,7 +395,8 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         const connection = await connectionFromServer(buildServer);
         const built = await buildImageOnServer({
           kind,
-          ctxDir,
+          ctxDir: buildPaths.buildDir,
+          dockerfilePath: buildPaths.dockerfilePathRelative,
           connection,
           deploymentId,
           onLine: log.line,
@@ -414,7 +435,8 @@ export async function runDeployment(deploymentId: string): Promise<void> {
         const metadataFile = join(ctxDir, "depot-metadata.json");
         const built = await buildImage({
           kind,
-          ctxDir,
+          ctxDir: buildPaths.buildDir,
+          dockerfilePath: buildPaths.dockerfilePath,
           depotToken,
           projectId: depot.projectId,
           deploymentId,

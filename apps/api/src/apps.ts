@@ -27,6 +27,12 @@ import {
   importContainer,
   listImportableContainers,
 } from "./agent-client";
+import {
+  DEFAULT_BUILD_ROOT_DIRECTORY,
+  DEFAULT_DOCKERFILE_PATH,
+  normalizeBuildRootDirectory,
+  normalizeDockerfilePath,
+} from "./build-paths";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { connectionFromServer } from "./server-connection";
 import { runScript } from "./ssh";
@@ -163,6 +169,17 @@ function validateImageRef(value: string): string | null {
   return null;
 }
 
+function normalizeBuildPathInput(
+  value: string | undefined,
+  normalize: (input?: string | null) => string,
+): { ok: true; value: string } | { ok: false; error: string } {
+  try {
+    return { ok: true, value: normalize(value) };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Invalid build path" };
+  }
+}
+
 function normalizeVolumes(value: unknown): AppVolume[] | null {
   if (!Array.isArray(value)) return null;
   const volumes: AppVolume[] = [];
@@ -264,7 +281,10 @@ export function toApp(
     branch: row.branch,
     port: row.port,
     buildMode: row.buildMode,
+    buildRootDirectory: row.buildRootDirectory,
+    dockerfilePath: row.dockerfilePath,
     buildRunner: row.buildRunner,
+    autoRedeployEnabled: row.autoRedeployEnabled,
     appKind: row.appKind,
     sourceType: row.sourceType,
     imageRef: row.imageRef,
@@ -487,8 +507,24 @@ export async function buildAppUpdates(
   if (BUILD_MODES.includes(body?.buildMode as AppBuildMode)) {
     updates.buildMode = body?.buildMode as AppBuildMode;
   }
+  if (typeof body?.buildRootDirectory === "string") {
+    const normalized = normalizeBuildPathInput(
+      body.buildRootDirectory,
+      normalizeBuildRootDirectory,
+    );
+    if (!normalized.ok) return { ok: false, error: normalized.error, status: 400 };
+    updates.buildRootDirectory = normalized.value;
+  }
+  if (typeof body?.dockerfilePath === "string") {
+    const normalized = normalizeBuildPathInput(body.dockerfilePath, normalizeDockerfilePath);
+    if (!normalized.ok) return { ok: false, error: normalized.error, status: 400 };
+    updates.dockerfilePath = normalized.value;
+  }
   if (BUILD_RUNNERS.includes(body?.buildRunner as AppBuildRunner)) {
     updates.buildRunner = body?.buildRunner as AppBuildRunner;
+  }
+  if (typeof body?.autoRedeployEnabled === "boolean") {
+    updates.autoRedeployEnabled = body.autoRedeployEnabled;
   }
   if (existing.appKind === "database") {
     const existingDatabaseKind = (existing.databaseKind ?? "postgres") as DatabaseKind;
@@ -976,12 +1012,38 @@ apps.post("/", async (c) => {
   const buildMode = BUILD_MODES.includes(body?.buildMode as AppBuildMode)
     ? (body?.buildMode as AppBuildMode)
     : "auto";
+  const normalizedBuildRootDirectory =
+    appKind === "database"
+      ? { ok: true as const, value: DEFAULT_BUILD_ROOT_DIRECTORY }
+      : normalizeBuildPathInput(
+          typeof body?.buildRootDirectory === "string" ? body.buildRootDirectory : undefined,
+          normalizeBuildRootDirectory,
+        );
+  if (!normalizedBuildRootDirectory.ok) {
+    return c.json({ error: normalizedBuildRootDirectory.error }, 400);
+  }
+  const normalizedDockerfilePath =
+    appKind === "database"
+      ? { ok: true as const, value: DEFAULT_DOCKERFILE_PATH }
+      : normalizeBuildPathInput(
+          typeof body?.dockerfilePath === "string" ? body.dockerfilePath : undefined,
+          normalizeDockerfilePath,
+        );
+  if (!normalizedDockerfilePath.ok) {
+    return c.json({ error: normalizedDockerfilePath.error }, 400);
+  }
   const buildRunner =
     appKind === "database"
       ? "server"
       : BUILD_RUNNERS.includes(body?.buildRunner as AppBuildRunner)
         ? (body?.buildRunner as AppBuildRunner)
         : "depot";
+  const autoRedeployEnabled =
+    appKind === "database"
+      ? false
+      : typeof body?.autoRedeployEnabled === "boolean"
+        ? body.autoRedeployEnabled
+        : true;
   const cpuLimitMillicores =
     body && "cpuLimitMillicores" in body ? normalizeCpuLimit(body.cpuLimitMillicores) : null;
   if (typeof cpuLimitMillicores === "undefined") {
@@ -1048,7 +1110,10 @@ apps.post("/", async (c) => {
           branch,
           port,
           buildMode,
+          buildRootDirectory: normalizedBuildRootDirectory.value,
+          dockerfilePath: normalizedDockerfilePath.value,
           buildRunner,
+          autoRedeployEnabled,
           appKind,
           volumes: JSON.stringify(volumes),
           cpuLimitMillicores,
