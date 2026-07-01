@@ -39,3 +39,20 @@ Recent commits use short imperative subjects, for example `Add app resource limi
 ## Security & Configuration Tips
 
 Do not commit `.env` files, tokens, SSH keys, or generated server credentials. The agent API requires bearer auth and is intended for loopback exposure behind SSH tunnels. Keep migrations in `packages/db/drizzle/` and review destructive schema changes carefully.
+
+## Cursor Cloud specific instructions
+
+Runtime is **Bun** (symlinked at `/usr/local/bin/bun`); Postgres 16 and Redis 7 are installed. The update script runs `bun install` on startup, but the following are NOT automatic and must be done each session before running the app:
+
+- **Start services (no systemd):** `sudo pg_ctlcluster 16 main start` and `sudo redis-server --daemonize yes`. Verify with `redis-cli ping` (expect `PONG`) and `pg_lsclusters`.
+- **`.env` is git-ignored and not persisted.** If `/workspace/.env` is missing, recreate it: `cp .env.example .env` then set a real `BETTER_AUTH_SECRET` (≥32 chars, e.g. `bun run auth:secret` or `openssl rand -hex 32`). The defaults for `DATABASE_URL` (`postgres://postgres:postgres@127.0.0.1:5432/basse`) and `REDIS_URL` match the local services below.
+- **Postgres role/db:** the `postgres` role password is set to `postgres` and a `basse` database exists. If starting from a fresh DB, run `sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD 'postgres';"` and `sudo -u postgres createdb basse`, then `bun run db:migrate`.
+- **Migrations** must be applied after schema changes / fresh DB: `bun run db:migrate` (harmless `identifier ... will be truncated` NOTICEs are expected).
+
+Standard commands are in the "Build, Test, and Development Commands" section above (`bun run dev`, `bun run check`, `bun run lint`, `bun test`). Dev servers: API on `127.0.0.1:3000`, web (Vite) on `127.0.0.1:5173` which proxies `/api` + `/health` to the API.
+
+Non-obvious gotchas:
+
+- **Email is disabled locally**, so signup/login OTP codes are NOT emailed — they are logged to the API console as `[email] OTP delivery disabled; code for <email> (<type>): <code>`. Only the most recently sent code is valid; requesting a new one invalidates the previous. To verify an account without the UI: POST `/api/auth/email-otp/send-verification-otp` then POST `/api/auth/email-otp/verify-email` with the freshest logged code.
+- **Redis is required for real end-to-end flows** (BullMQ worker/monitor for provisioning, deployments, monitoring). The API process will still boot without Redis, but those background flows silently won't run.
+- The **Go agent** (`apps/agent/`) is optional (runs on remote user servers, not the control plane) and its `go.mod` targets Go 1.26; the VM has Go 1.22, so its toolchain-download build/vet may fail here. This does not affect the control plane.
