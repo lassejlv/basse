@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import { runMigrations } from "@basse/db/migrations";
 import { alerts } from "./alerts";
 import { apps } from "./apps";
 import { auth } from "./auth";
@@ -28,6 +29,11 @@ import {
 } from "./shared-env-vars";
 import { sshKeys } from "./ssh-keys";
 import { workspaceSettingsRoutes } from "./workspace-settings";
+
+if (Bun.env.DB_MIGRATE_ON_STARTUP !== "false") {
+  await runMigrations();
+  console.log("[db] migrations applied");
+}
 
 const app = new Hono();
 const webDist = Bun.env.WEB_DIST ?? "./apps/web/dist";

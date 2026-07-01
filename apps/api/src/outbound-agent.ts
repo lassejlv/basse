@@ -72,77 +72,87 @@ export async function sendOutboundAgentRequest(
 }
 
 outboundAgent.post("/poll", async (c) => {
-  const auth = c.req.header("authorization") ?? "";
-  const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
-  if (!token) return c.json({ error: "unauthorized" }, 401);
+  try {
+    const auth = c.req.header("authorization") ?? "";
+    const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
+    if (!token) return c.json({ error: "unauthorized" }, 401);
 
-  const tokenHash = await agentTokenHash(token);
-  const [row] = await db
-    .select()
-    .from(server)
-    .where(and(eq(server.agentTokenHash, tokenHash), eq(server.connectionMode, "outbound")))
-    .limit(1);
-  if (!row?.agentToken) return c.json({ error: "unauthorized" }, 401);
+    const tokenHash = await agentTokenHash(token);
+    const [row] = await db
+      .select()
+      .from(server)
+      .where(and(eq(server.agentTokenHash, tokenHash), eq(server.connectionMode, "outbound")))
+      .limit(1);
+    if (!row?.agentToken) return c.json({ error: "unauthorized" }, 401);
 
-  const storedToken = await decryptSecret(row.agentToken).catch(() => null);
-  if (storedToken !== token) return c.json({ error: "unauthorized" }, 401);
+    const storedToken = await decryptSecret(row.agentToken).catch(() => null);
+    if (storedToken !== token) return c.json({ error: "unauthorized" }, 401);
 
-  const now = new Date();
-  await db
-    .update(server)
-    .set({ status: "active", statusMessage: null, lastSeenAt: now, updatedAt: now })
-    .where(eq(server.id, row.id));
+    const now = new Date();
+    await db
+      .update(server)
+      .set({ status: "active", statusMessage: null, lastSeenAt: now, updatedAt: now })
+      .where(eq(server.id, row.id));
 
-  const command = await claimNextCommand(row.id, now);
-  if (!command) return c.body(null, 204);
+    const command = await claimNextCommand(row.id, now);
+    if (!command) return c.body(null, 204);
 
-  return c.json({
-    id: command.id,
-    method: command.method,
-    path: command.path,
-    body: command.body ? JSON.parse(command.body) : null,
-  });
+    return c.json({
+      id: command.id,
+      method: command.method,
+      path: command.path,
+      body: command.body ? JSON.parse(command.body) : null,
+    });
+  } catch (error) {
+    console.error("[outbound-agent] poll failed", error);
+    return c.json({ error: "poll failed" }, 500);
+  }
 });
 
 outboundAgent.post("/commands/:id/result", async (c) => {
-  const auth = c.req.header("authorization") ?? "";
-  const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
-  if (!token) return c.json({ error: "unauthorized" }, 401);
+  try {
+    const auth = c.req.header("authorization") ?? "";
+    const token = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";
+    if (!token) return c.json({ error: "unauthorized" }, 401);
 
-  const tokenHash = await agentTokenHash(token);
-  const [serverRow] = await db
-    .select({ id: server.id, agentToken: server.agentToken })
-    .from(server)
-    .where(and(eq(server.agentTokenHash, tokenHash), eq(server.connectionMode, "outbound")))
-    .limit(1);
-  if (!serverRow?.agentToken) return c.json({ error: "unauthorized" }, 401);
+    const tokenHash = await agentTokenHash(token);
+    const [serverRow] = await db
+      .select({ id: server.id, agentToken: server.agentToken })
+      .from(server)
+      .where(and(eq(server.agentTokenHash, tokenHash), eq(server.connectionMode, "outbound")))
+      .limit(1);
+    if (!serverRow?.agentToken) return c.json({ error: "unauthorized" }, 401);
 
-  const storedToken = await decryptSecret(serverRow.agentToken).catch(() => null);
-  if (storedToken !== token) return c.json({ error: "unauthorized" }, 401);
+    const storedToken = await decryptSecret(serverRow.agentToken).catch(() => null);
+    if (storedToken !== token) return c.json({ error: "unauthorized" }, 401);
 
-  const body = (await c.req.json().catch(() => null)) as {
-    status?: unknown;
-    body?: unknown;
-    error?: unknown;
-  } | null;
-  const responseStatus = typeof body?.status === "number" ? body.status : 502;
-  const responseBody = typeof body?.body === "string" ? body.body : "";
-  const error = typeof body?.error === "string" ? body.error : null;
-  const now = new Date();
+    const body = (await c.req.json().catch(() => null)) as {
+      status?: unknown;
+      body?: unknown;
+      error?: unknown;
+    } | null;
+    const responseStatus = typeof body?.status === "number" ? body.status : 502;
+    const responseBody = typeof body?.body === "string" ? body.body : "";
+    const error = typeof body?.error === "string" ? body.error : null;
+    const now = new Date();
 
-  await db
-    .update(agentCommand)
-    .set({
-      status: error ? "failed" : "completed",
-      responseStatus,
-      responseBody,
-      error,
-      completedAt: now,
-      updatedAt: now,
-    })
-    .where(and(eq(agentCommand.id, c.req.param("id")), eq(agentCommand.serverId, serverRow.id)));
+    await db
+      .update(agentCommand)
+      .set({
+        status: error ? "failed" : "completed",
+        responseStatus,
+        responseBody,
+        error,
+        completedAt: now,
+        updatedAt: now,
+      })
+      .where(and(eq(agentCommand.id, c.req.param("id")), eq(agentCommand.serverId, serverRow.id)));
 
-  return c.json({ ok: true });
+    return c.json({ ok: true });
+  } catch (error) {
+    console.error("[outbound-agent] result failed", error);
+    return c.json({ error: "result failed" }, 500);
+  }
 });
 
 async function claimNextCommand(serverId: string, now: Date): Promise<AgentCommandRow | null> {
