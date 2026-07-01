@@ -5,11 +5,12 @@ Docker socket, and exposes a small bearer-authenticated HTTP API.
 
 Basse can reach the agent in two ways:
 
-- **SSH mode**: the default. The control plane opens an SSH tunnel to the
-  server and calls the agent on loopback.
-- **Outbound mode**: for servers with no public ingress and no SSH access from
-  Basse. The agent polls the control plane over HTTPS, pulls queued commands,
-  runs them against its local HTTP API, then posts the result back.
+- **SSH mode**: the default and recommended mode. The control plane opens an SSH
+  tunnel to the server and calls the agent on loopback.
+- **Outbound mode**: experimental mode for servers with no public ingress and no
+  SSH access from Basse. The agent polls the control plane over HTTPS, pulls
+  queued commands, runs them against its local HTTP API, then posts the result
+  back.
 
 ## Why Go (and no dependencies)
 
@@ -87,7 +88,8 @@ managed database images deploy through the agent.
 ## Set up without SSH
 
 Use outbound mode when the server can make HTTPS requests to Basse, but Basse
-cannot connect back to the server over SSH or any public ingress port.
+cannot connect back to the server over SSH or any public ingress port. Prefer
+SSH mode when it is available; outbound mode is still experimental.
 
 ### Requirements
 

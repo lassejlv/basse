@@ -2,8 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
-  ArrowUpRightIcon,
   BoxIcon,
+  ChevronDownIcon,
   DownloadIcon,
   HardDriveIcon,
   HistoryIcon,
@@ -13,10 +13,8 @@ import {
   PencilIcon,
   PlusIcon,
   RefreshCwIcon,
-  RocketIcon,
   SettingsIcon,
   TrashIcon,
-  XIcon,
 } from "lucide-react";
 import {
   FormEvent,
@@ -36,8 +34,9 @@ import type {
   DatabaseKind,
   ImportableDockerContainer,
 } from "@basse/shared";
+import { AppPanel } from "@/components/app/app-panel";
 import { DatabaseIcon, databaseEngineLabel } from "@/components/database-icon";
-import { DeployStatusBadge, StatusDot, deployState } from "@/components/deploy-status";
+import { StatusDot, deployState } from "@/components/deploy-status";
 import { GitHubRepositorySelect } from "@/components/github-repository-select";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -67,7 +66,15 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "@/components/ui/menu";
+import {
+  Menu,
+  MenuItem,
+  MenuPopup,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuSeparator,
+  MenuTrigger,
+} from "@/components/ui/menu";
 import {
   Select,
   SelectItem,
@@ -75,7 +82,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tabs, TabsList, TabsTab } from "@/components/ui/tabs";
+import {
+  Sheet,
+  SheetDescription,
+  SheetHeader,
+  SheetPanel,
+  SheetPopup,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import {
   createApp,
@@ -84,7 +98,7 @@ import {
   listImportableDockerContainers,
 } from "@/lib/apps";
 import { getProjectChangeHistory, getProjectChanges } from "@/lib/changes";
-import { listDeployments, triggerDeploy } from "@/lib/deployments";
+import { triggerDeploy } from "@/lib/deployments";
 import { createEnvironment, listEnvironments } from "@/lib/environments";
 import {
   listEnvironmentSharedEnvVars,
@@ -96,7 +110,6 @@ import {
   type SharedEnvVarMasked,
   type SharedEnvVarPlain,
 } from "@/lib/env-vars";
-import { relativeTime } from "@/lib/format";
 import { listGitHubRepositories } from "@/lib/github";
 import { parseDotenv, serializeDotenv } from "@/lib/dotenv";
 import { deleteProject, getProject } from "@/lib/projects";
@@ -106,16 +119,61 @@ import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_authed/projects/$projectId")({
   component: ProjectDetailRoute,
+  validateSearch: (search: Record<string, unknown>): { app?: string; tab?: string } => ({
+    app: typeof search.app === "string" ? search.app : undefined,
+    tab: typeof search.tab === "string" ? search.tab : undefined,
+  }),
 });
 
-type SettingsDialog = "project-vars" | "environment-vars" | "history";
+type SettingsDialog = "project-vars" | "environment-vars";
+
+function envStorageKey(projectId: string): string {
+  return `basse:project-env:${projectId}`;
+}
 
 function ProjectDetailRoute() {
   const { projectId } = Route.useParams();
-  const navigate = useNavigate();
+  const search = Route.useSearch();
+  const navigate = useNavigate({ from: Route.fullPath });
   const queryClient = useQueryClient();
-  const [activeEnv, setActiveEnv] = useState<string | null>(null);
+  const [activeEnv, setActiveEnv] = useState<string | null>(() =>
+    localStorage.getItem(envStorageKey(projectId)),
+  );
   const [settingsDialog, setSettingsDialog] = useState<SettingsDialog | null>(null);
+  const [newEnvOpen, setNewEnvOpen] = useState(false);
+  const [activityOpen, setActivityOpen] = useState(false);
+
+  const selectedAppId = search.app ?? null;
+
+  function selectApp(appId: string | null) {
+    void navigate({
+      search: (prev) => ({
+        app: appId ?? undefined,
+        tab: appId && appId === prev.app ? prev.tab : undefined,
+      }),
+      replace: appId === null,
+    });
+  }
+
+  function setPanelTab(tab: string) {
+    void navigate({
+      search: (prev) => ({ ...prev, tab: tab === "deployments" ? undefined : tab }),
+      replace: true,
+    });
+  }
+
+  // Escape closes the app panel — unless a dialog/sheet is open (it owns Escape).
+  useEffect(() => {
+    if (!selectedAppId) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      if (document.querySelector('[data-slot="dialog-popup"], [data-slot="sheet-popup"]')) return;
+      selectApp(null);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAppId]);
 
   const project = useQuery({
     queryKey: ["project", projectId],
@@ -135,8 +193,24 @@ function ProjectDetailRoute() {
   });
 
   const envList = environments.data ?? [];
-  const selectedEnv = activeEnv ?? envList[0]?.id ?? null;
+  const selectedEnv =
+    (activeEnv && envList.some((env) => env.id === activeEnv) ? activeEnv : null) ??
+    envList.find((env) => env.isDefault)?.id ??
+    envList[0]?.id ??
+    null;
   const selectedEnvName = envList.find((env) => env.id === selectedEnv)?.name ?? "Environment";
+
+  function switchEnvironment(envId: string) {
+    setActiveEnv(envId);
+    try {
+      localStorage.setItem(envStorageKey(projectId), envId);
+    } catch {
+      // Persistence is a convenience only.
+    }
+    if (selectedAppId) selectApp(null);
+  }
+
+  const stagedChangeCount = (projectChanges.data?.changes ?? []).length;
 
   const removeProject = useMutation({
     mutationFn: () => deleteProject(projectId),
@@ -182,27 +256,50 @@ function ProjectDetailRoute() {
         <h1 className="min-w-0 truncate font-semibold text-sm tracking-tight">
           {project.data.name}
         </h1>
-        <div className="mx-1 h-4 w-px shrink-0 bg-border" aria-hidden />
+        <span aria-hidden className="text-muted-foreground/40">
+          /
+        </span>
         {environments.isPending ? (
-          <div className="h-8 w-36 animate-pulse rounded-lg bg-muted/50" aria-hidden />
+          <div className="h-7 w-28 animate-pulse rounded-lg bg-muted/50" aria-hidden />
         ) : (
-          <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto">
-            <Tabs
-              onValueChange={(value) => setActiveEnv(value as string)}
-              value={selectedEnv ?? ""}
-            >
-              <TabsList>
+          <Menu>
+            <MenuTrigger
+              render={
+                <Button className="gap-1.5 font-normal" size="sm" variant="ghost">
+                  {selectedEnvName}
+                  <ChevronDownIcon className="size-3.5 text-muted-foreground" />
+                </Button>
+              }
+            />
+            <MenuPopup align="start">
+              <MenuRadioGroup
+                onValueChange={(value) => switchEnvironment(value as string)}
+                value={selectedEnv ?? ""}
+              >
                 {envList.map((env) => (
-                  <TabsTab key={env.id} value={env.id}>
+                  <MenuRadioItem key={env.id} value={env.id}>
                     {env.name}
-                  </TabsTab>
+                  </MenuRadioItem>
                 ))}
-              </TabsList>
-            </Tabs>
-            <NewEnvironmentDialog projectId={projectId} />
-          </div>
+              </MenuRadioGroup>
+              <MenuSeparator />
+              <MenuItem onClick={() => setNewEnvOpen(true)}>
+                <PlusIcon />
+                New environment
+              </MenuItem>
+            </MenuPopup>
+          </Menu>
         )}
         <div className="ml-auto flex items-center gap-2">
+          <Button onClick={() => setActivityOpen(true)} size="sm" variant="outline">
+            <HistoryIcon />
+            Activity
+            {stagedChangeCount > 0 ? (
+              <span className="flex size-4.5 items-center justify-center rounded-full bg-primary font-semibold text-[0.65rem] text-primary-foreground">
+                {stagedChangeCount}
+              </span>
+            ) : null}
+          </Button>
           <Menu>
             <MenuTrigger
               render={
@@ -223,10 +320,6 @@ function ProjectDetailRoute() {
                 <KeyRoundIcon />
                 {selectedEnvName} variables
               </MenuItem>
-              <MenuItem onClick={() => setSettingsDialog("history")}>
-                <HistoryIcon />
-                Change history
-              </MenuItem>
               <MenuSeparator />
               <MenuItem onClick={confirmDeleteProject} variant="destructive">
                 <TrashIcon />
@@ -245,18 +338,23 @@ function ProjectDetailRoute() {
 
       <div className="relative min-h-0 flex-1">
         {selectedEnv ? (
-          <EnvironmentCanvas environmentId={selectedEnv} />
+          <EnvironmentCanvas
+            environmentId={selectedEnv}
+            onSelectApp={selectApp}
+            selectedAppId={selectedAppId}
+          />
         ) : environments.isPending ? null : (
           <p className="p-6 text-muted-foreground text-sm">No environments in this project.</p>
         )}
-        <div className="pointer-events-none absolute inset-x-0 bottom-2 z-20 flex justify-center px-4">
-          <div className="pointer-events-auto w-full max-w-xl">
-            <ProjectStagedChangesBar
-              changes={projectChanges.data?.changes ?? []}
-              projectId={projectId}
-            />
-          </div>
-        </div>
+        {selectedAppId ? (
+          <AppPanel
+            appId={selectedAppId}
+            key={selectedAppId}
+            onClose={() => selectApp(null)}
+            onTabChange={setPanelTab}
+            tab={search.tab}
+          />
+        ) : null}
       </div>
 
       <SharedEnvVarsDialog
@@ -281,23 +379,31 @@ function ProjectDetailRoute() {
           title={`${selectedEnvName} variables`}
         />
       ) : null}
-      <Dialog
-        onOpenChange={(open) => setSettingsDialog(open ? "history" : null)}
-        open={settingsDialog === "history"}
-      >
-        <DialogPopup className="h-fit max-w-2xl">
-          <DialogTitle className="sr-only">Project change history</DialogTitle>
-          <DialogPanel className="max-h-[70vh] overflow-y-auto">
+      <Sheet onOpenChange={setActivityOpen} open={activityOpen}>
+        <SheetPopup className="max-w-md" side="right">
+          <SheetHeader>
+            <SheetTitle>Activity</SheetTitle>
+            <SheetDescription>
+              Staged changes and applied history for this project.
+            </SheetDescription>
+          </SheetHeader>
+          <SheetPanel className="space-y-5">
+            <ProjectStagedChangesBar
+              changes={projectChanges.data?.changes ?? []}
+              projectId={projectId}
+            />
             <ProjectStagedChangesHistory
               entries={projectChangeHistory.data ?? []}
               isPending={projectChangeHistory.isPending}
             />
-          </DialogPanel>
-          <DialogFooter>
-            <DialogClose render={<Button variant="outline">Close</Button>} />
-          </DialogFooter>
-        </DialogPopup>
-      </Dialog>
+          </SheetPanel>
+        </SheetPopup>
+      </Sheet>
+      <NewEnvironmentDialog
+        onOpenChange={setNewEnvOpen}
+        open={newEnvOpen}
+        projectId={projectId}
+      />
     </section>
   );
 }
@@ -381,13 +487,20 @@ type PointerGesture = {
   moved: boolean;
 };
 
-function EnvironmentCanvas({ environmentId }: { environmentId: string }) {
+function EnvironmentCanvas({
+  environmentId,
+  selectedAppId,
+  onSelectApp,
+}: {
+  environmentId: string;
+  selectedAppId: string | null;
+  onSelectApp: (appId: string | null) => void;
+}) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const panRef = useRef<PointerGesture | null>(null);
   const fittedRef = useRef(false);
   const [view, setView] = useState<CanvasView>({ x: 0, y: 0, scale: 1 });
   const [panning, setPanning] = useState(false);
-  const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
   const [stored, setStored] = useState<Record<string, NodePosition>>(() =>
     readStoredPositions(environmentId),
   );
@@ -398,7 +511,6 @@ function EnvironmentCanvas({ environmentId }: { environmentId: string }) {
     refetchInterval: 15_000,
   });
   const appList = useMemo(() => apps.data ?? [], [apps.data]);
-  const selectedApp = appList.find((app) => app.id === selectedAppId) ?? null;
 
   const nodes = useMemo(
     () =>
@@ -411,7 +523,6 @@ function EnvironmentCanvas({ environmentId }: { environmentId: string }) {
 
   useEffect(() => {
     setStored(readStoredPositions(environmentId));
-    setSelectedAppId(null);
     fittedRef.current = false;
   }, [environmentId]);
 
@@ -482,15 +593,6 @@ function EnvironmentCanvas({ environmentId }: { environmentId: string }) {
     return () => viewport.removeEventListener("wheel", onWheel);
   }, []);
 
-  useEffect(() => {
-    if (!selectedAppId) return;
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setSelectedAppId(null);
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedAppId]);
-
   function zoomBy(factor: number) {
     const viewport = viewportRef.current;
     if (!viewport) return;
@@ -555,7 +657,7 @@ function EnvironmentCanvas({ environmentId }: { environmentId: string }) {
         onPointerUp={(event) => {
           const gesture = panRef.current;
           if (gesture?.pointerId === event.pointerId) {
-            if (!gesture.moved) setSelectedAppId(null);
+            if (!gesture.moved) onSelectApp(null);
             panRef.current = null;
             setPanning(false);
           }
@@ -584,7 +686,7 @@ function EnvironmentCanvas({ environmentId }: { environmentId: string }) {
               key={app.id}
               onMove={moveNode}
               onMoveEnd={persistPositions}
-              onSelect={setSelectedAppId}
+              onSelect={onSelectApp}
               position={position}
               scale={view.scale}
               selected={app.id === selectedAppId}
@@ -658,14 +760,6 @@ function EnvironmentCanvas({ environmentId }: { environmentId: string }) {
         </div>
       ) : null}
 
-      {selectedApp ? (
-        <AppPanel
-          app={selectedApp}
-          environmentId={environmentId}
-          key={selectedApp.id}
-          onClose={() => setSelectedAppId(null)}
-        />
-      ) : null}
     </div>
   );
 }
@@ -771,173 +865,6 @@ function CanvasNode({
           <span className="truncate">{volumeLabel}</span>
         </div>
       ) : null}
-    </div>
-  );
-}
-
-function AppPanel({
-  app,
-  environmentId,
-  onClose,
-}: {
-  app: App;
-  environmentId: string;
-  onClose: () => void;
-}) {
-  const queryClient = useQueryClient();
-  const database = app.appKind === "database" ? app.database : null;
-
-  const deployments = useQuery({
-    queryKey: ["deployments", app.id, "canvas-panel"],
-    queryFn: () => listDeployments(app.id),
-    refetchInterval: 10_000,
-  });
-  const deploymentList = (deployments.data ?? []).slice(0, 5);
-
-  const deploy = useMutation({
-    mutationFn: () => triggerDeploy(app.id),
-    onSuccess: async () => {
-      toast.success("Deploy queued");
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["apps", environmentId] }),
-        queryClient.invalidateQueries({ queryKey: ["deployments", app.id, "canvas-panel"] }),
-      ]);
-    },
-    onError: (mutationError: Error) =>
-      toast.error("Couldn't queue deploy", { description: mutationError.message }),
-  });
-
-  return (
-    <aside
-      aria-label={`${app.name} overview`}
-      className="fade-in-0 slide-in-from-right-4 absolute inset-y-3 right-3 z-20 flex w-[min(24rem,calc(100%-1.5rem))] animate-in flex-col overflow-hidden rounded-xl border bg-card shadow-xl duration-200 motion-reduce:animate-none"
-    >
-      <div className="flex items-start gap-3 border-b p-4">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <StatusDot status={app.latestDeploymentStatus} />
-            <h2 className="truncate font-semibold text-base">{app.name}</h2>
-          </div>
-          <p className="mt-1 truncate font-mono text-muted-foreground text-xs">
-            {appSourceLabel(app)}
-          </p>
-        </div>
-        <Button aria-label="Close panel" onClick={onClose} size="icon-sm" variant="ghost">
-          <XIcon />
-        </Button>
-      </div>
-
-      <div className="flex items-center gap-2 border-b p-3">
-        <Button loading={deploy.isPending} onClick={() => deploy.mutate()} size="sm">
-          <RocketIcon />
-          Deploy
-        </Button>
-        <Button
-          render={<Link params={{ appId: app.id }} to="/apps/$appId" />}
-          size="sm"
-          variant="outline"
-        >
-          <ArrowUpRightIcon />
-          Open app
-        </Button>
-        <span className="ml-auto">
-          <DeployStatusBadge size="sm" status={app.latestDeploymentStatus} />
-        </span>
-      </div>
-
-      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-3">
-          <PanelMeta label="Port" mono value={`:${app.port}`} />
-          {database ? (
-            <PanelMeta
-              label="Engine"
-              value={`${databaseEngineLabel(database.kind)} ${database.version}`}
-            />
-          ) : app.sourceType === "repository" ? (
-            <PanelMeta label="Branch" mono value={app.branch} />
-          ) : (
-            <PanelMeta label="Source" value="Docker image" />
-          )}
-          <PanelMeta
-            label="Servers"
-            value={`${app.serverIds.length} ${app.serverIds.length === 1 ? "server" : "servers"}`}
-          />
-          <PanelMeta
-            label="Volumes"
-            value={app.volumes.length === 0 ? "None" : String(app.volumes.length)}
-          />
-          <PanelMeta label="Created" value={relativeTime(app.createdAt)} />
-          {database?.publicEnabled && database.publicPort ? (
-            <PanelMeta label="Public port" mono value={`:${database.publicPort}`} />
-          ) : null}
-        </dl>
-
-        {app.volumes.length > 0 ? (
-          <div>
-            <h3 className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
-              Volumes
-            </h3>
-            <ul className="mt-2 divide-y rounded-lg border">
-              {app.volumes.map((volume) => (
-                <li
-                  className="flex items-center gap-2 px-3 py-2 font-mono text-xs"
-                  key={`${volume.hostPath}:${volume.containerPath}`}
-                >
-                  <HardDriveIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                  <span className="truncate">{volume.containerPath}</span>
-                  {volume.readOnly ? (
-                    <span className="ml-auto shrink-0 text-muted-foreground">ro</span>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-
-        <div>
-          <h3 className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
-            Recent deployments
-          </h3>
-          {deployments.isPending ? (
-            <div className="mt-2 h-24 animate-pulse rounded-lg border bg-muted/30" aria-hidden />
-          ) : deploymentList.length === 0 ? (
-            <p className="mt-2 rounded-lg border border-dashed px-3 py-5 text-center text-muted-foreground text-sm">
-              No deployments yet. Deploy starts the first release.
-            </p>
-          ) : (
-            <ul className="mt-2 divide-y rounded-lg border">
-              {deploymentList.map((deployment) => (
-                <li className="flex items-center gap-3 px-3 py-2" key={deployment.id}>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate font-mono text-xs">
-                      {deployment.commitSha?.slice(0, 7) ??
-                        deployment.imageRef ??
-                        deployment.id.slice(0, 8)}
-                    </p>
-                    <p className="mt-0.5 text-muted-foreground text-xs">
-                      {relativeTime(deployment.createdAt)}
-                    </p>
-                  </div>
-                  <DeployStatusBadge size="sm" status={deployment.status} />
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </div>
-    </aside>
-  );
-}
-
-function PanelMeta({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div className="min-w-0">
-      <dt className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
-        {label}
-      </dt>
-      <dd className={cn("mt-0.5 truncate text-sm", mono && "font-mono text-xs leading-5")}>
-        {value}
-      </dd>
     </div>
   );
 }
@@ -1324,9 +1251,16 @@ function ImportContainerDialog({ environmentId }: { environmentId: string }) {
   );
 }
 
-function NewEnvironmentDialog({ projectId }: { projectId: string }) {
+function NewEnvironmentDialog({
+  projectId,
+  open,
+  onOpenChange,
+}: {
+  projectId: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
   const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -1335,7 +1269,7 @@ function NewEnvironmentDialog({ projectId }: { projectId: string }) {
     onSuccess: async () => {
       setName("");
       setError(null);
-      setOpen(false);
+      onOpenChange(false);
       await queryClient.invalidateQueries({ queryKey: ["environments", projectId] });
       toast.success("Environment created");
     },
@@ -1346,17 +1280,10 @@ function NewEnvironmentDialog({ projectId }: { projectId: string }) {
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        setOpen(next);
+        onOpenChange(next);
         if (!next) setError(null);
       }}
     >
-      <DialogTrigger
-        render={
-          <Button aria-label="New environment" size="icon-sm" variant="ghost">
-            <PlusIcon />
-          </Button>
-        }
-      />
       <DialogPopup className="h-fit max-w-md">
         <form
           onSubmit={(event) => {

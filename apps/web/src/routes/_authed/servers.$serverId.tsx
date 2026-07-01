@@ -1,15 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
-import { ArrowLeftIcon, TrashIcon } from "lucide-react";
-import { FormEvent, useEffect, useState } from "react";
+import { ArrowLeftIcon, CheckIcon, CopyIcon, RotateCcwIcon, TrashIcon } from "lucide-react";
+import { FormEvent, type ReactNode, useEffect, useState } from "react";
 import { chartCssVars } from "@/components/charts/chart-context";
 import { Grid } from "@/components/charts/grid";
 import { Line, LineChart } from "@/components/charts/line-chart";
 import { ChartTooltip } from "@/components/charts/tooltip";
 import { XAxis } from "@/components/charts/x-axis";
+import { LogExplorer } from "@/components/log-explorer";
 import { ServerStatusBadge } from "@/components/server-status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import {
   Dialog,
   DialogClose,
@@ -24,7 +26,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
 import { createDomain, deleteDomain, listDomains, resyncProxy } from "@/lib/domains";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, relativeTime } from "@/lib/format";
 import {
   checkServerConnection,
   checkAgentUpdate,
@@ -44,12 +46,35 @@ export const Route = createFileRoute("/_authed/servers/$serverId")({
   component: ServerDetailRoute,
 });
 
+function SectionHeading({ title, action }: { title: string; action?: ReactNode }) {
+  return (
+    <div className="mb-3 flex items-center justify-between gap-3">
+      <h2 className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+        {title}
+      </h2>
+      {action}
+    </div>
+  );
+}
+
+function MetaTile({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="min-w-0 p-4">
+      <p className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+        {label}
+      </p>
+      <p className={`mt-1 truncate text-sm ${mono ? "font-mono text-xs leading-5" : ""}`}>
+        {value}
+      </p>
+    </div>
+  );
+}
+
 function ServerDetailRoute() {
   const { serverId } = Route.useParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { data: activeOrganization } = authClient.useActiveOrganization();
-  const [copied, setCopied] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteCode, setDeleteCode] = useState("");
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -83,38 +108,6 @@ function ServerDetailRoute() {
     onError: (error) => setDeleteError(toMessage(error)),
   });
 
-  const test = useMutation({
-    mutationFn: () => checkServerConnection(serverId),
-    onSuccess: async (result) => {
-      await queryClient.invalidateQueries({ queryKey: ["server", serverId] });
-      if (result.ok) {
-        toast.success("Connection OK");
-      } else {
-        toast.error("Couldn't connect", { description: result.error ?? "Server unreachable" });
-      }
-    },
-    onError: (error) => {
-      toast.error("Couldn't test connection", { description: toMessage(error) });
-    },
-  });
-
-  const provision = useMutation({
-    mutationFn: () => provisionServer(serverId),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["server", serverId] });
-      toast.success("Provisioning started");
-    },
-  });
-
-  async function copyPublicKey() {
-    if (!server.data) {
-      return;
-    }
-    await navigator.clipboard.writeText(server.data.sshPublicKey);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  }
-
   if (server.isPending) {
     return <p className="p-6 text-muted-foreground text-sm">Loading…</p>;
   }
@@ -126,20 +119,20 @@ function ServerDetailRoute() {
   const data = server.data;
 
   return (
-    <section className="flex flex-1 flex-col gap-8 p-4 md:p-6">
-      <div className="max-w-2xl">
+    <section className="flex flex-1 flex-col gap-6 p-4 md:p-6">
+      <div>
         <Link
+          className="inline-flex items-center gap-1.5 text-muted-foreground text-sm transition hover:text-foreground"
           to="/servers"
-          className="inline-flex items-center gap-1.5 text-muted-foreground text-sm hover:text-foreground"
         >
           <ArrowLeftIcon className="size-4" />
           Servers
         </Link>
-        <div className="mt-3 flex items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-normal md:text-3xl">{data.name}</h1>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <h1 className="font-semibold text-2xl tracking-tight md:text-3xl">{data.name}</h1>
           <ServerStatusBadge status={data.status} />
         </div>
-        <p className="mt-2 font-mono text-muted-foreground text-sm">
+        <p className="mt-1 font-mono text-muted-foreground text-sm">
           {data.connectionMode === "outbound"
             ? `outbound · ${data.sshHost}`
             : `${data.sshUser}@${data.sshHost}:${data.sshPort}`}
@@ -149,94 +142,56 @@ function ServerDetailRoute() {
         ) : null}
       </div>
 
-      {data.connectionMode === "outbound" ? (
-        <OutboundInstallSection serverId={serverId} />
-      ) : (
-        <>
-          <div className="max-w-2xl rounded-lg border bg-card p-6">
-            <h2 className="text-lg font-semibold">Install the access key</h2>
-            <p className="mt-1 text-muted-foreground text-sm">
-              Add this public key to <code className="font-mono">~/.ssh/authorized_keys</code> on
-              the server (as <code className="font-mono">{data.sshUser}</code>), then provision it.
-            </p>
-            <pre className="mt-4 overflow-x-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
-              {data.sshPublicKey}
-            </pre>
-            <div className="mt-3 flex items-center gap-2">
-              <Button onClick={copyPublicKey} size="sm" variant="outline">
-                {copied ? "Copied" : "Copy key"}
-              </Button>
-              <Button
-                loading={test.isPending}
-                onClick={() => test.mutate()}
-                size="sm"
-                variant="outline"
-              >
-                Test connection
-              </Button>
-              {test.data ? (
-                test.data.ok ? (
-                  <span className="text-success-foreground text-sm">Reachable</span>
-                ) : (
-                  <span className="text-destructive-foreground text-sm">
-                    {test.data.error ?? "Unreachable"}
-                  </span>
-                )
-              ) : null}
-            </div>
-          </div>
+      <Card className="grid grid-cols-2 gap-0 divide-y p-0 sm:grid-cols-4 sm:divide-x sm:divide-y-0">
+        <MetaTile
+          label="Connection"
+          value={data.connectionMode === "outbound" ? "Outbound agent" : "SSH"}
+        />
+        <MetaTile label="Host" mono value={data.sshHost} />
+        <MetaTile
+          label="Last seen"
+          value={data.lastSeenAt ? relativeTime(data.lastSeenAt) : "Never"}
+        />
+        <MetaTile label="Added" value={relativeTime(data.createdAt)} />
+      </Card>
 
-          <div className="max-w-2xl rounded-lg border bg-card p-6">
-            <h2 className="text-lg font-semibold">Provisioning</h2>
-            <p className="mt-1 text-muted-foreground text-sm">
-              Installs Docker (if missing) and runs the Basse agent over SSH. Safe to run again.
-            </p>
-            {data.status === "active" ? (
-              <p className="mt-3 text-success-foreground text-sm">
-                Agent active
-                {data.lastSeenAt
-                  ? ` · last seen ${new Date(data.lastSeenAt).toLocaleString()}`
-                  : null}
+      <div className="grid items-start gap-6 xl:grid-cols-[2fr_1fr]">
+        <div className="flex flex-col gap-6">
+          <AgentSection
+            connectionMode={data.connectionMode}
+            enabled={Boolean(data.agentTokenHint)}
+            serverId={serverId}
+          />
+          <DomainsSection serverId={serverId} sshHost={data.sshHost} />
+        </div>
+
+        <div className="flex flex-col gap-6">
+          {data.connectionMode === "outbound" ? (
+            <OutboundInstallSection serverId={serverId} />
+          ) : (
+            <SshSetupSection data={data} serverId={serverId} />
+          )}
+
+          <section>
+            <SectionHeading title="Danger zone" />
+            <Card className="border-destructive/24 p-5">
+              <p className="text-muted-foreground text-sm">
+                Deleting a server removes it from Basse and discards its access key. Any running
+                agent container is left in place.
               </p>
-            ) : null}
-            <div className="mt-4 flex items-center gap-2">
               <Button
-                loading={provision.isPending || data.status === "provisioning"}
-                onClick={() => provision.mutate()}
-                disabled={data.status === "provisioning"}
+                className="mt-4"
+                onClick={() => setDeleteDialogOpen(true)}
+                variant="destructive-outline"
               >
-                {data.status === "active" || data.status === "unreachable"
-                  ? "Re-provision"
-                  : "Provision"}
+                <TrashIcon />
+                Delete server
               </Button>
-              {provision.isError ? (
-                <span className="text-destructive-foreground text-sm">
-                  {(provision.error as Error).message}
-                </span>
-              ) : null}
-            </div>
-          </div>
-        </>
-      )}
-
-      <AgentSection
-        serverId={serverId}
-        enabled={Boolean(data.agentTokenHint)}
-        connectionMode={data.connectionMode}
-      />
-
-      <DomainsSection serverId={serverId} sshHost={data.sshHost} />
-
-      <div className="max-w-2xl rounded-lg border border-destructive/24 bg-card p-6">
-        <h2 className="text-lg font-semibold">Danger zone</h2>
-        <p className="mt-1 text-muted-foreground text-sm">
-          Deleting a server removes it from Basse and discards its access key. Any running agent
-          container is left in place.
-        </p>
-        <Button className="mt-4" onClick={() => setDeleteDialogOpen(true)} variant="destructive">
-          Delete server
-        </Button>
+            </Card>
+          </section>
+        </div>
       </div>
+
       <Dialog
         open={deleteDialogOpen}
         onOpenChange={(open) => {
@@ -299,6 +254,115 @@ function ServerDetailRoute() {
   );
 }
 
+function SshSetupSection({
+  serverId,
+  data,
+}: {
+  serverId: string;
+  data: NonNullable<Awaited<ReturnType<typeof getServer>>>;
+}) {
+  const queryClient = useQueryClient();
+  const [copied, setCopied] = useState(false);
+
+  const test = useMutation({
+    mutationFn: () => checkServerConnection(serverId),
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ["server", serverId] });
+      if (result.ok) {
+        toast.success("Connection OK");
+      } else {
+        toast.error("Couldn't connect", { description: result.error ?? "Server unreachable" });
+      }
+    },
+    onError: (error) => {
+      toast.error("Couldn't test connection", { description: toMessage(error) });
+    },
+  });
+
+  const provision = useMutation({
+    mutationFn: () => provisionServer(serverId),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["server", serverId] });
+      toast.success("Provisioning started");
+    },
+  });
+
+  async function copyPublicKey() {
+    await navigator.clipboard.writeText(data.sshPublicKey);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
+  return (
+    <section>
+      <SectionHeading title="Setup" />
+      <Card className="p-5">
+        <h3 className="font-medium text-sm">Install the access key</h3>
+        <p className="mt-1 text-muted-foreground text-sm">
+          Add this public key to <code className="font-mono">~/.ssh/authorized_keys</code> on the
+          server (as <code className="font-mono">{data.sshUser}</code>), then provision it.
+        </p>
+        <pre className="mt-3 overflow-x-auto rounded-lg border bg-muted/30 p-3 font-mono text-xs">
+          {data.sshPublicKey}
+        </pre>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button onClick={copyPublicKey} size="sm" variant="outline">
+            {copied ? <CheckIcon /> : <CopyIcon />}
+            {copied ? "Copied" : "Copy key"}
+          </Button>
+          <Button
+            loading={test.isPending}
+            onClick={() => test.mutate()}
+            size="sm"
+            variant="outline"
+          >
+            Test connection
+          </Button>
+          {test.data ? (
+            test.data.ok ? (
+              <span className="text-success-foreground text-sm">Reachable</span>
+            ) : (
+              <span className="text-destructive-foreground text-sm">
+                {test.data.error ?? "Unreachable"}
+              </span>
+            )
+          ) : null}
+        </div>
+
+        <div className="mt-5 border-t pt-4">
+          <h3 className="font-medium text-sm">Provisioning</h3>
+          <p className="mt-1 text-muted-foreground text-sm">
+            Installs Docker (if missing) and runs the Basse agent over SSH. Safe to run again.
+          </p>
+          {data.status === "active" ? (
+            <p className="mt-2 text-success-foreground text-sm">
+              Agent active
+              {data.lastSeenAt ? ` · last seen ${new Date(data.lastSeenAt).toLocaleString()}` : null}
+            </p>
+          ) : null}
+          <div className="mt-3 flex items-center gap-2">
+            <Button
+              disabled={data.status === "provisioning"}
+              loading={provision.isPending || data.status === "provisioning"}
+              onClick={() => provision.mutate()}
+              size="sm"
+            >
+              {data.status === "active" || data.status === "unreachable"
+                ? "Re-provision"
+                : "Provision"}
+            </Button>
+            {provision.isError ? (
+              <span className="text-destructive-foreground text-sm">
+                {(provision.error as Error).message}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      </Card>
+    </section>
+  );
+}
+
 function OutboundInstallSection({ serverId }: { serverId: string }) {
   const [command, setCommand] = useState("");
 
@@ -317,36 +381,45 @@ function OutboundInstallSection({ serverId }: { serverId: string }) {
   }
 
   return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6">
-      <h2 className="text-lg font-semibold">Outbound agent</h2>
-      <p className="mt-1 text-muted-foreground text-sm">
-        Experimental mode for servers where SSH is not possible. SSH mode is recommended when the
-        server can accept it.
-      </p>
-      <p className="mt-2 text-muted-foreground text-sm">
-        Run the install command on the server. The token is embedded in the command and should be
-        treated like a secret.
-      </p>
-      <div className="mt-4 flex flex-wrap items-center gap-2">
-        <Button loading={install.isPending} onClick={() => install.mutate()} variant="outline">
-          {command ? "Refresh command" : "Show install command"}
-        </Button>
-        {command ? (
-          <Button onClick={copyCommand} type="button">
-            Copy command
-          </Button>
-        ) : null}
-      </div>
-      {command ? (
-        <pre className="mt-4 max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/40 p-3 font-mono text-xs">
-          {command}
-        </pre>
-      ) : (
-        <p className="mt-4 text-muted-foreground text-sm">
-          The server becomes active after the installed agent reaches Basse for the first time.
+    <section>
+      <SectionHeading title="Setup" />
+      <Card className="p-5">
+        <h3 className="font-medium text-sm">Outbound agent</h3>
+        <p className="mt-1 text-muted-foreground text-sm">
+          Experimental mode for servers where SSH is not possible. SSH mode is recommended when the
+          server can accept it.
         </p>
-      )}
-    </div>
+        <p className="mt-2 text-muted-foreground text-sm">
+          Run the install command on the server. The token is embedded in the command and should be
+          treated like a secret.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button
+            loading={install.isPending}
+            onClick={() => install.mutate()}
+            size="sm"
+            variant="outline"
+          >
+            {command ? "Refresh command" : "Show install command"}
+          </Button>
+          {command ? (
+            <Button onClick={copyCommand} size="sm" type="button">
+              <CopyIcon />
+              Copy command
+            </Button>
+          ) : null}
+        </div>
+        {command ? (
+          <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-3 font-mono text-xs">
+            {command}
+          </pre>
+        ) : (
+          <p className="mt-3 text-muted-foreground text-sm">
+            The server becomes active after the installed agent reaches Basse for the first time.
+          </p>
+        )}
+      </Card>
+    </section>
   );
 }
 
@@ -425,70 +498,79 @@ function AgentSection({
   });
 
   return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-semibold">Agent</h2>
-          <p className="mt-1 text-muted-foreground text-sm">
-            Health, metrics, logs, and updates for the Basse agent running on this server.
+    <section>
+      <SectionHeading
+        action={
+          <Badge size="sm" variant={info.data?.ready ? "success" : "outline"}>
+            {info.data?.ready ? "ready" : "unknown"}
+          </Badge>
+        }
+        title="Agent"
+      />
+      <Card className="p-5">
+        {!enabled ? (
+          <p className="rounded-lg border border-dashed px-3 py-6 text-center text-muted-foreground text-sm">
+            Provision this server to install the agent.
           </p>
-        </div>
-        <Badge variant={info.data?.ready ? "success" : "outline"}>
-          {info.data?.ready ? "ready" : "unknown"}
-        </Badge>
-      </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="min-w-0 rounded-lg border p-3">
+                <p className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+                  Version
+                </p>
+                <p className="mt-1 truncate font-mono text-xs leading-5">
+                  {info.data?.version ?? "unknown"}
+                </p>
+              </div>
+              <div className="min-w-0 rounded-lg border p-3">
+                <p className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+                  Target image
+                </p>
+                <p
+                  className="mt-1 truncate font-mono text-xs leading-5"
+                  title={info.data?.targetImage}
+                >
+                  {info.data?.targetImage ?? "unknown"}
+                </p>
+              </div>
+              <div className="min-w-0 rounded-lg border p-3">
+                <p className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+                  Docker
+                </p>
+                <p className="mt-1 truncate text-sm">
+                  {info.data?.docker
+                    ? `${info.data.docker.containersRunning}/${info.data.docker.containers} running`
+                    : "unknown"}
+                </p>
+              </div>
+              <div className="min-w-0 rounded-lg border p-3">
+                <p className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+                  Engine
+                </p>
+                <p className="mt-1 truncate text-sm">{info.data?.engine?.version ?? "unknown"}</p>
+              </div>
+            </div>
 
-      {!enabled ? (
-        <p className="mt-5 text-muted-foreground text-sm">
-          Provision this server to install the agent.
-        </p>
-      ) : (
-        <>
-          <div className="mt-5 grid gap-3 text-sm sm:grid-cols-2">
-            <div className="rounded-md border p-3">
-              <p className="text-muted-foreground">Version</p>
-              <p className="mt-1 font-mono">{info.data?.version ?? "unknown"}</p>
-            </div>
-            <div className="rounded-md border p-3">
-              <p className="text-muted-foreground">Target image</p>
-              <p className="mt-1 truncate font-mono">{info.data?.targetImage ?? "unknown"}</p>
-            </div>
-            <div className="rounded-md border p-3">
-              <p className="text-muted-foreground">Docker</p>
-              <p className="mt-1">
-                {info.data?.docker
-                  ? `${info.data.docker.containersRunning}/${info.data.docker.containers} running`
-                  : "unknown"}
-              </p>
-            </div>
-            <div className="rounded-md border p-3">
-              <p className="text-muted-foreground">Engine</p>
-              <p className="mt-1">{info.data?.engine?.version ?? "unknown"}</p>
-            </div>
-          </div>
-
-          {supportsHostAgentOps ? (
-            <>
-              <div className="mt-5 h-56 overflow-hidden rounded-md border bg-muted/20 p-3">
-                {samples.length > 1 ? (
+            {supportsHostAgentOps ? (
+              <>
+                <div className="mt-4 overflow-hidden rounded-lg border">
                   <LineChart
                     animationDuration={700}
                     aspectRatio={undefined}
-                    className="h-full"
+                    className="h-56"
                     data={samples}
-                    margin={{ bottom: 28, left: 28, right: 20, top: 18 }}
+                    loadingLabel={metrics.isError ? "Metrics unavailable" : "Collecting metrics"}
+                    margin={{ bottom: 28, left: 12, right: 12, top: 16 }}
+                    status={samples.length > 1 ? "ready" : "loading"}
                     xDataKey="date"
                   >
                     <Grid horizontal />
-                    <Line
-                      dataKey="cpuPercent"
-                      stroke={chartCssVars.linePrimary}
-                      strokeWidth={2.5}
-                    />
+                    <Line dataKey="cpuPercent" stroke={chartCssVars.linePrimary} strokeWidth={2} />
                     <Line
                       dataKey="memoryPercent"
                       stroke={chartCssVars.lineSecondary}
-                      strokeWidth={2.5}
+                      strokeWidth={2}
                     />
                     <XAxis />
                     <ChartTooltip
@@ -508,52 +590,78 @@ function AgentSection({
                       ]}
                     />
                   </LineChart>
-                ) : (
-                  <div className="flex h-full items-center justify-center text-muted-foreground text-sm">
-                    {metrics.isError ? "Metrics unavailable." : "Collecting metrics…"}
+                  <div className="flex items-center gap-4 border-t px-3 py-2 text-muted-foreground text-xs">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span
+                        className="size-2 rounded-full"
+                        style={{ background: chartCssVars.linePrimary }}
+                      />
+                      CPU
+                    </span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span
+                        className="size-2 rounded-full"
+                        style={{ background: chartCssVars.lineSecondary }}
+                      />
+                      Memory
+                    </span>
+                    <span className="ml-auto flex items-center gap-2">
+                      <Button
+                        loading={checkUpdate.isPending}
+                        onClick={() => checkUpdate.mutate()}
+                        size="xs"
+                        variant="outline"
+                      >
+                        Check updates
+                      </Button>
+                      <Button
+                        loading={runUpdate.isPending}
+                        onClick={() => runUpdate.mutate()}
+                        size="xs"
+                      >
+                        Update agent
+                      </Button>
+                    </span>
                   </div>
-                )}
-              </div>
-
-              <div className="mt-5 flex flex-wrap items-center gap-2">
-                <Button
-                  loading={checkUpdate.isPending}
-                  onClick={() => checkUpdate.mutate()}
-                  size="sm"
-                  variant="outline"
-                >
-                  Check updates
-                </Button>
-                <Button loading={runUpdate.isPending} onClick={() => runUpdate.mutate()} size="sm">
-                  Update agent
-                </Button>
+                </div>
                 {checkUpdate.data ? (
-                  <span className="text-sm">
+                  <p className="mt-2 text-muted-foreground text-sm">
                     {checkUpdate.data.updateAvailable
                       ? "Update available"
                       : "Agent image is current"}
-                  </span>
+                  </p>
                 ) : null}
-              </div>
-              {checkUpdate.isError ? (
-                <p className="mt-2 text-destructive-foreground text-sm">
-                  {(checkUpdate.error as Error).message}
-                </p>
-              ) : null}
+                {checkUpdate.isError ? (
+                  <p className="mt-2 text-destructive-foreground text-sm">
+                    {(checkUpdate.error as Error).message}
+                  </p>
+                ) : null}
 
-              <pre className="mt-5 max-h-72 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs">
-                {logs.data?.logs ?? "Loading logs…"}
-              </pre>
-            </>
-          ) : (
-            <p className="mt-5 text-muted-foreground text-sm">
-              Outbound agents report health and Docker info here. Host-level agent logs, host
-              metrics, and automatic agent updates require SSH.
-            </p>
-          )}
-        </>
-      )}
-    </div>
+                <div className="mt-4">
+                  <h3 className="mb-2 font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+                    Agent logs
+                  </h3>
+                  <LogExplorer
+                    downloadName="basse-agent.log"
+                    emptyText={logs.isPending ? "Loading logs…" : "No logs yet."}
+                    isRefreshing={logs.isFetching}
+                    live={!logs.isError}
+                    maxHeight="18rem"
+                    onRefresh={() => void logs.refetch()}
+                    text={logs.data?.logs ?? ""}
+                  />
+                </div>
+              </>
+            ) : (
+              <p className="mt-4 text-muted-foreground text-sm">
+                Outbound agents report health and Docker info here. Host-level agent logs, host
+                metrics, and automatic agent updates require SSH.
+              </p>
+            )}
+          </>
+        )}
+      </Card>
+    </section>
   );
 }
 
@@ -620,88 +728,96 @@ function DomainsSection({ serverId, sshHost }: { serverId: string; sshHost: stri
   const domainList = domains.data ?? [];
 
   return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold">Domains</h2>
-        <Button
-          loading={resync.isPending}
-          onClick={() => resync.mutate()}
-          size="sm"
-          variant="outline"
-        >
-          Resync proxy
-        </Button>
-      </div>
-      <p className="mt-1 text-muted-foreground text-sm">
-        Point each domain's DNS A record at <code className="font-mono">{sshHost}</code>, then it is
-        routed to its upstream with automatic HTTPS.
-      </p>
+    <section>
+      <SectionHeading
+        action={
+          <Button
+            loading={resync.isPending}
+            onClick={() => resync.mutate()}
+            size="xs"
+            variant="outline"
+          >
+            <RotateCcwIcon />
+            Resync proxy
+          </Button>
+        }
+        title="Domains"
+      />
+      <Card className="p-5">
+        <p className="text-muted-foreground text-sm">
+          Point each domain's DNS A record at <code className="font-mono">{sshHost}</code>, then it
+          is routed to its upstream with automatic HTTPS.
+        </p>
 
-      <div className="mt-5">
-        {domains.isPending ? (
-          <p className="text-muted-foreground text-sm">Loading…</p>
-        ) : domainList.length === 0 ? (
-          <p className="text-muted-foreground text-sm">No domains yet.</p>
-        ) : (
-          <ul className="flex flex-col gap-2">
-            {domainList.map((d) => (
-              <li
-                key={d.id}
-                className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
-              >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="truncate font-medium text-sm">{d.host}</p>
-                    <Badge variant={DOMAIN_STATUS_VARIANT[d.status]}>{d.status}</Badge>
+        <div className="mt-4">
+          {domains.isPending ? (
+            <div className="h-16 animate-pulse rounded-lg border bg-muted/30" aria-hidden />
+          ) : domainList.length === 0 ? (
+            <p className="rounded-lg border border-dashed px-3 py-5 text-center text-muted-foreground text-sm">
+              No domains routed on this server yet.
+            </p>
+          ) : (
+            <ul className="divide-y rounded-lg border">
+              {domainList.map((d) => (
+                <li key={d.id} className="flex items-center justify-between gap-3 px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="truncate font-medium text-sm">{d.host}</p>
+                      <Badge size="sm" variant={DOMAIN_STATUS_VARIANT[d.status]}>
+                        {d.status}
+                      </Badge>
+                    </div>
+                    <p className="truncate font-mono text-muted-foreground text-xs">
+                      → {d.upstream}
+                      {d.statusMessage ? ` · ${d.statusMessage}` : ""}
+                    </p>
                   </div>
-                  <p className="truncate font-mono text-muted-foreground text-xs">
-                    → {d.upstream}
-                    {d.statusMessage ? ` · ${d.statusMessage}` : ""}
-                  </p>
-                </div>
-                <Button
-                  aria-label={`Delete ${d.host}`}
-                  loading={remove.isPending && remove.variables === d.id}
-                  onClick={() => remove.mutate(d.id)}
-                  size="icon"
-                  variant="outline"
-                >
-                  <TrashIcon />
-                </Button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      <form className="mt-6 space-y-4 border-t pt-6" onSubmit={handleSubmit}>
-        <div className="space-y-2">
-          <Label htmlFor="domain-host">Domain</Label>
-          <Input
-            id="domain-host"
-            onChange={(event) => setHost(event.currentTarget.value)}
-            placeholder="app.example.com"
-            required
-            value={host}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="domain-upstream">Upstream</Label>
-          <Input
-            id="domain-upstream"
-            onChange={(event) => setUpstream(event.currentTarget.value)}
-            placeholder="my-container:3000"
-            required
-            value={upstream}
-          />
+                  <Button
+                    aria-label={`Delete ${d.host}`}
+                    loading={remove.isPending && remove.variables === d.id}
+                    onClick={() => remove.mutate(d.id)}
+                    size="icon-sm"
+                    variant="ghost"
+                  >
+                    <TrashIcon />
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
 
-        {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
-
-        <Button loading={add.isPending} type="submit">
-          Add domain
-        </Button>
-      </form>
-    </div>
+        <form className="mt-5 grid gap-3 border-t pt-4 sm:grid-cols-[1fr_1fr_auto]" onSubmit={handleSubmit}>
+          <div className="space-y-2">
+            <Label htmlFor="domain-host">Domain</Label>
+            <Input
+              id="domain-host"
+              onChange={(event) => setHost(event.currentTarget.value)}
+              placeholder="app.example.com"
+              required
+              value={host}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="domain-upstream">Upstream</Label>
+            <Input
+              id="domain-upstream"
+              onChange={(event) => setUpstream(event.currentTarget.value)}
+              placeholder="my-container:3000"
+              required
+              value={upstream}
+            />
+          </div>
+          <div className="flex items-end">
+            <Button loading={add.isPending} type="submit">
+              Add domain
+            </Button>
+          </div>
+          {error ? (
+            <p className="text-destructive-foreground text-sm sm:col-span-3">{error}</p>
+          ) : null}
+        </form>
+      </Card>
+    </section>
   );
 }

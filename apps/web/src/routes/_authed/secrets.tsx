@@ -1,8 +1,30 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { CheckIcon, CopyIcon, ExternalLinkIcon, TrashIcon } from "lucide-react";
-import { FormEvent, useEffect, useRef, useState } from "react";
+import {
+  CheckIcon,
+  ContainerIcon,
+  CopyIcon,
+  ExternalLinkIcon,
+  GitBranchIcon,
+  KeyRoundIcon,
+  PlusIcon,
+  TrashIcon,
+} from "lucide-react";
+import { FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogClose,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -37,18 +59,69 @@ function SecretsRoute() {
   const organizationId = activeOrganization?.id;
 
   return (
-    <section className="flex flex-1 flex-col gap-8 p-4 md:p-6">
-      <div className="max-w-2xl">
-        <h1 className="text-2xl font-semibold tracking-normal md:text-3xl">Secrets</h1>
-        <p className="mt-2 text-muted-foreground text-sm">
+    <section className="flex flex-1 flex-col gap-7 p-4 md:p-6">
+      <div>
+        <p className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+          Workspace
+        </p>
+        <h1 className="mt-1 font-semibold text-2xl tracking-tight md:text-3xl">Secrets</h1>
+        <p className="mt-1 text-muted-foreground text-sm">
           SSH keys and integration credentials for {activeOrganization?.name ?? "this workspace"}.
         </p>
       </div>
 
-      <SshKeysSection organizationId={organizationId} />
-      <GitHubSection organizationId={organizationId} />
-      <DepotSection organizationId={organizationId} />
+      <div className="grid max-w-6xl items-start gap-4 xl:grid-cols-2">
+        <GitHubSection organizationId={organizationId} />
+        <div className="flex flex-col gap-4">
+          <SshKeysSection organizationId={organizationId} />
+          <DepotSection organizationId={organizationId} />
+        </div>
+      </div>
     </section>
+  );
+}
+
+function SectionCard({
+  icon,
+  title,
+  description,
+  badge,
+  children,
+}: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+  badge?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <Card className="p-6">
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg border bg-muted/30 text-foreground/80">
+          {icon}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="font-semibold text-base">{title}</h2>
+            {badge}
+          </div>
+          <p className="mt-0.5 text-muted-foreground text-sm">{description}</p>
+        </div>
+      </div>
+      {children}
+    </Card>
+  );
+}
+
+function ConnectionBadge({ connected }: { connected: boolean | undefined }) {
+  return connected ? (
+    <Badge size="sm" variant="success">
+      Connected
+    </Badge>
+  ) : (
+    <Badge size="sm" variant="secondary">
+      Not connected
+    </Badge>
   );
 }
 
@@ -250,13 +323,12 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
   }
 
   return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6">
-      <h2 className="text-lg font-semibold">GitHub</h2>
-      <p className="mt-1 text-muted-foreground text-sm">
-        Create a workspace GitHub App, install it on private repositories, and deploy over
-        short-lived installation tokens.
-      </p>
-
+    <SectionCard
+      badge={<ConnectionBadge connected={connected} />}
+      description="Create a workspace GitHub App, install it on private repositories, and deploy over short-lived installation tokens."
+      icon={<GitBranchIcon className="size-4.5" />}
+      title="GitHub"
+    >
       {integration.isError ? (
         <p className="mt-4 text-destructive-foreground text-sm">
           Couldn't load GitHub integration: {toMessage(integration.error)}
@@ -280,7 +352,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
       ) : null}
 
       {connected ? (
-        <div className="mt-5 rounded-md border px-3 py-2 text-sm">
+        <div className="mt-5 rounded-lg border px-3 py-2.5 text-sm">
           <p className="font-medium">{integration.data?.appName}</p>
           <p className="font-mono text-muted-foreground text-xs">
             github.com/apps/{integration.data?.appSlug}
@@ -312,51 +384,59 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
       ) : null}
 
       {savedInstallations.length > 0 ? (
-        <ul className="mt-4 flex flex-col gap-2">
-          {savedInstallations.map((installation) => (
-            <li
-              key={installation.id}
-              className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
-            >
-              <div className="min-w-0 text-sm">
-                <p className="truncate font-medium">{installation.accountLogin}</p>
-                <p className="truncate text-muted-foreground text-xs">
-                  {installation.accountType ?? "account"} ·{" "}
-                  {installation.repositorySelection ?? "repositories"}
-                </p>
-              </div>
-              <Button
-                aria-label={`Remove ${installation.accountLogin} installation`}
-                loading={removeInstallation.isPending}
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      `Remove ${installation.accountLogin} from this workspace's GitHub installations?`,
-                    )
-                  ) {
-                    removeInstallation.mutate(installation.id);
-                  }
-                }}
-                size="icon"
-                type="button"
-                variant="outline"
+        <div className="mt-4">
+          <h3 className="mb-2 font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+            Installations
+          </h3>
+          <ul className="divide-y rounded-lg border">
+            {savedInstallations.map((installation) => (
+              <li
+                key={installation.id}
+                className="flex items-center justify-between gap-3 px-3 py-2"
               >
-                <TrashIcon />
-              </Button>
-            </li>
-          ))}
-        </ul>
+                <div className="min-w-0 text-sm">
+                  <p className="truncate font-medium">{installation.accountLogin}</p>
+                  <p className="truncate text-muted-foreground text-xs">
+                    {installation.accountType ?? "account"} ·{" "}
+                    {installation.repositorySelection ?? "repositories"}
+                  </p>
+                </div>
+                <Button
+                  aria-label={`Remove ${installation.accountLogin} installation`}
+                  loading={removeInstallation.isPending}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `Remove ${installation.accountLogin} from this workspace's GitHub installations?`,
+                      )
+                    ) {
+                      removeInstallation.mutate(installation.id);
+                    }
+                  }}
+                  size="icon-sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  <TrashIcon />
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : connected ? (
-        <p className="mt-4 text-muted-foreground text-sm">No GitHub installations saved yet.</p>
+        <p className="mt-4 rounded-lg border border-dashed px-3 py-4 text-center text-muted-foreground text-sm">
+          No GitHub installations saved yet.
+        </p>
       ) : null}
 
-      <div className="mt-6 flex flex-wrap gap-2 border-t pt-6">
+      <div className="mt-6 flex flex-wrap gap-2 border-t pt-5">
         <form action={manifest.data?.actionUrl} method="post" onSubmit={submitGitHubManifest}>
           <input name="manifest" type="hidden" value={manifest.data?.manifest ?? ""} />
           <Button
             disabled={!organizationId || manifest.isPending || startingGitHubSetup}
             loading={startingGitHubSetup}
             type="submit"
+            variant={connected ? "outline" : "default"}
           >
             {connected ? "Replace GitHub App" : "Create GitHub App"}
           </Button>
@@ -382,7 +462,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
           </>
         ) : null}
       </div>
-    </div>
+    </SectionCard>
   );
 }
 
@@ -402,6 +482,7 @@ async function clearGitHubCallbackSearch(navigate: ReturnType<typeof useNavigate
 function SshKeysSection({ organizationId }: { organizationId?: string }) {
   const queryClient = useQueryClient();
   const queryKey = ["ssh-keys", organizationId];
+  const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [privateKey, setPrivateKey] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -418,6 +499,7 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
       setName("");
       setPrivateKey("");
       setError(null);
+      setOpen(false);
       toast.success("SSH key added");
       await queryClient.invalidateQueries({ queryKey });
     },
@@ -433,44 +515,45 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
     onError: (error) => toast.error("Couldn't remove key", { description: toMessage(error) }),
   });
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    addKey.mutate();
-  }
-
   const keyList = keys.data ?? [];
 
   return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6">
-      <h2 className="text-lg font-semibold">SSH Keys</h2>
-      <p className="mt-1 text-muted-foreground text-sm">
-        Private keys Basse can use when connecting to servers in this workspace.
-      </p>
-
+    <SectionCard
+      badge={
+        keyList.length > 0 ? (
+          <Badge size="sm" variant="outline">
+            {keyList.length}
+          </Badge>
+        ) : undefined
+      }
+      description="Private keys Basse can use when connecting to servers in this workspace."
+      icon={<KeyRoundIcon className="size-4.5" />}
+      title="SSH keys"
+    >
       <div className="mt-5">
         {keys.isPending ? (
-          <p className="text-muted-foreground text-sm">Loading…</p>
+          <div className="h-16 animate-pulse rounded-lg border bg-muted/30" aria-hidden />
         ) : keyList.length === 0 ? (
-          <p className="text-muted-foreground text-sm">No SSH keys yet.</p>
+          <p className="rounded-lg border border-dashed px-3 py-4 text-center text-muted-foreground text-sm">
+            No SSH keys yet. Add one to connect servers with an existing key.
+          </p>
         ) : (
-          <ul className="flex flex-col gap-2">
+          <ul className="divide-y rounded-lg border">
             {keyList.map((key) => (
-              <li
-                key={key.id}
-                className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
-              >
+              <li key={key.id} className="flex items-center justify-between gap-3 px-3 py-2">
                 <div className="min-w-0">
                   <p className="truncate font-medium text-sm">{key.name}</p>
                   <p className="truncate font-mono text-muted-foreground text-xs">
-                    {key.publicKey} {key.hasPrivateKey ? "" : " · public key only"}
+                    {key.publicKey}
+                    {key.hasPrivateKey ? "" : " · public key only"}
                   </p>
                 </div>
                 <Button
                   aria-label={`Delete ${key.name}`}
                   loading={removeKey.isPending && removeKey.variables === key.id}
                   onClick={() => removeKey.mutate(key.id)}
-                  size="icon"
-                  variant="outline"
+                  size="icon-sm"
+                  variant="ghost"
                 >
                   <TrashIcon />
                 </Button>
@@ -480,46 +563,79 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
         )}
       </div>
 
-      <form className="mt-6 space-y-4 border-t pt-6" onSubmit={handleSubmit}>
-        <div className="space-y-2">
-          <Label htmlFor="ssh-key-name">Name</Label>
-          <Input
-            id="ssh-key-name"
-            value={name}
-            onChange={(event) => setName(event.currentTarget.value)}
-            placeholder="laptop"
-            required
+      <div className="mt-4">
+        <Dialog
+          open={open}
+          onOpenChange={(next) => {
+            setOpen(next);
+            if (!next) setError(null);
+          }}
+        >
+          <DialogTrigger
+            render={
+              <Button size="sm" variant="outline">
+                <PlusIcon />
+                Add SSH key
+              </Button>
+            }
           />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="ssh-key-private">Private key</Label>
-          <Textarea
-            id="ssh-key-private"
-            value={privateKey}
-            onChange={(event) => setPrivateKey(event.currentTarget.value)}
-            placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-            rows={6}
-            className="font-mono text-xs"
-            required
-          />
-          <p className="text-muted-foreground text-xs">
-            Basse stores it encrypted and derives the public key automatically.
-          </p>
-        </div>
-
-        {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
-
-        <Button disabled={!organizationId} loading={addKey.isPending} type="submit">
-          Add SSH key
-        </Button>
-      </form>
-    </div>
+          <DialogPopup className="h-fit max-w-md">
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                addKey.mutate();
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>Add SSH key</DialogTitle>
+                <DialogDescription>
+                  Basse stores it encrypted and derives the public key automatically.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogPanel className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="ssh-key-name">Name</Label>
+                  <Input
+                    autoFocus
+                    id="ssh-key-name"
+                    onChange={(event) => setName(event.currentTarget.value)}
+                    placeholder="laptop"
+                    required
+                    value={name}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="ssh-key-private">Private key</Label>
+                  <Textarea
+                    className="font-mono text-xs"
+                    id="ssh-key-private"
+                    onChange={(event) => setPrivateKey(event.currentTarget.value)}
+                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                    required
+                    rows={6}
+                    value={privateKey}
+                  />
+                </div>
+                {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+              </DialogPanel>
+              <DialogFooter>
+                <DialogClose render={<Button variant="outline">Cancel</Button>} />
+                <Button disabled={!organizationId} loading={addKey.isPending} type="submit">
+                  Add SSH key
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogPopup>
+        </Dialog>
+      </div>
+    </SectionCard>
   );
 }
 
 function DepotSection({ organizationId }: { organizationId?: string }) {
   const queryClient = useQueryClient();
   const queryKey = ["depot-connection", organizationId];
+  const [open, setOpen] = useState(false);
   const [token, setToken] = useState("");
   const [projectId, setProjectId] = useState("");
   const [orgId, setOrgId] = useState("");
@@ -538,6 +654,7 @@ function DepotSection({ organizationId }: { organizationId?: string }) {
       setProjectId("");
       setOrgId("");
       setError(null);
+      setOpen(false);
       toast.success("Depot token saved");
       await queryClient.invalidateQueries({ queryKey });
     },
@@ -553,80 +670,109 @@ function DepotSection({ organizationId }: { organizationId?: string }) {
     onError: (error) => toast.error("Couldn't disconnect Depot", { description: toMessage(error) }),
   });
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    save.mutate();
-  }
-
   const connected = connection.data?.connected;
 
   return (
-    <div className="max-w-2xl rounded-lg border bg-card p-6">
-      <h2 className="text-lg font-semibold">Depot</h2>
-      <p className="mt-1 text-muted-foreground text-sm">
-        Connect a Depot project to build images for this workspace.
-      </p>
-
+    <SectionCard
+      badge={<ConnectionBadge connected={connected} />}
+      description="Connect a Depot project to build images for this workspace."
+      icon={<ContainerIcon className="size-4.5" />}
+      title="Depot"
+    >
       {connected ? (
-        <div className="mt-5 flex items-center justify-between gap-3 rounded-md border px-3 py-2">
-          <div className="min-w-0 text-sm">
-            <p className="font-medium">Connected</p>
-            <p className="truncate font-mono text-muted-foreground text-xs">
-              project {connection.data?.projectId} · org {connection.data?.orgId ?? "—"} · token
-              ••••
-              {connection.data?.tokenHint}
-            </p>
-          </div>
+        <div className="mt-5 rounded-lg border px-3 py-2.5">
+          <p className="font-medium text-sm">Connected</p>
+          <p className="truncate font-mono text-muted-foreground text-xs">
+            project {connection.data?.projectId} · org {connection.data?.orgId ?? "—"} · token ••••
+            {connection.data?.tokenHint}
+          </p>
+        </div>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Dialog
+          open={open}
+          onOpenChange={(next) => {
+            setOpen(next);
+            if (!next) setError(null);
+          }}
+        >
+          <DialogTrigger
+            render={
+              <Button size="sm" variant={connected ? "outline" : "default"}>
+                {connected ? "Update connection" : "Connect Depot"}
+              </Button>
+            }
+          />
+          <DialogPopup className="h-fit max-w-md">
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                save.mutate();
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>{connected ? "Update Depot connection" : "Connect Depot"}</DialogTitle>
+                <DialogDescription>
+                  Builds run on Depot and push to its registry before deploying to your servers.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogPanel className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="depot-project">Project ID</Label>
+                  <Input
+                    autoFocus
+                    id="depot-project"
+                    onChange={(event) => setProjectId(event.currentTarget.value)}
+                    placeholder="abc123def4"
+                    required
+                    value={projectId}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="depot-org">Organization ID</Label>
+                  <Input
+                    id="depot-org"
+                    onChange={(event) => setOrgId(event.currentTarget.value)}
+                    placeholder="the {orgId}.registry.depot.dev subdomain"
+                    required
+                    value={orgId}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="depot-token">Access token</Label>
+                  <Input
+                    autoComplete="off"
+                    id="depot-token"
+                    onChange={(event) => setToken(event.currentTarget.value)}
+                    placeholder="depot_org_…"
+                    required
+                    type="password"
+                    value={token}
+                  />
+                </div>
+                {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+              </DialogPanel>
+              <DialogFooter>
+                <DialogClose render={<Button variant="outline">Cancel</Button>} />
+                <Button disabled={!organizationId} loading={save.isPending} type="submit">
+                  {connected ? "Update connection" : "Connect Depot"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogPopup>
+        </Dialog>
+        {connected ? (
           <Button
             loading={disconnect.isPending}
             onClick={() => disconnect.mutate()}
+            size="sm"
             variant="outline"
           >
             Disconnect
           </Button>
-        </div>
-      ) : null}
-
-      <form className="mt-6 space-y-4 border-t pt-6" onSubmit={handleSubmit}>
-        <div className="space-y-2">
-          <Label htmlFor="depot-project">Project ID</Label>
-          <Input
-            id="depot-project"
-            value={projectId}
-            onChange={(event) => setProjectId(event.currentTarget.value)}
-            placeholder="abc123def4"
-            required
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="depot-org">Organization ID</Label>
-          <Input
-            id="depot-org"
-            value={orgId}
-            onChange={(event) => setOrgId(event.currentTarget.value)}
-            placeholder="the {orgId}.registry.depot.dev subdomain"
-            required
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="depot-token">Access token</Label>
-          <Input
-            id="depot-token"
-            type="password"
-            autoComplete="off"
-            value={token}
-            onChange={(event) => setToken(event.currentTarget.value)}
-            placeholder="depot_org_…"
-            required
-          />
-        </div>
-
-        {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
-
-        <Button disabled={!organizationId} loading={save.isPending} type="submit">
-          {connected ? "Update connection" : "Connect Depot"}
-        </Button>
-      </form>
-    </div>
+        ) : null}
+      </div>
+    </SectionCard>
   );
 }
