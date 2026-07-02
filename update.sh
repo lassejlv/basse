@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  if command -v bash >/dev/null 2>&1; then
+    exec bash -s "$@"
+  fi
+  printf '%s\n' "Basse updater requires bash. Install bash, then run: curl -fsSL https://basse.sh/update | bash" >&2
+  exit 1
+fi
+
 set -Eeuo pipefail
 
 APP_NAME="Basse"

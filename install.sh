@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  if command -v bash >/dev/null 2>&1; then
+    exec bash -s "$@"
+  fi
+  printf '%s\n' "Basse installer requires bash. Install bash, then run: curl -fsSL https://basse.sh/install | bash" >&2
+  exit 1
+fi
+
 set -Eeuo pipefail
 
 APP_NAME="Basse"
@@ -149,6 +157,82 @@ detect_os() {
   esac
 }
 
+install_base_tooling() {
+  if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+    return
+  fi
+
+  info "Installing curl..."
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y ca-certificates curl
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y ca-certificates curl
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y ca-certificates curl
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm ca-certificates curl
+  else
+    fail "Need curl or wget, and no supported package manager was found."
+  fi
+}
+
+install_docker() {
+  if command -v docker >/dev/null 2>&1; then
+    return
+  fi
+
+  install_base_tooling
+  info "Docker is not installed. Installing Docker Engine..."
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL https://get.docker.com | sh
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- https://get.docker.com | sh
+  else
+    fail "Need curl or wget to install Docker."
+  fi
+}
+
+start_docker() {
+  if docker info >/dev/null 2>&1; then
+    return
+  fi
+
+  info "Starting Docker..."
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable --now docker
+  elif command -v service >/dev/null 2>&1; then
+    service docker start
+  fi
+
+  for _ in $(seq 1 20); do
+    docker info >/dev/null 2>&1 && return
+    sleep 1
+  done
+
+  fail "Docker is installed, but the daemon is not reachable."
+}
+
+install_compose_plugin() {
+  if docker_compose_cmd >/dev/null 2>&1; then
+    return
+  fi
+
+  info "Installing Docker Compose plugin..."
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y docker-compose-plugin
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y docker-compose-plugin
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y docker-compose-plugin
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm docker-compose
+  else
+    fail "Docker Compose is missing, and no supported package manager was found."
+  fi
+}
+
 docker_compose_cmd() {
   if docker compose version >/dev/null 2>&1; then
     printf 'docker compose'
@@ -162,8 +246,9 @@ docker_compose_cmd() {
 }
 
 check_dependencies() {
-  command -v docker >/dev/null 2>&1 || fail "Docker is not installed. Install Docker Engine first, then re-run this script."
-  docker info >/dev/null 2>&1 || fail "Docker is installed, but the daemon is not reachable."
+  install_docker
+  start_docker
+  install_compose_plugin
   COMPOSE_CMD="$(docker_compose_cmd)" || fail "Docker Compose is not installed. Install the Docker Compose plugin, then re-run this script."
   export COMPOSE_CMD
   ok "Docker is ready"

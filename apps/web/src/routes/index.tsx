@@ -23,8 +23,8 @@ export const Route = createFileRoute("/")({
   component: LandingRoute,
 });
 
-const INSTALL_DISPLAY = "curl -fsSL basse.sh/install | sh";
-const INSTALL_COMMAND = "curl -fsSL https://basse.sh/install | sh";
+const INSTALL_DISPLAY = "curl -fsSL basse.sh/install | bash";
+const INSTALL_COMMAND = "curl -fsSL https://basse.sh/install | bash";
 
 const FEATURES = [
   {
