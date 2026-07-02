@@ -225,6 +225,34 @@
       "when": 1782948980499,
       "tag": "0031_black_bullseye",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1782949760056,
+      "tag": "0032_little_leper_queen",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1782949976014,
+      "tag": "0033_mixed_triathlon",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1782950446789,
+      "tag": "0034_loud_umar",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1782951059361,
+      "tag": "0035_giant_northstar",
+      "breakpoints": true
     }
   ]
 }

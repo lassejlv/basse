@@ -5,6 +5,7 @@ import {
   domain,
   environment,
   loadBalancer,
+  loadBalancerEvent,
   loadBalancerIntegration,
   loadBalancerTarget,
   project,
@@ -14,11 +15,12 @@ import type {
   CreateLoadBalancerIntegrationInput,
   CreateManagedLoadBalancerInput,
   LoadBalancerIntegration,
+  LoadBalancerEvent,
   LoadBalancerProvider,
   ManagedLoadBalancer,
   ManagedLoadBalancerTarget,
 } from "@basse/shared";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import {
   deleteCloudflareLoadBalancer,
@@ -33,6 +35,7 @@ import { resolveActiveWorkspace } from "./workspace";
 type IntegrationRow = typeof loadBalancerIntegration.$inferSelect;
 type LoadBalancerRow = typeof loadBalancer.$inferSelect;
 type TargetRow = typeof loadBalancerTarget.$inferSelect;
+type EventRow = typeof loadBalancerEvent.$inferSelect;
 type ServerRow = typeof server.$inferSelect;
 
 const PROVIDERS: LoadBalancerProvider[] = ["hetzner", "cloudflare"];
@@ -42,7 +45,7 @@ const CONTROL_PLANE_DOMAIN = Bun.env.DOMAIN?.trim().toLowerCase();
 export const loadBalancers = new Hono();
 
 loadBalancers.get("/integrations", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const rows = await db
@@ -55,7 +58,7 @@ loadBalancers.get("/integrations", async (c) => {
 });
 
 loadBalancers.post("/integrations", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const body = (await c.req
@@ -132,7 +135,7 @@ loadBalancers.post("/integrations", async (c) => {
 });
 
 loadBalancers.delete("/integrations/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const integrationId = c.req.param("id");
@@ -168,7 +171,7 @@ loadBalancers.delete("/integrations/:id", async (c) => {
 });
 
 loadBalancers.get("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.query("appId");
@@ -181,7 +184,7 @@ loadBalancers.get("/", async (c) => {
 });
 
 loadBalancers.post("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const body = (await c.req
@@ -251,7 +254,7 @@ loadBalancers.post("/", async (c) => {
 });
 
 loadBalancers.post("/:id/sync", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const row = await ownedLoadBalancer(c.req.param("id"), organizationId);
@@ -260,8 +263,25 @@ loadBalancers.post("/:id/sync", async (c) => {
   return c.json(await syncManagedLoadBalancer(row.id, organizationId));
 });
 
+loadBalancers.get("/:id/events", async (c) => {
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
+  if (organizationId instanceof Response) return organizationId;
+
+  const row = await ownedLoadBalancer(c.req.param("id"), organizationId);
+  if (!row) return c.json({ error: "Load balancer not found" }, 404);
+
+  const rows = await db
+    .select()
+    .from(loadBalancerEvent)
+    .where(eq(loadBalancerEvent.loadBalancerId, row.id))
+    .orderBy(desc(loadBalancerEvent.createdAt))
+    .limit(50);
+
+  return c.json(rows.map(toEvent));
+});
+
 loadBalancers.delete("/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const row = await ownedLoadBalancer(c.req.param("id"), organizationId);
@@ -340,6 +360,17 @@ function toManagedLoadBalancer(row: LoadBalancerRow, targets: TargetRow[]): Mana
   };
 }
 
+function toEvent(row: EventRow): LoadBalancerEvent {
+  return {
+    id: row.id,
+    loadBalancerId: row.loadBalancerId,
+    status: row.status,
+    message: row.message,
+    details: row.details,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
 async function listManagedLoadBalancers(
   appId: string,
   organizationId: string,
@@ -382,6 +413,7 @@ async function syncManagedLoadBalancer(
     .update(loadBalancer)
     .set({ status: "syncing", statusMessage: null, updatedAt: new Date() })
     .where(eq(loadBalancer.id, row.id));
+  await recordLoadBalancerEvent(row.id, "info", "Sync started");
 
   try {
     const integration = await ownedIntegration(row.integrationId, organizationId);
@@ -494,6 +526,13 @@ async function syncManagedLoadBalancer(
       }
     });
 
+    await recordLoadBalancerEvent(
+      row.id,
+      "success",
+      `Synced ${syncResult.targets.length} target${syncResult.targets.length === 1 ? "" : "s"}`,
+      syncResult.targets.map((target) => target.address).join(", ") || null,
+    );
+
     await enqueueDomainSyncs([
       ...appContext.servers.map((target) => target.id),
       ...staleDomainServerIds,
@@ -504,11 +543,50 @@ async function syncManagedLoadBalancer(
       .update(loadBalancer)
       .set({ status: "error", statusMessage: message, updatedAt: new Date() })
       .where(eq(loadBalancer.id, row.id));
+    await recordLoadBalancerEvent(row.id, "error", "Sync failed", message);
   }
 
   const [updated] = await listManagedLoadBalancers(row.appId, organizationId);
   if (!updated) throw new Error("Load balancer not found");
   return updated;
+}
+
+async function recordLoadBalancerEvent(
+  loadBalancerId: string,
+  status: EventRow["status"],
+  message: string,
+  details?: string | null,
+) {
+  await db.insert(loadBalancerEvent).values({
+    id: crypto.randomUUID(),
+    loadBalancerId,
+    status,
+    message,
+    details: details ?? null,
+    createdAt: new Date(),
+  });
+}
+
+export async function syncManagedLoadBalancersForApp(appId: string): Promise<void> {
+  const [context] = await db
+    .select({ organizationId: project.organizationId })
+    .from(app)
+    .innerJoin(environment, eq(app.environmentId, environment.id))
+    .innerJoin(project, eq(environment.projectId, project.id))
+    .where(eq(app.id, appId))
+    .limit(1);
+  if (!context) return;
+
+  const rows = await db
+    .select({ id: loadBalancer.id })
+    .from(loadBalancer)
+    .where(
+      and(eq(loadBalancer.appId, appId), eq(loadBalancer.organizationId, context.organizationId)),
+    );
+
+  for (const row of rows) {
+    await syncManagedLoadBalancer(row.id, context.organizationId);
+  }
 }
 
 async function ensureDomains(

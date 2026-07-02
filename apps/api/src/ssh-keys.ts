@@ -23,7 +23,7 @@ function sanitizeSshKey(row: SshKeyRow) {
 export const sshKeys = new Hono();
 
 sshKeys.get("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
@@ -39,7 +39,7 @@ sshKeys.get("/", async (c) => {
 });
 
 sshKeys.post("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
@@ -86,7 +86,7 @@ sshKeys.post("/", async (c) => {
 });
 
 sshKeys.delete("/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;

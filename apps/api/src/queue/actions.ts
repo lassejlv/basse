@@ -1,5 +1,7 @@
 import { runBackupUpload, runDatabaseBackup } from "../backups";
+import { runCronJob } from "../cron-jobs";
 import { runDeployment } from "../deploy";
+import { syncManagedLoadBalancersForApp } from "../load-balancers";
 import { provisionServer } from "../provision";
 import { syncServerDomains } from "../proxy-sync";
 import type { ActionName } from "./queue";
@@ -14,7 +16,9 @@ export const actionHandlers: Record<ActionName, (entityId: string) => Promise<vo
   "sync-domains": async (serverId) => {
     await syncServerDomains(serverId);
   },
+  "sync-app-load-balancers": (appId) => syncManagedLoadBalancersForApp(appId),
   "deploy-app": (deploymentId) => runDeployment(deploymentId),
+  "cron-job": (jobId) => runCronJob(jobId),
   "database-backup": (backupId) => runDatabaseBackup(backupId),
   "database-backup-upload": (backupId) => runBackupUpload(backupId),
 };

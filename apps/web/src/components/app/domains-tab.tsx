@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { PlusIcon, RotateCcwIcon, TrashIcon } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
-import type { LoadBalancerIntegration, ManagedLoadBalancer } from "@basse/shared";
+import type { LoadBalancerEvent, LoadBalancerIntegration, ManagedLoadBalancer } from "@basse/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -22,6 +22,7 @@ import { listDomains, resyncProxy, type Domain } from "@/lib/domains";
 import {
   createManagedLoadBalancer,
   deleteManagedLoadBalancer,
+  listLoadBalancerEvents,
   listLoadBalancerIntegrations,
   listManagedLoadBalancers,
   syncManagedLoadBalancer,
@@ -630,11 +631,17 @@ function ManagedLoadBalancerCard({
   queryKey: unknown[];
 }) {
   const queryClient = useQueryClient();
+  const eventsKey = ["load-balancer-events", loadBalancer.id];
+  const events = useQuery({
+    queryKey: eventsKey,
+    queryFn: () => listLoadBalancerEvents(loadBalancer.id),
+  });
   const sync = useMutation({
     mutationFn: () => syncManagedLoadBalancer(loadBalancer.id),
     onSuccess: async (updated) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey }),
+        queryClient.invalidateQueries({ queryKey: eventsKey }),
         ...app.serverIds.map((serverId) =>
           queryClient.invalidateQueries({ queryKey: ["domains", serverId] }),
         ),
@@ -655,6 +662,7 @@ function ManagedLoadBalancerCard({
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey }),
+        queryClient.invalidateQueries({ queryKey: eventsKey }),
         ...app.serverIds.map((serverId) =>
           queryClient.invalidateQueries({ queryKey: ["domains", serverId] }),
         ),
@@ -730,7 +738,7 @@ function ManagedLoadBalancerCard({
       )}
 
       <div className="mt-4">
-        <p className="font-medium text-sm">Targets</p>
+        <p className="font-medium text-sm">Target health</p>
         {loadBalancer.targets.length === 0 ? (
           <p className="mt-1 text-muted-foreground text-sm">No targets synced yet.</p>
         ) : (
@@ -740,7 +748,14 @@ function ManagedLoadBalancerCard({
                 key={target.id}
                 className="flex items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-sm"
               >
-                <span className="min-w-0 truncate font-mono text-xs">{target.address}</span>
+                <span className="min-w-0">
+                  <span className="block truncate font-mono text-xs">{target.address}</span>
+                  {target.statusMessage ? (
+                    <span className="mt-1 block truncate text-muted-foreground text-xs">
+                      {target.statusMessage}
+                    </span>
+                  ) : null}
+                </span>
                 <Badge
                   size="sm"
                   variant={
@@ -759,11 +774,67 @@ function ManagedLoadBalancerCard({
         )}
       </div>
 
+      <LoadBalancerEventList events={events.data ?? []} loading={events.isPending} />
+
       {loadBalancer.lastSyncedAt ? (
         <p className="mt-4 text-muted-foreground text-xs">
           Last synced {new Date(loadBalancer.lastSyncedAt).toLocaleString()}
         </p>
       ) : null}
+    </div>
+  );
+}
+
+function LoadBalancerEventList({
+  events,
+  loading,
+}: {
+  events: LoadBalancerEvent[];
+  loading: boolean;
+}) {
+  return (
+    <div className="mt-4">
+      <p className="font-medium text-sm">Recent activity</p>
+      {loading ? (
+        <p className="mt-1 text-muted-foreground text-sm">Loading activity...</p>
+      ) : events.length === 0 ? (
+        <p className="mt-1 text-muted-foreground text-sm">No activity recorded yet.</p>
+      ) : (
+        <ul className="mt-2 flex flex-col gap-2">
+          {events.slice(0, 6).map((event) => (
+            <li
+              className="flex items-start justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-sm"
+              key={event.id}
+            >
+              <span className="min-w-0">
+                <span className="block truncate">{event.message}</span>
+                {event.details ? (
+                  <span className="mt-1 block truncate text-muted-foreground text-xs">
+                    {event.details}
+                  </span>
+                ) : null}
+              </span>
+              <span className="flex shrink-0 items-center gap-2">
+                <span className="text-muted-foreground text-xs">
+                  {new Date(event.createdAt).toLocaleString()}
+                </span>
+                <Badge
+                  size="sm"
+                  variant={
+                    event.status === "success"
+                      ? "success"
+                      : event.status === "error"
+                        ? "error"
+                        : "outline"
+                  }
+                >
+                  {event.status}
+                </Badge>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

@@ -25,7 +25,7 @@ async function ownedProjectId(projectId: string, organizationId: string): Promis
 export const environments = new Hono();
 
 environments.get("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const projectId = c.req.query("projectId");
@@ -43,7 +43,7 @@ environments.get("/", async (c) => {
 });
 
 environments.post("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const body = (await c.req.json().catch(() => null)) as Partial<CreateEnvironmentInput> | null;

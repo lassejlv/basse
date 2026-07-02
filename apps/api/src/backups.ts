@@ -35,6 +35,9 @@ import { resolveActiveWorkspace } from "./workspace";
 
 type AppRow = typeof app.$inferSelect;
 type BackupRow = typeof databaseBackup.$inferSelect;
+type BackupTarget =
+  | { kind: "postgres"; database: string; user: string; dataDir: string }
+  | { kind: "redis"; dataDir: string };
 
 const SCHEDULER_INTERVAL_MS = 5 * 60 * 1000;
 const MIN_INTERVAL_HOURS = 1;
@@ -53,15 +56,32 @@ function postgresDataPath(version: string | null): string {
   return Number.isFinite(major) && major >= 18 ? "/var/lib/postgresql" : "/var/lib/postgresql/data";
 }
 
-/** The pg_dump/pg_restore target for a postgres database app, or null if not one. */
-function backupTarget(row: AppRow): { database: string; user: string; dataDir: string } | null {
+/** The agent backup target for a supported database app, or null if not one. */
+function backupTarget(row: AppRow): BackupTarget | null {
   if (row.appKind !== "database") return null;
-  if ((row.databaseKind ?? "postgres") !== "postgres") return null;
+  const kind = row.databaseKind ?? "postgres";
+  if (kind === "redis") return { kind, dataDir: "/data" };
+  if (kind !== "postgres") return null;
   return {
+    kind,
     database: row.databaseName ?? "postgres",
     user: row.databaseUser ?? "postgres",
     dataDir: postgresDataPath(row.databaseVersion),
   };
+}
+
+async function backupInput(row: AppRow, target: BackupTarget) {
+  if (target.kind === "postgres") return target;
+  if (!row.databasePassword) throw new Error("Redis password is missing");
+  return { ...target, password: await decryptSecret(row.databasePassword) };
+}
+
+function backupExtension(target: BackupTarget): "dump" | "rdb" {
+  return target.kind === "postgres" ? "dump" : "rdb";
+}
+
+function backupLabel(target: BackupTarget): string {
+  return target.kind === "postgres" ? "Postgres" : "Redis";
 }
 
 function toBackup(row: BackupRow): DatabaseBackup {
@@ -193,13 +213,13 @@ async function hasActiveBackup(appId: string): Promise<boolean> {
 export const backups = new Hono();
 
 backups.get("/:id/backups", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.param("id");
   const row = await ownedApp(appId, organizationId);
   if (!row) return c.json({ error: "App not found" }, 404);
-  if (!backupTarget(row)) return c.json({ error: "Backups require a postgres database" }, 400);
+  if (!backupTarget(row)) return c.json({ error: "Backups require a database app" }, 400);
 
   const rows = await db
     .select()
@@ -215,13 +235,13 @@ backups.get("/:id/backups", async (c) => {
 });
 
 backups.post("/:id/backups", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.param("id");
   const row = await ownedApp(appId, organizationId);
   if (!row) return c.json({ error: "App not found" }, 404);
-  if (!backupTarget(row)) return c.json({ error: "Backups require a postgres database" }, 400);
+  if (!backupTarget(row)) return c.json({ error: "Backups require a database app" }, 400);
   if (await hasActiveBackup(appId)) {
     return c.json({ error: "A backup is already in progress" }, 409);
   }
@@ -256,14 +276,14 @@ backups.post("/:id/backups", async (c) => {
 });
 
 backups.post("/:id/backups/:backupId/restore", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.param("id");
   const row = await ownedApp(appId, organizationId);
   if (!row) return c.json({ error: "App not found" }, 404);
   const target = backupTarget(row);
-  if (!target) return c.json({ error: "Backups require a postgres database" }, 400);
+  if (!target) return c.json({ error: "Backups require a database app" }, 400);
 
   const backup = await ownedBackup(c.req.param("backupId"), appId);
   if (!backup) return c.json({ error: "Backup not found" }, 404);
@@ -277,7 +297,7 @@ backups.post("/:id/backups/:backupId/restore", async (c) => {
   try {
     await restoreAgentBackup(agent.connection!, agent.token!, appId, {
       backupId: backup.id,
-      ...target,
+      ...(await backupInput(row, target)),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Restore failed";
@@ -288,7 +308,7 @@ backups.post("/:id/backups/:backupId/restore", async (c) => {
 });
 
 backups.delete("/:id/backups/:backupId", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.param("id");
@@ -308,7 +328,14 @@ backups.delete("/:id/backups/:backupId", async (c) => {
     try {
       const agent = await requireAgentTarget(appId, backup.serverId);
       if (agent.server) {
-        await deleteAgentBackup(agent.connection!, agent.token!, appId, backup.id, target.dataDir);
+        await deleteAgentBackup(
+          agent.connection!,
+          agent.token!,
+          appId,
+          backup.id,
+          target.dataDir,
+          target.kind,
+        );
       }
     } catch {
       // ignore — row deletion below is what the user asked for
@@ -321,14 +348,14 @@ backups.delete("/:id/backups/:backupId", async (c) => {
 });
 
 backups.get("/:id/backups/:backupId/download", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.param("id");
   const row = await ownedApp(appId, organizationId);
   if (!row) return c.json({ error: "App not found" }, 404);
   const target = backupTarget(row);
-  if (!target) return c.json({ error: "Backups require a postgres database" }, 400);
+  if (!target) return c.json({ error: "Backups require a database app" }, 400);
 
   const backup = await ownedBackup(c.req.param("backupId"), appId);
   if (!backup) return c.json({ error: "Backup not found" }, 404);
@@ -337,7 +364,7 @@ backups.get("/:id/backups/:backupId/download", async (c) => {
   }
 
   const timestamp = backup.createdAt.toISOString().replaceAll(":", "-").slice(0, 19);
-  const filename = `${row.slug}-${timestamp}.dump`;
+  const filename = `${row.slug}-${timestamp}.${backupExtension(target)}`;
 
   // Serve from S3 when the copy is there. Streams the uploaded object when the
   // server copy is unreachable (server gone, outbound mode, file pruned).
@@ -380,7 +407,7 @@ backups.get("/:id/backups/:backupId/download", async (c) => {
     rejectHead = reject;
   });
 
-  const path = `/v1/apps/${appId}/backups/${backup.id}/download?dataDir=${encodeURIComponent(target.dataDir)}`;
+  const path = `/v1/apps/${appId}/backups/${backup.id}/download?dataDir=${encodeURIComponent(target.dataDir)}&kind=${target.kind}`;
   const pump = withTunnel(agent.connection!, AGENT_PORT, async (baseUrl) => {
     const upstream = await fetch(`${baseUrl}${path}`, {
       headers: { authorization: `Bearer ${agent.token!}` },
@@ -421,13 +448,13 @@ backups.get("/:id/backups/:backupId/download", async (c) => {
 });
 
 backups.post("/:id/backups/:backupId/upload", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.param("id");
   const row = await ownedApp(appId, organizationId);
   if (!row) return c.json({ error: "App not found" }, 404);
-  if (!backupTarget(row)) return c.json({ error: "Backups require a postgres database" }, 400);
+  if (!backupTarget(row)) return c.json({ error: "Backups require a database app" }, 400);
   if (!row.backupS3ConnectionId) {
     return c.json({ error: "Choose an S3 connection in the backup settings first" }, 400);
   }
@@ -468,13 +495,13 @@ backups.post("/:id/backups/:backupId/upload", async (c) => {
 });
 
 backups.patch("/:id/backups/settings", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.param("id");
   const row = await ownedApp(appId, organizationId);
   if (!row) return c.json({ error: "App not found" }, 404);
-  if (!backupTarget(row)) return c.json({ error: "Backups require a postgres database" }, 400);
+  if (!backupTarget(row)) return c.json({ error: "Backups require a database app" }, 400);
 
   const body = (await c.req.json().catch(() => null)) as UpdateDatabaseBackupSettingsInput | null;
   if (!body) return c.json({ error: "Invalid request body" }, 400);
@@ -523,9 +550,10 @@ backups.patch("/:id/backups/settings", async (c) => {
 });
 
 /**
- * Worker handler for the "database-backup" action. Runs pg_dump on the target
- * server via the agent, records size/status on the backup row, and prunes
- * completed backups past the app's retention. Never throws.
+ * Worker handler for the "database-backup" action. Runs the database-specific
+ * backup operation on the target server via the agent, records size/status on
+ * the backup row, and prunes completed backups past the app's retention.
+ * Never throws.
  */
 export async function runDatabaseBackup(backupId: string): Promise<void> {
   const [backup] = await db
@@ -550,7 +578,7 @@ export async function runDatabaseBackup(backupId: string): Promise<void> {
     if (!appRow) return fail("App no longer exists");
     appName = appRow.name;
     const target = backupTarget(appRow);
-    if (!target) return fail("App is not a postgres database");
+    if (!target) return fail("App is not a supported database");
 
     const [serverRow] = await db
       .select()
@@ -572,7 +600,7 @@ export async function runDatabaseBackup(backupId: string): Promise<void> {
     const token = await decryptSecret(serverRow.agentToken);
     const result = await createAgentBackup(connection, token, appRow.id, {
       backupId: backup.id,
-      ...target,
+      ...(await backupInput(appRow, target)),
     });
 
     await db
@@ -591,7 +619,7 @@ export async function runDatabaseBackup(backupId: string): Promise<void> {
       backup,
       appName,
       ok: true,
-      message: `pg_dump finished (${result.sizeBytes} bytes).`,
+      message: `${backupLabel(target)} backup finished (${result.sizeBytes} bytes).`,
     });
 
     // Auto-offload to S3 when the app has a destination configured.
@@ -618,7 +646,7 @@ export async function runDatabaseBackup(backupId: string): Promise<void> {
       }
     }
 
-    await enforceRetention(appRow, connection, token, target.dataDir);
+    await enforceRetention(appRow, connection, token, target);
   } catch (error) {
     await fail(error instanceof Error ? error.message : "Backup failed");
   }
@@ -661,7 +689,7 @@ export async function runBackupUpload(backupId: string): Promise<void> {
     if (!appRow) return fail("App no longer exists");
     appName = appRow.name;
     const target = backupTarget(appRow);
-    if (!target) return fail("App is not a postgres database");
+    if (!target) return fail("App is not a supported database");
 
     const [serverRow] = await db
       .select()
@@ -679,8 +707,9 @@ export async function runBackupUpload(backupId: string): Promise<void> {
     const token = await decryptSecret(serverRow.agentToken);
 
     const client = await s3ClientForConnection(connectionRow);
-    const key = `basse-backups/${appRow.slug}/${backup.createdAt.toISOString().slice(0, 19).replaceAll(":", "-")}-${backup.id.slice(0, 8)}.dump`;
-    const path = `/v1/apps/${appRow.id}/backups/${backup.id}/download?dataDir=${encodeURIComponent(target.dataDir)}`;
+    const extension = backupExtension(target);
+    const key = `basse-backups/${appRow.slug}/${backup.createdAt.toISOString().slice(0, 19).replaceAll(":", "-")}-${backup.id.slice(0, 8)}.${extension}`;
+    const path = `/v1/apps/${appRow.id}/backups/${backup.id}/download?dataDir=${encodeURIComponent(target.dataDir)}&kind=${target.kind}`;
 
     await withTunnel(agentConnection, AGENT_PORT, async (baseUrl) => {
       const upstream = await fetch(`${baseUrl}${path}`, {
@@ -749,7 +778,7 @@ async function enforceRetention(
   appRow: AppRow,
   connection: AgentConnection,
   token: string,
-  dataDir: string,
+  target: BackupTarget,
 ): Promise<void> {
   const excess = await db
     .select()
@@ -760,7 +789,7 @@ async function enforceRetention(
 
   for (const old of excess) {
     try {
-      await deleteAgentBackup(connection, token, appRow.id, old.id, dataDir);
+      await deleteAgentBackup(connection, token, appRow.id, old.id, target.dataDir, target.kind);
     } catch {
       // File cleanup is best effort; still drop the row so retention converges.
     }

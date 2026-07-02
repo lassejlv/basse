@@ -8,7 +8,7 @@ import { resolveActiveWorkspace } from "./workspace";
 export const depot = new Hono();
 
 depot.get("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
@@ -43,7 +43,7 @@ depot.get("/", async (c) => {
 });
 
 depot.put("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
@@ -95,7 +95,7 @@ depot.put("/", async (c) => {
 });
 
 depot.delete("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;

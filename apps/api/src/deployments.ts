@@ -134,7 +134,7 @@ async function ownedDeployment(
 export const deployments = new Hono();
 
 deployments.get("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.query("appId");
@@ -179,7 +179,7 @@ deployments.get("/", async (c) => {
 });
 
 deployments.post("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const body = (await c.req.json().catch(() => null)) as Partial<TriggerDeploymentInput> | null;
@@ -198,7 +198,7 @@ deployments.post("/", async (c) => {
 });
 
 deployments.post("/rollback", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const body = (await c.req.json().catch(() => null)) as RollbackDeploymentInput | null;
@@ -256,7 +256,7 @@ deployments.post("/rollback", async (c) => {
 });
 
 deployments.get("/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const row = await ownedDeployment(c.req.param("id"), organizationId);

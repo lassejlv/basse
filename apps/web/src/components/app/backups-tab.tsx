@@ -58,6 +58,7 @@ export function BackupsTab({ app }: { app: App }) {
   });
 
   const backups = backupsQuery.data?.backups ?? [];
+  const engine = app.database?.kind === "redis" ? "Redis RDB" : "pg_dump";
 
   return (
     <div className="flex flex-col gap-4">
@@ -66,7 +67,7 @@ export function BackupsTab({ app }: { app: App }) {
           <div>
             <h2 className="font-semibold text-lg">Backups</h2>
             <p className="mt-1 text-muted-foreground text-sm">
-              pg_dump snapshots stored on the database&apos;s server volume.
+              {engine} snapshots stored on the database&apos;s server volume.
             </p>
           </div>
           <Button disabled={create.isPending} onClick={() => create.mutate()} size="sm">

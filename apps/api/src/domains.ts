@@ -62,7 +62,7 @@ async function ownedServerId(serverId: string, organizationId: string): Promise<
 export const domains = new Hono();
 
 domains.get("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const serverId = c.req.query("serverId");
@@ -80,7 +80,7 @@ domains.get("/", async (c) => {
 });
 
 domains.post("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const body = (await c.req.json().catch(() => null)) as
@@ -144,7 +144,7 @@ domains.post("/", async (c) => {
 });
 
 domains.delete("/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   // Join domain->server to enforce ownership (domain has no organizationId).

@@ -70,7 +70,7 @@ function parseVars(body: Partial<SetSharedEnvVarsInput> | null) {
 }
 
 projectSharedEnvVars.get("/:id/shared-env-vars", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const projectId = c.req.param("id");
@@ -87,7 +87,7 @@ projectSharedEnvVars.get("/:id/shared-env-vars", async (c) => {
 });
 
 projectSharedEnvVars.get("/:id/shared-env-vars/reveal", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const projectId = c.req.param("id");
@@ -104,7 +104,7 @@ projectSharedEnvVars.get("/:id/shared-env-vars/reveal", async (c) => {
 });
 
 projectSharedEnvVars.put("/:id/shared-env-vars", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const projectId = c.req.param("id");
@@ -140,7 +140,7 @@ projectSharedEnvVars.put("/:id/shared-env-vars", async (c) => {
 });
 
 environmentSharedEnvVars.get("/:id/shared-env-vars", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const owned = await ownedEnvironmentId(c.req.param("id"), organizationId);
@@ -155,7 +155,7 @@ environmentSharedEnvVars.get("/:id/shared-env-vars", async (c) => {
 });
 
 environmentSharedEnvVars.get("/:id/shared-env-vars/reveal", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const owned = await ownedEnvironmentId(c.req.param("id"), organizationId);
@@ -170,7 +170,7 @@ environmentSharedEnvVars.get("/:id/shared-env-vars/reveal", async (c) => {
 });
 
 environmentSharedEnvVars.put("/:id/shared-env-vars", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const owned = await ownedEnvironmentId(c.req.param("id"), organizationId);
@@ -204,7 +204,7 @@ environmentSharedEnvVars.put("/:id/shared-env-vars", async (c) => {
 });
 
 appEnvReferences.get("/:appId/env-references", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const owned = await ownedApp(c.req.param("appId"), organizationId);

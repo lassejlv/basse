@@ -247,7 +247,7 @@ function normalizeDeleteCode(value: unknown): string {
 }
 
 servers.get("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
@@ -263,7 +263,7 @@ servers.get("/", async (c) => {
 });
 
 servers.get("/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
@@ -283,7 +283,7 @@ servers.get("/:id", async (c) => {
 });
 
 servers.get("/:id/agent", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const row = await ownedServer(c.req.param("id"), organizationId);
@@ -342,7 +342,7 @@ servers.get("/:id/agent", async (c) => {
 });
 
 servers.get("/:id/agent/logs", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const row = await ownedServer(c.req.param("id"), organizationId);
@@ -364,7 +364,7 @@ servers.get("/:id/agent/logs", async (c) => {
 });
 
 servers.get("/:id/agent/metrics", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const row = await ownedServer(c.req.param("id"), organizationId);
@@ -391,7 +391,7 @@ servers.get("/:id/agent/metrics", async (c) => {
 });
 
 servers.post("/:id/agent/check-update", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const row = await ownedServer(c.req.param("id"), organizationId);
@@ -434,7 +434,7 @@ echo "LATEST=$latest"
 });
 
 servers.post("/:id/agent/update", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const id = c.req.param("id");
@@ -467,7 +467,7 @@ servers.post("/:id/agent/update", async (c) => {
 });
 
 servers.post("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
@@ -592,7 +592,7 @@ servers.post("/", async (c) => {
 });
 
 servers.post("/:id/install-command", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
@@ -617,7 +617,7 @@ servers.post("/:id/install-command", async (c) => {
 });
 
 servers.post("/:id/provision", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
@@ -684,7 +684,7 @@ servers.post("/:id/provision", async (c) => {
 });
 
 servers.post("/:id/proxy/resync", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
@@ -714,7 +714,7 @@ servers.post("/:id/proxy/resync", async (c) => {
 });
 
 servers.post("/:id/check-connection", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;

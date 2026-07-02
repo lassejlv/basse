@@ -36,6 +36,7 @@ import {
 } from "./build-paths";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { connectionFromServer } from "./server-connection";
+import { enqueueAction } from "./queue/queue";
 import { runScript, type SshConnection } from "./ssh";
 import { resolveActiveWorkspace } from "./workspace";
 
@@ -167,6 +168,27 @@ function validateImageRef(value: string): string | null {
   if (value.length > 255) return "imageRef is too long";
   if (/\s/.test(value)) return "imageRef must not contain whitespace";
   if (value.startsWith("-")) return "imageRef must be a Docker image reference";
+  return null;
+}
+
+function normalizeWebhookUrl(value: string | null): string | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function validateWebhookUrl(value: string | null): string | null {
+  if (value === null) return null;
+  if (value.length > 2048) return "Webhook URL is too long";
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return "Webhook URL must be a valid URL";
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return "Webhook URL must use http or https";
+  }
   return null;
 }
 
@@ -304,6 +326,11 @@ export function toApp(
       expectedStatus: row.healthCheckStatus,
       timeoutSeconds: row.healthCheckTimeoutSeconds,
       intervalSeconds: row.healthCheckIntervalSeconds,
+    },
+    deployNotifications: {
+      webhookUrl: row.deployWebhookUrl,
+      notifyOnSuccess: row.deployNotifySuccess,
+      notifyOnFailure: row.deployNotifyFailure,
     },
     database,
     latestDeploymentStatus,
@@ -585,6 +612,24 @@ export async function buildAppUpdates(
     }
     updates.healthCheckIntervalSeconds = body.healthCheckIntervalSeconds;
   }
+  if (body && "deployWebhookUrl" in body) {
+    const webhookUrl =
+      typeof body.deployWebhookUrl === "string" || body.deployWebhookUrl === null
+        ? normalizeWebhookUrl(body.deployWebhookUrl)
+        : undefined;
+    if (typeof webhookUrl === "undefined") {
+      return { ok: false, error: "Webhook URL must be a string or null", status: 400 };
+    }
+    const webhookError = validateWebhookUrl(webhookUrl);
+    if (webhookError) return { ok: false, error: webhookError, status: 400 };
+    updates.deployWebhookUrl = webhookUrl;
+  }
+  if (typeof body?.deployNotifySuccess === "boolean") {
+    updates.deployNotifySuccess = body.deployNotifySuccess;
+  }
+  if (typeof body?.deployNotifyFailure === "boolean") {
+    updates.deployNotifyFailure = body.deployNotifyFailure;
+  }
   if (existing.appKind === "database") {
     const existingDatabaseKind = (existing.databaseKind ?? "postgres") as DatabaseKind;
     if (typeof body?.databaseVersion === "string" && body.databaseVersion.trim()) {
@@ -669,7 +714,7 @@ export async function buildAppUpdates(
 export const apps = new Hono();
 
 apps.get("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const environmentId = c.req.query("environmentId");
@@ -690,7 +735,7 @@ apps.get("/", async (c) => {
 });
 
 apps.get("/importable-containers", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const serverId = c.req.query("serverId") ?? "";
@@ -720,7 +765,7 @@ apps.get("/importable-containers", async (c) => {
 });
 
 apps.post("/import-container", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const body = (await c.req.json().catch(() => null)) as Partial<ImportDockerContainerInput> | null;
@@ -836,7 +881,7 @@ apps.post("/import-container", async (c) => {
 });
 
 apps.get("/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const row = await ownedApp(c.req.param("id"), organizationId);
@@ -866,7 +911,7 @@ apps.get("/:id", async (c) => {
 });
 
 apps.get("/:id/database/connection", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.param("id");
@@ -910,7 +955,7 @@ apps.get("/:id/database/connection", async (c) => {
 });
 
 apps.get("/:id/metrics", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.param("id");
@@ -928,7 +973,7 @@ apps.get("/:id/metrics", async (c) => {
 });
 
 apps.get("/:id/logs", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.param("id");
@@ -944,7 +989,7 @@ apps.get("/:id/logs", async (c) => {
 });
 
 apps.post("/:id/console", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.param("id");
@@ -970,7 +1015,7 @@ apps.post("/:id/console", async (c) => {
 });
 
 apps.post("/:id/stop", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const appId = c.req.param("id");
@@ -1004,7 +1049,7 @@ apps.post("/:id/stop", async (c) => {
 });
 
 apps.post("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const body = (await c.req.json().catch(() => null)) as Partial<CreateAppInput> | null;
@@ -1213,7 +1258,7 @@ apps.post("/", async (c) => {
 });
 
 apps.patch("/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedApp(c.req.param("id"), organizationId);
@@ -1244,11 +1289,16 @@ apps.patch("/:id", async (c) => {
   });
   if (!updated) return c.json({ error: "Failed to update app" }, 500);
   const currentServerIds = serverIds ?? (await loadAppServerIds([updated.id])).get(updated.id);
+  if (serverIds) {
+    await enqueueAction("sync-app-load-balancers", updated.id).catch((error) => {
+      console.error("[load-balancer-resync]", updated.id, error);
+    });
+  }
   return c.json(toApp(updated, currentServerIds));
 });
 
 apps.delete("/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedApp(c.req.param("id"), organizationId);

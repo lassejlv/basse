@@ -75,16 +75,16 @@ Checked against the current repo on 2026-06-30.
 - [x] S3 connections (workspace-level, encrypted) with auto/manual backup upload and download fallback.
 - [x] Realtime WebSocket layer (org-scoped events → query invalidation); removed client polling.
 - [x] Deploy pipeline hardening: cancellation-safe status transitions, zombie-deployment recovery, image retention pruning, readiness gates (stay-up check, pg_isready, Redis auth), arm64 platform detection, parallel multi-server deploys, build-time env vars, deployment phase model + UI stepper.
+- [x] Deploy webhooks and success/failure email notifications, configurable per app through staged settings.
+- [x] Scoped API tokens for automation with read, deploy, and write scopes plus Secrets UI management.
+- [x] Redis backups via BGSAVE using the existing backup list, restore, download, retention, scheduler, and S3 upload plumbing.
+- [x] Scheduled cron jobs per app with cron expressions, manual runs, last-run status/output, and worker-backed execution.
+- [x] Team invites and roles with owner/admin/member management, pending invitations, and last-owner protection.
+- [x] Automatic managed load balancer resync when app server assignments change.
+- [x] Load balancer action history and target health telemetry.
 
 ### Next Implementation Targets
-
-- [ ] Deploy webhooks + success/failure notifications.
-- [ ] Scoped API tokens for automation.
-- [ ] Redis backups (BGSAVE via the existing backup plumbing).
-- [ ] Scheduled cron jobs per app.
-- [ ] Team invites and roles.
-- [ ] Add automatic managed load balancer resync when app server assignments change.
-- [ ] Add load balancer action history and health telemetry.
+- [x] Coolify parity tracker complete for the current inventory.
 
 ## Product Shape
 

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { PlusIcon, TrashIcon } from "lucide-react";
+import { BellIcon, PlusIcon, TrashIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AppBuildMode, AppBuildRunner, AppSourceType, AppVolume } from "@basse/shared";
 import { DatabaseIcon, databaseEngineLabel } from "@/components/database-icon";
@@ -47,6 +47,7 @@ export function AppSettingsTab({ app, draft }: { app: App; draft: App }) {
         <BuildSettingsCard app={draft} />
       )}
       {app.appKind === "service" ? <HealthCheckCard app={draft} /> : null}
+      <DeployNotificationsCard app={draft} />
       <ServerCard app={draft} />
       <ResourceLimitsCard app={draft} />
       {app.appKind === "service" ? <VolumesCard app={draft} /> : null}
@@ -102,6 +103,91 @@ function DeleteAppCard({ app }: { app: App }) {
         <TrashIcon />
         Delete app
       </Button>
+    </Card>
+  );
+}
+
+function DeployNotificationsCard({ app }: { app: App }) {
+  const queryClient = useQueryClient();
+  const settings = app.deployNotifications;
+  const [webhookUrl, setWebhookUrl] = useState(settings.webhookUrl ?? "");
+  const [notifyOnSuccess, setNotifyOnSuccess] = useState(settings.notifyOnSuccess);
+  const [notifyOnFailure, setNotifyOnFailure] = useState(settings.notifyOnFailure);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setWebhookUrl(settings.webhookUrl ?? "");
+    setNotifyOnSuccess(settings.notifyOnSuccess);
+    setNotifyOnFailure(settings.notifyOnFailure);
+  }, [settings.webhookUrl, settings.notifyOnSuccess, settings.notifyOnFailure]);
+
+  const stage = useMutation({
+    mutationFn: () =>
+      stageAppChanges(app.id, {
+        deployWebhookUrl: webhookUrl.trim() || null,
+        deployNotifySuccess: notifyOnSuccess,
+        deployNotifyFailure: notifyOnFailure,
+      }),
+    onSuccess: (data) => {
+      setError(null);
+      toast.success("Notification change staged");
+      queryClient.setQueryData(["changes", app.id], data);
+      void queryClient.invalidateQueries({ queryKey: ["project-changes"] });
+    },
+    onError: (mutationError: Error) => setError(mutationError.message),
+  });
+
+  return (
+    <Card className="p-6">
+      <div className="flex items-center gap-2">
+        <BellIcon className="size-5 text-muted-foreground" />
+        <h2 className="font-semibold text-lg">Deploy notifications</h2>
+      </div>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Send a JSON webhook and optional workspace email when deployments finish.
+      </p>
+      <form
+        className="mt-4 space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          stage.mutate();
+        }}
+      >
+        <div className="space-y-2">
+          <Label htmlFor="deploy-webhook-url">Webhook URL</Label>
+          <Input
+            id="deploy-webhook-url"
+            onChange={(event) => setWebhookUrl(event.currentTarget.value)}
+            placeholder="https://example.com/basse/deploy"
+            type="url"
+            value={webhookUrl}
+          />
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+            <span className="min-w-0">
+              <span className="block font-medium text-sm">Success email</span>
+              <span className="block text-muted-foreground text-xs">
+                Email workspace members after a healthy deploy.
+              </span>
+            </span>
+            <Switch checked={notifyOnSuccess} onCheckedChange={setNotifyOnSuccess} />
+          </label>
+          <label className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+            <span className="min-w-0">
+              <span className="block font-medium text-sm">Failure email</span>
+              <span className="block text-muted-foreground text-xs">
+                Email workspace members after a failed deploy.
+              </span>
+            </span>
+            <Switch checked={notifyOnFailure} onCheckedChange={setNotifyOnFailure} />
+          </label>
+        </div>
+        {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+        <Button loading={stage.isPending} type="submit">
+          Stage notification changes
+        </Button>
+      </form>
     </Card>
   );
 }

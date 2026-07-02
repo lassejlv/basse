@@ -600,6 +600,26 @@ func (c *Client) StartContainer(ctx context.Context, id string) error {
 	return fmt.Errorf("start %s: status %d: %s", id, resp.StatusCode, b)
 }
 
+// RestartContainer restarts an existing container by name or id.
+func (c *Client) RestartContainer(ctx context.Context, name string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://docker/containers/"+name+"/restart", nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	return fmt.Errorf("restart %s: status %d: %s", name, resp.StatusCode, b)
+}
+
 // splitImageRef splits "repo:tag" into (repo, tag), defaulting tag to "latest".
 // It is digest- and registry-port-aware (only splits on a tag after the last /).
 func splitImageRef(image string) (string, string) {

@@ -16,7 +16,7 @@ function slugify(value: string) {
 export const projects = new Hono();
 
 projects.get("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
@@ -59,7 +59,7 @@ projects.get("/", async (c) => {
 });
 
 projects.get("/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
@@ -79,7 +79,7 @@ projects.get("/:id", async (c) => {
 });
 
 projects.post("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
@@ -140,7 +140,7 @@ projects.post("/", async (c) => {
 });
 
 projects.delete("/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;

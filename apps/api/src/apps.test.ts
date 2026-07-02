@@ -9,7 +9,7 @@ const baseApp = {
   serverId: null,
   name: "Gateway",
   slug: "gateway",
-  repositoryUrl: "",
+  repositoryUrl: "https://github.com/acme/gateway",
   branch: "main",
   port: 3000,
   buildMode: "auto",
@@ -39,6 +39,9 @@ const baseApp = {
   backupIntervalHours: 24,
   backupRetention: 7,
   backupS3ConnectionId: null,
+  deployWebhookUrl: null,
+  deployNotifySuccess: false,
+  deployNotifyFailure: false,
   createdAt: new Date("2026-01-01T00:00:00.000Z"),
   updatedAt: new Date("2026-01-01T00:00:00.000Z"),
 } satisfies AppRow;
@@ -63,5 +66,39 @@ describe("buildAppUpdates", () => {
     expect(result.updates.sourceType).toBe("image");
     expect(result.updates.imageRef).toBe("ghcr.io/drizzle-team/gateway");
     expect(result.updates.repositoryUrl).toBeUndefined();
+  });
+
+  it("normalizes deploy notification settings", async () => {
+    Bun.env.BETTER_AUTH_SECRET ??= "test-secret-at-least-32-characters";
+    const { buildAppUpdates } = await import("./apps");
+    const result = await buildAppUpdates(
+      baseApp,
+      {
+        deployWebhookUrl: " https://hooks.example.com/basse ",
+        deployNotifySuccess: true,
+        deployNotifyFailure: true,
+      },
+      "org_1",
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.updates.deployWebhookUrl).toBe("https://hooks.example.com/basse");
+    expect(result.updates.deployNotifySuccess).toBe(true);
+    expect(result.updates.deployNotifyFailure).toBe(true);
+  });
+
+  it("rejects invalid deploy webhook URLs", async () => {
+    Bun.env.BETTER_AUTH_SECRET ??= "test-secret-at-least-32-characters";
+    const { buildAppUpdates } = await import("./apps");
+    const result = await buildAppUpdates(
+      baseApp,
+      { deployWebhookUrl: "ftp://hooks.example.com/basse" },
+      "org_1",
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toBe("Webhook URL must use http or https");
   });
 });

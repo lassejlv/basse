@@ -314,13 +314,15 @@ export async function execAppCommand(
 }
 
 export type BackupTargetInput = {
+  kind: "postgres" | "redis";
   backupId: string;
-  database: string;
-  user: string;
+  database?: string;
+  user?: string;
+  password?: string;
   dataDir: string;
 };
 
-/** Runs pg_dump inside the database container; the dump lands on its data volume. */
+/** Runs the database-specific backup inside the container; the file lands on its data volume. */
 export async function createAgentBackup(
   conn: AgentConnection,
   token: string,
@@ -336,7 +338,7 @@ export async function createAgentBackup(
   );
 }
 
-/** Runs pg_restore --clean --if-exists from an existing dump. Throws on failure. */
+/** Restores an existing backup file into the database container. Throws on failure. */
 export async function restoreAgentBackup(
   conn: AgentConnection,
   token: string,
@@ -359,10 +361,11 @@ export async function deleteAgentBackup(
   appId: string,
   backupId: string,
   dataDir: string,
+  kind: "postgres" | "redis" = "postgres",
 ): Promise<void> {
   const response = await fetchAgent(conn, token, {
     method: "DELETE",
-    path: `/v1/apps/${appId}/backups/${backupId}?dataDir=${encodeURIComponent(dataDir)}`,
+    path: `/v1/apps/${appId}/backups/${backupId}?dataDir=${encodeURIComponent(dataDir)}&kind=${kind}`,
     authed: true,
     timeoutMs: 30_000,
   });

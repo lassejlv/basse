@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { TrashIcon } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
-import type { LoadBalancerProvider } from "@basse/shared";
+import type { LoadBalancerProvider, WorkspaceRole } from "@basse/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -20,6 +20,13 @@ import {
   saveLoadBalancerIntegration,
 } from "@/lib/load-balancers";
 import { toast } from "@/lib/toast";
+import {
+  deleteTeamInvitation,
+  deleteTeamMember,
+  getTeam,
+  inviteTeamMember,
+  updateTeamMember,
+} from "@/lib/team";
 import { getWorkspaceSettings, updateWorkspaceSettings } from "@/lib/workspace-settings";
 
 export const Route = createFileRoute("/_authed/settings")({
@@ -70,6 +77,8 @@ function SettingsRoute() {
         <h1 className="text-2xl font-semibold tracking-normal md:text-3xl">Settings</h1>
         <p className="mt-2 text-muted-foreground text-sm">Workspace and account settings.</p>
       </div>
+
+      <TeamCard />
 
       <div className="max-w-2xl rounded-lg border bg-card p-6">
         <h2 className="text-lg font-semibold">Workspace</h2>
@@ -134,6 +143,162 @@ function SettingsRoute() {
         </Button>
       </div>
     </section>
+  );
+}
+
+function TeamCard() {
+  const queryClient = useQueryClient();
+  const queryKey = ["team"];
+  const team = useQuery({ queryKey, queryFn: getTeam });
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<WorkspaceRole>("member");
+
+  const invalidate = () => queryClient.invalidateQueries({ queryKey });
+
+  const invite = useMutation({
+    mutationFn: () => inviteTeamMember({ email, role }),
+    onSuccess: async () => {
+      setEmail("");
+      toast.success("Team updated");
+      await invalidate();
+    },
+    onError: (error: Error) => toast.error("Couldn't invite member", { description: error.message }),
+  });
+
+  const updateRole = useMutation({
+    mutationFn: (input: { id: string; role: WorkspaceRole }) =>
+      updateTeamMember(input.id, { role: input.role }),
+    onSuccess: async () => {
+      toast.success("Role updated");
+      await invalidate();
+    },
+    onError: (error: Error) => toast.error("Couldn't update role", { description: error.message }),
+  });
+
+  const removeMember = useMutation({
+    mutationFn: deleteTeamMember,
+    onSuccess: async () => {
+      toast.success("Member removed");
+      await invalidate();
+    },
+    onError: (error: Error) => toast.error("Couldn't remove member", { description: error.message }),
+  });
+
+  const cancelInvite = useMutation({
+    mutationFn: deleteTeamInvitation,
+    onSuccess: async () => {
+      toast.success("Invitation cancelled");
+      await invalidate();
+    },
+    onError: (error: Error) => toast.error("Couldn't cancel invitation", { description: error.message }),
+  });
+
+  return (
+    <div className="max-w-2xl rounded-lg border bg-card p-6">
+      <h2 className="text-lg font-semibold">Team</h2>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Invite teammates and control workspace access.
+      </p>
+
+      <form
+        className="mt-4 grid gap-3 sm:grid-cols-[1fr_140px_auto]"
+        onSubmit={(event) => {
+          event.preventDefault();
+          invite.mutate();
+        }}
+      >
+        <Input
+          aria-label="Invite email"
+          onChange={(event) => setEmail(event.currentTarget.value)}
+          placeholder="teammate@example.com"
+          type="email"
+          value={email}
+        />
+        <RoleSelect onChange={setRole} value={role} />
+        <Button disabled={!email.trim()} loading={invite.isPending} type="submit">
+          Invite
+        </Button>
+      </form>
+
+      <div className="mt-5 space-y-2">
+        {team.isPending ? (
+          <p className="text-muted-foreground text-sm">Loading team…</p>
+        ) : team.isError ? (
+          <p className="text-destructive-foreground text-sm">{team.error.message}</p>
+        ) : (
+          <>
+            {team.data.members.map((member) => (
+              <div
+                className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+                key={member.id}
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-sm">{member.name || member.email}</p>
+                  <p className="truncate text-muted-foreground text-xs">{member.email}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <RoleSelect
+                    onChange={(nextRole) => updateRole.mutate({ id: member.id, role: nextRole })}
+                    value={member.role}
+                  />
+                  <Button
+                    aria-label={`Remove ${member.email}`}
+                    loading={removeMember.isPending && removeMember.variables === member.id}
+                    onClick={() => removeMember.mutate(member.id)}
+                    size="icon"
+                    variant="outline"
+                  >
+                    <TrashIcon />
+                  </Button>
+                </div>
+              </div>
+            ))}
+            {team.data.invitations.map((invitation) => (
+              <div
+                className="flex items-center justify-between gap-3 rounded-md border border-dashed px-3 py-2"
+                key={invitation.id}
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-medium text-sm">{invitation.email}</p>
+                  <p className="truncate text-muted-foreground text-xs">
+                    Pending · {invitation.role}
+                  </p>
+                </div>
+                <Button
+                  loading={cancelInvite.isPending && cancelInvite.variables === invitation.id}
+                  onClick={() => cancelInvite.mutate(invitation.id)}
+                  size="sm"
+                  variant="outline"
+                >
+                  Cancel
+                </Button>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RoleSelect({
+  value,
+  onChange,
+}: {
+  value: WorkspaceRole;
+  onChange: (value: WorkspaceRole) => void;
+}) {
+  return (
+    <Select value={value} onValueChange={(next) => onChange((next ?? "member") as WorkspaceRole)}>
+      <SelectTrigger className="w-full">
+        <SelectValue placeholder="Role">{(next: WorkspaceRole) => next}</SelectValue>
+      </SelectTrigger>
+      <SelectPopup>
+        <SelectItem value="owner">Owner</SelectItem>
+        <SelectItem value="admin">Admin</SelectItem>
+        <SelectItem value="member">Member</SelectItem>
+      </SelectPopup>
+    </Select>
   );
 }
 

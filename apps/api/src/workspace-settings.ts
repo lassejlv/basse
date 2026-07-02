@@ -45,7 +45,7 @@ async function getOrCreateWorkspaceSettings(organizationId: string): Promise<Wor
 export const workspaceSettingsRoutes = new Hono();
 
 workspaceSettingsRoutes.get("/settings", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const row = await getOrCreateWorkspaceSettings(organizationId);
@@ -53,7 +53,7 @@ workspaceSettingsRoutes.get("/settings", async (c) => {
 });
 
 workspaceSettingsRoutes.put("/settings", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const body = (await c.req.json().catch(() => null)) as UpdateWorkspaceSettingsInput | null;

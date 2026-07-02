@@ -109,7 +109,7 @@ function invalidInput(body: Partial<CreateS3ConnectionInput>, requireAll: boolea
 export const s3 = new Hono();
 
 s3.get("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const rows = await db
@@ -120,7 +120,7 @@ s3.get("/", async (c) => {
 });
 
 s3.post("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const body = (await c.req.json().catch(() => null)) as CreateS3ConnectionInput | null;
@@ -155,7 +155,7 @@ s3.post("/", async (c) => {
 });
 
 s3.patch("/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedS3Connection(c.req.param("id"), organizationId);
@@ -209,7 +209,7 @@ s3.patch("/:id", async (c) => {
 });
 
 s3.post("/:id/test", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedS3Connection(c.req.param("id"), organizationId);
@@ -229,7 +229,7 @@ s3.post("/:id/test", async (c) => {
 });
 
 s3.delete("/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedS3Connection(c.req.param("id"), organizationId);

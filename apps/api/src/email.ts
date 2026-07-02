@@ -1,5 +1,10 @@
 import { db, member, user } from "@basse/db";
-import { type LoginOtpType, renderLoginOtpEmail, renderMonitorAlertEmail } from "@basse/emails";
+import {
+  type LoginOtpType,
+  renderDeploymentNotificationEmail,
+  renderLoginOtpEmail,
+  renderMonitorAlertEmail,
+} from "@basse/emails";
 import { createEmailClient, type EmailClient } from "@opencoredev/email-sdk";
 import { cloudflare } from "@opencoredev/email-sdk/cloudflare";
 import { observabilityPlugin } from "@opencoredev/email-sdk/plugins/observability";
@@ -13,6 +18,17 @@ type AlertEmail = {
   message: string;
   code: string;
   fingerprint: string;
+};
+
+type DeploymentEmail = {
+  id: string;
+  appId: string;
+  organizationId: string;
+  appName: string;
+  projectName: string;
+  environmentName: string;
+  status: "healthy" | "failed";
+  commitSha: string | null;
 };
 
 let emailClient: EmailClient | null | undefined;
@@ -188,6 +204,64 @@ export async function sendAlertEmail(alert: AlertEmail): Promise<void> {
         .catch((error) => {
           console.error(
             "[email] alert delivery failed",
+            error instanceof Error ? error.message : error,
+          );
+        }),
+    ),
+  );
+}
+
+export async function sendDeploymentEmail(deployment: DeploymentEmail): Promise<void> {
+  const client = getEmailClient();
+  if (!client) {
+    if (!warnedMissingConfig) {
+      warnedMissingConfig = true;
+      console.warn("[email] deployment email disabled; configure Cloudflare email env vars");
+    }
+    return;
+  }
+
+  const recipients = await organizationRecipients(deployment.organizationId);
+  if (recipients.length === 0) return;
+
+  const baseUrl = appUrl();
+  const deploymentUrl = baseUrl ? `${baseUrl}/apps/${deployment.appId}` : null;
+  const subject = `[Basse] ${deployment.appName} deploy ${deployment.status === "healthy" ? "succeeded" : "failed"}`;
+  const rendered = await renderDeploymentNotificationEmail({
+    appName: deployment.appName,
+    projectName: deployment.projectName,
+    environmentName: deployment.environmentName,
+    deploymentId: deployment.id,
+    status: deployment.status,
+    commitSha: deployment.commitSha,
+    deploymentUrl,
+  });
+
+  await Promise.all(
+    recipients.map((email) =>
+      client
+        .send(
+          {
+            from: Bun.env.EMAIL_FROM!,
+            to: email,
+            subject,
+            text: rendered.text,
+            html: rendered.html,
+            headers: {
+              "X-Basse-Deployment-Status": deployment.status,
+            },
+          },
+          {
+            idempotencyKey: `basse-deployment:${deployment.id}:${deployment.status}:${email}`,
+            metadata: {
+              deploymentId: deployment.id,
+              status: deployment.status,
+            },
+          },
+        )
+        .catch((error) => {
+          console.error(
+            "[email] deployment delivery failed",
             error instanceof Error ? error.message : error,
           );
         }),

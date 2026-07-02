@@ -61,6 +61,12 @@ export type AppHealthCheck = {
   intervalSeconds: number;
 };
 
+export type AppDeployNotifications = {
+  webhookUrl: string | null;
+  notifyOnSuccess: boolean;
+  notifyOnFailure: boolean;
+};
+
 export type AppDatabase = {
   kind: DatabaseKind;
   version: string;
@@ -93,6 +99,7 @@ export type App = {
   volumes: AppVolume[];
   resourceLimits: AppResourceLimits;
   healthCheck: AppHealthCheck;
+  deployNotifications: AppDeployNotifications;
   database: AppDatabase | null;
   createdAt: string;
   updatedAt: string;
@@ -165,6 +172,9 @@ export type UpdateAppInput = {
   healthCheckStatus?: number;
   healthCheckTimeoutSeconds?: number;
   healthCheckIntervalSeconds?: number;
+  deployWebhookUrl?: string | null;
+  deployNotifySuccess?: boolean;
+  deployNotifyFailure?: boolean;
   name?: string;
   repositoryUrl?: string;
   branch?: string;
@@ -462,6 +472,32 @@ export type TriggerDeploymentInput = {
   noCache?: boolean;
 };
 
+export type CronJobStatus = "running" | "succeeded" | "failed";
+
+export type CronJob = {
+  id: string;
+  appId: string;
+  name: string;
+  command: string;
+  schedule: string;
+  enabled: boolean;
+  lastStatus: CronJobStatus | null;
+  lastRunAt: string | null;
+  lastFinishedAt: string | null;
+  lastOutput: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateCronJobInput = {
+  name: string;
+  command: string;
+  schedule: string;
+  enabled?: boolean;
+};
+
+export type UpdateCronJobInput = Partial<CreateCronJobInput>;
+
 export type MonitorSeverity = "info" | "warning" | "critical";
 export type AlertStatus = "open" | "acknowledged" | "resolved";
 
@@ -522,6 +558,67 @@ export type WorkspaceSettings = {
 
 export type UpdateWorkspaceSettingsInput = {
   imageRetentionDays: number;
+};
+
+export type ApiTokenScope = "read" | "deployments:write" | "write";
+
+export type ApiToken = {
+  id: string;
+  organizationId: string;
+  name: string;
+  tokenPrefix: string;
+  scopes: ApiTokenScope[];
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateApiTokenInput = {
+  name: string;
+  scopes: ApiTokenScope[];
+  expiresAt?: string | null;
+};
+
+export type CreateApiTokenResult = {
+  token: string;
+  apiToken: ApiToken;
+};
+
+export type WorkspaceRole = "owner" | "admin" | "member";
+
+export type TeamMember = {
+  id: string;
+  userId: string;
+  organizationId: string;
+  name: string;
+  email: string;
+  role: WorkspaceRole;
+  createdAt: string;
+};
+
+export type TeamInvitation = {
+  id: string;
+  organizationId: string;
+  email: string;
+  role: WorkspaceRole;
+  status: string;
+  expiresAt: string;
+  createdAt: string;
+};
+
+export type TeamOverview = {
+  members: TeamMember[];
+  invitations: TeamInvitation[];
+};
+
+export type InviteTeamMemberInput = {
+  email: string;
+  role: WorkspaceRole;
+};
+
+export type UpdateTeamMemberInput = {
+  role: WorkspaceRole;
 };
 
 export type AppMetrics = {
@@ -763,6 +860,7 @@ export type CreateLoadBalancerIntegrationInput = {
 };
 
 export type ManagedLoadBalancerStatus = "pending" | "syncing" | "active" | "error";
+export type LoadBalancerEventStatus = "info" | "success" | "error";
 
 export type ManagedLoadBalancerTarget = {
   id: string;
@@ -795,6 +893,15 @@ export type ManagedLoadBalancer = {
   targets: ManagedLoadBalancerTarget[];
   createdAt: string;
   updatedAt: string;
+};
+
+export type LoadBalancerEvent = {
+  id: string;
+  loadBalancerId: string;
+  status: LoadBalancerEventStatus;
+  message: string;
+  details: string | null;
+  createdAt: string;
 };
 
 export type CreateManagedLoadBalancerInput = {

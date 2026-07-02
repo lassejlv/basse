@@ -2,6 +2,7 @@ import type {
   CreateLoadBalancerIntegrationInput,
   CreateManagedLoadBalancerInput,
   LoadBalancerIntegration,
+  LoadBalancerEvent,
   ManagedLoadBalancer,
 } from "@basse/shared";
 
@@ -70,6 +71,14 @@ export async function syncManagedLoadBalancer(id: string): Promise<ManagedLoadBa
   });
   if (!response.ok) throw new Error(await parseError(response));
   return response.json() as Promise<ManagedLoadBalancer>;
+}
+
+export async function listLoadBalancerEvents(id: string): Promise<LoadBalancerEvent[]> {
+  const response = await fetch(`${apiBaseUrl}/api/load-balancers/${id}/events`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(await parseError(response));
+  return response.json() as Promise<LoadBalancerEvent[]>;
 }
 
 export async function deleteManagedLoadBalancer(id: string): Promise<void> {

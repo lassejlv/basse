@@ -98,7 +98,7 @@ type GitHubWebhookPayload = GitHubPushPayload & {
 export const github = new Hono();
 
 github.get("/integration", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const integration = await getIntegration(organizationId);
@@ -112,7 +112,7 @@ github.get("/integration", async (c) => {
 });
 
 github.get("/manifest", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   c.header("Cache-Control", "no-store");
@@ -122,7 +122,7 @@ github.get("/manifest", async (c) => {
 });
 
 github.post("/manifest/complete", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const body = (await c.req
@@ -319,7 +319,7 @@ github.post("/webhook", async (c) => {
 });
 
 github.get("/installations", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const rows = await db
@@ -332,7 +332,7 @@ github.get("/installations", async (c) => {
 });
 
 github.post("/installations", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const integration = await getIntegration(organizationId);
@@ -366,7 +366,7 @@ github.post("/installations", async (c) => {
 });
 
 github.post("/installations/sync", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const integration = await getIntegration(organizationId);
@@ -385,7 +385,7 @@ github.post("/installations/sync", async (c) => {
 });
 
 github.delete("/installations/:id", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   await db
@@ -401,7 +401,7 @@ github.delete("/installations/:id", async (c) => {
 });
 
 github.get("/repositories", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const repositoriesResult = await tryGitHub(() => listInstalledRepositories(organizationId));
@@ -411,7 +411,7 @@ github.get("/repositories", async (c) => {
 });
 
 github.delete("/integration", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   await db

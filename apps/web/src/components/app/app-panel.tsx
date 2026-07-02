@@ -9,6 +9,7 @@ import type { App } from "@/lib/apps";
 import { cn } from "@/lib/utils";
 import { BackupsTab } from "./backups-tab";
 import { DatabaseConnectionCard } from "./connection-tab";
+import { CronJobsTab } from "./cron-jobs-tab";
 import { DeployButton } from "./deploy-button";
 import { DeploymentsPanel } from "./deployments-tab";
 import { AppDomainsTab } from "./domains-tab";
@@ -17,8 +18,8 @@ import { SpecDivider, useLiveUrl } from "./shared";
 import { useAppDetail } from "./use-app-detail";
 import { EnvVarsCard } from "./variables-tab";
 
-const SERVICE_TABS = ["deployments", "variables", "domains", "changes", "settings"];
-const DATABASE_TABS = ["deployments", "connection", "backups", "changes", "settings"];
+const SERVICE_TABS = ["deployments", "variables", "domains", "cron", "changes", "settings"];
+const DATABASE_TABS = ["deployments", "connection", "backups", "cron", "changes", "settings"];
 
 /** The app sidecard on the project canvas — the entire app experience lives
  * here: deployments, variables, domains, staged-change history, settings. */
@@ -96,9 +97,7 @@ export function AppPanel({
               {app.appKind === "database" ? (
                 <>
                   <TabsTab value="connection">Connection</TabsTab>
-                  {app.database?.kind === "postgres" ? (
-                    <TabsTab value="backups">Backups</TabsTab>
-                  ) : null}
+                  <TabsTab value="backups">Backups</TabsTab>
                 </>
               ) : (
                 <>
@@ -106,6 +105,7 @@ export function AppPanel({
                   <TabsTab value="domains">Domains</TabsTab>
                 </>
               )}
+              <TabsTab value="cron">Cron</TabsTab>
               <TabsTab value="changes">Changes</TabsTab>
               <TabsTab value="settings">Settings</TabsTab>
             </TabsList>
@@ -122,11 +122,9 @@ export function AppPanel({
                   <TabsPanel value="connection">
                     <DatabaseConnectionCard app={app} />
                   </TabsPanel>
-                  {app.database?.kind === "postgres" ? (
-                    <TabsPanel value="backups">
-                      <BackupsTab app={app} />
-                    </TabsPanel>
-                  ) : null}
+                  <TabsPanel value="backups">
+                    <BackupsTab app={app} />
+                  </TabsPanel>
                 </>
               ) : (
                 <>
@@ -143,6 +141,9 @@ export function AppPanel({
                   </TabsPanel>
                 </>
               )}
+              <TabsPanel value="cron">
+                <CronJobsTab app={app} />
+              </TabsPanel>
               <TabsPanel value="changes">
                 {app.projectId ? (
                   <ProjectStagedChangesHistory

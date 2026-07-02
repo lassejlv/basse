@@ -46,7 +46,7 @@ async function ownedAlert(alertId: string, organizationId: string): Promise<Aler
 }
 
 alerts.get("/", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const status = c.req.query("status") ?? "active";
@@ -77,7 +77,7 @@ alerts.get("/", async (c) => {
 });
 
 alerts.get("/overview", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const [openCount, acknowledgedCount, criticalOpenCount] = await Promise.all([
@@ -109,7 +109,7 @@ alerts.get("/overview", async (c) => {
 });
 
 alerts.post("/:id/acknowledge", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const row = await ownedAlert(c.req.param("id"), organizationId);
@@ -125,7 +125,7 @@ alerts.post("/:id/acknowledge", async (c) => {
 });
 
 alerts.post("/:id/resolve", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const row = await ownedAlert(c.req.param("id"), organizationId);

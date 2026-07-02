@@ -19,7 +19,7 @@ export const envVars = new Hono();
 
 // GET /api/apps/:appId/env-vars — keys + masked values only (never plaintext).
 envVars.get("/:appId/env-vars", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const owned = await ownedApp(c.req.param("appId"), organizationId);
@@ -41,7 +41,7 @@ envVars.get("/:appId/env-vars", async (c) => {
 // GET /api/apps/:appId/env-vars/reveal — decrypted plaintext for the editor.
 // Same workspace-auth gate as everything else; the user owns these secrets.
 envVars.get("/:appId/env-vars/reveal", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const owned = await ownedApp(c.req.param("appId"), organizationId);
@@ -58,7 +58,7 @@ envVars.get("/:appId/env-vars/reveal", async (c) => {
 
 // PUT /api/apps/:appId/env-vars — bulk replace the whole set (encrypted at rest).
 envVars.put("/:appId/env-vars", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const owned = await ownedApp(c.req.param("appId"), organizationId);
@@ -103,7 +103,7 @@ envVars.put("/:appId/env-vars", async (c) => {
 
 // DELETE /api/apps/:appId/env-vars/:key — remove one variable.
 envVars.delete("/:appId/env-vars/:key", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const owned = await ownedApp(c.req.param("appId"), organizationId);

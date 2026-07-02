@@ -11,7 +11,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 export * from "./auth-schema";
-import { organization } from "./auth-schema";
+import { organization, user } from "./auth-schema";
 
 // A user server, workspace-scoped. Basse SSHes in (using its own per-server
 // keypair), installs Docker, and runs the Go agent. Secret columns (private
@@ -77,6 +77,31 @@ export const agentCommand = pgTable(
   (table) => [
     index("agent_command_serverId_status_idx").on(table.serverId, table.status),
     index("agent_command_createdAt_idx").on(table.createdAt),
+  ],
+);
+
+export const apiToken = pgTable(
+  "api_token",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    createdByUserId: text("created_by_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    name: text("name").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    tokenPrefix: text("token_prefix").notNull(),
+    scopes: text("scopes").notNull(),
+    lastUsedAt: timestamp("last_used_at"),
+    expiresAt: timestamp("expires_at"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("api_token_organizationId_idx").on(table.organizationId),
+    uniqueIndex("api_token_tokenHash_uidx").on(table.tokenHash),
   ],
 );
 
@@ -184,6 +209,9 @@ export const app = pgTable(
     backupRetention: integer("backup_retention").notNull().default(7),
     // When set, completed backups are also uploaded to this S3 connection.
     backupS3ConnectionId: text("backup_s3_connection_id"),
+    deployWebhookUrl: text("deploy_webhook_url"),
+    deployNotifySuccess: boolean("deploy_notify_success").notNull().default(false),
+    deployNotifyFailure: boolean("deploy_notify_failure").notNull().default(false),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },
@@ -208,6 +236,30 @@ export const appServer = pgTable(
     uniqueIndex("app_server_appId_serverId_uidx").on(table.appId, table.serverId),
     index("app_server_appId_idx").on(table.appId),
     index("app_server_serverId_idx").on(table.serverId),
+  ],
+);
+
+export const appCronJob = pgTable(
+  "app_cron_job",
+  {
+    id: text("id").primaryKey(),
+    appId: text("app_id")
+      .notNull()
+      .references(() => app.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    command: text("command").notNull(),
+    schedule: text("schedule").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    lastStatus: text("last_status", { enum: ["running", "succeeded", "failed"] }),
+    lastRunAt: timestamp("last_run_at"),
+    lastFinishedAt: timestamp("last_finished_at"),
+    lastOutput: text("last_output"),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("app_cron_job_appId_idx").on(table.appId),
+    index("app_cron_job_enabled_idx").on(table.enabled),
   ],
 );
 
@@ -554,6 +606,13 @@ export const serverRelations = relations(server, ({ one, many }) => ({
   appServers: many(appServer),
 }));
 
+export const apiTokenRelations = relations(apiToken, ({ one }) => ({
+  organization: one(organization, {
+    fields: [apiToken.organizationId],
+    references: [organization.id],
+  }),
+}));
+
 export const workspaceSettingsRelations = relations(workspaceSettings, ({ one }) => ({
   organization: one(organization, {
     fields: [workspaceSettings.organizationId],
@@ -573,8 +632,16 @@ export const appRelations = relations(app, ({ one, many }) => ({
   deployments: many(deployment),
   envVars: many(envVar),
   appServers: many(appServer),
+  cronJobs: many(appCronJob),
   stagedChanges: many(stagedChange),
   stagedChangeHistory: many(stagedChangeHistory),
+}));
+
+export const appCronJobRelations = relations(appCronJob, ({ one }) => ({
+  app: one(app, {
+    fields: [appCronJob.appId],
+    references: [app.id],
+  }),
 }));
 
 export const appServerRelations = relations(appServer, ({ one }) => ({
@@ -907,6 +974,24 @@ export const loadBalancerTarget = pgTable(
   ],
 );
 
+export const loadBalancerEvent = pgTable(
+  "load_balancer_event",
+  {
+    id: text("id").primaryKey(),
+    loadBalancerId: text("load_balancer_id")
+      .notNull()
+      .references(() => loadBalancer.id, { onDelete: "cascade" }),
+    status: text("status", { enum: ["info", "success", "error"] }).notNull(),
+    message: text("message").notNull(),
+    details: text("details"),
+    createdAt: timestamp("created_at").notNull(),
+  },
+  (table) => [
+    index("load_balancer_event_loadBalancerId_idx").on(table.loadBalancerId),
+    index("load_balancer_event_createdAt_idx").on(table.createdAt),
+  ],
+);
+
 export const sshKeyRelations = relations(sshKey, ({ one }) => ({
   organization: one(organization, {
     fields: [sshKey.organizationId],
@@ -946,6 +1031,7 @@ export const loadBalancerRelations = relations(loadBalancer, ({ one, many }) => 
     references: [app.id],
   }),
   targets: many(loadBalancerTarget),
+  events: many(loadBalancerEvent),
 }));
 
 export const loadBalancerTargetRelations = relations(loadBalancerTarget, ({ one }) => ({
@@ -956,5 +1042,12 @@ export const loadBalancerTargetRelations = relations(loadBalancerTarget, ({ one 
   server: one(server, {
     fields: [loadBalancerTarget.serverId],
     references: [server.id],
+  }),
+}));
+
+export const loadBalancerEventRelations = relations(loadBalancerEvent, ({ one }) => ({
+  loadBalancer: one(loadBalancer, {
+    fields: [loadBalancerEvent.loadBalancerId],
+    references: [loadBalancer.id],
   }),
 }));

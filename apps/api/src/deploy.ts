@@ -31,6 +31,7 @@ import {
 } from "./builder";
 import { resolveBuildPaths } from "./build-paths";
 import { decryptSecret } from "./crypto";
+import { notifyDeploymentFinished } from "./deployment-notifications";
 import { loadResolvedEnvMap } from "./env-resolver";
 import { resolveGitHubCloneToken } from "./github";
 import { gitHubHttpsCloneUrl, parseGitHubOwner } from "./github-utils";
@@ -69,6 +70,9 @@ async function setStatus(
     .returning({ id: deployment.id });
   if (rows.length === 0) return false;
   void publishForDeployment(id);
+  if (status === "healthy" || status === "failed") {
+    void notifyDeploymentFinished(id, status);
+  }
   return true;
 }
 

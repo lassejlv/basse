@@ -242,7 +242,7 @@ export const realtimeRoutes = new Hono<{ Variables: { organizationId: string } }
 realtimeRoutes.get(
   "/",
   async (c, next) => {
-    const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+    const organizationId = await resolveActiveWorkspace(c.req.raw);
     if (organizationId instanceof Response) return organizationId;
     c.set("organizationId", organizationId);
     await next();

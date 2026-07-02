@@ -44,6 +44,7 @@ import {
 import { decryptSecret, encryptSecret } from "./crypto";
 import { enqueueDeploy, toDeployment } from "./deployments";
 import { validateHost, validateUpstream } from "./domains";
+import { enqueueAction } from "./queue/queue";
 import { enqueueOrRunDomainSync } from "./proxy-sync";
 import { publishRealtime } from "./realtime";
 import { resolveActiveWorkspace } from "./workspace";
@@ -490,6 +491,11 @@ async function applyStagedChangesForApp(
   }
 
   await Promise.all([...domainSyncServerIds].map((serverId) => enqueueOrRunDomainSync(serverId)));
+  if (serverIds) {
+    await enqueueAction("sync-app-load-balancers", existing.id).catch((error) => {
+      console.error("[load-balancer-resync]", existing.id, error);
+    });
+  }
 
   let deployment: ApplyStagedChangesResult["deployment"] = null;
   if (shouldDeploy) {
@@ -605,7 +611,7 @@ export const changes = new Hono();
 export const projectChanges = new Hono();
 
 projectChanges.get("/:id/changes", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const projectId = c.req.param("id");
@@ -623,7 +629,7 @@ projectChanges.get("/:id/changes", async (c) => {
 });
 
 projectChanges.get("/:id/changes/history", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const projectId = c.req.param("id");
@@ -635,7 +641,7 @@ projectChanges.get("/:id/changes/history", async (c) => {
 });
 
 projectChanges.post("/:id/changes/apply", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const projectId = c.req.param("id");
@@ -673,7 +679,7 @@ projectChanges.post("/:id/changes/apply", async (c) => {
 });
 
 projectChanges.post("/:id/changes/discard", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const projectId = c.req.param("id");
@@ -713,7 +719,7 @@ projectChanges.post("/:id/changes/discard", async (c) => {
 });
 
 projectChanges.delete("/:id/changes/:changeId", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const projectId = c.req.param("id");
@@ -755,7 +761,7 @@ projectChanges.delete("/:id/changes/:changeId", async (c) => {
 
 // GET /api/apps/:id/changes — the pending changes plus the draft app.
 changes.get("/:id/changes", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedApp(c.req.param("id"), organizationId);
@@ -766,7 +772,7 @@ changes.get("/:id/changes", async (c) => {
 
 // GET /api/apps/:id/changes/history — recent applied/discarded staged batches.
 changes.get("/:id/changes/history", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedApp(c.req.param("id"), organizationId);
@@ -786,7 +792,7 @@ changes.get("/:id/changes/history", async (c) => {
 // so the env editor edits on top of what is already staged. Same auth gate as
 // the reveal endpoint; the user owns these secrets.
 changes.get("/:id/changes/env-draft", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedApp(c.req.param("id"), organizationId);
@@ -818,7 +824,7 @@ changes.get("/:id/changes/env-draft", async (c) => {
 // matches PATCH; only fields that actually differ from the live app are staged,
 // and a field re-set to its original value clears its staged row.
 changes.post("/:id/changes/app", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedApp(c.req.param("id"), organizationId);
@@ -892,7 +898,7 @@ changes.post("/:id/changes/app", async (c) => {
 // is diffed against the live vars into create/update/delete rows; values are
 // encrypted at rest exactly like the live env_var table.
 changes.post("/:id/changes/env", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedApp(c.req.param("id"), organizationId);
@@ -958,7 +964,7 @@ changes.post("/:id/changes/env", async (c) => {
 // GET /api/apps/:id/changes/preview-domain — cloud preview URL settings for
 // single-server apps. Disabled in self-hosted installs unless env is configured.
 changes.get("/:id/changes/preview-domain", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedApp(c.req.param("id"), organizationId);
@@ -970,7 +976,7 @@ changes.get("/:id/changes/preview-domain", async (c) => {
 // POST /api/apps/:id/changes/preview-domain — stage the one allowed managed
 // preview domain. Applying the staged change writes the Cloudflare A record.
 changes.post("/:id/changes/preview-domain", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedApp(c.req.param("id"), organizationId);
@@ -1027,7 +1033,7 @@ changes.post("/:id/changes/preview-domain", async (c) => {
 // POST /api/apps/:id/changes/domain — stage a domain create/delete. Applying
 // the batch commits the domain table change and queues a proxy sync.
 changes.post("/:id/changes/domain", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedApp(c.req.param("id"), organizationId);
@@ -1141,7 +1147,7 @@ changes.post("/:id/changes/domain", async (c) => {
 // deploy (which reads the now-updated config). Returns the deployment, or null
 // when no server is attached to deploy to.
 changes.post("/:id/changes/apply", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedApp(c.req.param("id"), organizationId);
@@ -1159,7 +1165,7 @@ changes.post("/:id/changes/apply", async (c) => {
 
 // POST /api/apps/:id/changes/discard — drop every staged change for the app.
 changes.post("/:id/changes/discard", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedApp(c.req.param("id"), organizationId);
@@ -1178,7 +1184,7 @@ changes.post("/:id/changes/discard", async (c) => {
 
 // DELETE /api/apps/:id/changes/:changeId — discard a single staged change.
 changes.delete("/:id/changes/:changeId", async (c) => {
-  const organizationId = await resolveActiveWorkspace(c.req.raw.headers);
+  const organizationId = await resolveActiveWorkspace(c.req.raw);
   if (organizationId instanceof Response) return organizationId;
 
   const existing = await ownedApp(c.req.param("id"), organizationId);

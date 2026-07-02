@@ -11,6 +11,7 @@ import {
   TrashIcon,
 } from "lucide-react";
 import { FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import type { ApiTokenScope } from "@basse/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -28,6 +29,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { createApiToken, deleteApiToken, listApiTokens } from "@/lib/api-tokens";
 import { authClient } from "@/lib/auth-client";
 import { disconnectDepot, getDepotConnection, saveDepotConnection } from "@/lib/depot";
 import {
@@ -73,11 +75,220 @@ function SecretsRoute() {
       <div className="grid max-w-5xl items-start gap-4 xl:grid-cols-2">
         <GitHubSection organizationId={organizationId} />
         <div className="flex flex-col gap-4">
+          <ApiTokensSection organizationId={organizationId} />
           <SshKeysSection organizationId={organizationId} />
           <DepotSection organizationId={organizationId} />
         </div>
       </div>
     </section>
+  );
+}
+
+const API_TOKEN_SCOPES: { value: ApiTokenScope; label: string; description: string }[] = [
+  {
+    value: "read",
+    label: "Read",
+    description: "List workspace resources and deployment state.",
+  },
+  {
+    value: "deployments:write",
+    label: "Deploy",
+    description: "Trigger and roll back deployments.",
+  },
+  {
+    value: "write",
+    label: "Write",
+    description: "Mutate workspace resources.",
+  },
+];
+
+function ApiTokensSection({ organizationId }: { organizationId?: string }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [scopes, setScopes] = useState<ApiTokenScope[]>(["read", "deployments:write"]);
+  const [createdToken, setCreatedToken] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const tokensKey = ["api-tokens", organizationId];
+
+  const tokens = useQuery({
+    queryKey: tokensKey,
+    queryFn: listApiTokens,
+    enabled: Boolean(organizationId),
+  });
+
+  const create = useMutation({
+    mutationFn: () =>
+      createApiToken({
+        name,
+        scopes,
+        expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+      }),
+    onSuccess: async (result) => {
+      setCreatedToken(result.token);
+      setName("");
+      setExpiresAt("");
+      toast.success("API token created");
+      await queryClient.invalidateQueries({ queryKey: tokensKey });
+    },
+    onError: (error) => toast.error("Couldn't create API token", { description: toMessage(error) }),
+  });
+
+  const remove = useMutation({
+    mutationFn: deleteApiToken,
+    onSuccess: async () => {
+      toast.success("API token deleted");
+      await queryClient.invalidateQueries({ queryKey: tokensKey });
+    },
+    onError: (error) => toast.error("Couldn't delete API token", { description: toMessage(error) }),
+  });
+
+  function toggleScope(scope: ApiTokenScope, checked: boolean) {
+    setScopes((current) => {
+      const next = checked ? [...new Set([...current, scope])] : current.filter((s) => s !== scope);
+      return next.length > 0 ? next : current;
+    });
+  }
+
+  async function copyCreatedToken() {
+    if (!createdToken) return;
+    await navigator.clipboard.writeText(createdToken);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  }
+
+  return (
+    <SectionCard
+      badge={<Badge size="sm">Automation</Badge>}
+      description="Scoped bearer tokens for scripts, CI, and deploy automation."
+      icon={<KeyRoundIcon className="size-4" />}
+      title="API tokens"
+    >
+      <div className="mt-4 space-y-3">
+        {(tokens.data ?? []).map((token) => (
+          <div
+            className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
+            key={token.id}
+          >
+            <div className="min-w-0">
+              <p className="truncate font-medium text-sm">{token.name}</p>
+              <p className="text-muted-foreground text-xs">
+                {token.tokenPrefix} · {token.scopes.join(", ")}
+              </p>
+              <p className="text-muted-foreground text-xs">
+                {token.lastUsedAt ? `Last used ${new Date(token.lastUsedAt).toLocaleString()}` : "Never used"}
+              </p>
+            </div>
+            <Button
+              loading={remove.isPending}
+              onClick={() => remove.mutate(token.id)}
+              size="icon"
+              title="Delete API token"
+              variant="ghost"
+            >
+              <TrashIcon />
+            </Button>
+          </div>
+        ))}
+        {tokens.isSuccess && (tokens.data ?? []).length === 0 ? (
+          <p className="text-muted-foreground text-sm">No API tokens yet.</p>
+        ) : null}
+        {tokens.isError ? (
+          <p className="text-destructive-foreground text-sm">
+            Couldn't load API tokens: {toMessage(tokens.error)}
+          </p>
+        ) : null}
+      </div>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogTrigger
+          render={
+            <Button className="mt-4" size="sm">
+              <PlusIcon />
+              New token
+            </Button>
+          }
+        />
+        <DialogPopup>
+          <DialogPanel>
+            <DialogHeader>
+              <DialogTitle>Create API token</DialogTitle>
+              <DialogDescription>
+                The token is only shown once. Store it somewhere safe before closing this dialog.
+              </DialogDescription>
+            </DialogHeader>
+            {createdToken ? (
+              <div className="space-y-3">
+                <Label htmlFor="created-api-token">Token</Label>
+                <Textarea id="created-api-token" readOnly value={createdToken} />
+                <Button onClick={copyCreatedToken} type="button">
+                  {copied ? <CheckIcon /> : <CopyIcon />}
+                  {copied ? "Copied" : "Copy token"}
+                </Button>
+              </div>
+            ) : (
+              <form
+                className="space-y-4"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  create.mutate();
+                }}
+              >
+                <div className="space-y-2">
+                  <Label htmlFor="api-token-name">Name</Label>
+                  <Input
+                    id="api-token-name"
+                    onChange={(event) => setName(event.currentTarget.value)}
+                    placeholder="GitHub Actions deploy"
+                    value={name}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="api-token-expiry">Expires at</Label>
+                  <Input
+                    id="api-token-expiry"
+                    onChange={(event) => setExpiresAt(event.currentTarget.value)}
+                    type="datetime-local"
+                    value={expiresAt}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Scopes</Label>
+                  <div className="space-y-2">
+                    {API_TOKEN_SCOPES.map((scope) => (
+                      <label
+                        className="flex items-start gap-2 rounded-md border px-3 py-2 text-sm"
+                        key={scope.value}
+                      >
+                        <input
+                          checked={scopes.includes(scope.value)}
+                          className="mt-1"
+                          onChange={(event) => toggleScope(scope.value, event.currentTarget.checked)}
+                          type="checkbox"
+                        />
+                        <span>
+                          <span className="block font-medium">{scope.label}</span>
+                          <span className="block text-muted-foreground text-xs">
+                            {scope.description}
+                          </span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <DialogFooter>
+                  <DialogClose render={<Button variant="outline">Cancel</Button>} />
+                  <Button loading={create.isPending} type="submit">
+                    Create token
+                  </Button>
+                </DialogFooter>
+              </form>
+            )}
+          </DialogPanel>
+        </DialogPopup>
+      </Dialog>
+    </SectionCard>
   );
 }
 

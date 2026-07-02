@@ -4,10 +4,12 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { runMigrations } from "@basse/db/migrations";
 import { alerts } from "./alerts";
+import { apiTokens } from "./api-tokens";
 import { apps } from "./apps";
 import { auth } from "./auth";
 import { backups, startBackupScheduler } from "./backups";
 import { changes, projectChanges } from "./changes";
+import { cronJobs, startCronScheduler } from "./cron-jobs";
 import { reconcileInflightDeployments } from "./deploy";
 import { deployments } from "./deployments";
 import { depot } from "./depot";
@@ -32,6 +34,7 @@ import {
   projectSharedEnvVars,
 } from "./shared-env-vars";
 import { sshKeys } from "./ssh-keys";
+import { team } from "./team";
 import { workspaceSettingsRoutes } from "./workspace-settings";
 
 if (Bun.env.DB_MIGRATE_ON_STARTUP !== "false") {
@@ -79,6 +82,7 @@ app.route("/api/apps", envVars);
 app.route("/api/apps", appEnvReferences);
 app.route("/api/apps", changes);
 app.route("/api/apps", backups);
+app.route("/api/apps", cronJobs);
 app.route("/api/deployments", deployments);
 app.route("/api/ssh-keys", sshKeys);
 app.route("/api/depot", depot);
@@ -90,6 +94,8 @@ app.route("/api/s3", s3);
 app.route("/api/ws", realtimeRoutes);
 app.route("/api/workspace", workspaceSettingsRoutes);
 app.route("/api/alerts", alerts);
+app.route("/api/api-tokens", apiTokens);
+app.route("/api/team", team);
 app.route("/api/agent/outbound", outboundAgent);
 
 app.get("/health", (c) =>
@@ -111,6 +117,7 @@ type BackgroundServices = {
   worker: ReturnType<typeof startWorker>;
   monitor: { close: () => void };
   backupScheduler: { close: () => void };
+  cronScheduler: { close: () => void };
   imagePruner: { close: () => void };
 };
 const SERVICES_KEY = Symbol.for("basse.background-services");
@@ -122,6 +129,7 @@ if (!globalState[SERVICES_KEY]) {
     worker: startWorker(),
     monitor: startMonitor(),
     backupScheduler: startBackupScheduler(),
+    cronScheduler: startCronScheduler(),
     imagePruner: startImagePruner(),
   };
   globalState[SERVICES_KEY] = services;
@@ -143,6 +151,7 @@ if (!globalState[SERVICES_KEY]) {
     try {
       services.monitor.close();
       services.backupScheduler.close();
+      services.cronScheduler.close();
       services.imagePruner.close();
       await services.worker.close();
       await actionsQueue.close();

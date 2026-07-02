@@ -8,7 +8,9 @@ import { createConnection } from "./connection";
 export type ActionName =
   | "provision-server"
   | "sync-domains"
+  | "sync-app-load-balancers"
   | "deploy-app"
+  | "cron-job"
   | "database-backup"
   | "database-backup-upload";
 
@@ -50,7 +52,7 @@ const ENQUEUE_TIMEOUT_MS = 5000;
  */
 export async function enqueueAction(name: ActionName, entityId: string): Promise<void> {
   const jobId =
-    name === "sync-domains"
+    name === "sync-domains" || name === "sync-app-load-balancers"
       ? `${name}__${entityId}__${Date.now()}__${crypto.randomUUID()}`
       : `${name}__${entityId}`;
   const add = actionsQueue.add(name, { entityId }, { jobId });
