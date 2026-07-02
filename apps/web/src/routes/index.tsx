@@ -115,6 +115,12 @@ function LandingRoute() {
             <span className="text-base font-semibold tracking-[-0.01em]">basse</span>
           </Link>
           <div className="flex-1" />
+          <Link
+            to="/pricing"
+            className="px-1 py-1.5 text-sm font-medium text-muted-foreground hover:text-foreground"
+          >
+            Pricing
+          </Link>
           <a
             href="#"
             className="px-1 py-1.5 text-sm font-medium text-muted-foreground hover:text-foreground"
@@ -378,6 +384,9 @@ function LandingRoute() {
             <span className="font-mono text-[13px] font-medium text-muted-foreground">basse</span>
           </div>
           <div className="flex gap-5 font-mono text-[12.5px] text-muted-foreground">
+            <Link to="/pricing" className="hover:text-foreground">
+              Pricing
+            </Link>
             <a href="#" className="hover:text-foreground">
               Docs
             </a>
