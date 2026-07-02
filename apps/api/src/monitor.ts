@@ -129,6 +129,8 @@ export async function raiseAlert(issue: MonitorIssue): Promise<void> {
       message: created.message,
       code: created.code,
       fingerprint: created.fingerprint,
+    }).catch((error) => {
+      console.error("[monitor] alert email failed", error instanceof Error ? error.message : error);
     });
   }
 }

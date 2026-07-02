@@ -1,18 +1,19 @@
 services:
   caddy:
-    image: caddy:latest
+    image: caddy:2-alpine
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
     environment:
-      DOMAIN: ${DOMAIN}
+      DOMAIN: ${DOMAIN:-localhost}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      - ${BASSE_DATA_DIR:-/data/basse}/caddy/data:/data
+      - ${BASSE_DATA_DIR:-/data/basse}/caddy/config:/config
     depends_on:
-      - control-plane
+      control-plane:
+        condition: service_healthy
     networks:
       - basse
 
@@ -20,44 +21,93 @@ services:
     image: ${CONTROL_PLANE_IMAGE:-ghcr.io/lassejlv/basse-control-plane:latest}
     restart: unless-stopped
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
-      BETTER_AUTH_URL: https://${DOMAIN}
-      WEB_ORIGIN: https://${DOMAIN}
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-basse}:${POSTGRES_PASSWORD:-basse}@postgres:5432/${POSTGRES_DB:-basse}}
       REDIS_URL: redis://redis:6379
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET in .env}
+      BETTER_AUTH_URL: ${BASSE_PUBLIC_URL:-http://localhost}
+      EMAIL_VERIFICATION: ${EMAIL_VERIFICATION:-false}
+      WEB_ORIGIN: ${BASSE_PUBLIC_URL:-http://localhost}
+      API_ORIGIN: ${BASSE_PUBLIC_URL:-http://localhost}
+      BASSE_PUBLIC_URL: ${BASSE_PUBLIC_URL:-http://localhost}
+      DOMAIN: ${DOMAIN:-localhost}
+      INSTALL_SCRIPT_URL: ${INSTALL_SCRIPT_URL:-https://raw.githubusercontent.com/lassejlv/basse/main/install.sh}
+      UPDATE_SCRIPT_URL: ${UPDATE_SCRIPT_URL:-https://raw.githubusercontent.com/lassejlv/basse/main/update.sh}
       API_HOST: 0.0.0.0
       API_PORT: "3000"
+      QUEUE_CONCURRENCY: ${QUEUE_CONCURRENCY:-5}
+      BASSE_AGENT_IMAGE: ${BASSE_AGENT_IMAGE:-ghcr.io/lassejlv/basse-agent:latest}
+      BASSE_CADDY_IMAGE: ${BASSE_CADDY_IMAGE:-caddy:2}
+      DB_MIGRATE_ON_STARTUP: ${DB_MIGRATE_ON_STARTUP:-true}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_REQUIRE_TLS: ${SMTP_REQUIRE_TLS:-false}
+      SMTP_ALLOW_INSECURE_AUTH: ${SMTP_ALLOW_INSECURE_AUTH:-false}
+      SMTP_AUTH_METHOD: ${SMTP_AUTH_METHOD:-plain}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      GITHUB_APP_NAME: ${GITHUB_APP_NAME:-Basse}
     expose:
       - "3000"
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
-    # Give the in-process worker time to finish an in-flight provision on stop.
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'bun -e "const r = await fetch(''http://127.0.0.1:3000/health'').catch(() => null); process.exit(r?.ok ? 0 : 1)"',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     stop_grace_period: 120s
     networks:
       - basse
 
-  redis:
-    image: redis:7-alpine
+  postgres:
+    image: postgres:18-alpine
     restart: unless-stopped
-    # appendonly persistence so queued jobs survive a restart. noeviction
-    # (the default) is required — any eviction policy silently corrupts BullMQ.
-    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-basse}
+      POSTGRES_USER: ${POSTGRES_USER:-basse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-basse}
     volumes:
-      - redis_data:/data
+      - ${BASSE_DATA_DIR:-/data/basse}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - basse
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "everysec",
+        "--maxmemory-policy",
+        "noeviction",
+      ]
+    volumes:
+      - ${BASSE_DATA_DIR:-/data/basse}/redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
-      retries: 5
-    # No published ports — internal to the basse network only.
+      retries: 10
     networks:
       - basse
-
-volumes:
-  caddy_data:
-  caddy_config:
-  redis_data:
 
 networks:
   basse:

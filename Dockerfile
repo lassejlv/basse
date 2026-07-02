@@ -15,9 +15,11 @@ COPY . .
 RUN bun run --cwd apps/web build
 
 FROM base AS runner
+ARG BASSE_COMMIT_SHA=unknown
 ENV NODE_ENV=production
 ENV API_HOST=0.0.0.0
 ENV API_PORT=3000
+ENV BASSE_COMMIT_SHA=${BASSE_COMMIT_SHA}
 # Pin the Railpack CLI + matching BuildKit frontend image (must agree).
 ENV RAILPACK_VERSION=0.30.0
 ENV BASSE_RAILPACK_FRONTEND=ghcr.io/railwayapp/railpack-frontend:v0.30.0

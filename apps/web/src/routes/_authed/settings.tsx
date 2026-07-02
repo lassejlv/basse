@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { TrashIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 import type { LoadBalancerProvider, WorkspaceRole } from "@basse/shared";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,7 @@ import {
   listLoadBalancerIntegrations,
   saveLoadBalancerIntegration,
 } from "@/lib/load-balancers";
+import { checkSystemUpdate, getSystemInfo } from "@/lib/system";
 import { toast } from "@/lib/toast";
 import {
   deleteTeamInvitation,
@@ -79,6 +80,8 @@ function SettingsRoute() {
       </div>
 
       <TeamCard />
+
+      <SelfHostedUpdatesCard />
 
       <div className="max-w-2xl rounded-lg border bg-card p-6">
         <h2 className="text-lg font-semibold">Workspace</h2>
@@ -146,6 +149,105 @@ function SettingsRoute() {
   );
 }
 
+function shortSha(value: string | null | undefined): string {
+  if (!value || value === "unknown") return "unknown";
+  return value.slice(0, 12);
+}
+
+function SelfHostedUpdatesCard() {
+  const system = useQuery({
+    queryKey: ["system-info"],
+    queryFn: getSystemInfo,
+  });
+  const [copied, setCopied] = useState(false);
+  const check = useMutation({
+    mutationFn: checkSystemUpdate,
+    onSuccess: (result) => {
+      if (!result.selfHosted) {
+        toast.info("Cloud-managed instance", { description: result.message });
+      } else if (result.updateAvailable === true) {
+        toast.success("Update available", { description: result.message });
+      } else if (result.updateAvailable === false) {
+        toast.success("Basse is up to date", { description: result.message });
+      } else {
+        toast.info("Update status unknown", { description: result.message });
+      }
+    },
+    onError: (error: Error) =>
+      toast.error("Couldn't check updates", { description: error.message }),
+  });
+  const latest = check.data;
+  const command =
+    latest?.updateCommand ?? system.data?.updateCommand ?? "cd /data/basse && ./update.sh";
+  const selfHosted = latest?.selfHosted ?? system.data?.selfHosted ?? true;
+
+  async function copyCommand() {
+    await navigator.clipboard.writeText(command);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+    toast.success("Update command copied");
+  }
+
+  return (
+    <div className="max-w-2xl rounded-lg border bg-card p-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">Updates</h2>
+          <p className="mt-1 text-muted-foreground text-sm">
+            Check the latest self-hosted release and copy the host update command.
+          </p>
+        </div>
+        <Button
+          disabled={system.isPending}
+          loading={check.isPending}
+          onClick={() => check.mutate()}
+          variant="outline"
+        >
+          <RefreshCwIcon />
+          Check updates
+        </Button>
+      </div>
+
+      {system.isError ? (
+        <p className="mt-4 text-destructive-foreground text-sm">{system.error.message}</p>
+      ) : null}
+
+      <dl className="mt-4 grid grid-cols-[8rem_1fr] gap-y-3 text-sm">
+        <dt className="text-muted-foreground">Mode</dt>
+        <dd className="font-medium">{selfHosted ? "Self-hosted" : "Cloud"}</dd>
+        <dt className="text-muted-foreground">Current</dt>
+        <dd className="font-mono text-xs">
+          {shortSha(latest?.currentCommitSha ?? system.data?.currentCommitSha)}
+        </dd>
+        <dt className="text-muted-foreground">Latest</dt>
+        <dd className="font-mono text-xs">{shortSha(latest?.latestCommitSha)}</dd>
+        <dt className="text-muted-foreground">Status</dt>
+        <dd>
+          {latest
+            ? latest.message
+            : selfHosted
+              ? "Run a check to compare this instance with GitHub main."
+              : "Cloud instances are updated by the deploy pipeline."}
+        </dd>
+      </dl>
+
+      {selfHosted ? (
+        <div className="mt-4 flex items-center gap-2 rounded-md border bg-muted/20 p-2">
+          <code className="min-w-0 flex-1 truncate font-mono text-xs">{command}</code>
+          <Button
+            aria-label="Copy update command"
+            onClick={copyCommand}
+            size="icon"
+            variant="outline"
+          >
+            {copied ? <CheckIcon /> : <CopyIcon />}
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function TeamCard() {
   const queryClient = useQueryClient();
   const queryKey = ["team"];
@@ -162,7 +264,8 @@ function TeamCard() {
       toast.success("Team updated");
       await invalidate();
     },
-    onError: (error: Error) => toast.error("Couldn't invite member", { description: error.message }),
+    onError: (error: Error) =>
+      toast.error("Couldn't invite member", { description: error.message }),
   });
 
   const updateRole = useMutation({
@@ -181,7 +284,8 @@ function TeamCard() {
       toast.success("Member removed");
       await invalidate();
     },
-    onError: (error: Error) => toast.error("Couldn't remove member", { description: error.message }),
+    onError: (error: Error) =>
+      toast.error("Couldn't remove member", { description: error.message }),
   });
 
   const cancelInvite = useMutation({
@@ -190,7 +294,8 @@ function TeamCard() {
       toast.success("Invitation cancelled");
       await invalidate();
     },
-    onError: (error: Error) => toast.error("Couldn't cancel invitation", { description: error.message }),
+    onError: (error: Error) =>
+      toast.error("Couldn't cancel invitation", { description: error.message }),
   });
 
   return (

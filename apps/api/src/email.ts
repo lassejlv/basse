@@ -8,6 +8,7 @@ import {
 import { createEmailClient, type EmailClient } from "@opencoredev/email-sdk";
 import { cloudflare } from "@opencoredev/email-sdk/cloudflare";
 import { observabilityPlugin } from "@opencoredev/email-sdk/plugins/observability";
+import { smtp } from "@opencoredev/email-sdk/smtp";
 import { eq } from "drizzle-orm";
 
 type AlertEmail = {
@@ -41,19 +42,59 @@ function appUrl(): string {
   );
 }
 
+function envFlag(name: string): boolean {
+  return ["1", "true", "yes", "on"].includes((Bun.env[name] ?? "").trim().toLowerCase());
+}
+
 function getEmailClient(): EmailClient | null {
   if (emailClient !== undefined) return emailClient;
 
   const apiToken = Bun.env.CLOUDFLARE_EMAIL_API_TOKEN ?? Bun.env.CLOUDFLARE_API_TOKEN;
   const accountId = Bun.env.CLOUDFLARE_ACCOUNT_ID;
-  if (!apiToken || !accountId || !Bun.env.EMAIL_FROM) {
+  const smtpHost = Bun.env.SMTP_HOST?.trim();
+  const emailFrom = Bun.env.EMAIL_FROM?.trim();
+  if (!emailFrom) {
     emailClient = null;
     return emailClient;
   }
 
+  const adapters = [];
+  if (apiToken && accountId) {
+    adapters.push(cloudflare({ apiToken, accountId }));
+  }
+
+  if (smtpHost) {
+    const smtpUser = Bun.env.SMTP_USER?.trim();
+    const smtpPassword = Bun.env.SMTP_PASSWORD ?? Bun.env.SMTP_PASS;
+    adapters.push(
+      smtp({
+        host: smtpHost,
+        port: Number(Bun.env.SMTP_PORT ?? 587),
+        secure: envFlag("SMTP_SECURE"),
+        requireTLS: envFlag("SMTP_REQUIRE_TLS"),
+        allowInsecureAuth: envFlag("SMTP_ALLOW_INSECURE_AUTH"),
+        auth:
+          smtpUser && smtpPassword
+            ? {
+                user: smtpUser,
+                pass: smtpPassword,
+                method: Bun.env.SMTP_AUTH_METHOD === "login" ? "login" : "plain",
+              }
+            : undefined,
+      }),
+    );
+  }
+
+  if (adapters.length === 0) {
+    emailClient = null;
+    return emailClient;
+  }
+
+  const defaultAdapter = apiToken && accountId ? "cloudflare" : "smtp";
   emailClient = createEmailClient({
-    adapters: [cloudflare({ apiToken, accountId })],
-    defaultAdapter: "cloudflare",
+    adapters,
+    defaultAdapter,
+    fallback: defaultAdapter === "cloudflare" && smtpHost ? ["smtp"] : [],
     retry: { retries: 1 },
     plugins: [
       observabilityPlugin({
@@ -160,7 +201,7 @@ export async function sendAlertEmail(alert: AlertEmail): Promise<void> {
   if (!client) {
     if (!warnedMissingConfig) {
       warnedMissingConfig = true;
-      console.warn("[email] alert email disabled; configure Cloudflare email env vars");
+      console.warn("[email] alert email disabled; configure SMTP or Cloudflare email env vars");
     }
     return;
   }
@@ -216,7 +257,9 @@ export async function sendDeploymentEmail(deployment: DeploymentEmail): Promise<
   if (!client) {
     if (!warnedMissingConfig) {
       warnedMissingConfig = true;
-      console.warn("[email] deployment email disabled; configure Cloudflare email env vars");
+      console.warn(
+        "[email] deployment email disabled; configure SMTP or Cloudflare email env vars",
+      );
     }
     return;
   }

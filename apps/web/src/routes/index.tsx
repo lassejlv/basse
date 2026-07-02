@@ -23,8 +23,8 @@ export const Route = createFileRoute("/")({
   component: LandingRoute,
 });
 
-const INSTALL_DISPLAY = "curl -fsSL basse.dev/install | sh";
-const INSTALL_COMMAND = "curl -fsSL https://basse.dev/install | sh";
+const INSTALL_DISPLAY = "curl -fsSL basse.sh/install | sh";
+const INSTALL_COMMAND = "curl -fsSL https://basse.sh/install | sh";
 
 const FEATURES = [
   {
@@ -308,7 +308,8 @@ function LandingRoute() {
                 <span className="w-0.5 shrink-0 self-stretch rounded-full bg-success" />
                 <span className="shrink-0 select-none text-muted-foreground/50">18:21:34</span>
                 <span className="min-w-0 truncate text-foreground">
-                  ✓ live at <span className="underline underline-offset-[3px]">app.basse.dev</span>
+                  ✓ live at{" "}
+                  <span className="underline underline-offset-[3px]">app-prod.basse.network</span>
                 </span>
               </div>
             </div>

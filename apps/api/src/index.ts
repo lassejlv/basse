@@ -44,6 +44,11 @@ if (Bun.env.DB_MIGRATE_ON_STARTUP !== "false") {
 
 const app = new Hono();
 const webDist = Bun.env.WEB_DIST ?? "./apps/web/dist";
+const installScriptUrl =
+  Bun.env.INSTALL_SCRIPT_URL ?? "https://raw.githubusercontent.com/lassejlv/basse/main/install.sh";
+const updateScriptUrl =
+  Bun.env.UPDATE_SCRIPT_URL ?? "https://raw.githubusercontent.com/lassejlv/basse/main/update.sh";
+const currentCommitSha = Bun.env.BASSE_COMMIT_SHA ?? Bun.env.BASSE_VERSION ?? "unknown";
 const allowedOrigins = new Set(
   ["http://localhost:5173", "http://127.0.0.1:5173", normalizeOrigin(Bun.env.WEB_ORIGIN)].filter(
     (origin): origin is string => Boolean(origin),
@@ -57,6 +62,35 @@ function normalizeOrigin(origin?: string): string | undefined {
   } catch {
     return origin;
   }
+}
+
+function isCloudRuntime(): boolean {
+  return Object.keys(Bun.env).some((key) => key.startsWith("CLOUD_"));
+}
+
+function updateCommand(): string {
+  return "cd /data/basse && ./update.sh";
+}
+
+async function fetchRawScript(url: string, unavailableMessage: string): Promise<Response> {
+  const response = await fetch(url, {
+    headers: { accept: "text/plain" },
+  }).catch(() => null);
+
+  if (!response?.ok) {
+    return new Response(`${unavailableMessage}\n`, {
+      status: 502,
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
+  }
+
+  return new Response(await response.text(), {
+    status: 200,
+    headers: {
+      "cache-control": "public, max-age=300",
+      "content-type": "text/plain; charset=utf-8",
+    },
+  });
 }
 
 app.use(logger());
@@ -98,12 +132,83 @@ app.route("/api/api-tokens", apiTokens);
 app.route("/api/team", team);
 app.route("/api/agent/outbound", outboundAgent);
 
+app.get("/api/system", (c) =>
+  c.json({
+    mode: isCloudRuntime() ? "cloud" : "self-hosted",
+    selfHosted: !isCloudRuntime(),
+    currentCommitSha,
+    installUrl: "/install",
+    updateUrl: "/update",
+    updateCommand: updateCommand(),
+  }),
+);
+
+app.get("/api/system/update-check", async (c) => {
+  if (isCloudRuntime()) {
+    return c.json({
+      mode: "cloud",
+      selfHosted: false,
+      currentCommitSha,
+      latestCommitSha: null,
+      updateAvailable: false,
+      updateCommand: null,
+      message: "Cloud instances are updated by the cloud deploy pipeline.",
+    });
+  }
+
+  const response = await fetch("https://api.github.com/repos/lassejlv/basse/commits/main", {
+    headers: {
+      accept: "application/vnd.github+json",
+      "user-agent": "basse-update-check",
+    },
+  }).catch(() => null);
+
+  if (!response?.ok) {
+    return c.json(
+      {
+        error: "Could not check GitHub for the latest version",
+        currentCommitSha,
+        updateCommand: updateCommand(),
+      },
+      502,
+    );
+  }
+
+  const body = (await response.json().catch(() => null)) as { sha?: string } | null;
+  const latestCommitSha = body?.sha ?? null;
+  const knownCurrent = currentCommitSha !== "unknown" && currentCommitSha.length >= 7;
+  const updateAvailable =
+    knownCurrent && latestCommitSha
+      ? !latestCommitSha.startsWith(currentCommitSha) &&
+        !currentCommitSha.startsWith(latestCommitSha)
+      : null;
+
+  return c.json({
+    mode: "self-hosted",
+    selfHosted: true,
+    currentCommitSha,
+    latestCommitSha,
+    updateAvailable,
+    updateCommand: updateCommand(),
+    message:
+      updateAvailable === null
+        ? "Current image version is unknown. Run the update command to pull the latest image."
+        : updateAvailable
+          ? "A newer version is available."
+          : "This instance is up to date.",
+  });
+});
+
 app.get("/health", (c) =>
   c.json({
     ok: true,
     service: "basse-api",
   }),
 );
+
+app.get("/install", () => fetchRawScript(installScriptUrl, "install script unavailable"));
+
+app.get("/update", () => fetchRawScript(updateScriptUrl, "update script unavailable"));
 
 app.use("/*", serveStatic({ root: webDist }));
 app.get("*", serveStatic({ path: `${webDist}/index.html` }));

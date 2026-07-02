@@ -11,6 +11,8 @@ const trustedOrigins = [
   Bun.env.WEB_ORIGIN,
 ].filter((origin): origin is string => Boolean(origin));
 
+const emailVerificationEnabled = Bun.env.EMAIL_VERIFICATION !== "false";
+
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
     provider: "pg",
@@ -27,7 +29,7 @@ export const auth = betterAuth({
   },
   emailAndPassword: {
     enabled: true,
-    requireEmailVerification: true,
+    requireEmailVerification: emailVerificationEnabled,
   },
   plugins: [
     emailOTP({
