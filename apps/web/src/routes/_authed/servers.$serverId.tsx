@@ -126,6 +126,11 @@ function ServerDetailRoute() {
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <h1 className="font-semibold text-2xl tracking-tight md:text-3xl">{data.name}</h1>
           <ServerStatusBadge status={data.status} />
+          {data.isSystem ? (
+            <Badge size="sm" variant="outline">
+              Local
+            </Badge>
+          ) : null}
         </div>
         <p className="mt-1 font-mono text-muted-foreground text-sm">
           {data.connectionMode === "outbound"
@@ -162,29 +167,35 @@ function ServerDetailRoute() {
 
         <div className="flex min-w-0 flex-col gap-6">
           {data.connectionMode === "outbound" ? (
-            <OutboundInstallSection serverId={serverId} />
+            data.isSystem ? (
+              <LocalServerSection />
+            ) : (
+              <OutboundInstallSection serverId={serverId} />
+            )
           ) : (
             <SshSetupSection data={data} serverId={serverId} />
           )}
 
-          <section>
-            <SectionHeading title="Danger zone" />
-            <Card className="flex flex-row items-center justify-between gap-3 border-destructive/24 p-4">
-              <p className="min-w-0 text-muted-foreground text-xs">
-                Removes the server and discards its access key. Running containers are left in
-                place.
-              </p>
-              <Button
-                className="shrink-0"
-                onClick={() => setDeleteDialogOpen(true)}
-                size="sm"
-                variant="destructive-outline"
-              >
-                <TrashIcon />
-                Delete
-              </Button>
-            </Card>
-          </section>
+          {!data.isSystem ? (
+            <section>
+              <SectionHeading title="Danger zone" />
+              <Card className="flex flex-row items-center justify-between gap-3 border-destructive/24 p-4">
+                <p className="min-w-0 text-muted-foreground text-xs">
+                  Removes the server and discards its access key. Running containers are left in
+                  place.
+                </p>
+                <Button
+                  className="shrink-0"
+                  onClick={() => setDeleteDialogOpen(true)}
+                  size="sm"
+                  variant="destructive-outline"
+                >
+                  <TrashIcon />
+                  Delete
+                </Button>
+              </Card>
+            </section>
+          ) : null}
         </div>
       </div>
 
@@ -422,6 +433,24 @@ function OutboundInstallSection({ serverId }: { serverId: string }) {
             The server becomes active after the installed agent reaches Basse for the first time.
           </p>
         )}
+      </Card>
+    </section>
+  );
+}
+
+function LocalServerSection() {
+  return (
+    <section>
+      <SectionHeading title="Setup" />
+      <Card className="p-5">
+        <h3 className="font-medium text-sm">Local self-host server</h3>
+        <p className="mt-1 text-muted-foreground text-sm">
+          This target is created automatically for self-hosted installs and uses the bundled local
+          agent container.
+        </p>
+        <p className="mt-2 text-muted-foreground text-sm">
+          It deploys workloads onto the Docker host running Basse and cannot be deleted.
+        </p>
       </Card>
     </section>
   );

@@ -117,7 +117,11 @@ function ServersRoute() {
               </p>
               <div className="mt-3 flex items-center gap-2">
                 <Badge size="sm" variant="outline">
-                  {server.connectionMode === "outbound" ? "outbound agent" : "ssh"}
+                  {server.isSystem
+                    ? "local"
+                    : server.connectionMode === "outbound"
+                      ? "outbound agent"
+                      : "ssh"}
                 </Badge>
                 <span className="ml-auto text-muted-foreground text-xs">
                   {server.lastSeenAt

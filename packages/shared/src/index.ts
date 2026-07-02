@@ -735,6 +735,7 @@ export type Server = {
   sshPublicKey: string;
   connectionMode: ServerConnectionMode;
   agentUrl: string | null;
+  isSystem: boolean;
   status: ServerStatus;
   statusMessage: string | null;
   hostKeyFingerprint: string | null;

@@ -88,10 +88,7 @@ func (p Proxy) Ensure(w http.ResponseWriter, r *http.Request) {
 				cfg.DataVolume + ":/data",
 				cfg.AdminVolume + ":" + cfg.AdminDir,
 			},
-			PortBindings: map[string][]dockerx.PortBinding{
-				"80/tcp":  {{HostPort: "80"}},
-				"443/tcp": {{HostPort: "443"}},
-			},
+			PortBindings:  proxyPortBindings(cfg),
 			NetworkMode:   cfg.ProxyNetwork,
 			RestartPolicy: dockerx.RestartPolicy{Name: "unless-stopped"},
 		},
@@ -119,6 +116,20 @@ func (p Proxy) Ensure(w http.ResponseWriter, r *http.Request) {
 // Status reports the proxy's running + admin-reachable state. Bearer-guarded.
 func (p Proxy) Status(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, p.status(r.Context()))
+}
+
+func proxyPortBindings(cfg config.Config) map[string][]dockerx.PortBinding {
+	bindings := map[string][]dockerx.PortBinding{}
+	if cfg.ProxyHTTPPort != "" && cfg.ProxyHTTPPort != "none" {
+		bindings["80/tcp"] = []dockerx.PortBinding{{HostPort: cfg.ProxyHTTPPort}}
+	}
+	if cfg.ProxyHTTPSPort != "" && cfg.ProxyHTTPSPort != "none" {
+		bindings["443/tcp"] = []dockerx.PortBinding{{HostPort: cfg.ProxyHTTPSPort}}
+	}
+	if len(bindings) == 0 {
+		return nil
+	}
+	return bindings
 }
 
 type syncRequest struct {

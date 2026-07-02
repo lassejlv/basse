@@ -39,6 +39,7 @@ export const server = pgTable(
       .default("ssh"),
     // Loopback URL the agent listens on (reached via SSH tunnel). Null until up.
     agentUrl: text("agent_url"),
+    isSystem: boolean("is_system").notNull().default(false),
     hostKeyFingerprint: text("host_key_fingerprint"),
     status: text("status", {
       enum: ["pending", "provisioning", "active", "error", "unreachable"],

@@ -253,6 +253,13 @@
       "when": 1782951059361,
       "tag": "0035_giant_northstar",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1782953524559,
+      "tag": "0036_absurd_lethal_legion",
+      "breakpoints": true
     }
   ]
 }

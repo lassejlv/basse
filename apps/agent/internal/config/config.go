@@ -26,6 +26,8 @@ type Config struct {
 	CaddyImage     string // image the agent runs as the proxy
 	CaddyContainer string // container name
 	ProxyNetwork   string // shared Docker network Caddy joins to reach upstreams
+	ProxyHTTPPort  string // host HTTP port for Caddy, or "none" to avoid binding
+	ProxyHTTPSPort string // host HTTPS port for Caddy, or "none" to avoid binding
 	DataVolume     string // named volume for ACME certs/state (NEVER removed)
 	AdminVolume    string // named volume holding the admin unix socket + init.json
 	// AdminDir is where AdminVolume is mounted in BOTH the agent and Caddy. The
@@ -54,6 +56,8 @@ func Load() (Config, error) {
 		CaddyImage:      envOr("BASSE_CADDY_IMAGE", "caddy:2"),
 		CaddyContainer:  envOr("BASSE_CADDY_CONTAINER", "basse-caddy"),
 		ProxyNetwork:    envOr("BASSE_PROXY_NETWORK", "basse"),
+		ProxyHTTPPort:   envOr("BASSE_PROXY_HTTP_PORT", "80"),
+		ProxyHTTPSPort:  envOr("BASSE_PROXY_HTTPS_PORT", "443"),
 		DataVolume:      envOr("BASSE_CADDY_DATA_VOLUME", "basse_caddy_data"),
 		AdminVolume:     envOr("BASSE_CADDY_ADMIN_VOLUME", "basse_caddy_admin"),
 		AdminDir:        envOr("BASSE_CADDY_ADMIN_DIR", "/run/caddy-admin"),

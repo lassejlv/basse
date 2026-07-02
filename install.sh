@@ -340,6 +340,7 @@ write_env_file() {
   local smtp_auth_method="${12}"
   local smtp_user="${13}"
   local smtp_password="${14}"
+  local local_agent_token="${15}"
 
   cat >"$ENV_FILE" <<EOF
 DOMAIN=$domain
@@ -351,6 +352,7 @@ BETTER_AUTH_SECRET=$(escape_env "$auth_secret")
 EMAIL_VERIFICATION=$email_verification
 CONTROL_PLANE_IMAGE=ghcr.io/lassejlv/basse-control-plane:latest
 BASSE_AGENT_IMAGE=ghcr.io/lassejlv/basse-agent:latest
+BASSE_LOCAL_AGENT_TOKEN=$(escape_env "$local_agent_token")
 HTTP_PORT=80
 HTTPS_PORT=443
 POSTGRES_DB=basse
@@ -390,13 +392,22 @@ wait_for_health() {
   $COMPOSE_CMD --env-file "$ENV_FILE" -f "$COMPOSE_FILE" logs --tail=80 control-plane || true
 }
 
+prepare_data_dirs() {
+  mkdir -p "$INSTALL_DIR"/{postgres,redis,caddy/data,caddy/config}
+
+  # The official postgres image runs as uid/gid 999 and must be able to
+  # initialize the bind-mounted data directory on first boot.
+  chown -R 999:999 "$INSTALL_DIR/postgres"
+  chmod 700 "$INSTALL_DIR/postgres"
+}
+
 main() {
   banner
   require_root "$@"
   detect_os
   check_dependencies
 
-  mkdir -p "$INSTALL_DIR"/{postgres,redis,caddy/data,caddy/config}
+  prepare_data_dirs
 
   if [[ -f "$ENV_FILE" || -f "$COMPOSE_FILE" ]]; then
     confirm "$INSTALL_DIR already contains a Basse install. Update configuration and restart?" "n" \
@@ -450,9 +461,10 @@ main() {
     warn "SMTP skipped. Email verification will stay disabled for first-run bootstrap."
   fi
 
-  local auth_secret postgres_password
+  local auth_secret postgres_password local_agent_token
   auth_secret="$(generate_secret)"
   postgres_password="$(generate_secret)"
+  local_agent_token="ba_local_$(generate_secret)"
 
   install_compose_file
   install_update_file
@@ -471,7 +483,8 @@ main() {
     "$smtp_allow_insecure" \
     "$smtp_auth_method" \
     "$smtp_user" \
-    "$smtp_password"
+    "$smtp_password" \
+    "$local_agent_token"
 
   ok "Wrote $ENV_FILE"
   ok "Wrote $COMPOSE_FILE"

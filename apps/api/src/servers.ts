@@ -61,6 +61,7 @@ async function sanitizeServer(
     sshPublicKey: row.sshPublicKey,
     connectionMode: row.connectionMode,
     agentUrl: row.agentUrl,
+    isSystem: row.isSystem,
     status: row.status,
     statusMessage: row.statusMessage,
     hostKeyFingerprint: row.hostKeyFingerprint,
@@ -246,12 +247,78 @@ function normalizeDeleteCode(value: unknown): string {
   return typeof value === "string" ? value.trim().replace(/\s+/g, "") : "";
 }
 
+function isCloudRuntime(): boolean {
+  return Object.keys(Bun.env).some((key) => key.startsWith("CLOUD_"));
+}
+
+function localServerId(organizationId: string): string {
+  return `local-${organizationId}`;
+}
+
+async function ensureLocalServer(organizationId: string): Promise<void> {
+  if (isCloudRuntime()) return;
+
+  const rawAgentToken = Bun.env.BASSE_LOCAL_AGENT_TOKEN?.trim();
+  if (!rawAgentToken) {
+    console.warn("[servers] BASSE_LOCAL_AGENT_TOKEN is not set; local server was not created");
+    return;
+  }
+
+  const id = localServerId(organizationId);
+  const now = new Date();
+  const [existing] = await db.select().from(server).where(eq(server.id, id)).limit(1);
+  const encryptedAgentToken = await encryptSecret(rawAgentToken);
+  const hashedAgentToken = await agentTokenHash(rawAgentToken);
+
+  if (existing) {
+    await db
+      .update(server)
+      .set({
+        name: "Local server",
+        sshHost: "localhost",
+        sshPort: 22,
+        sshUser: "root",
+        agentToken: encryptedAgentToken,
+        agentTokenHash: hashedAgentToken,
+        connectionMode: "outbound",
+        agentUrl: `outbound:${id}`,
+        isSystem: true,
+        updatedAt: now,
+      })
+      .where(and(eq(server.id, id), eq(server.organizationId, organizationId)));
+    return;
+  }
+
+  const keyPair = await generateServerKeyPair(id);
+  await db.insert(server).values({
+    id,
+    organizationId,
+    name: "Local server",
+    sshHost: "localhost",
+    sshPort: 22,
+    sshUser: "root",
+    sshPublicKey: keyPair.publicKey,
+    sshPrivateKey: await encryptSecret(keyPair.privateKey),
+    agentToken: encryptedAgentToken,
+    agentTokenHash: hashedAgentToken,
+    connectionMode: "outbound",
+    agentUrl: `outbound:${id}`,
+    isSystem: true,
+    status: "pending",
+    statusMessage: "Waiting for the local agent to connect…",
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
 servers.get("/", async (c) => {
   const organizationId = await resolveActiveWorkspace(c.req.raw);
 
   if (organizationId instanceof Response) {
     return organizationId;
   }
+
+  await ensureLocalServer(organizationId);
 
   const rows = await db
     .select()
@@ -758,6 +825,9 @@ servers.post("/:id/delete-code", async (c) => {
   if (!row) {
     return c.json({ error: "Server not found" }, 404);
   }
+  if (row.isSystem) {
+    return c.json({ error: "System servers cannot be deleted" }, 400);
+  }
 
   const code = deleteCode();
   const identifier = deleteVerificationIdentifier({
@@ -795,6 +865,14 @@ servers.delete("/:id", async (c) => {
   }
 
   const body = (await c.req.json().catch(() => null)) as { code?: unknown } | null;
+  const row = await ownedServer(c.req.param("id"), active.organizationId);
+  if (!row) {
+    return c.json({ error: "Server not found" }, 404);
+  }
+  if (row.isSystem) {
+    return c.json({ error: "System servers cannot be deleted" }, 400);
+  }
+
   const code = normalizeDeleteCode(body?.code);
   if (!/^\d{6}$/.test(code)) {
     return c.json({ error: "Enter the 6-digit code sent to your email" }, 400);

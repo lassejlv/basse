@@ -36,6 +36,7 @@ services:
       API_PORT: "3000"
       QUEUE_CONCURRENCY: ${QUEUE_CONCURRENCY:-5}
       BASSE_AGENT_IMAGE: ${BASSE_AGENT_IMAGE:-ghcr.io/lassejlv/basse-agent:latest}
+      BASSE_LOCAL_AGENT_TOKEN: ${BASSE_LOCAL_AGENT_TOKEN:?set BASSE_LOCAL_AGENT_TOKEN in .env}
       BASSE_CADDY_IMAGE: ${BASSE_CADDY_IMAGE:-caddy:2}
       DB_MIGRATE_ON_STARTUP: ${DB_MIGRATE_ON_STARTUP:-true}
       EMAIL_FROM: ${EMAIL_FROM:-}
@@ -66,6 +67,31 @@ services:
       retries: 12
       start_period: 30s
     stop_grace_period: 120s
+    networks:
+      - basse
+
+  local-agent:
+    image: ${BASSE_AGENT_IMAGE:-ghcr.io/lassejlv/basse-agent:latest}
+    restart: unless-stopped
+    environment:
+      BASSE_AGENT_MODE: outbound
+      BASSE_AGENT_TOKEN: ${BASSE_LOCAL_AGENT_TOKEN:?set BASSE_LOCAL_AGENT_TOKEN in .env}
+      BASSE_CONTROL_PLANE_URL: http://control-plane:3000
+      BASSE_AGENT_PORT: "8888"
+      BASSE_CADDY_IMAGE: ${BASSE_CADDY_IMAGE:-caddy:2}
+      BASSE_CADDY_CONTAINER: basse-local-caddy
+      BASSE_PROXY_NETWORK: basse
+      BASSE_PROXY_HTTP_PORT: none
+      BASSE_PROXY_HTTPS_PORT: none
+      BASSE_CADDY_DATA_VOLUME: basse_local_caddy_data
+      BASSE_CADDY_ADMIN_VOLUME: basse_local_caddy_admin
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - basse_local_caddy_data:/data
+      - basse_local_caddy_admin:/run/caddy-admin
+    depends_on:
+      control-plane:
+        condition: service_healthy
     networks:
       - basse
 
@@ -112,3 +138,7 @@ services:
 networks:
   basse:
     name: basse
+
+volumes:
+  basse_local_caddy_data:
+  basse_local_caddy_admin:
