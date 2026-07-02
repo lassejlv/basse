@@ -76,15 +76,31 @@ trim() {
   printf '%s' "$value"
 }
 
+read_tty() {
+  local prompt_text="$1"
+  local silent="${2:-false}"
+  local value
+  if [[ ! -r /dev/tty ]]; then
+    fail "Interactive terminal required. Run this command from a real shell, not a detached process."
+  fi
+  if [[ "$silent" == "true" ]]; then
+    read -r -s -p "$prompt_text" value </dev/tty
+    printf '\n' >/dev/tty
+  else
+    read -r -p "$prompt_text" value </dev/tty
+  fi
+  printf '%s' "$value"
+}
+
 prompt() {
   local label="$1"
   local default="${2:-}"
   local value
   if [[ -n "$default" ]]; then
-    read -r -p "$(printf '%s [%s]: ' "$label" "$default")" value
+    value="$(read_tty "$(printf '%s [%s]: ' "$label" "$default")")"
     printf '%s' "$(trim "${value:-$default}")"
   else
-    read -r -p "$(printf '%s: ' "$label")" value
+    value="$(read_tty "$(printf '%s: ' "$label")")"
     printf '%s' "$(trim "$value")"
   fi
 }
@@ -92,8 +108,7 @@ prompt() {
 prompt_secret() {
   local label="$1"
   local value
-  read -r -s -p "$(printf '%s: ' "$label")" value
-  printf '\n' >&2
+  value="$(read_tty "$(printf '%s: ' "$label")" true)"
   printf '%s' "$value"
 }
 
@@ -103,7 +118,7 @@ confirm() {
   local suffix="[y/N]"
   [[ "$default" == "y" ]] && suffix="[Y/n]"
   local value
-  read -r -p "$label $suffix " value
+  value="$(read_tty "$label $suffix ")"
   value="$(trim "${value:-$default}")"
   case "${value,,}" in
     y|yes) return 0 ;;
