@@ -16,7 +16,8 @@ COMPOSE_FILE="$INSTALL_DIR/docker-compose.yml"
 ENV_FILE="$INSTALL_DIR/.env"
 CADDY_FILE="$INSTALL_DIR/Caddyfile"
 UPDATE_FILE="$INSTALL_DIR/update.sh"
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P || printf '.')"
+SCRIPT_PATH="${BASH_SOURCE[0]-$0}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" >/dev/null 2>&1 && pwd -P || printf '.')"
 
 if [[ -t 1 ]]; then
   bold="$(printf '\033[1m')"
