@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import {
+  Box,
   BoxIcon,
   ChevronRightIcon,
   GitBranchIcon,
@@ -54,6 +55,11 @@ const FEATURES = [
     body: "Postgres and Redis with volumes, internal networking, and public TCP only when you ask.",
   },
   {
+    icon: Box,
+    title: "Integrations",
+    body: "Connect things such as Neon to ease your database workflow, directly connect connection strings to your apps.",
+  },
+  {
     icon: GlobeIcon,
     title: "Domains & HTTPS",
     body: "Point an A record and traffic routes with automatic certificates — or a managed load balancer across servers.",
@@ -87,25 +93,20 @@ function LandingRoute() {
     <>
       <SiteHeader />
 
-      {/* Hero — the landing page opens on the product's own surface: the
-          canvas dot grid with live nodes. The only color on the page is
-          deploy state, same rule as the dashboard. */}
+
       <section className="relative overflow-hidden">
         <DotGrid fadeClassName="bg-[radial-gradient(110%_110%_at_30%_20%,transparent_40%,var(--color-background)_92%)]" />
 
-        <div className="relative mx-auto flex max-w-[1120px] flex-col items-start gap-14 px-7 pb-24 pt-24 lg:flex-row lg:items-center lg:gap-10 lg:pt-32">
-          <div className="max-w-[560px]">
-            <Eyebrow className="mb-6">Self-hosted PaaS · open source</Eyebrow>
+        <div className="relative mx-auto flex max-w-280 flex-col items-start gap-14 px-7 pb-24 pt-24 lg:flex-row lg:items-center lg:gap-10 lg:pt-32">
+          <div className="max-w-140">
             <h1 className="mb-6 text-[clamp(42px,6vw,68px)] font-semibold leading-[1.02] tracking-[-0.04em]">
-              Deploy to servers
-              <br />
-              you own.
+              Just deploy it.
             </h1>
             <p className="mb-9 max-w-[46ch] text-[18px] leading-[1.55] text-muted-foreground">
               Connect a machine, push from Git or point at an image, and it's live with HTTPS. The
               platform experience, without the platform bill.
             </p>
-            <div className="mb-8 flex flex-wrap items-center gap-[14px]">
+            <div className="mb-8 flex flex-wrap items-center gap-3.5">
               <DeployCta label="Deploy your first app" />
               <a
                 href="#"
@@ -118,9 +119,6 @@ function LandingRoute() {
             <InstallCommand className="w-fit bg-card/90 backdrop-blur-sm" />
           </div>
 
-          {/* Canvas nodes — built from the product's real vocabulary. `web`
-              sits live, `api` is mid-deploy and pulses, postgres carries its
-              volume tab. */}
           <div aria-hidden className="relative hidden h-[430px] flex-1 select-none lg:block">
             <HeroNode
               className="absolute left-0 top-4"
@@ -190,15 +188,12 @@ function LandingRoute() {
 
       <section className="border-t">
         <div className="mx-auto max-w-[680px] px-7 pt-[72px] pb-[88px] text-center">
-          <div className="mb-6 inline-flex items-center gap-2 font-mono text-xs text-muted-foreground">
-            <ServerIcon className="size-3.5" />
-            Runs on a €4 VPS
-          </div>
+
           <h2 className="mb-[14px] text-[clamp(26px,3.6vw,34px)] font-semibold leading-[1.1] tracking-[-0.025em]">
             Ship your first app in minutes
           </h2>
           <p className="mx-auto mb-7 max-w-[42ch] text-base leading-[1.55] text-muted-foreground">
-            Install the CLI, connect a server, deploy. Free and open source, MIT licensed.
+           Connect a server, deploy. Free and open source, MIT licensed.
           </p>
           <div className="flex flex-wrap items-center justify-center gap-[14px]">
             <DeployCta label="Deploy now" />

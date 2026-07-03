@@ -54,9 +54,8 @@ function PricingRoute() {
         <DotGrid fadeClassName="bg-[radial-gradient(110%_110%_at_50%_0%,transparent_35%,var(--color-background)_88%)]" />
 
         <div className="relative mx-auto max-w-[1120px] px-7 pt-20 pb-16 lg:pt-28">
-          <Eyebrow className="mb-6">Pricing</Eyebrow>
           <h1 className="mb-5 max-w-[16ch] text-[clamp(36px,5vw,56px)] font-semibold leading-[1.04] tracking-[-0.04em]">
-            Priced per server, not per seat.
+            Simple pricing
           </h1>
           <p className="max-w-[52ch] text-[17px] leading-[1.55] text-muted-foreground">
             Run the dashboard yourself for free, forever. Or let us host it for the price of a
