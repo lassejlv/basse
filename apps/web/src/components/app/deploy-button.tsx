@@ -24,8 +24,7 @@ export function DeployButton({
   const [error, setError] = useState<string | null>(null);
   const reusableImage = deployments.find(
     (deployment) =>
-      deployment.imageRef &&
-      (deployment.status === "healthy" || deployment.status === "superseded"),
+      deployment.imageRef && ["healthy", "crashed", "superseded"].includes(deployment.status),
   );
   const disabledTitle = hasStagedChanges
     ? "You have unsaved changes — deploy them from the bar below"

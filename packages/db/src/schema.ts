@@ -338,6 +338,9 @@ export const deployment = pgTable("deployment", {
       "building",
       "deploying",
       "healthy",
+      // The monitor sets a healthy deployment to "crashed" when its container
+      // goes down or crash-loops post-deploy, and back to "healthy" on recovery.
+      "crashed",
       "superseded",
       "failed",
       "cancelled",

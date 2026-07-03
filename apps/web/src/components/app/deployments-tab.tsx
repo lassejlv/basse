@@ -87,7 +87,7 @@ export function DeploymentsPanel({
               const canRollback =
                 deployment.id !== latest?.id &&
                 Boolean(deployment.imageRef) &&
-                ["healthy", "superseded"].includes(deployment.status);
+                ["healthy", "crashed", "superseded"].includes(deployment.status);
               const imageTail =
                 deployment.imageRef?.split("/").pop() ?? deployment.buildId ?? "no image yet";
               return (
@@ -219,7 +219,7 @@ function DeploymentPhaseSteps({ app, deployment }: { app: App; deployment: Deplo
       : ["initializing", "deploying"];
 
   const inFlight = IN_FLIGHT_STATUSES.includes(deployment.status);
-  const succeeded = ["healthy", "superseded"].includes(deployment.status);
+  const succeeded = ["healthy", "crashed", "superseded"].includes(deployment.status);
   const currentIndex = deployment.phase
     ? phases.indexOf(deployment.phase)
     : deployment.status === "queued"

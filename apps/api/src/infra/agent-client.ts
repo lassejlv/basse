@@ -255,18 +255,24 @@ export async function deployApp(
   return postJson<DeployAppResult>(conn, token, "/v1/apps/deploy", input, 300_000);
 }
 
+// Crash-loop fields are optional: agents predating the status extension only
+// report exists/running.
+export type AgentAppStatus = {
+  exists: boolean;
+  running: boolean;
+  restarting?: boolean;
+  restartCount?: number;
+  exitCode?: number;
+  startedAt?: string;
+};
+
 /** Reports whether an app container exists and is running. Throws on failure. */
 export async function getAppStatus(
   conn: AgentConnection,
   token: string,
   appId: string,
-): Promise<{ exists: boolean; running: boolean }> {
-  return getJson<{ exists: boolean; running: boolean }>(
-    conn,
-    token,
-    `/v1/apps/${appId}/status`,
-    true,
-  );
+): Promise<AgentAppStatus> {
+  return getJson<AgentAppStatus>(conn, token, `/v1/apps/${appId}/status`, true);
 }
 
 export type AgentAppMetrics = {

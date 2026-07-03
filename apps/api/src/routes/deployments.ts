@@ -75,7 +75,7 @@ export async function enqueueDeploy(
       .where(
         and(
           eq(deployment.appId, appId),
-          inArray(deployment.status, ["healthy", "superseded"]),
+          inArray(deployment.status, ["healthy", "crashed", "superseded"]),
           isNotNull(deployment.imageRef),
         ),
       )
@@ -212,7 +212,7 @@ deployments.post("/rollback", async (c) => {
   if (!target.imageRef) {
     return c.json({ error: "Deployment does not have a saved image to roll back to" }, 400);
   }
-  if (!["healthy", "superseded"].includes(target.status)) {
+  if (!["healthy", "crashed", "superseded"].includes(target.status)) {
     return c.json({ error: "Only healthy or superseded deployments can be rolled back" }, 400);
   }
 

@@ -23,6 +23,8 @@ export function deployState(status: DeploymentStatus | null | undefined): Deploy
       return { label: "Deploying", tone: "progress", pulse: true };
     case "failed":
       return { label: "Failed", tone: "failed", pulse: false };
+    case "crashed":
+      return { label: "Crashed", tone: "failed", pulse: false };
     case "stopped":
       return { label: "Stopped", tone: "idle", pulse: false };
     case "cancelled":

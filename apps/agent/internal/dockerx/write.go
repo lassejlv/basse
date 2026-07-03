@@ -54,10 +54,16 @@ type RegistryAuth struct {
 	ServerAddress string `json:"serveraddress"`
 }
 
-// ContainerState is the subset of GET /containers/{id}/json we read.
+// ContainerState is the subset of GET /containers/{id}/json we read. Running
+// alone hides crash loops: the restart policy brings a crashing container back
+// within seconds, so Restarting and RestartCount are what expose the crashes.
 type ContainerState struct {
-	Exists  bool
-	Running bool
+	Exists       bool
+	Running      bool
+	Restarting   bool
+	RestartCount int
+	ExitCode     int
+	StartedAt    string
 }
 
 type ContainerMetrics struct {
@@ -194,15 +200,26 @@ func (c *Client) InspectContainer(ctx context.Context, name string) (ContainerSt
 	}
 
 	var out struct {
-		State struct {
-			Running bool `json:"Running"`
+		RestartCount int `json:"RestartCount"`
+		State        struct {
+			Running    bool   `json:"Running"`
+			Restarting bool   `json:"Restarting"`
+			ExitCode   int    `json:"ExitCode"`
+			StartedAt  string `json:"StartedAt"`
 		} `json:"State"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return ContainerState{}, err
 	}
 
-	return ContainerState{Exists: true, Running: out.State.Running}, nil
+	return ContainerState{
+		Exists:       true,
+		Running:      out.State.Running,
+		Restarting:   out.State.Restarting,
+		RestartCount: out.RestartCount,
+		ExitCode:     out.State.ExitCode,
+		StartedAt:    out.State.StartedAt,
+	}, nil
 }
 
 // RemoveContainer force-removes a container, treating "not found" (404) as success.

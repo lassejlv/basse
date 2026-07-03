@@ -768,16 +768,30 @@ export async function runDeployment(deploymentId: string): Promise<void> {
             running = false;
           }
         } else {
-          // No health check configured: catch immediate crash loops before
-          // routing traffic — give the app a moment, then confirm it's up.
+          // No health check configured: catch crash loops before routing
+          // traffic. The restart policy (unless-stopped) brings a crashed
+          // container back within seconds, so "is it running" alone races the
+          // restart — the Restarting flag and restart count expose crashes the
+          // boolean hides. Sample twice (~5s and ~15s in) to also catch apps
+          // that start fine and die shortly after.
           line(`Verifying the container stays up on ${srv.name}…`);
-          await Bun.sleep(5000);
-          const status = await getAppStatus(connection, agentToken, appRow.id);
-          if (!status.running) {
-            line(
-              `Container exited shortly after starting on ${srv.name} — check the runtime logs.`,
-            );
-            running = false;
+          for (const delayMs of [5000, 10000]) {
+            await Bun.sleep(delayMs);
+            const status = await getAppStatus(connection, agentToken, appRow.id);
+            const crashed = status.restarting === true || (status.restartCount ?? 0) > 0;
+            if (crashed || !status.running) {
+              const exitCode =
+                typeof status.exitCode === "number" && status.exitCode !== 0
+                  ? ` (exit code ${status.exitCode})`
+                  : "";
+              line(
+                crashed
+                  ? `Container crashed after starting on ${srv.name}${exitCode} — check the runtime logs.`
+                  : `Container exited shortly after starting on ${srv.name}${exitCode} — check the runtime logs.`,
+              );
+              running = false;
+              break;
+            }
           }
         }
       }
@@ -817,7 +831,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
           and(
             eq(deployment.appId, appRow.id),
             ne(deployment.id, deploymentId),
-            eq(deployment.status, "healthy"),
+            inArray(deployment.status, ["healthy", "crashed"]),
           ),
         );
     }

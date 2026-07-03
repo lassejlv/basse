@@ -1,5 +1,5 @@
 import { app, appServer, db, deployment, server, workspaceSettings } from "@basse/db";
-import { and, eq, gt, isNotNull, or } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, or } from "drizzle-orm";
 import { pruneServerImages } from "../infra/agent-client";
 import { decryptSecret } from "../lib/crypto";
 import { connectionFromServer } from "../infra/server-connection";
@@ -24,7 +24,7 @@ async function keepRefsForServer(serverId: string, cutoff: Date): Promise<string
       and(
         eq(appServer.serverId, serverId),
         isNotNull(deployment.imageRef),
-        or(eq(deployment.status, "healthy"), gt(deployment.createdAt, cutoff)),
+        or(inArray(deployment.status, ["healthy", "crashed"]), gt(deployment.createdAt, cutoff)),
       ),
     );
   return [...new Set(rows.map((row) => row.imageRef!))];

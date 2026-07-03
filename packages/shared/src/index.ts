@@ -455,6 +455,9 @@ export type DeploymentStatus =
   | "building"
   | "deploying"
   | "healthy"
+  // Set by the monitor when a healthy app's container goes down or
+  // crash-loops; cleared back to "healthy" on recovery.
+  | "crashed"
   | "superseded"
   | "failed"
   | "cancelled"

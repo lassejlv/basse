@@ -261,7 +261,14 @@ func (a Apps) Status(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]bool{"exists": state.Exists, "running": state.Running})
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"exists":       state.Exists,
+		"running":      state.Running,
+		"restarting":   state.Restarting,
+		"restartCount": state.RestartCount,
+		"exitCode":     state.ExitCode,
+		"startedAt":    state.StartedAt,
+	})
 }
 
 func (a Apps) Metrics(w http.ResponseWriter, r *http.Request) {

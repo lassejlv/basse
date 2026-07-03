@@ -38,6 +38,10 @@ const pressureCounts = new Map<string, number>();
 const healthProbeAt = new Map<string, number>();
 const healthFailCounts = new Map<string, number>();
 const HEALTH_FAILURE_THRESHOLD = 2;
+// Last observed Docker restart count per app+server. The restart policy brings
+// a crashed container back within seconds, so `running` alone misses crash
+// loops — a rising restart count between ticks is what exposes them.
+const restartCounts = new Map<string, number>();
 
 function envNumber(name: string, fallback: number): number {
   const value = Number(Bun.env[name]);
@@ -323,6 +327,48 @@ async function resolveFinishedDeploymentAlerts(): Promise<void> {
   }
 }
 
+/** Downgrades a healthy deployment to "crashed" so the canvas/panel go red. */
+async function markDeploymentCrashed(deploymentId: string): Promise<void> {
+  const rows = await db
+    .update(deployment)
+    .set({ status: "crashed", updatedAt: new Date() })
+    .where(and(eq(deployment.id, deploymentId), eq(deployment.status, "healthy")))
+    .returning({ id: deployment.id });
+  if (rows.length > 0) void publishForDeployment(deploymentId);
+}
+
+/**
+ * Restores a crashed deployment to "healthy" once its containers recover —
+ * but only when no other server still has an open container-down alert for
+ * the app (the deployment status is app-wide, the checks are per-server).
+ */
+async function restoreCrashedDeployment(
+  deploymentId: string,
+  organizationId: string,
+  appId: string,
+): Promise<void> {
+  const [openDown] = await db
+    .select({ id: alert.id })
+    .from(alert)
+    .where(
+      and(
+        eq(alert.organizationId, organizationId),
+        eq(alert.appId, appId),
+        eq(alert.code, "app_container_down"),
+        inArray(alert.status, ["open", "acknowledged"]),
+      ),
+    )
+    .limit(1);
+  if (openDown) return;
+
+  const rows = await db
+    .update(deployment)
+    .set({ status: "healthy", updatedAt: new Date() })
+    .where(and(eq(deployment.id, deploymentId), eq(deployment.status, "crashed")))
+    .returning({ id: deployment.id });
+  if (rows.length > 0) void publishForDeployment(deploymentId);
+}
+
 async function checkAppsOnServer(row: ServerRow): Promise<void> {
   if (!row.agentToken) return;
   const token = await decryptSecret(row.agentToken);
@@ -346,7 +392,8 @@ async function checkAppsOnServer(row: ServerRow): Promise<void> {
       .where(eq(deployment.appId, attached.app.id))
       .orderBy(desc(deployment.createdAt))
       .limit(1);
-    if (!latest || latest.status !== "healthy") continue;
+    // "crashed" is included so recovery can flip the deployment back.
+    if (!latest || !["healthy", "crashed"].includes(latest.status)) continue;
 
     const downFingerprint = `app_container_down:${attached.app.id}:${row.id}`;
     try {
@@ -364,20 +411,37 @@ async function checkAppsOnServer(row: ServerRow): Promise<void> {
           deploymentId: latest.id,
         },
       );
-      if (!status.exists || !status.running) {
+
+      // Crash-loop detection: the restart policy revives crashing containers,
+      // so `running` flips back to true between ticks. A set Restarting flag
+      // or a restart count that rose since the previous tick means crashes.
+      const crashKey = `${attached.app.id}:${row.id}`;
+      const restartCount = status.restartCount ?? 0;
+      const previousRestartCount = restartCounts.get(crashKey);
+      restartCounts.set(crashKey, restartCount);
+      const crashLooping =
+        status.restarting === true ||
+        (previousRestartCount !== undefined && restartCount > previousRestartCount);
+
+      if (!status.exists || !status.running || crashLooping) {
         await raiseAlert({
           organizationId: attached.project.organizationId,
           severity: "critical",
           code: "app_container_down",
-          title: `${attached.app.name} is not running on ${row.name}`,
-          message: status.exists
-            ? "The managed container exists but is not running."
-            : "The managed container does not exist on the target server.",
+          title: crashLooping
+            ? `${attached.app.name} is crash-looping on ${row.name}`
+            : `${attached.app.name} is not running on ${row.name}`,
+          message: crashLooping
+            ? `The container keeps crashing and being restarted (${restartCount} restart${restartCount === 1 ? "" : "s"}${typeof status.exitCode === "number" && status.exitCode !== 0 ? `, last exit code ${status.exitCode}` : ""}). Check the runtime logs.`
+            : status.exists
+              ? "The managed container exists but is not running."
+              : "The managed container does not exist on the target server.",
           fingerprint: downFingerprint,
           serverId: row.id,
           appId: attached.app.id,
           deploymentId: latest.id,
         });
+        await markDeploymentCrashed(latest.id);
         continue;
       }
       await resolveAlert(attached.project.organizationId, downFingerprint, {
@@ -389,6 +453,9 @@ async function checkAppsOnServer(row: ServerRow): Promise<void> {
         appId: attached.app.id,
         deploymentId: latest.id,
       });
+      if (latest.status === "crashed") {
+        await restoreCrashedDeployment(latest.id, attached.project.organizationId, attached.app.id);
+      }
 
       // Continuous HTTP health check for service apps that configured one,
       // paced by the app's interval (never faster than the monitor tick).

@@ -1056,7 +1056,7 @@ apps.post("/:id/stop", async (c) => {
   await db
     .update(deployment)
     .set({ status: "stopped", updatedAt: new Date() })
-    .where(and(eq(deployment.appId, appId), eq(deployment.status, "healthy")));
+    .where(and(eq(deployment.appId, appId), inArray(deployment.status, ["healthy", "crashed"])));
 
   return c.json({ ok: true });
 });
