@@ -188,6 +188,9 @@ function SelfHostedUpdatesCard() {
     toast.success("Update command copied");
   }
 
+  // Cloud instances are updated by the deploy pipeline — nothing to manage here.
+  if (system.data && !system.data.selfHosted) return null;
+
   return (
     <div className="max-w-2xl rounded-lg border bg-card p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
