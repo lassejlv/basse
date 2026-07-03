@@ -39,6 +39,17 @@ import {
 /** The full settings stack for an app: build/database, servers, resources,
  * volumes, delete. `app` is live state, `draft` has staged changes overlaid. */
 export function AppSettingsTab({ app, draft }: { app: App; draft: App }) {
+  // Neon databases run on Neon: no build, servers, resources, or deploy
+  // webhooks to configure — just rename and delete.
+  if (app.appKind === "neon") {
+    return (
+      <div className="flex flex-col gap-6">
+        <GeneralSettingsCard app={app} />
+        <DeleteAppCard app={app} />
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <GeneralSettingsCard app={app} />
@@ -141,8 +152,13 @@ function DeleteAppCard({ app }: { app: App }) {
     onError: (mutationError: Error) => setError(mutationError.message),
   });
 
+  const neonApp = app.appKind === "neon";
+
   function confirmDelete() {
-    if (!window.confirm(`Delete ${app.name}? This removes the app and its running containers.`)) {
+    const consequence = neonApp
+      ? "This deletes the Neon project and all of its branches."
+      : "This removes the app and its running containers.";
+    if (!window.confirm(`Delete ${app.name}? ${consequence}`)) {
       return;
     }
     remove.mutate();
@@ -152,8 +168,9 @@ function DeleteAppCard({ app }: { app: App }) {
     <Card className="border-destructive/30 p-6">
       <h2 className="font-semibold text-lg">Delete app</h2>
       <p className="mt-1 text-muted-foreground text-sm">
-        Remove this app, its running containers, deployment history, variables, and server
-        assignments.
+        {neonApp
+          ? "Remove this app and delete its Neon project — all branches and data on Neon are destroyed."
+          : "Remove this app, its running containers, deployment history, variables, and server assignments."}
       </p>
       {error ? <p className="mt-3 text-destructive-foreground text-sm">{error}</p> : null}
       <Button

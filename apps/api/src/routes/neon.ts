@@ -1,122 +1,26 @@
 import { db, neonConnection } from "@basse/db";
-import type { NeonConnection, NeonRegion, SaveNeonConnectionInput } from "@basse/shared";
+import type {
+  CreateNeonBranchInput,
+  NeonBranch,
+  NeonBranchConnection,
+  NeonConnection,
+  NeonRegion,
+  SaveNeonConnectionInput,
+} from "@basse/shared";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
+import {
+  createNeonBranch,
+  deleteNeonBranch,
+  getNeonApiKey,
+  getNeonBranchConnection,
+  listNeonBranches,
+  listNeonRegions,
+  validateNeonApiKey,
+} from "../integrations/neon";
 import { decryptSecret, encryptSecret } from "../lib/crypto";
 import { resolveActiveWorkspace } from "../lib/workspace";
-
-const NEON_API = "https://console.neon.tech/api/v2";
-
-type NeonRegionResponse = {
-  region_id: string;
-  name: string;
-};
-
-type NeonCreateProjectResponse = {
-  project: { id: string; region_id: string };
-  connection_uris: { connection_uri: string }[];
-};
-
-async function neonRequest(apiKey: string, path: string, init?: RequestInit): Promise<Response> {
-  return fetch(`${NEON_API}${path}`, {
-    ...init,
-    headers: {
-      accept: "application/json",
-      authorization: `Bearer ${apiKey}`,
-      ...(init?.body ? { "content-type": "application/json" } : {}),
-      ...init?.headers,
-    },
-  });
-}
-
-async function neonError(response: Response, fallback: string): Promise<string> {
-  const body = (await response.json().catch(() => null)) as { message?: string } | null;
-  return body?.message || `${fallback} (${response.status})`;
-}
-
-// The /regions endpoint rejects organization API keys ("not allowed for
-// organization API keys"), so keys are validated against /projects — which
-// works for both personal and org keys — and region listing falls back to this
-// static set when the live endpoint is unavailable (mirrors Neon's own CLI).
-const FALLBACK_REGIONS: NeonRegion[] = [
-  { id: "aws-us-east-1", name: "AWS US East (N. Virginia)" },
-  { id: "aws-us-east-2", name: "AWS US East (Ohio)" },
-  { id: "aws-us-west-2", name: "AWS US West (Oregon)" },
-  { id: "aws-eu-central-1", name: "AWS Europe (Frankfurt)" },
-  { id: "aws-eu-west-2", name: "AWS Europe (London)" },
-  { id: "aws-ap-southeast-1", name: "AWS Asia Pacific (Singapore)" },
-  { id: "aws-ap-southeast-2", name: "AWS Asia Pacific (Sydney)" },
-  { id: "aws-sa-east-1", name: "AWS South America (São Paulo)" },
-  { id: "azure-eastus2", name: "Azure East US 2 (Virginia)" },
-  { id: "azure-westus3", name: "Azure West US 3 (Arizona)" },
-  { id: "azure-gwc", name: "Azure Germany West Central (Frankfurt)" },
-];
-
-export async function validateNeonApiKey(apiKey: string): Promise<void> {
-  const response = await neonRequest(apiKey, "/projects?limit=1");
-  if (!response.ok) {
-    throw new Error(await neonError(response, "Neon rejected the API key"));
-  }
-}
-
-export async function listNeonRegions(apiKey: string): Promise<NeonRegion[]> {
-  const response = await neonRequest(apiKey, "/regions");
-  if (!response.ok) {
-    return FALLBACK_REGIONS;
-  }
-  const body = (await response.json().catch(() => null)) as {
-    regions?: NeonRegionResponse[];
-  } | null;
-  const regions = (body?.regions ?? []).map((region) => ({
-    id: region.region_id,
-    name: region.name,
-  }));
-  return regions.length > 0 ? regions : FALLBACK_REGIONS;
-}
-
-export async function createNeonProject(
-  apiKey: string,
-  input: { name: string; regionId: string },
-): Promise<{ projectId: string; regionId: string; connectionUri: string }> {
-  const response = await neonRequest(apiKey, "/projects", {
-    method: "POST",
-    body: JSON.stringify({ project: { name: input.name, region_id: input.regionId } }),
-  });
-  if (!response.ok) {
-    throw new Error(await neonError(response, "Could not create the Neon project"));
-  }
-  const body = (await response.json()) as NeonCreateProjectResponse;
-  const connectionUri = body.connection_uris[0]?.connection_uri;
-  if (!connectionUri) {
-    throw new Error("Neon did not return a connection string for the new project");
-  }
-  return {
-    projectId: body.project.id,
-    regionId: body.project.region_id,
-    connectionUri,
-  };
-}
-
-export async function deleteNeonProject(apiKey: string, projectId: string): Promise<void> {
-  const response = await neonRequest(apiKey, `/projects/${encodeURIComponent(projectId)}`, {
-    method: "DELETE",
-  });
-  // Already gone on Neon's side is fine — the goal is that it no longer exists.
-  if (!response.ok && response.status !== 404) {
-    throw new Error(await neonError(response, "Could not delete the Neon project"));
-  }
-}
-
-/** The workspace's decrypted Neon API key, or null when not connected. */
-export async function getNeonApiKey(organizationId: string): Promise<string | null> {
-  const [connection] = await db
-    .select()
-    .from(neonConnection)
-    .where(eq(neonConnection.organizationId, organizationId))
-    .limit(1);
-  if (!connection) return null;
-  return decryptSecret(connection.apiKey);
-}
+import { ownedApp } from "./apps";
 
 export const neon = new Hono();
 
@@ -218,5 +122,93 @@ neon.get("/regions", async (c) => {
       { error: error instanceof Error ? error.message : "Could not list Neon regions" },
       502,
     );
+  }
+});
+
+// ── App-scoped branch management ─────────────────────────────────────────────
+
+/** Loads the workspace-owned Neon app plus the decrypted API key, or a
+ * Response to short-circuit with. */
+async function resolveNeonApp(
+  request: Request,
+  appId: string,
+): Promise<{ projectId: string; apiKey: string } | Response> {
+  const organizationId = await resolveActiveWorkspace(request);
+  if (organizationId instanceof Response) return organizationId;
+
+  const row = await ownedApp(appId, organizationId);
+  if (!row || row.appKind !== "neon" || !row.neonProjectId) {
+    return Response.json({ error: "Neon database not found" }, { status: 404 });
+  }
+
+  const apiKey = await getNeonApiKey(organizationId);
+  if (!apiKey) {
+    return Response.json({ error: "Connect a Neon API key in Secrets first" }, { status: 400 });
+  }
+
+  return { projectId: row.neonProjectId, apiKey };
+}
+
+function neonFailure(error: unknown, fallback: string): Response {
+  return Response.json(
+    { error: error instanceof Error ? error.message : fallback },
+    { status: 502 },
+  );
+}
+
+neon.get("/apps/:appId/branches", async (c) => {
+  const resolved = await resolveNeonApp(c.req.raw, c.req.param("appId"));
+  if (resolved instanceof Response) return resolved;
+
+  try {
+    const branches = await listNeonBranches(resolved.apiKey, resolved.projectId);
+    return c.json(branches satisfies NeonBranch[]);
+  } catch (error) {
+    return neonFailure(error, "Could not list Neon branches");
+  }
+});
+
+neon.post("/apps/:appId/branches", async (c) => {
+  const resolved = await resolveNeonApp(c.req.raw, c.req.param("appId"));
+  if (resolved instanceof Response) return resolved;
+
+  const body = (await c.req.json().catch(() => null)) as Partial<CreateNeonBranchInput> | null;
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
+  if (!name) return c.json({ error: "name is required" }, 400);
+  if (name.length > 64) return c.json({ error: "Branch name is too long" }, 400);
+
+  try {
+    const branch = await createNeonBranch(resolved.apiKey, resolved.projectId, name);
+    return c.json(branch satisfies NeonBranch, 201);
+  } catch (error) {
+    return neonFailure(error, "Could not create the Neon branch");
+  }
+});
+
+neon.delete("/apps/:appId/branches/:branchId", async (c) => {
+  const resolved = await resolveNeonApp(c.req.raw, c.req.param("appId"));
+  if (resolved instanceof Response) return resolved;
+
+  try {
+    await deleteNeonBranch(resolved.apiKey, resolved.projectId, c.req.param("branchId"));
+    return c.body(null, 204);
+  } catch (error) {
+    return neonFailure(error, "Could not delete the Neon branch");
+  }
+});
+
+neon.get("/apps/:appId/branches/:branchId/connection", async (c) => {
+  const resolved = await resolveNeonApp(c.req.raw, c.req.param("appId"));
+  if (resolved instanceof Response) return resolved;
+
+  try {
+    const connection = await getNeonBranchConnection(
+      resolved.apiKey,
+      resolved.projectId,
+      c.req.param("branchId"),
+    );
+    return c.json(connection satisfies NeonBranchConnection);
+  } catch (error) {
+    return neonFailure(error, "Could not fetch the branch connection");
   }
 });

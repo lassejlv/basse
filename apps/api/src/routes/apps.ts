@@ -35,7 +35,7 @@ import {
   normalizeDockerfilePath,
 } from "../deploy/build-paths";
 import { decryptSecret, encryptSecret } from "../lib/crypto";
-import { createNeonProject, deleteNeonProject, getNeonApiKey } from "./neon";
+import { createNeonProject, deleteNeonProject, getNeonApiKey } from "../integrations/neon";
 import { connectionFromServer } from "../infra/server-connection";
 import { enqueueAction } from "../queue/queue";
 import { runScript, type SshConnection } from "../infra/ssh";

@@ -13,6 +13,7 @@ import { CronJobsTab } from "./cron-jobs-tab";
 import { DeployButton } from "./deploy-button";
 import { DeploymentsPanel } from "./deployments-tab";
 import { AppDomainsTab } from "./domains-tab";
+import { NeonDatabaseTab } from "./neon-tab";
 import { AppSettingsTab } from "./settings-tab";
 import { SpecDivider, useLiveUrl } from "./shared";
 import { useAppDetail } from "./use-app-detail";
@@ -21,8 +22,8 @@ import { EnvVarsCard } from "./variables-tab";
 const SERVICE_TABS = ["deployments", "variables", "domains", "cron", "changes", "settings"];
 const DATABASE_TABS = ["deployments", "connection", "backups", "cron", "changes", "settings"];
 // Neon databases live on Neon: no deployments, servers, domains, or cron —
-// just the connection string (in Variables), staged changes, and settings.
-const NEON_TABS = ["variables", "changes", "settings"];
+// branches + connection strings, env vars, staged changes, and settings.
+const NEON_TABS = ["database", "variables", "changes", "settings"];
 
 /** The app sidecard on the project canvas — the entire app experience lives
  * here: deployments, variables, domains, staged-change history, settings. */
@@ -110,7 +111,10 @@ export function AppPanel({
                   <TabsTab value="backups">Backups</TabsTab>
                 </>
               ) : app.appKind === "neon" ? (
-                <TabsTab value="variables">Variables</TabsTab>
+                <>
+                  <TabsTab value="database">Database</TabsTab>
+                  <TabsTab value="variables">Variables</TabsTab>
+                </>
               ) : (
                 <>
                   <TabsTab value="variables">Variables</TabsTab>
@@ -141,9 +145,14 @@ export function AppPanel({
                   </TabsPanel>
                 </>
               ) : app.appKind === "neon" ? (
-                <TabsPanel value="variables">
-                  <EnvVarsCard appId={appId} stagedChanges={detail.stagedChanges} />
-                </TabsPanel>
+                <>
+                  <TabsPanel value="database">
+                    <NeonDatabaseTab app={app} />
+                  </TabsPanel>
+                  <TabsPanel value="variables">
+                    <EnvVarsCard appId={appId} stagedChanges={detail.stagedChanges} />
+                  </TabsPanel>
+                </>
               ) : (
                 <>
                   <TabsPanel value="variables">

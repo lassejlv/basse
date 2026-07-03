@@ -696,6 +696,28 @@ export type NeonRegion = {
   name: string;
 };
 
+export type NeonBranch = {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  currentState: string | null;
+  createdAt: string;
+};
+
+export type CreateNeonBranchInput = {
+  name: string;
+};
+
+// Connection strings for one branch. The pooled URI goes through Neon's
+// connection pooler (use it from apps); the direct URI is for migrations and
+// tools that need session semantics.
+export type NeonBranchConnection = {
+  pooledUri: string;
+  directUri: string;
+  database: string;
+  role: string;
+};
+
 export type GitHubAppIntegration = {
   connected: boolean;
   appName?: string;

@@ -49,7 +49,7 @@ export function DatabaseConnectionCard({ app }: { app: App }) {
   );
 }
 
-function ConnectionValue({
+export function ConnectionValue({
   copied,
   label,
   loading,
