@@ -47,6 +47,17 @@ const baseApp = {
 } satisfies AppRow;
 
 describe("buildAppUpdates", () => {
+  it("normalizes app renames and keeps the slug in sync", async () => {
+    Bun.env.BETTER_AUTH_SECRET ??= "test-secret-at-least-32-characters";
+    const { buildAppUpdates } = await import("./apps");
+    const result = await buildAppUpdates(baseApp, { name: "  Edge API  " }, "org_1");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.updates.name).toBe("Edge API");
+    expect(result.updates.slug).toBe("edge-api");
+  });
+
   it("does not validate repositoryUrl when switching to a Docker image source", async () => {
     Bun.env.BETTER_AUTH_SECRET ??= "test-secret-at-least-32-characters";
     const { buildAppUpdates } = await import("./apps");

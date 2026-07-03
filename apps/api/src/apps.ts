@@ -17,7 +17,7 @@ import type {
   DeploymentStatus,
   UpdateAppInput,
 } from "@basse/shared";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, ne } from "drizzle-orm";
 import { Hono } from "hono";
 import { removeAppContainers } from "./app-cleanup";
 import {
@@ -1267,6 +1267,23 @@ apps.patch("/:id", async (c) => {
   const body = (await c.req.json().catch(() => null)) as UpdateAppInput | null;
   const result = await buildAppUpdates(existing, body, organizationId);
   if (!result.ok) return c.json({ error: result.error }, result.status);
+
+  if (result.updates.slug && result.updates.slug !== existing.slug) {
+    const [duplicate] = await db
+      .select({ id: app.id })
+      .from(app)
+      .where(
+        and(
+          eq(app.environmentId, existing.environmentId),
+          eq(app.slug, result.updates.slug),
+          ne(app.id, existing.id),
+        ),
+      )
+      .limit(1);
+    if (duplicate) {
+      return c.json({ error: "An app with that name already exists in this environment" }, 409);
+    }
+  }
 
   const updates: Partial<AppRow> = { ...result.updates, updatedAt: new Date() };
   const serverIds = result.serverIds;

@@ -20,7 +20,7 @@ import {
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import type { App } from "@/lib/apps";
-import { deleteApp } from "@/lib/apps";
+import { deleteApp, updateApp } from "@/lib/apps";
 import { stageAppChanges } from "@/lib/changes";
 import { formatBytes } from "@/lib/format";
 import { listGitHubRepositories } from "@/lib/github";
@@ -41,6 +41,7 @@ import {
 export function AppSettingsTab({ app, draft }: { app: App; draft: App }) {
   return (
     <div className="flex flex-col gap-6">
+      <GeneralSettingsCard app={app} />
       {app.appKind === "database" ? (
         <DatabaseSettingsCard app={draft} />
       ) : (
@@ -53,6 +54,67 @@ export function AppSettingsTab({ app, draft }: { app: App; draft: App }) {
       {app.appKind === "service" ? <VolumesCard app={draft} /> : null}
       <DeleteAppCard app={app} />
     </div>
+  );
+}
+
+function GeneralSettingsCard({ app }: { app: App }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState(app.name);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setName(app.name);
+  }, [app.name]);
+
+  const rename = useMutation({
+    mutationFn: () => updateApp(app.id, { name: name.trim() }),
+    onSuccess: async (updated) => {
+      setError(null);
+      setName(updated.name);
+      toast.success("App renamed");
+      queryClient.setQueryData(["app", app.id], updated);
+      queryClient.setQueryData<App[]>(["apps", app.environmentId], (current) =>
+        current?.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)),
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["app", app.id] }),
+        queryClient.invalidateQueries({ queryKey: ["apps", app.environmentId] }),
+      ]);
+    },
+    onError: (mutationError: Error) => setError(mutationError.message),
+  });
+
+  const trimmedName = name.trim();
+  const unchanged = trimmedName === app.name;
+
+  return (
+    <Card className="p-6">
+      <h2 className="font-semibold text-lg">General</h2>
+      <p className="mt-1 text-muted-foreground text-sm">
+        Rename the app shown in the project canvas, panel, alerts, and deployment history.
+      </p>
+      <form
+        className="mt-4 space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!trimmedName || unchanged) return;
+          rename.mutate();
+        }}
+      >
+        <div className="space-y-2">
+          <Label htmlFor={`app-name-${app.id}`}>App name</Label>
+          <Input
+            id={`app-name-${app.id}`}
+            onChange={(event) => setName(event.currentTarget.value)}
+            value={name}
+          />
+        </div>
+        {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+        <Button disabled={!trimmedName || unchanged} loading={rename.isPending} type="submit">
+          Rename app
+        </Button>
+      </form>
+    </Card>
   );
 }
 
