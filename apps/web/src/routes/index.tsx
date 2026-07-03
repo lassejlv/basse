@@ -1,11 +1,8 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
 import {
   ArrowRightIcon,
-  ArrowUpIcon,
   BoxIcon,
-  CheckIcon,
   ChevronRightIcon,
-  CopyIcon,
   GitBranchIcon,
   GlobeIcon,
   HardDriveIcon,
@@ -13,18 +10,15 @@ import {
   ScrollTextIcon,
   ServerIcon,
 } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { DatabaseIcon } from "@/components/database-icon";
 import { StatusDot } from "@/components/deploy-status";
-import { ThemeToggle } from "@/components/theme-toggle";
+import { DotGrid, InstallCommand, SiteFooter, SiteHeader } from "@/components/marketing";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/")({
   component: LandingRoute,
 });
-
-const INSTALL_DISPLAY = "curl -fsSL basse.sh/install | bash";
-const INSTALL_COMMAND = "curl -fsSL https://basse.sh/install | bash";
 
 const FEATURES = [
   {
@@ -92,73 +86,15 @@ function DatabaseFeatureIcon({ className }: { className?: string }) {
 }
 
 function LandingRoute() {
-  const [copied, setCopied] = useState(false);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => () => clearTimeout(timeoutRef.current ?? undefined), []);
-
-  function copyInstall() {
-    navigator.clipboard?.writeText(INSTALL_COMMAND).catch(() => {});
-    setCopied(true);
-    clearTimeout(timeoutRef.current ?? undefined);
-    timeoutRef.current = setTimeout(() => setCopied(false), 1600);
-  }
-
   return (
     <>
-      <header className="sticky top-0 z-50 border-b border-transparent bg-background/75 backdrop-blur-md backdrop-saturate-[1.8]">
-        <div className="mx-auto flex h-16 max-w-[1120px] items-center gap-4 px-7">
-          <Link to="/" className="flex items-center gap-[9px]">
-            <span className="inline-flex size-6 items-center justify-center rounded-[7px] bg-primary text-primary-foreground">
-              <ArrowUpIcon className="size-3.5" strokeWidth={2.6} />
-            </span>
-            <span className="text-base font-semibold tracking-[-0.01em]">basse</span>
-          </Link>
-          <div className="flex-1" />
-          <Link
-            to="/pricing"
-            className="px-1 py-1.5 text-sm font-medium text-muted-foreground hover:text-foreground"
-          >
-            Pricing
-          </Link>
-          <a
-            href="#"
-            className="px-1 py-1.5 text-sm font-medium text-muted-foreground hover:text-foreground"
-          >
-            Docs
-          </a>
-          <a
-            href="#"
-            className="px-1 py-1.5 text-sm font-medium text-muted-foreground hover:text-foreground"
-          >
-            GitHub
-          </a>
-          <ThemeToggle />
-          <Link
-            to="/dashboard"
-            className="inline-flex h-8 items-center rounded-[9px] bg-primary px-[13px] text-sm font-medium text-primary-foreground hover:bg-primary/90"
-          >
-            Deploy
-          </Link>
-        </div>
-      </header>
+      <SiteHeader />
 
       {/* Hero — the landing page opens on the product's own surface: the
           canvas dot grid with live nodes. The only color on the page is
           deploy state, same rule as the dashboard. */}
       <section className="relative overflow-hidden">
-        <div
-          aria-hidden
-          className="absolute inset-0"
-          style={{
-            backgroundImage: "radial-gradient(var(--color-border) 1px, transparent 1px)",
-            backgroundSize: "24px 24px",
-          }}
-        />
-        <div
-          aria-hidden
-          className="absolute inset-0 bg-[radial-gradient(110%_110%_at_30%_20%,transparent_40%,var(--color-background)_92%)]"
-        />
+        <DotGrid fadeClassName="bg-[radial-gradient(110%_110%_at_30%_20%,transparent_40%,var(--color-background)_92%)]" />
 
         <div className="relative mx-auto flex max-w-[1120px] flex-col items-start gap-14 px-7 pb-24 pt-24 lg:flex-row lg:items-center lg:gap-10 lg:pt-32">
           <div className="max-w-[560px]">
@@ -190,25 +126,7 @@ function LandingRoute() {
                 <ChevronRightIcon className="size-[15px] opacity-60" />
               </a>
             </div>
-            <div className="inline-flex h-[42px] max-w-full items-center gap-3 rounded-[11px] border bg-card/90 pr-[5px] pl-[15px] backdrop-blur-sm">
-              <span className="font-mono text-[13.5px] font-medium text-muted-foreground">$</span>
-              <span className="truncate font-mono text-[13.5px] font-medium text-foreground">
-                {INSTALL_DISPLAY}
-              </span>
-              <button
-                type="button"
-                onClick={copyInstall}
-                aria-label="Copy install command"
-                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-[13px] font-medium text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {copied ? (
-                  <CheckIcon className="size-3.5 text-success-foreground" strokeWidth={2.4} />
-                ) : (
-                  <CopyIcon className="size-3.5 opacity-80" />
-                )}
-                {copied ? "Copied" : "Copy"}
-              </button>
-            </div>
+            <InstallCommand className="w-fit bg-card/90 backdrop-blur-sm" />
           </div>
 
           {/* Canvas nodes — built from the product's real vocabulary. `web`
@@ -375,28 +293,7 @@ function LandingRoute() {
         </div>
       </section>
 
-      <footer className="border-t">
-        <div className="mx-auto flex max-w-[1120px] flex-wrap items-center justify-between gap-4 px-7 py-6">
-          <div className="flex items-center gap-[9px]">
-            <span className="inline-flex size-5 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <ArrowUpIcon className="size-[11px]" strokeWidth={2.6} />
-            </span>
-            <span className="font-mono text-[13px] font-medium text-muted-foreground">basse</span>
-          </div>
-          <div className="flex gap-5 font-mono text-[12.5px] text-muted-foreground">
-            <Link to="/pricing" className="hover:text-foreground">
-              Pricing
-            </Link>
-            <a href="#" className="hover:text-foreground">
-              Docs
-            </a>
-            <a href="#" className="hover:text-foreground">
-              GitHub
-            </a>
-            <span>MIT licensed</span>
-          </div>
-        </div>
-      </footer>
+      <SiteFooter />
     </>
   );
 }
