@@ -1,17 +1,17 @@
-import { Link, createFileRoute } from "@tanstack/react-router";
-import { ArrowRightIcon, CheckIcon, MinusIcon, PlusIcon, ServerIcon } from "lucide-react";
-import { useState } from "react";
-import { DotGrid, InstallCommand, SiteFooter, SiteHeader } from "@/components/marketing";
-import { cn } from "@/lib/utils";
+import { createFileRoute } from "@tanstack/react-router";
+import { CheckIcon } from "lucide-react";
+import {
+  DeployCta,
+  DotGrid,
+  Eyebrow,
+  InstallCommand,
+  SiteFooter,
+  SiteHeader,
+} from "@/components/marketing";
 
 export const Route = createFileRoute("/pricing")({
   component: PricingRoute,
 });
-
-const CLOUD_BASE_PRICE = 5;
-const CLOUD_INCLUDED_SERVERS = 2;
-const CLOUD_OVERAGE_PRICE = 1.5;
-const CALCULATOR_MAX_SERVERS = 24;
 
 const SELF_HOSTED_FEATURES = [
   "Unlimited servers and apps",
@@ -23,8 +23,8 @@ const SELF_HOSTED_FEATURES = [
 const CLOUD_FEATURES = [
   "Everything in self-hosted",
   "We run and update the control plane",
-  `${CLOUD_INCLUDED_SERVERS} connected servers included`,
-  "Connect more anytime, priced below",
+  "2 connected servers included",
+  "$1.50 per month for each extra server",
 ];
 
 const FAQ = [
@@ -45,10 +45,6 @@ const FAQ = [
   },
 ];
 
-function formatPrice(value: number) {
-  return Number.isInteger(value) ? `$${value}` : `$${value.toFixed(2)}`;
-}
-
 function PricingRoute() {
   return (
     <>
@@ -58,9 +54,7 @@ function PricingRoute() {
         <DotGrid fadeClassName="bg-[radial-gradient(110%_110%_at_50%_0%,transparent_35%,var(--color-background)_88%)]" />
 
         <div className="relative mx-auto max-w-[1120px] px-7 pt-20 pb-16 lg:pt-28">
-          <p className="mb-6 font-mono text-[0.7rem] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-            Pricing
-          </p>
+          <Eyebrow className="mb-6">Pricing</Eyebrow>
           <h1 className="mb-5 max-w-[16ch] text-[clamp(36px,5vw,56px)] font-semibold leading-[1.04] tracking-[-0.04em]">
             Priced per server, not per seat.
           </h1>
@@ -93,28 +87,16 @@ function PricingRoute() {
                 Hosted
               </span>
             </div>
-            <Price
-              amount={formatPrice(CLOUD_BASE_PRICE)}
-              detail={`per month · then ${formatPrice(CLOUD_OVERAGE_PRICE)} per extra server`}
-            />
+            <Price amount="$5" detail="per month · 2 servers included" />
             <FeatureList features={CLOUD_FEATURES} />
-            <ServerCalculator />
-            <Link
-              to="/dashboard"
-              className="mt-auto inline-flex h-11 items-center justify-center gap-2 rounded-[11px] bg-primary px-[19px] text-[15px] font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-            >
-              Start deploying
-              <ArrowRightIcon className="-mr-0.5 size-4 opacity-90" strokeWidth={2.2} />
-            </Link>
+            <DeployCta label="Start deploying" className="mt-auto justify-center" />
           </div>
         </div>
       </section>
 
       <section className="border-t">
         <div className="mx-auto max-w-[1120px] px-7 py-20">
-          <p className="mb-10 font-mono text-[0.7rem] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-            Questions
-          </p>
+          <Eyebrow className="mb-10">Questions</Eyebrow>
           <div className="grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-x-9 gap-y-10">
             {FAQ.map((item) => (
               <div key={item.question}>
@@ -164,89 +146,5 @@ function FeatureList({ features }: { features: string[] }) {
         </li>
       ))}
     </ul>
-  );
-}
-
-function StepButton({
-  onClick,
-  disabled,
-  label,
-  icon,
-}: {
-  onClick: () => void;
-  disabled: boolean;
-  label: string;
-  icon: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={label}
-      className="inline-flex size-7 items-center justify-center rounded-lg border text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground disabled:pointer-events-none disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-    >
-      {icon}
-    </button>
-  );
-}
-
-/* The Cloud price is a function of connected servers, so the card computes
-   it live: tiles fill in as machines are added, included ones are solid. */
-function ServerCalculator() {
-  const [servers, setServers] = useState(CLOUD_INCLUDED_SERVERS);
-
-  const overage = Math.max(0, servers - CLOUD_INCLUDED_SERVERS);
-  const total = CLOUD_BASE_PRICE + overage * CLOUD_OVERAGE_PRICE;
-
-  return (
-    <div className="mb-7 rounded-[11px] border bg-background p-4">
-      <div className="flex items-center justify-between gap-3">
-        <span className="inline-flex items-center gap-1.5 font-mono text-xs text-muted-foreground">
-          <ServerIcon className="size-3.5" />
-          {servers} {servers === 1 ? "server" : "servers"}
-        </span>
-        <div className="flex items-center gap-1">
-          <StepButton
-            onClick={() => setServers((n) => Math.max(1, n - 1))}
-            disabled={servers <= 1}
-            label="Remove a server"
-            icon={<MinusIcon className="size-3.5" strokeWidth={2.4} />}
-          />
-          <StepButton
-            onClick={() => setServers((n) => Math.min(CALCULATOR_MAX_SERVERS, n + 1))}
-            disabled={servers >= CALCULATOR_MAX_SERVERS}
-            label="Add a server"
-            icon={<PlusIcon className="size-3.5" strokeWidth={2.4} />}
-          />
-        </div>
-      </div>
-
-      <div className="mt-3 flex flex-wrap gap-1.5" aria-hidden>
-        {Array.from({ length: servers }, (_, i) => (
-          <span
-            key={i}
-            className={cn(
-              "h-[18px] w-[26px] rounded-[5px] border transition-colors",
-              i < CLOUD_INCLUDED_SERVERS
-                ? "border-foreground/60 bg-foreground/80"
-                : "border-foreground/25 bg-foreground/10",
-            )}
-          />
-        ))}
-      </div>
-
-      <div className="mt-3 flex items-baseline justify-between border-t pt-3">
-        <span className="text-[13px] text-muted-foreground">
-          {overage > 0
-            ? `${formatPrice(CLOUD_BASE_PRICE)} + ${overage} × ${formatPrice(CLOUD_OVERAGE_PRICE)}`
-            : `${CLOUD_INCLUDED_SERVERS} servers included`}
-        </span>
-        <span className="font-mono text-[15px] font-semibold tabular-nums">
-          {formatPrice(total)}
-          <span className="ml-1 font-normal text-muted-foreground">/mo</span>
-        </span>
-      </div>
-    </div>
   );
 }

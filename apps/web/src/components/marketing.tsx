@@ -1,5 +1,6 @@
 import { Link } from "@tanstack/react-router";
-import { CheckIcon, CopyIcon } from "lucide-react";
+import { ArrowRightIcon, CheckIcon, CopyIcon } from "lucide-react";
+import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
@@ -86,6 +87,36 @@ export function SiteFooter() {
         </div>
       </div>
     </footer>
+  );
+}
+
+/* The mono section eyebrow used across every marketing section. */
+export function Eyebrow({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <p
+      className={cn(
+        "font-mono text-[0.7rem] font-medium uppercase tracking-[0.16em] text-muted-foreground",
+        className,
+      )}
+    >
+      {children}
+    </p>
+  );
+}
+
+/* The primary marketing CTA — always points at the dashboard. */
+export function DeployCta({ label, className }: { label: string; className?: string }) {
+  return (
+    <Link
+      to="/dashboard"
+      className={cn(
+        "inline-flex h-11 items-center gap-2 rounded-[11px] bg-primary px-[19px] text-[15px] font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+        className,
+      )}
+    >
+      {label}
+      <ArrowRightIcon className="-mr-0.5 size-4 opacity-90" strokeWidth={2.2} />
+    </Link>
   );
 }
 

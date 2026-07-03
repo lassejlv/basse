@@ -1,6 +1,5 @@
-import { Link, createFileRoute } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 import {
-  ArrowRightIcon,
   BoxIcon,
   ChevronRightIcon,
   GitBranchIcon,
@@ -14,7 +13,9 @@ import type { ReactNode } from "react";
 import { DatabaseIcon } from "@/components/database-icon";
 import { StatusDot } from "@/components/deploy-status";
 import {
+  DeployCta,
   DotGrid,
+  Eyebrow,
   GITHUB_URL,
   InstallCommand,
   SiteFooter,
@@ -77,16 +78,6 @@ const STEPS = [
   },
 ];
 
-const DEPLOY_LOG = [
-  { time: "18:20:01", text: "Cloning github.com/acme/web (main)", level: "info" },
-  { time: "18:20:04", text: "Railpack detected bun 1.3.14", level: "info" },
-  { time: "18:20:12", text: "$ bun install --frozen-lockfile", level: "info" },
-  { time: "18:20:48", text: "vite v6.1.0 building for production...", level: "info" },
-  { time: "18:21:02", text: "warning: chunk size exceeds 500 kB", level: "warn" },
-  { time: "18:21:31", text: "image push 122 MB done in 5.1s", level: "info" },
-  { time: "18:21:33", text: "Deployment healthy on 1 server", level: "success" },
-] as const;
-
 function DatabaseFeatureIcon({ className }: { className?: string }) {
   return <DatabaseIcon className={className} kind="postgres" />;
 }
@@ -104,9 +95,7 @@ function LandingRoute() {
 
         <div className="relative mx-auto flex max-w-[1120px] flex-col items-start gap-14 px-7 pb-24 pt-24 lg:flex-row lg:items-center lg:gap-10 lg:pt-32">
           <div className="max-w-[560px]">
-            <p className="mb-6 font-mono text-[0.7rem] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-              Self-hosted PaaS · open source
-            </p>
+            <Eyebrow className="mb-6">Self-hosted PaaS · open source</Eyebrow>
             <h1 className="mb-6 text-[clamp(42px,6vw,68px)] font-semibold leading-[1.02] tracking-[-0.04em]">
               Deploy to servers
               <br />
@@ -117,13 +106,7 @@ function LandingRoute() {
               platform experience, without the platform bill.
             </p>
             <div className="mb-8 flex flex-wrap items-center gap-[14px]">
-              <Link
-                to="/dashboard"
-                className="inline-flex h-11 items-center gap-2 rounded-[11px] bg-primary px-[19px] text-[15px] font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-              >
-                Deploy your first app
-                <ArrowRightIcon className="-mr-0.5 size-4 opacity-90" strokeWidth={2.2} />
-              </Link>
+              <DeployCta label="Deploy your first app" />
               <a
                 href="#"
                 className="inline-flex h-11 items-center gap-1.5 px-2 text-[15px] font-medium text-foreground hover:text-muted-foreground"
@@ -171,90 +154,26 @@ function LandingRoute() {
         </div>
       </section>
 
-      {/* How it works — a real sequence, so it earns its numbers. The log
-          block is the product's log explorer, warn line and all. */}
       <section className="border-t">
-        <div className="mx-auto grid max-w-[1120px] items-center gap-14 px-7 py-20 lg:grid-cols-2">
-          <div>
-            <p className="mb-8 font-mono text-[0.7rem] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-              How it works
-            </p>
-            <ol className="flex flex-col gap-8">
-              {STEPS.map((step) => (
-                <li key={step.number} className="flex gap-5">
-                  <span className="mt-0.5 font-mono text-sm text-muted-foreground/60">
-                    {step.number}
-                  </span>
-                  <div>
-                    <h3 className="text-[15.5px] font-semibold">{step.title}</h3>
-                    <p className="mt-1 max-w-[44ch] text-[14.5px] leading-[1.6] text-muted-foreground">
-                      {step.body}
-                    </p>
-                  </div>
-                </li>
-              ))}
-            </ol>
-          </div>
-
-          <div className="overflow-hidden rounded-[14px] border bg-background shadow-sm">
-            <div className="flex h-[38px] items-center justify-between border-b px-[14px]">
-              <span className="font-mono text-xs font-medium text-muted-foreground">
-                basse up --prod
-              </span>
-              <span className="inline-flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
-                <StatusDot className="size-1.5" status="building" />
-                deploying
-              </span>
-            </div>
-            <div className="px-3 py-3 font-mono text-[12.5px] leading-[1.9]">
-              {DEPLOY_LOG.map((line) => (
-                <div key={line.time} className="flex gap-2.5">
-                  <span
-                    className={cn(
-                      "w-0.5 shrink-0 self-stretch rounded-full",
-                      line.level === "warn"
-                        ? "bg-warning"
-                        : line.level === "success"
-                          ? "bg-success"
-                          : "bg-border",
-                    )}
-                  />
-                  <span className="shrink-0 select-none text-muted-foreground/50">{line.time}</span>
-                  <span
-                    className={cn(
-                      "min-w-0 truncate",
-                      line.level === "warn"
-                        ? "text-warning-foreground"
-                        : line.level === "success"
-                          ? "text-success-foreground"
-                          : "text-foreground/85",
-                    )}
-                  >
-                    {line.text}
-                  </span>
-                </div>
-              ))}
-              <div className="mt-1 flex gap-2.5">
-                <span className="w-0.5 shrink-0 self-stretch rounded-full bg-success" />
-                <span className="shrink-0 select-none text-muted-foreground/50">18:21:34</span>
-                <span className="min-w-0 truncate text-foreground">
-                  ✓ live at{" "}
-                  <span className="underline underline-offset-[3px]">app-prod.basse.network</span>
-                </span>
-              </div>
-            </div>
-            <div className="border-t px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
-              8 lines · 1 warn
-            </div>
-          </div>
+        <div className="mx-auto max-w-[1120px] px-7 py-20">
+          <Eyebrow className="mb-10">How it works</Eyebrow>
+          <ol className="grid gap-10 sm:grid-cols-3">
+            {STEPS.map((step) => (
+              <li key={step.number}>
+                <span className="font-mono text-sm text-muted-foreground/60">{step.number}</span>
+                <h3 className="mt-2 text-[15.5px] font-semibold">{step.title}</h3>
+                <p className="mt-1 max-w-[44ch] text-[14.5px] leading-[1.6] text-muted-foreground">
+                  {step.body}
+                </p>
+              </li>
+            ))}
+          </ol>
         </div>
       </section>
 
       <section className="border-t">
         <div className="mx-auto max-w-[1120px] px-7 py-20">
-          <p className="mb-10 font-mono text-[0.7rem] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-            What's in the box
-          </p>
+          <Eyebrow className="mb-10">What's in the box</Eyebrow>
           <div className="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-x-9 gap-y-10">
             {FEATURES.map((feature) => (
               <div key={feature.title}>
@@ -282,13 +201,7 @@ function LandingRoute() {
             Install the CLI, connect a server, deploy. Free and open source, MIT licensed.
           </p>
           <div className="flex flex-wrap items-center justify-center gap-[14px]">
-            <Link
-              to="/dashboard"
-              className="inline-flex h-11 items-center gap-2 rounded-[11px] bg-primary px-[19px] text-[15px] font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-            >
-              Deploy now
-              <ArrowRightIcon className="-mr-0.5 size-4 opacity-90" strokeWidth={2.2} />
-            </Link>
+            <DeployCta label="Deploy now" />
             <a
               href={GITHUB_URL}
               target="_blank"
