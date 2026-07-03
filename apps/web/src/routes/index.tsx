@@ -8,7 +8,6 @@ import {
   HardDriveIcon,
   LayersIcon,
   ScrollTextIcon,
-  ServerIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { DatabaseIcon } from "@/components/database-icon";
@@ -37,7 +36,7 @@ const FEATURES = [
   {
     icon: GitBranchIcon,
     title: "Push to deploy",
-    body: "Connect a repo and every push builds, ships and runs. Dockerfile, Railpack, or a prebuilt image.",
+    body: "Connect a repo and every push builds, ships and runs. Dockerfile, Railpack, or a prebuilt image. Even connect depot.dev to build your apps.",
   },
   {
     icon: ScrollTextIcon,
@@ -92,7 +91,6 @@ function LandingRoute() {
   return (
     <>
       <SiteHeader />
-
 
       <section className="relative overflow-hidden">
         <DotGrid fadeClassName="bg-[radial-gradient(110%_110%_at_30%_20%,transparent_40%,var(--color-background)_92%)]" />
@@ -188,12 +186,11 @@ function LandingRoute() {
 
       <section className="border-t">
         <div className="mx-auto max-w-[680px] px-7 pt-[72px] pb-[88px] text-center">
-
           <h2 className="mb-[14px] text-[clamp(26px,3.6vw,34px)] font-semibold leading-[1.1] tracking-[-0.025em]">
             Ship your first app in minutes
           </h2>
           <p className="mx-auto mb-7 max-w-[42ch] text-base leading-[1.55] text-muted-foreground">
-           Connect a server, deploy. Free and open source, MIT licensed.
+            Connect a server, deploy. Free and open source, MIT licensed.
           </p>
           <div className="flex flex-wrap items-center justify-center gap-[14px]">
             <DeployCta label="Deploy now" />
