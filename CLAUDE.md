@@ -26,7 +26,7 @@ Env lives in `.env` at the repo root (copy from `.env.example`); `dev` scripts l
 
 Bun-workspace monorepo: `apps/*` + `packages/*`, isolated linker (`bunfig.toml`).
 
-- **`apps/api`** — Hono server, default export is a Bun server object (`{ port, hostname, fetch }`), run with `bun --hot`. Better Auth is mounted at `/api/auth/*` via `auth.handler`. CORS and Better Auth `trustedOrigins` both allow the Vite dev origins plus `WEB_ORIGIN`.
+- **`apps/api`** — Hono server, default export is a Bun server object (`{ port, hostname, fetch }`), run with `bun --hot`. Better Auth is mounted at `/api/auth/*` via `auth.handler`. CORS and Better Auth `trustedOrigins` both allow the Vite dev origins plus `WEB_ORIGIN`. `src/` is organized by role: `routes/` (every mounted Hono router, registered in `index.ts`), `deploy/` (build/deploy pipeline), `infra/` (server agent, SSH, provisioning, monitor, realtime), `integrations/` (external provider API clients with no router — Hetzner, Cloudflare, GitHub helpers), `lib/` (auth, crypto, workspace resolution, email), `queue/` (in-process action queue). New endpoint → `routes/`; new provider client → `integrations/` (or inside its router file when it's small and single-consumer, like `routes/neon.ts`).
 - **`apps/web`** — Vite + React, TanStack Router (file-based) + TanStack Query. Vite dev-proxies `/api` and `/health` to `:3000`, so the browser talks to the API same-origin in dev. `@/*` aliases `src/*`.
 - **`packages/db`** — owns the database. Drizzle ORM on the `bun-sql` Postgres driver. **`prepare: false`** is set deliberately for Neon pooler compatibility. Exports `db`, the schema, and workspace helpers from `@basse/db` (and `@basse/db/schema`).
 

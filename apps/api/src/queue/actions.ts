@@ -1,9 +1,9 @@
-import { runBackupUpload, runDatabaseBackup } from "../backups";
-import { runCronJob } from "../cron-jobs";
-import { runDeployment } from "../deploy";
-import { syncManagedLoadBalancersForApp } from "../load-balancers";
-import { provisionServer } from "../provision";
-import { syncServerDomains } from "../proxy-sync";
+import { runBackupUpload, runDatabaseBackup } from "../routes/backups";
+import { runCronJob } from "../routes/cron-jobs";
+import { runDeployment } from "../deploy/deploy";
+import { syncManagedLoadBalancersForApp } from "../routes/load-balancers";
+import { provisionServer } from "../infra/provision";
+import { syncServerDomains } from "../deploy/proxy-sync";
 import type { ActionName } from "./queue";
 
 // Maps each action to its handler. Imported ONLY by worker.ts — never by the

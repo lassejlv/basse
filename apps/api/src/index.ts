@@ -3,40 +3,40 @@ import { serveStatic } from "hono/bun";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { runMigrations } from "@basse/db/migrations";
-import { alerts } from "./alerts";
-import { apiTokens } from "./api-tokens";
-import { apps } from "./apps";
-import { auth } from "./auth";
-import { backups, startBackupScheduler } from "./backups";
-import { changes, projectChanges } from "./changes";
-import { cronJobs, startCronScheduler } from "./cron-jobs";
-import { reconcileInflightDeployments } from "./deploy";
-import { deployments } from "./deployments";
-import { depot } from "./depot";
-import { domains } from "./domains";
-import { environments } from "./environments";
-import { envVars } from "./env-vars";
-import { github } from "./github";
-import { startImagePruner } from "./image-prune";
-import { loadBalancers } from "./load-balancers";
-import { startMonitor } from "./monitor";
-import { neon } from "./neon";
-import { outboundAgent } from "./outbound-agent";
-import { projects } from "./projects";
-import { realtimeRoutes, websocket } from "./realtime";
-import { s3 } from "./s3";
+import { alerts } from "./routes/alerts";
+import { apiTokens } from "./routes/api-tokens";
+import { apps } from "./routes/apps";
+import { auth } from "./lib/auth";
+import { backups, startBackupScheduler } from "./routes/backups";
+import { changes, projectChanges } from "./routes/changes";
+import { cronJobs, startCronScheduler } from "./routes/cron-jobs";
+import { reconcileInflightDeployments } from "./deploy/deploy";
+import { deployments } from "./routes/deployments";
+import { depot } from "./routes/depot";
+import { domains } from "./routes/domains";
+import { environments } from "./routes/environments";
+import { envVars } from "./routes/env-vars";
+import { github } from "./routes/github";
+import { startImagePruner } from "./deploy/image-prune";
+import { loadBalancers } from "./routes/load-balancers";
+import { startMonitor } from "./infra/monitor";
+import { neon } from "./routes/neon";
+import { outboundAgent } from "./routes/outbound-agent";
+import { projects } from "./routes/projects";
+import { realtimeRoutes, websocket } from "./infra/realtime";
+import { s3 } from "./routes/s3";
 import { actionsQueue } from "./queue/queue";
 import { reconcileProvisioningServers } from "./queue/reconcile";
 import { startWorker } from "./queue/worker";
-import { servers } from "./servers";
+import { servers } from "./routes/servers";
 import {
   appEnvReferences,
   environmentSharedEnvVars,
   projectSharedEnvVars,
-} from "./shared-env-vars";
-import { sshKeys } from "./ssh-keys";
-import { team } from "./team";
-import { workspaceSettingsRoutes } from "./workspace-settings";
+} from "./routes/shared-env-vars";
+import { sshKeys } from "./routes/ssh-keys";
+import { team } from "./routes/team";
+import { workspaceSettingsRoutes } from "./routes/workspace-settings";
 
 if (Bun.env.DB_MIGRATE_ON_STARTUP !== "false") {
   await runMigrations();

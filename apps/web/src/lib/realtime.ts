@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { apiClientId } from "./api";
 
-// Client half of the realtime layer (see apps/api/src/realtime.ts): a single
+// Client half of the realtime layer (see apps/api/src/infra/realtime.ts): a single
 // workspace-scoped WebSocket delivering small hint events, mapped here to
 // React Query invalidations. Data always flows through the normal fetch layer.
 // The server excludes this tab's own mutations from the stream (apiClientId),
