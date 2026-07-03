@@ -34,13 +34,44 @@ async function neonError(response: Response, fallback: string): Promise<string> 
   return body?.message || `${fallback} (${response.status})`;
 }
 
+// The /regions endpoint rejects organization API keys ("not allowed for
+// organization API keys"), so keys are validated against /projects — which
+// works for both personal and org keys — and region listing falls back to this
+// static set when the live endpoint is unavailable (mirrors Neon's own CLI).
+const FALLBACK_REGIONS: NeonRegion[] = [
+  { id: "aws-us-east-1", name: "AWS US East (N. Virginia)" },
+  { id: "aws-us-east-2", name: "AWS US East (Ohio)" },
+  { id: "aws-us-west-2", name: "AWS US West (Oregon)" },
+  { id: "aws-eu-central-1", name: "AWS Europe (Frankfurt)" },
+  { id: "aws-eu-west-2", name: "AWS Europe (London)" },
+  { id: "aws-ap-southeast-1", name: "AWS Asia Pacific (Singapore)" },
+  { id: "aws-ap-southeast-2", name: "AWS Asia Pacific (Sydney)" },
+  { id: "aws-sa-east-1", name: "AWS South America (São Paulo)" },
+  { id: "azure-eastus2", name: "Azure East US 2 (Virginia)" },
+  { id: "azure-westus3", name: "Azure West US 3 (Arizona)" },
+  { id: "azure-gwc", name: "Azure Germany West Central (Frankfurt)" },
+];
+
+export async function validateNeonApiKey(apiKey: string): Promise<void> {
+  const response = await neonRequest(apiKey, "/projects?limit=1");
+  if (!response.ok) {
+    throw new Error(await neonError(response, "Neon rejected the API key"));
+  }
+}
+
 export async function listNeonRegions(apiKey: string): Promise<NeonRegion[]> {
   const response = await neonRequest(apiKey, "/regions");
   if (!response.ok) {
-    throw new Error(await neonError(response, "Could not list Neon regions"));
+    return FALLBACK_REGIONS;
   }
-  const body = (await response.json()) as { regions?: NeonRegionResponse[] };
-  return (body.regions ?? []).map((region) => ({ id: region.region_id, name: region.name }));
+  const body = (await response.json().catch(() => null)) as {
+    regions?: NeonRegionResponse[];
+  } | null;
+  const regions = (body?.regions ?? []).map((region) => ({
+    id: region.region_id,
+    name: region.name,
+  }));
+  return regions.length > 0 ? regions : FALLBACK_REGIONS;
 }
 
 export async function createNeonProject(
@@ -130,7 +161,7 @@ neon.put("/", async (c) => {
 
   // Round-trip the key against the Neon API before storing it.
   try {
-    await listNeonRegions(apiKey);
+    await validateNeonApiKey(apiKey);
   } catch (error) {
     return c.json(
       { error: error instanceof Error ? error.message : "Neon rejected the API key" },
