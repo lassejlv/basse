@@ -2,11 +2,20 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ArrowLeftIcon, CheckIcon, CopyIcon, RotateCcwIcon, TrashIcon } from "lucide-react";
 import { FormEvent, type ReactNode, useEffect, useState } from "react";
+import { useClipboard } from "@/components/app/shared";
 import { chartCssVars } from "@/components/charts/chart-context";
 import { Grid } from "@/components/charts/grid";
 import { Line, LineChart } from "@/components/charts/line-chart";
 import { ChartTooltip } from "@/components/charts/tooltip";
 import { XAxis } from "@/components/charts/x-axis";
+import {
+  EmptyNote,
+  ErrorText,
+  Row,
+  RowDeleteButton,
+  RowList,
+  SectionLabel,
+} from "@/components/dashboard";
 import { LogExplorer } from "@/components/log-explorer";
 import { ServerStatusBadge } from "@/components/server-status-badge";
 import { Badge } from "@/components/ui/badge";
@@ -49,9 +58,7 @@ export const Route = createFileRoute("/_authed/servers/$serverId")({
 function SectionHeading({ title, action }: { title: string; action?: ReactNode }) {
   return (
     <div className="mb-3 flex items-center justify-between gap-3">
-      <h2 className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
-        {title}
-      </h2>
+      <SectionLabel as="h2">{title}</SectionLabel>
       {action}
     </div>
   );
@@ -60,9 +67,7 @@ function SectionHeading({ title, action }: { title: string; action?: ReactNode }
 function MetaTile({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="min-w-0 p-4">
-      <p className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
-        {label}
-      </p>
+      <SectionLabel>{label}</SectionLabel>
       <p className={`mt-1 truncate text-sm ${mono ? "font-mono text-xs leading-5" : ""}`}>
         {value}
       </p>
@@ -108,7 +113,7 @@ function ServerDetailRoute() {
   }
 
   if (server.isError || !server.data) {
-    return <p className="p-6 text-destructive-foreground text-sm">Server not found.</p>;
+    return <ErrorText className="p-6">Server not found.</ErrorText>;
   }
 
   const data = server.data;
@@ -239,9 +244,7 @@ function ServerDetailRoute() {
                 value={deleteCode}
               />
             </div>
-            {deleteError ? (
-              <p className="text-destructive-foreground text-sm">{deleteError}</p>
-            ) : null}
+            {deleteError ? <ErrorText>{deleteError}</ErrorText> : null}
           </DialogPanel>
           <DialogFooter>
             <DialogClose
@@ -275,7 +278,7 @@ function SshSetupSection({
   data: NonNullable<Awaited<ReturnType<typeof getServer>>>;
 }) {
   const queryClient = useQueryClient();
-  const [copied, setCopied] = useState(false);
+  const { copiedId, copy } = useClipboard();
 
   const test = useMutation({
     mutationFn: () => checkServerConnection(serverId),
@@ -300,12 +303,6 @@ function SshSetupSection({
     },
   });
 
-  async function copyPublicKey() {
-    await navigator.clipboard.writeText(data.sshPublicKey);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  }
-
   return (
     <section>
       <SectionHeading title="Setup" />
@@ -319,9 +316,9 @@ function SshSetupSection({
           {data.sshPublicKey}
         </pre>
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Button onClick={copyPublicKey} size="sm" variant="outline">
-            {copied ? <CheckIcon /> : <CopyIcon />}
-            {copied ? "Copied" : "Copy key"}
+          <Button onClick={() => copy("public-key", data.sshPublicKey)} size="sm" variant="outline">
+            {copiedId === "public-key" ? <CheckIcon /> : <CopyIcon />}
+            {copiedId === "public-key" ? "Copied" : "Copy key"}
           </Button>
           <Button
             loading={test.isPending}
@@ -530,6 +527,18 @@ function AgentSection({
     },
   });
 
+  const agentFacts = [
+    { label: "Version", value: info.data?.version ?? "unknown", mono: true },
+    { label: "Target image", value: info.data?.targetImage ?? "unknown", mono: true },
+    {
+      label: "Docker",
+      value: info.data?.docker
+        ? `${info.data.docker.containersRunning}/${info.data.docker.containers} running`
+        : "unknown",
+    },
+    { label: "Engine", value: info.data?.engine?.version ?? "unknown" },
+  ];
+
   return (
     <section>
       <SectionHeading
@@ -542,49 +551,21 @@ function AgentSection({
       />
       <Card className="p-5">
         {!enabled ? (
-          <p className="rounded-lg border border-dashed px-3 py-6 text-center text-muted-foreground text-sm">
-            Provision this server to install the agent.
-          </p>
+          <EmptyNote className="py-6">Provision this server to install the agent.</EmptyNote>
         ) : (
           <>
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
-              <div className="min-w-0">
-                <dt className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
-                  Version
-                </dt>
-                <dd className="mt-0.5 truncate font-mono text-xs leading-5">
-                  {info.data?.version ?? "unknown"}
-                </dd>
-              </div>
-              <div className="min-w-0">
-                <dt className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
-                  Target image
-                </dt>
-                <dd
-                  className="mt-0.5 truncate font-mono text-xs leading-5"
-                  title={info.data?.targetImage}
-                >
-                  {info.data?.targetImage ?? "unknown"}
-                </dd>
-              </div>
-              <div className="min-w-0">
-                <dt className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
-                  Docker
-                </dt>
-                <dd className="mt-0.5 truncate text-sm">
-                  {info.data?.docker
-                    ? `${info.data.docker.containersRunning}/${info.data.docker.containers} running`
-                    : "unknown"}
-                </dd>
-              </div>
-              <div className="min-w-0">
-                <dt className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
-                  Engine
-                </dt>
-                <dd className="mt-0.5 truncate text-sm">
-                  {info.data?.engine?.version ?? "unknown"}
-                </dd>
-              </div>
+              {agentFacts.map((fact) => (
+                <div className="min-w-0" key={fact.label}>
+                  <SectionLabel as="dt">{fact.label}</SectionLabel>
+                  <dd
+                    className={`mt-0.5 truncate ${fact.mono ? "font-mono text-xs leading-5" : "text-sm"}`}
+                    title={fact.value}
+                  >
+                    {fact.value}
+                  </dd>
+                </div>
+              ))}
             </dl>
 
             {supportsHostAgentOps ? (
@@ -667,15 +648,13 @@ function AgentSection({
                   </p>
                 ) : null}
                 {checkUpdate.isError ? (
-                  <p className="mt-2 text-destructive-foreground text-sm">
-                    {(checkUpdate.error as Error).message}
-                  </p>
+                  <ErrorText className="mt-2">{(checkUpdate.error as Error).message}</ErrorText>
                 ) : null}
 
                 <div className="mt-4">
-                  <h3 className="mb-2 font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+                  <SectionLabel as="h3" className="mb-2">
                     Agent logs
-                  </h3>
+                  </SectionLabel>
                   <LogExplorer
                     downloadName="basse-agent.log"
                     emptyText={logs.isPending ? "Loading logs…" : "No logs yet."}
@@ -785,37 +764,33 @@ function DomainsSection({ serverId, sshHost }: { serverId: string; sshHost: stri
           {domains.isPending ? (
             <div className="h-16 animate-pulse rounded-lg border bg-muted/30" aria-hidden />
           ) : domainList.length === 0 ? (
-            <p className="rounded-lg border border-dashed px-3 py-5 text-center text-muted-foreground text-sm">
-              No domains routed on this server yet.
-            </p>
+            <EmptyNote className="py-5">No domains routed on this server yet.</EmptyNote>
           ) : (
-            <ul className="divide-y rounded-lg border">
+            <RowList>
               {domainList.map((d) => (
-                <li key={d.id} className="flex items-center justify-between gap-3 px-3 py-2">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <p className="truncate font-medium text-sm">{d.host}</p>
-                      <Badge size="sm" variant={DOMAIN_STATUS_VARIANT[d.status]}>
-                        {d.status}
-                      </Badge>
-                    </div>
-                    <p className="truncate font-mono text-muted-foreground text-xs">
-                      → {d.upstream}
-                      {d.statusMessage ? ` · ${d.statusMessage}` : ""}
-                    </p>
+                <Row
+                  action={
+                    <RowDeleteButton
+                      label={`Delete ${d.host}`}
+                      loading={remove.isPending && remove.variables === d.id}
+                      onClick={() => remove.mutate(d.id)}
+                    />
+                  }
+                  key={d.id}
+                >
+                  <div className="flex items-center gap-2">
+                    <p className="truncate font-medium text-sm">{d.host}</p>
+                    <Badge size="sm" variant={DOMAIN_STATUS_VARIANT[d.status]}>
+                      {d.status}
+                    </Badge>
                   </div>
-                  <Button
-                    aria-label={`Delete ${d.host}`}
-                    loading={remove.isPending && remove.variables === d.id}
-                    onClick={() => remove.mutate(d.id)}
-                    size="icon-sm"
-                    variant="ghost"
-                  >
-                    <TrashIcon />
-                  </Button>
-                </li>
+                  <p className="truncate font-mono text-muted-foreground text-xs">
+                    → {d.upstream}
+                    {d.statusMessage ? ` · ${d.statusMessage}` : ""}
+                  </p>
+                </Row>
               ))}
-            </ul>
+            </RowList>
           )}
         </div>
 
@@ -848,9 +823,7 @@ function DomainsSection({ serverId, sshHost }: { serverId: string; sshHost: stri
               Add domain
             </Button>
           </div>
-          {error ? (
-            <p className="text-destructive-foreground text-sm sm:col-span-3">{error}</p>
-          ) : null}
+          {error ? <ErrorText className="sm:col-span-3">{error}</ErrorText> : null}
         </form>
       </Card>
     </section>

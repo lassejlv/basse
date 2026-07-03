@@ -8,10 +8,18 @@ import {
   GitBranchIcon,
   KeyRoundIcon,
   PlusIcon,
-  TrashIcon,
 } from "lucide-react";
 import { FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import type { ApiTokenScope } from "@basse/shared";
+import { useClipboard } from "@/components/app/shared";
+import {
+  EmptyNote,
+  ErrorText,
+  Row,
+  RowDeleteButton,
+  RowList,
+  SectionLabel,
+} from "@/components/dashboard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -63,9 +71,7 @@ function SecretsRoute() {
   return (
     <section className="flex flex-1 flex-col gap-7 p-4 md:p-6">
       <div>
-        <p className="font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
-          Workspace
-        </p>
+        <SectionLabel>Workspace</SectionLabel>
         <h1 className="mt-1 font-semibold text-2xl tracking-tight md:text-3xl">Secrets</h1>
         <p className="mt-1 text-muted-foreground text-sm">
           SSH keys and integration credentials for {activeOrganization?.name ?? "this workspace"}.
@@ -109,7 +115,7 @@ function ApiTokensSection({ organizationId }: { organizationId?: string }) {
   const [expiresAt, setExpiresAt] = useState("");
   const [scopes, setScopes] = useState<ApiTokenScope[]>(["read", "deployments:write"]);
   const [createdToken, setCreatedToken] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const { copiedId, copy } = useClipboard();
   const tokensKey = ["api-tokens", organizationId];
 
   const tokens = useQuery({
@@ -151,12 +157,7 @@ function ApiTokensSection({ organizationId }: { organizationId?: string }) {
     });
   }
 
-  async function copyCreatedToken() {
-    if (!createdToken) return;
-    await navigator.clipboard.writeText(createdToken);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1500);
-  }
+  const tokenList = tokens.data ?? [];
 
   return (
     <SectionCard
@@ -165,41 +166,36 @@ function ApiTokensSection({ organizationId }: { organizationId?: string }) {
       icon={<KeyRoundIcon className="size-4" />}
       title="API tokens"
     >
-      <div className="mt-4 space-y-3">
-        {(tokens.data ?? []).map((token) => (
-          <div
-            className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"
-            key={token.id}
-          >
-            <div className="min-w-0">
-              <p className="truncate font-medium text-sm">{token.name}</p>
-              <p className="text-muted-foreground text-xs">
-                {token.tokenPrefix} · {token.scopes.join(", ")}
-              </p>
-              <p className="text-muted-foreground text-xs">
-                {token.lastUsedAt
-                  ? `Last used ${new Date(token.lastUsedAt).toLocaleString()}`
-                  : "Never used"}
-              </p>
-            </div>
-            <Button
-              loading={remove.isPending}
-              onClick={() => remove.mutate(token.id)}
-              size="icon"
-              title="Delete API token"
-              variant="ghost"
-            >
-              <TrashIcon />
-            </Button>
-          </div>
-        ))}
-        {tokens.isSuccess && (tokens.data ?? []).length === 0 ? (
-          <p className="text-muted-foreground text-sm">No API tokens yet.</p>
+      <div className="mt-4">
+        {tokenList.length > 0 ? (
+          <RowList>
+            {tokenList.map((token) => (
+              <Row
+                action={
+                  <RowDeleteButton
+                    label={`Delete ${token.name}`}
+                    loading={remove.isPending && remove.variables === token.id}
+                    onClick={() => remove.mutate(token.id)}
+                  />
+                }
+                key={token.id}
+              >
+                <p className="truncate font-medium text-sm">{token.name}</p>
+                <p className="truncate text-muted-foreground text-xs">
+                  {token.tokenPrefix} · {token.scopes.join(", ")} ·{" "}
+                  {token.lastUsedAt
+                    ? `last used ${new Date(token.lastUsedAt).toLocaleString()}`
+                    : "never used"}
+                </p>
+              </Row>
+            ))}
+          </RowList>
+        ) : null}
+        {tokens.isSuccess && tokenList.length === 0 ? (
+          <EmptyNote>No API tokens yet.</EmptyNote>
         ) : null}
         {tokens.isError ? (
-          <p className="text-destructive-foreground text-sm">
-            Couldn't load API tokens: {toMessage(tokens.error)}
-          </p>
+          <ErrorText>Couldn't load API tokens: {toMessage(tokens.error)}</ErrorText>
         ) : null}
       </div>
 
@@ -224,9 +220,9 @@ function ApiTokensSection({ organizationId }: { organizationId?: string }) {
               <div className="space-y-3">
                 <Label htmlFor="created-api-token">Token</Label>
                 <Textarea id="created-api-token" readOnly value={createdToken} />
-                <Button onClick={copyCreatedToken} type="button">
-                  {copied ? <CheckIcon /> : <CopyIcon />}
-                  {copied ? "Copied" : "Copy token"}
+                <Button onClick={() => copy("created-token", createdToken)} type="button">
+                  {copiedId === "created-token" ? <CheckIcon /> : <CopyIcon />}
+                  {copiedId === "created-token" ? "Copied" : "Copy token"}
                 </Button>
               </div>
             ) : (
@@ -347,10 +343,18 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
   const processedCode = useRef<string | null>(null);
   const processedInstallation = useRef<string | null>(null);
   const processedSetupCallback = useRef<string | null>(null);
-  const [copiedWebhook, setCopiedWebhook] = useState(false);
+  const { copiedId, copy } = useClipboard();
   const [startingGitHubSetup, setStartingGitHubSetup] = useState(false);
   const integrationKey = ["github-app-integration", organizationId];
   const installationsKey = ["github-app-installations", organizationId];
+
+  function invalidate(...keys: unknown[][]) {
+    return Promise.all(keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));
+  }
+
+  function refreshInstallations() {
+    return invalidate(installationsKey, ["github-repositories"]);
+  }
 
   const integration = useQuery({
     queryKey: integrationKey,
@@ -374,11 +378,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
     mutationFn: (input: { code: string; state: string }) => completeGitHubAppManifest(input),
     onSuccess: async () => {
       toast.success("GitHub App connected");
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: integrationKey }),
-        queryClient.invalidateQueries({ queryKey: installationsKey }),
-        queryClient.invalidateQueries({ queryKey: ["github-repositories"] }),
-      ]);
+      await invalidate(integrationKey, installationsKey, ["github-repositories"]);
       await clearGitHubCallbackSearch(navigate);
     },
     onError: (error) =>
@@ -394,10 +394,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
           ? "GitHub repository access updated"
           : "GitHub installation saved",
       );
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: installationsKey }),
-        queryClient.invalidateQueries({ queryKey: ["github-repositories"] }),
-      ]);
+      await refreshInstallations();
       await clearGitHubCallbackSearch(navigate);
     },
     onError: (error) =>
@@ -409,10 +406,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
     onSuccess: async (synced) => {
       if (synced.length > 0) {
         toast.success("GitHub installation saved");
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: installationsKey }),
-          queryClient.invalidateQueries({ queryKey: ["github-repositories"] }),
-        ]);
+        await refreshInstallations();
         await clearGitHubCallbackSearch(navigate);
         return;
       }
@@ -430,11 +424,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
     mutationFn: disconnectGitHubApp,
     onSuccess: async () => {
       toast.success("GitHub disconnected");
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: integrationKey }),
-        queryClient.invalidateQueries({ queryKey: installationsKey }),
-        queryClient.invalidateQueries({ queryKey: ["github-repositories"] }),
-      ]);
+      await invalidate(integrationKey, installationsKey, ["github-repositories"]);
     },
     onError: (error) =>
       toast.error("Couldn't disconnect GitHub", { description: toMessage(error) }),
@@ -444,10 +434,7 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
     mutationFn: deleteGitHubAppInstallation,
     onSuccess: async () => {
       toast.success("GitHub installation removed");
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: installationsKey }),
-        queryClient.invalidateQueries({ queryKey: ["github-repositories"] }),
-      ]);
+      await refreshInstallations();
     },
     onError: (error) =>
       toast.error("Couldn't remove GitHub installation", { description: toMessage(error) }),
@@ -489,13 +476,6 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
   const savedInstallations = installations.data ?? [];
   const installCallbackMissingId =
     Boolean(search.setup_action) && !search.installation_id && !search.code;
-
-  async function copyWebhookUrl() {
-    if (!webhookUrl) return;
-    await navigator.clipboard.writeText(webhookUrl);
-    setCopiedWebhook(true);
-    window.setTimeout(() => setCopiedWebhook(false), 1500);
-  }
 
   async function submitGitHubManifest(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -540,19 +520,19 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
       title="GitHub"
     >
       {integration.isError ? (
-        <p className="mt-4 text-destructive-foreground text-sm">
+        <ErrorText className="mt-4">
           Couldn't load GitHub integration: {toMessage(integration.error)}
-        </p>
+        </ErrorText>
       ) : null}
       {manifest.isError ? (
-        <p className="mt-4 text-destructive-foreground text-sm">
+        <ErrorText className="mt-4">
           Couldn't prepare GitHub App setup: {toMessage(manifest.error)}
-        </p>
+        </ErrorText>
       ) : null}
       {installations.isError ? (
-        <p className="mt-4 text-destructive-foreground text-sm">
+        <ErrorText className="mt-4">
           Couldn't load GitHub installations: {toMessage(installations.error)}
-        </p>
+        </ErrorText>
       ) : null}
       {installCallbackMissingId ? (
         <p className="mt-4 text-muted-foreground text-sm">
@@ -582,12 +562,12 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
             />
             <Button
               aria-label="Copy GitHub webhook URL"
-              onClick={copyWebhookUrl}
+              onClick={() => copy("webhook", webhookUrl)}
               size="icon"
               type="button"
               variant="outline"
             >
-              {copiedWebhook ? <CheckIcon /> : <CopyIcon />}
+              {copiedId === "webhook" ? <CheckIcon /> : <CopyIcon />}
             </Button>
           </div>
         </div>
@@ -595,48 +575,33 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
 
       {savedInstallations.length > 0 ? (
         <div className="mt-4">
-          <h3 className="mb-2 font-mono text-[0.7rem] text-muted-foreground uppercase tracking-[0.14em]">
+          <SectionLabel as="h3" className="mb-2">
             Installations
-          </h3>
-          <ul className="divide-y rounded-lg border">
+          </SectionLabel>
+          <RowList>
             {savedInstallations.map((installation) => (
-              <li
+              <Row
+                action={
+                  <RowDeleteButton
+                    confirmMessage={`Remove ${installation.accountLogin} from this workspace's GitHub installations?`}
+                    label={`Remove ${installation.accountLogin} installation`}
+                    loading={removeInstallation.isPending}
+                    onClick={() => removeInstallation.mutate(installation.id)}
+                  />
+                }
                 key={installation.id}
-                className="flex items-center justify-between gap-3 px-3 py-2"
               >
-                <div className="min-w-0 text-sm">
-                  <p className="truncate font-medium">{installation.accountLogin}</p>
-                  <p className="truncate text-muted-foreground text-xs">
-                    {installation.accountType ?? "account"} ·{" "}
-                    {installation.repositorySelection ?? "repositories"}
-                  </p>
-                </div>
-                <Button
-                  aria-label={`Remove ${installation.accountLogin} installation`}
-                  loading={removeInstallation.isPending}
-                  onClick={() => {
-                    if (
-                      window.confirm(
-                        `Remove ${installation.accountLogin} from this workspace's GitHub installations?`,
-                      )
-                    ) {
-                      removeInstallation.mutate(installation.id);
-                    }
-                  }}
-                  size="icon-sm"
-                  type="button"
-                  variant="ghost"
-                >
-                  <TrashIcon />
-                </Button>
-              </li>
+                <p className="truncate font-medium text-sm">{installation.accountLogin}</p>
+                <p className="truncate text-muted-foreground text-xs">
+                  {installation.accountType ?? "account"} ·{" "}
+                  {installation.repositorySelection ?? "repositories"}
+                </p>
+              </Row>
             ))}
-          </ul>
+          </RowList>
         </div>
       ) : connected ? (
-        <p className="mt-4 rounded-lg border border-dashed px-3 py-4 text-center text-muted-foreground text-sm">
-          No GitHub installations saved yet.
-        </p>
+        <EmptyNote className="mt-4">No GitHub installations saved yet.</EmptyNote>
       ) : null}
 
       <div className="mt-5 flex flex-wrap gap-2 border-t pt-4">
@@ -746,32 +711,28 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
         {keys.isPending ? (
           <div className="h-16 animate-pulse rounded-lg border bg-muted/30" aria-hidden />
         ) : keyList.length === 0 ? (
-          <p className="rounded-lg border border-dashed px-3 py-4 text-center text-muted-foreground text-sm">
-            No SSH keys yet. Add one to connect servers with an existing key.
-          </p>
+          <EmptyNote>No SSH keys yet. Add one to connect servers with an existing key.</EmptyNote>
         ) : (
-          <ul className="divide-y rounded-lg border">
+          <RowList>
             {keyList.map((key) => (
-              <li key={key.id} className="flex items-center justify-between gap-3 px-3 py-2">
-                <div className="min-w-0">
-                  <p className="truncate font-medium text-sm">{key.name}</p>
-                  <p className="truncate font-mono text-muted-foreground text-xs">
-                    {key.publicKey}
-                    {key.hasPrivateKey ? "" : " · public key only"}
-                  </p>
-                </div>
-                <Button
-                  aria-label={`Delete ${key.name}`}
-                  loading={removeKey.isPending && removeKey.variables === key.id}
-                  onClick={() => removeKey.mutate(key.id)}
-                  size="icon-sm"
-                  variant="ghost"
-                >
-                  <TrashIcon />
-                </Button>
-              </li>
+              <Row
+                action={
+                  <RowDeleteButton
+                    label={`Delete ${key.name}`}
+                    loading={removeKey.isPending && removeKey.variables === key.id}
+                    onClick={() => removeKey.mutate(key.id)}
+                  />
+                }
+                key={key.id}
+              >
+                <p className="truncate font-medium text-sm">{key.name}</p>
+                <p className="truncate font-mono text-muted-foreground text-xs">
+                  {key.publicKey}
+                  {key.hasPrivateKey ? "" : " · public key only"}
+                </p>
+              </Row>
             ))}
-          </ul>
+          </RowList>
         )}
       </div>
 
@@ -828,7 +789,7 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
                     value={privateKey}
                   />
                 </div>
-                {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+                {error ? <ErrorText>{error}</ErrorText> : null}
               </DialogPanel>
               <DialogFooter>
                 <DialogClose render={<Button variant="outline">Cancel</Button>} />
@@ -963,7 +924,7 @@ function DepotSection({ organizationId }: { organizationId?: string }) {
                     value={token}
                   />
                 </div>
-                {error ? <p className="text-destructive-foreground text-sm">{error}</p> : null}
+                {error ? <ErrorText>{error}</ErrorText> : null}
               </DialogPanel>
               <DialogFooter>
                 <DialogClose render={<Button variant="outline">Cancel</Button>} />
