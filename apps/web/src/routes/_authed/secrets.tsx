@@ -40,6 +40,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { createApiToken, deleteApiToken, listApiTokens } from "@/lib/api-tokens";
 import { authClient } from "@/lib/auth-client";
 import { disconnectDepot, getDepotConnection, saveDepotConnection } from "@/lib/depot";
+import { disconnectNeon, getNeonConnection, saveNeonConnection } from "@/lib/neon";
+import { NeonIcon } from "@/components/database-icon";
 import {
   completeGitHubAppManifest,
   deleteGitHubAppInstallation,
@@ -84,6 +86,7 @@ function SecretsRoute() {
           <ApiTokensSection organizationId={organizationId} />
           <SshKeysSection organizationId={organizationId} />
           <DepotSection organizationId={organizationId} />
+          <NeonSection organizationId={organizationId} />
         </div>
       </div>
     </section>
@@ -800,6 +803,127 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
             </form>
           </DialogPopup>
         </Dialog>
+      </div>
+    </SectionCard>
+  );
+}
+
+function NeonSection({ organizationId }: { organizationId?: string }) {
+  const queryClient = useQueryClient();
+  const queryKey = ["neon-connection", organizationId];
+  const [open, setOpen] = useState(false);
+  const [apiKey, setApiKey] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const connection = useQuery({
+    queryKey,
+    queryFn: getNeonConnection,
+    enabled: Boolean(organizationId),
+  });
+
+  const save = useMutation({
+    mutationFn: () => saveNeonConnection({ apiKey }),
+    onSuccess: async () => {
+      setApiKey("");
+      setError(null);
+      setOpen(false);
+      toast.success("Neon API key saved");
+      await queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (mutationError: Error) => setError(mutationError.message),
+  });
+
+  const disconnect = useMutation({
+    mutationFn: disconnectNeon,
+    onSuccess: async () => {
+      toast.success("Neon disconnected");
+      await queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (error) => toast.error("Couldn't disconnect Neon", { description: toMessage(error) }),
+  });
+
+  const connected = connection.data?.connected;
+
+  return (
+    <SectionCard
+      badge={<ConnectionBadge connected={connected} />}
+      description="Provision serverless Postgres databases on Neon from the app palette."
+      icon={<NeonIcon className="size-4.5" />}
+      title="Neon"
+    >
+      {connected ? (
+        <div className="mt-5 rounded-lg border px-3 py-2.5">
+          <p className="font-medium text-sm">Connected</p>
+          <p className="truncate font-mono text-muted-foreground text-xs">
+            API key ••••{connection.data?.keyHint}
+          </p>
+        </div>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Dialog
+          open={open}
+          onOpenChange={(next) => {
+            setOpen(next);
+            if (!next) setError(null);
+          }}
+        >
+          <DialogTrigger
+            render={
+              <Button size="sm" variant={connected ? "outline" : "default"}>
+                {connected ? "Update API key" : "Connect Neon"}
+              </Button>
+            }
+          />
+          <DialogPopup className="h-fit max-w-md">
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                save.mutate();
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>{connected ? "Update Neon API key" : "Connect Neon"}</DialogTitle>
+                <DialogDescription>
+                  Create an API key in the Neon console under Account settings → API keys. New
+                  databases are provisioned as Neon projects on your account.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogPanel className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="neon-api-key">API key</Label>
+                  <Input
+                    autoComplete="off"
+                    autoFocus
+                    id="neon-api-key"
+                    onChange={(event) => setApiKey(event.currentTarget.value)}
+                    placeholder="napi_…"
+                    required
+                    type="password"
+                    value={apiKey}
+                  />
+                </div>
+                {error ? <ErrorText>{error}</ErrorText> : null}
+              </DialogPanel>
+              <DialogFooter>
+                <DialogClose render={<Button variant="outline">Cancel</Button>} />
+                <Button disabled={!organizationId} loading={save.isPending} type="submit">
+                  {connected ? "Update API key" : "Connect Neon"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogPopup>
+        </Dialog>
+        {connected ? (
+          <Button
+            loading={disconnect.isPending}
+            onClick={() => disconnect.mutate()}
+            size="sm"
+            variant="outline"
+          >
+            Disconnect
+          </Button>
+        ) : null}
       </div>
     </SectionCard>
   );

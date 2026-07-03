@@ -1,5 +1,6 @@
 import type { ImgHTMLAttributes } from "react";
 import type { DatabaseKind } from "@basse/shared";
+import neonIcon from "@/assets/database/neon.svg";
 import postgresIcon from "@/assets/database/postgres.svg";
 import redisIcon from "@/assets/database/redis.svg";
 import { cn } from "@/lib/utils";
@@ -24,6 +25,21 @@ export function DatabaseIcon({ className, kind, ...props }: DatabaseIconProps) {
       aria-hidden="true"
       className={cn("size-5 shrink-0 object-contain", className)}
       src={databaseIcons[kind]}
+      {...props}
+    />
+  );
+}
+
+export function NeonIcon({
+  className,
+  ...props
+}: Omit<ImgHTMLAttributes<HTMLImageElement>, "alt" | "src">) {
+  return (
+    <img
+      alt=""
+      aria-hidden="true"
+      className={cn("size-5 shrink-0 object-contain", className)}
+      src={neonIcon}
       {...props}
     />
   );

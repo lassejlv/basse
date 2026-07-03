@@ -53,12 +53,14 @@ export function useAppDetail(appId: string) {
   const deploymentList = deployments.data ?? [];
   const status = deploymentList[0]?.status ?? data?.latestDeploymentStatus ?? null;
   const canDeploy = data
-    ? data.appKind === "database"
-      ? data.serverIds.length === 1
-      : data.serverIds.length > 0 &&
-        (data.sourceType === "image" ||
-          data.buildRunner !== "server" ||
-          data.serverIds.length === 1)
+    ? data.appKind === "neon"
+      ? false
+      : data.appKind === "database"
+        ? data.serverIds.length === 1
+        : data.serverIds.length > 0 &&
+          (data.sourceType === "image" ||
+            data.buildRunner !== "server" ||
+            data.serverIds.length === 1)
     : false;
 
   return {

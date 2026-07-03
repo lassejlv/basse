@@ -260,6 +260,13 @@
       "when": 1782953524559,
       "tag": "0036_absurd_lethal_legion",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1783097087930,
+      "tag": "0037_rich_boomer",
+      "breakpoints": true
     }
   ]
 }

@@ -38,7 +38,7 @@ export type CreateEnvironmentInput = {
 
 export type AppBuildMode = "auto" | "dockerfile" | "railpack";
 export type AppBuildRunner = "depot" | "server";
-export type AppKind = "service" | "database";
+export type AppKind = "service" | "database" | "neon";
 export type AppSourceType = "repository" | "image";
 export type DatabaseKind = "postgres" | "redis";
 
@@ -78,6 +78,14 @@ export type AppDatabase = {
   publicPort: number | null;
 };
 
+// Neon-provisioned Postgres (appKind "neon"). The connection string itself is
+// exposed only through the app's env vars (DATABASE_URL) and the connection
+// endpoint, never on the App DTO.
+export type AppNeon = {
+  projectId: string;
+  region: string;
+};
+
 export type App = {
   id: string;
   environmentId: string;
@@ -101,6 +109,7 @@ export type App = {
   healthCheck: AppHealthCheck;
   deployNotifications: AppDeployNotifications;
   database: AppDatabase | null;
+  neon: AppNeon | null;
   createdAt: string;
   updatedAt: string;
   // Status of the most recent deployment, for at-a-glance health. Present on
@@ -138,6 +147,8 @@ export type CreateAppInput = {
   databasePassword?: string;
   databasePublicEnabled?: boolean;
   databasePublicPort?: number | null;
+  // Neon region id (e.g. "aws-eu-central-1"); required when appKind is "neon".
+  neonRegion?: string;
 };
 
 export type ImportableDockerContainerPort = {
@@ -667,6 +678,22 @@ export type SaveDepotConnectionInput = {
   token: string;
   projectId: string;
   orgId: string;
+};
+
+export type NeonConnection = {
+  connected: boolean;
+  /** Last 4 characters of the API key, for display only. */
+  keyHint?: string;
+  updatedAt?: string;
+};
+
+export type SaveNeonConnectionInput = {
+  apiKey: string;
+};
+
+export type NeonRegion = {
+  id: string;
+  name: string;
 };
 
 export type GitHubAppIntegration = {

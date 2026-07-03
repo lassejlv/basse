@@ -35,6 +35,7 @@ import {
   normalizeDockerfilePath,
 } from "./build-paths";
 import { decryptSecret, encryptSecret } from "./crypto";
+import { createNeonProject, deleteNeonProject, getNeonApiKey } from "./neon";
 import { connectionFromServer } from "./server-connection";
 import { enqueueAction } from "./queue/queue";
 import { runScript, type SshConnection } from "./ssh";
@@ -44,7 +45,7 @@ type AppRow = typeof app.$inferSelect;
 
 const BUILD_MODES: AppBuildMode[] = ["auto", "dockerfile", "railpack"];
 const BUILD_RUNNERS: AppBuildRunner[] = ["depot", "server"];
-const APP_KINDS: AppKind[] = ["service", "database"];
+const APP_KINDS: AppKind[] = ["service", "database", "neon"];
 const SOURCE_TYPES: AppSourceType[] = ["repository", "image"];
 const DATABASE_KINDS: DatabaseKind[] = ["postgres", "redis"];
 const DEFAULT_POSTGRES_VERSION = "18";
@@ -297,6 +298,14 @@ export function toApp(
         }
       : null;
 
+  const neon =
+    row.appKind === "neon" && row.neonProjectId
+      ? {
+          projectId: row.neonProjectId,
+          region: row.neonRegion ?? "",
+        }
+      : null;
+
   return {
     id: row.id,
     environmentId: row.environmentId,
@@ -333,6 +342,7 @@ export function toApp(
       notifyOnFailure: row.deployNotifyFailure,
     },
     database,
+    neon,
     latestDeploymentStatus,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -689,11 +699,11 @@ export async function buildAppUpdates(
     if (memoryLimitError) return { ok: false, error: memoryLimitError, status: 400 };
     updates.memoryLimitBytes = memoryLimit;
   }
-  if ((updates.sourceType ?? existing.sourceType) === "repository") {
+  if (existing.appKind !== "neon" && (updates.sourceType ?? existing.sourceType) === "repository") {
     const repoError = validateRepositoryUrl(updates.repositoryUrl ?? existing.repositoryUrl);
     if (repoError) return { ok: false, error: repoError, status: 400 };
   }
-  if ((updates.sourceType ?? existing.sourceType) === "image") {
+  if (existing.appKind !== "neon" && (updates.sourceType ?? existing.sourceType) === "image") {
     const imageError = validateImageRef(updates.imageRef ?? existing.imageRef ?? "");
     if (imageError) return { ok: false, error: imageError, status: 400 };
   }
@@ -701,6 +711,9 @@ export async function buildAppUpdates(
   if (serverIds) {
     if (existing.appKind === "database" && serverIds.length !== 1) {
       return { ok: false, error: "Database apps require exactly one server", status: 400 };
+    }
+    if (existing.appKind === "neon" && serverIds.length > 0) {
+      return { ok: false, error: "Neon databases run on Neon, not on your servers", status: 400 };
     }
     if (!(await validateServersInOrg(serverIds, organizationId))) {
       return { ok: false, error: "Server not found", status: 404 };
@@ -1058,6 +1071,104 @@ apps.post("/", async (c) => {
   const appKind = APP_KINDS.includes(body?.appKind as AppKind)
     ? (body?.appKind as AppKind)
     : "service";
+
+  // Neon databases are provisioned on Neon's platform, not deployed to a
+  // server: create the Neon project, store the (encrypted) connection string,
+  // expose it as DATABASE_URL, and record a synthetic healthy deployment.
+  if (appKind === "neon") {
+    const neonRegion = typeof body?.neonRegion === "string" ? body.neonRegion.trim() : "";
+    if (!(await ownedEnvironmentId(environmentId, organizationId))) {
+      return c.json({ error: "Environment not found" }, 404);
+    }
+    if (!name) return c.json({ error: "name is required" }, 400);
+    if (!neonRegion) return c.json({ error: "neonRegion is required" }, 400);
+
+    const apiKey = await getNeonApiKey(organizationId);
+    if (!apiKey) {
+      return c.json({ error: "Connect a Neon API key in Secrets first" }, 400);
+    }
+
+    const slug = slugify(name);
+    const [duplicate] = await db
+      .select({ id: app.id })
+      .from(app)
+      .where(and(eq(app.environmentId, environmentId), eq(app.slug, slug)))
+      .limit(1);
+    if (duplicate) {
+      return c.json({ error: "An app with that name already exists in this environment" }, 409);
+    }
+
+    let provisioned: Awaited<ReturnType<typeof createNeonProject>>;
+    try {
+      provisioned = await createNeonProject(apiKey, { name, regionId: neonRegion });
+    } catch (error) {
+      return c.json(
+        { error: error instanceof Error ? error.message : "Could not create the Neon project" },
+        502,
+      );
+    }
+
+    const now = new Date();
+    try {
+      const created = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(app)
+          .values({
+            id: crypto.randomUUID(),
+            environmentId,
+            serverId: null,
+            name,
+            slug,
+            repositoryUrl: "",
+            sourceType: "repository",
+            branch: "main",
+            port: POSTGRES_PORT,
+            buildMode: "auto",
+            buildRunner: "server",
+            autoRedeployEnabled: false,
+            appKind: "neon",
+            volumes: "[]",
+            neonProjectId: provisioned.projectId,
+            neonRegion: provisioned.regionId,
+            neonConnectionUri: await encryptSecret(provisioned.connectionUri),
+            createdAt: now,
+            updatedAt: now,
+          })
+          .returning();
+        if (!row) return row;
+
+        await tx.insert(envVar).values({
+          id: crypto.randomUUID(),
+          appId: row.id,
+          key: "DATABASE_URL",
+          value: await encryptSecret(provisioned.connectionUri),
+          createdAt: now,
+          updatedAt: now,
+        });
+        await tx.insert(deployment).values({
+          id: crypto.randomUUID(),
+          appId: row.id,
+          status: "healthy",
+          logs: `Provisioned Neon project ${provisioned.projectId} in ${provisioned.regionId}.\n`,
+          createdAt: now,
+          updatedAt: now,
+        });
+
+        return row;
+      });
+
+      if (!created) {
+        await deleteNeonProject(apiKey, provisioned.projectId).catch(() => {});
+        return c.json({ error: "Failed to create app" }, 500);
+      }
+      return c.json(toApp(created, [], "healthy"), 201);
+    } catch {
+      // The row didn't land — don't leave an orphaned project on Neon.
+      await deleteNeonProject(apiKey, provisioned.projectId).catch(() => {});
+      return c.json({ error: "Failed to create app" }, 500);
+    }
+  }
+
   const databaseKind = DATABASE_KINDS.includes(body?.databaseKind as DatabaseKind)
     ? (body?.databaseKind as DatabaseKind)
     : "postgres";
@@ -1320,6 +1431,15 @@ apps.delete("/:id", async (c) => {
 
   const existing = await ownedApp(c.req.param("id"), organizationId);
   if (!existing) return c.json({ error: "App not found" }, 404);
+
+  if (existing.appKind === "neon" && existing.neonProjectId) {
+    const apiKey = await getNeonApiKey(organizationId);
+    if (apiKey) {
+      await deleteNeonProject(apiKey, existing.neonProjectId).catch((error) => {
+        console.error("[neon-delete]", existing.neonProjectId, error);
+      });
+    }
+  }
 
   await removeAppContainers([existing.id]);
   await db.delete(app).where(eq(app.id, existing.id));

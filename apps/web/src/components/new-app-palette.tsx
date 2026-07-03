@@ -12,17 +12,18 @@ import {
 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { DatabaseKind } from "@basse/shared";
-import { DatabaseIcon, databaseEngineLabel } from "@/components/database-icon";
+import { DatabaseIcon, NeonIcon, databaseEngineLabel } from "@/components/database-icon";
 import { Dialog, DialogPopup, DialogTitle } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { createApp } from "@/lib/apps";
 import { triggerDeploy } from "@/lib/deployments";
 import { listGitHubRepositories } from "@/lib/github";
+import { listNeonRegions } from "@/lib/neon";
 import { listServers } from "@/lib/servers";
 import { toast, toMessage } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
-type PaletteView = "root" | "github" | "image" | "database" | "database-server";
+type PaletteView = "root" | "github" | "image" | "database" | "database-server" | "neon";
 
 type PaletteRow = {
   key: string;
@@ -76,6 +77,12 @@ export function NewAppPalette({
     queryKey: ["servers", "palette"],
     queryFn: listServers,
     enabled: open,
+  });
+  const neonRegions = useQuery({
+    queryKey: ["neon-regions", "palette"],
+    queryFn: listNeonRegions,
+    enabled: open && view === "neon",
+    retry: false,
   });
   const activeServers = (servers.data ?? []).filter((server) => server.status === "active");
 
@@ -137,6 +144,13 @@ export function NewAppPalette({
           label: "Database",
           drill: true,
           onSelect: () => goTo("database"),
+        },
+        {
+          key: "neon",
+          icon: <NeonIcon className="size-4" />,
+          label: "Neon Postgres",
+          drill: true,
+          onSelect: () => goTo("neon"),
         },
         {
           key: "import",
@@ -211,6 +225,30 @@ export function NewAppPalette({
       ];
     }
 
+    if (view === "neon") {
+      // Neon databases pick a region, not a server — Neon hosts them.
+      return (neonRegions.data ?? [])
+        .filter(
+          (region) =>
+            !needle ||
+            region.name.toLowerCase().includes(needle) ||
+            region.id.toLowerCase().includes(needle),
+        )
+        .map((region) => ({
+          key: region.id,
+          icon: <NeonIcon className="size-4" />,
+          label: region.name,
+          hint: region.id,
+          onSelect: () =>
+            create.mutate({
+              environmentId,
+              name: "neon",
+              appKind: "neon",
+              neonRegion: region.id,
+            }),
+        }));
+    }
+
     if (view === "database") {
       const engines: DatabaseKind[] = ["postgres", "redis"];
       return engines
@@ -249,7 +287,16 @@ export function NewAppPalette({
           }),
       }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, needle, repoList, activeServers, databaseKind, looksLikeRepoUrl, query]);
+  }, [
+    view,
+    needle,
+    repoList,
+    activeServers,
+    databaseKind,
+    looksLikeRepoUrl,
+    query,
+    neonRegions.data,
+  ]);
 
   useEffect(() => {
     setHighlight((current) => Math.min(current, Math.max(rows.length - 1, 0)));
@@ -264,7 +311,9 @@ export function NewAppPalette({
           ? "nginx:alpine, ghcr.io/acme/api:latest…"
           : view === "database"
             ? "Postgres or Redis"
-            : "Pick a server";
+            : view === "neon"
+              ? "Pick a region"
+              : "Pick a server";
 
   const emptyText =
     view === "github"
@@ -277,7 +326,13 @@ export function NewAppPalette({
         ? "Type a Docker image reference and press enter."
         : view === "database-server" && activeServers.length === 0
           ? "no-servers"
-          : "Nothing matches.";
+          : view === "neon"
+            ? neonRegions.isPending
+              ? null
+              : neonRegions.isError
+                ? "no-neon"
+                : "No regions match."
+            : "Nothing matches.";
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
     if (event.key === "ArrowDown") {
@@ -330,7 +385,9 @@ export function NewAppPalette({
             spellCheck={false}
             value={query}
           />
-          {create.isPending || (view === "github" && repos.isPending) ? (
+          {create.isPending ||
+          (view === "github" && repos.isPending) ||
+          (view === "neon" && neonRegions.isPending) ? (
             <Spinner className="size-4 text-muted-foreground" />
           ) : null}
         </div>
@@ -377,6 +434,23 @@ export function NewAppPalette({
                 Install the GitHub App
               </Link>{" "}
               or paste a public repo URL above.
+            </p>
+          ) : emptyText === "no-neon" ? (
+            <p className="px-3 py-8 text-center text-muted-foreground text-sm">
+              {toMessage(neonRegions.error)}{" "}
+              <Link
+                className="text-foreground underline underline-offset-4"
+                search={{
+                  code: undefined,
+                  installation_id: undefined,
+                  setup_action: undefined,
+                  state: undefined,
+                }}
+                to="/secrets"
+              >
+                Manage integrations
+              </Link>
+              .
             </p>
           ) : emptyText === "no-servers" ? (
             <p className="px-3 py-8 text-center text-muted-foreground text-sm">

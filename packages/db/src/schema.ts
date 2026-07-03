@@ -175,7 +175,7 @@ export const app = pgTable(
       .default("depot"),
     autoRedeployEnabled: boolean("auto_redeploy_enabled").notNull().default(true),
     appKind: text("app_kind", {
-      enum: ["service", "database"],
+      enum: ["service", "database", "neon"],
     })
       .notNull()
       .default("service"),
@@ -197,6 +197,11 @@ export const app = pgTable(
     databasePassword: text("database_password"),
     databasePublicEnabled: boolean("database_public_enabled").notNull().default(false),
     databasePublicPort: integer("database_public_port"),
+    // Neon-provisioned databases (appKind "neon"). The connection URI is
+    // encrypted at rest; the project lives on Neon, not on a Basse server.
+    neonProjectId: text("neon_project_id"),
+    neonRegion: text("neon_region"),
+    neonConnectionUri: text("neon_connection_uri"),
     // HTTP health check (service apps): probed inside the container via the
     // agent (curl/wget), gating deploy cutover and monitored continuously.
     healthCheckEnabled: boolean("health_check_enabled").notNull().default(false),
@@ -811,6 +816,18 @@ export const depotConnection = pgTable("depot_connection", {
   projectId: text("project_id").notNull(),
   // Depot organization id — the registry subdomain ({orgId}.registry.depot.dev).
   orgId: text("org_id"),
+  createdAt: timestamp("created_at").notNull(),
+  updatedAt: timestamp("updated_at").notNull(),
+});
+
+// One Neon connection per workspace. `apiKey` is encrypted at rest.
+export const neonConnection = pgTable("neon_connection", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id")
+    .notNull()
+    .unique()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  apiKey: text("api_key").notNull(),
   createdAt: timestamp("created_at").notNull(),
   updatedAt: timestamp("updated_at").notNull(),
 });

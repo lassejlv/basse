@@ -42,6 +42,9 @@ export async function enqueueDeploy(
   if (!appRow) {
     return { error: "App not found", status: 400 };
   }
+  if (appRow.appKind === "neon") {
+    return { error: "Neon databases are managed on Neon and don't deploy", status: 400 };
+  }
   if (options.noCache && appRow.sourceType !== "repository") {
     return { error: "No-cache deploys are only available for repository apps", status: 400 };
   }

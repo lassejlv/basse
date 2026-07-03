@@ -35,7 +35,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import { DatabaseIcon, databaseEngineLabel } from "@/components/database-icon";
+import { DatabaseIcon, NeonIcon, databaseEngineLabel } from "@/components/database-icon";
 import { StatusDot, deployState } from "@/components/deploy-status";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -440,6 +440,9 @@ function nodeHeight(app: App): number {
 }
 
 function appSourceLabel(app: App): string {
+  if (app.appKind === "neon") {
+    return `Neon Postgres · ${app.neon?.region ?? ""}`.trim();
+  }
   if (app.appKind === "database" && app.database) {
     return `${databaseEngineLabel(app.database.kind)} ${app.database.version}`.trim();
   }
@@ -870,7 +873,9 @@ function CanvasNode({
         <div className="flex items-center gap-2.5">
           <StatusDot status={app.latestDeploymentStatus} />
           <span className="min-w-0 flex-1 truncate font-medium text-sm">{app.name}</span>
-          {database ? (
+          {app.appKind === "neon" ? (
+            <NeonIcon className="size-4 shrink-0 opacity-70" />
+          ) : database ? (
             <DatabaseIcon className="size-4 shrink-0 opacity-70" kind={database.kind} />
           ) : (
             <BoxIcon className="size-4 shrink-0 text-muted-foreground/70" />

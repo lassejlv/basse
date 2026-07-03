@@ -1,6 +1,6 @@
 import { ExternalLinkIcon, Maximize2Icon, Minimize2Icon, XIcon } from "lucide-react";
 import { useState } from "react";
-import { DatabaseIcon, databaseEngineLabel } from "@/components/database-icon";
+import { DatabaseIcon, NeonIcon, databaseEngineLabel } from "@/components/database-icon";
 import { DeployStatusBadge, StatusDot } from "@/components/deploy-status";
 import { ProjectStagedChangesHistory, StagedChangesHistory } from "@/components/staged-changes-bar";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,9 @@ import { EnvVarsCard } from "./variables-tab";
 
 const SERVICE_TABS = ["deployments", "variables", "domains", "cron", "changes", "settings"];
 const DATABASE_TABS = ["deployments", "connection", "backups", "cron", "changes", "settings"];
+// Neon databases live on Neon: no deployments, servers, domains, or cron —
+// just the connection string (in Variables), staged changes, and settings.
+const NEON_TABS = ["variables", "changes", "settings"];
 
 /** The app sidecard on the project canvas — the entire app experience lives
  * here: deployments, variables, domains, staged-change history, settings. */
@@ -38,8 +41,13 @@ export function AppPanel({
   const detail = useAppDetail(appId);
   const app = detail.data;
 
-  const validTabs = app?.appKind === "database" ? DATABASE_TABS : SERVICE_TABS;
-  const activeTab = tab && validTabs.includes(tab) ? tab : "deployments";
+  const validTabs =
+    app?.appKind === "neon"
+      ? NEON_TABS
+      : app?.appKind === "database"
+        ? DATABASE_TABS
+        : SERVICE_TABS;
+  const activeTab = tab && validTabs.includes(tab) ? tab : (validTabs[0] ?? "deployments");
 
   return (
     <aside
@@ -71,19 +79,21 @@ export function AppPanel({
             onToggleMaximize={() => setMaximized((value) => !value)}
             status={detail.status}
           />
-          <div className="border-b px-4 pb-3">
-            <DeployButton
-              app={app}
-              canDeploy={detail.canDeploy}
-              deployments={detail.deploymentList}
-              hasStagedChanges={detail.hasStagedChanges}
-            />
-            {app.serverIds.length === 0 ? (
-              <p className="mt-2 text-warning-foreground text-xs">
-                No servers attached — select at least one in Settings before deploying.
-              </p>
-            ) : null}
-          </div>
+          {app.appKind !== "neon" ? (
+            <div className="border-b px-4 pb-3">
+              <DeployButton
+                app={app}
+                canDeploy={detail.canDeploy}
+                deployments={detail.deploymentList}
+                hasStagedChanges={detail.hasStagedChanges}
+              />
+              {app.serverIds.length === 0 ? (
+                <p className="mt-2 text-warning-foreground text-xs">
+                  No servers attached — select at least one in Settings before deploying.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           <Tabs
             className="flex min-h-0 flex-1 flex-col gap-0"
             onValueChange={(value) => onTabChange(value as string)}
@@ -93,30 +103,34 @@ export function AppPanel({
               className="w-full shrink-0 justify-start overflow-x-auto rounded-none border-b px-4"
               variant="underline"
             >
-              <TabsTab value="deployments">Deployments</TabsTab>
+              {app.appKind !== "neon" ? <TabsTab value="deployments">Deployments</TabsTab> : null}
               {app.appKind === "database" ? (
                 <>
                   <TabsTab value="connection">Connection</TabsTab>
                   <TabsTab value="backups">Backups</TabsTab>
                 </>
+              ) : app.appKind === "neon" ? (
+                <TabsTab value="variables">Variables</TabsTab>
               ) : (
                 <>
                   <TabsTab value="variables">Variables</TabsTab>
                   <TabsTab value="domains">Domains</TabsTab>
                 </>
               )}
-              <TabsTab value="cron">Cron</TabsTab>
+              {app.appKind !== "neon" ? <TabsTab value="cron">Cron</TabsTab> : null}
               <TabsTab value="changes">Changes</TabsTab>
               <TabsTab value="settings">Settings</TabsTab>
             </TabsList>
             <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              <TabsPanel value="deployments">
-                <DeploymentsPanel
-                  app={app}
-                  deployments={detail.deploymentList}
-                  isPending={detail.deploymentsQuery.isPending}
-                />
-              </TabsPanel>
+              {app.appKind !== "neon" ? (
+                <TabsPanel value="deployments">
+                  <DeploymentsPanel
+                    app={app}
+                    deployments={detail.deploymentList}
+                    isPending={detail.deploymentsQuery.isPending}
+                  />
+                </TabsPanel>
+              ) : null}
               {app.appKind === "database" ? (
                 <>
                   <TabsPanel value="connection">
@@ -126,6 +140,10 @@ export function AppPanel({
                     <BackupsTab app={app} />
                   </TabsPanel>
                 </>
+              ) : app.appKind === "neon" ? (
+                <TabsPanel value="variables">
+                  <EnvVarsCard appId={appId} stagedChanges={detail.stagedChanges} />
+                </TabsPanel>
               ) : (
                 <>
                   <TabsPanel value="variables">
@@ -141,9 +159,11 @@ export function AppPanel({
                   </TabsPanel>
                 </>
               )}
-              <TabsPanel value="cron">
-                <CronJobsTab app={app} />
-              </TabsPanel>
+              {app.appKind !== "neon" ? (
+                <TabsPanel value="cron">
+                  <CronJobsTab app={app} />
+                </TabsPanel>
+              ) : null}
               <TabsPanel value="changes">
                 {app.projectId ? (
                   <ProjectStagedChangesHistory
@@ -194,7 +214,20 @@ function AppPanelHeader({
           <DeployStatusBadge size="sm" status={status} />
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-muted-foreground text-xs">
-          {database ? (
+          {app.appKind === "neon" ? (
+            <>
+              <span className="inline-flex items-center gap-1.5">
+                <NeonIcon className="size-3.5" />
+                Neon Postgres
+              </span>
+              {app.neon?.region ? (
+                <>
+                  <SpecDivider />
+                  <span className="truncate">{app.neon.region}</span>
+                </>
+              ) : null}
+            </>
+          ) : database ? (
             <>
               <span className="inline-flex items-center gap-1.5">
                 <DatabaseIcon className="size-3.5" kind={database.kind} />
