@@ -103,7 +103,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-basse}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-basse}
     volumes:
-      - ${BASSE_DATA_DIR:-/data/basse}/postgres:/var/lib/postgresql/data
+      # Postgres 18 initializes under /var/lib/postgresql/18/docker; mount the
+      # parent directory so the image can create its versioned data directory.
+      - ${BASSE_DATA_DIR:-/data/basse}/postgres:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
       interval: 10s
