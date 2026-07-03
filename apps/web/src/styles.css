@@ -246,6 +246,11 @@ body {
     sans-serif;
 }
 
+/* Dark theme: Linear-style layered slate. One cool blue-violet hue (277)
+   runs through every surface at whisper-level chroma — never a dead gray,
+   never a colorful one. Elevation is lightness: sidebar sits below the
+   canvas, cards float above it, popovers above cards. Text is tinted
+   off-white, not pure white. */
 .dark {
   --destructive-foreground: var(--color-red-400);
   --info: var(--color-blue-500);
@@ -255,55 +260,55 @@ body {
   --warning: var(--color-amber-500);
   --warning-foreground: var(--color-amber-400);
   --accent: --alpha(var(--color-white) / 7%);
-  --accent-foreground: var(--color-neutral-100);
-  --background: oklch(0.18 0 0);
-  --border: --alpha(var(--color-white) / 8%);
-  --card: oklch(0.208 0 0);
-  --card-foreground: var(--color-neutral-100);
+  --accent-foreground: oklch(0.93 0.007 277);
+  --background: oklch(0.205 0.009 277);
+  --border: --alpha(var(--color-white) / 9%);
+  --card: oklch(0.23 0.01 277);
+  --card-foreground: oklch(0.93 0.007 277);
   --destructive: color-mix(in srgb, var(--color-red-500) 90%, var(--color-white));
-  --foreground: var(--color-neutral-100);
-  --input: --alpha(var(--color-white) / 11%);
+  --foreground: oklch(0.93 0.007 277);
+  --input: --alpha(var(--color-white) / 12%);
   --muted: --alpha(var(--color-white) / 5%);
-  --muted-foreground: color-mix(in srgb, var(--color-neutral-500) 88%, var(--color-white));
-  --popover: oklch(0.208 0 0);
-  --popover-foreground: var(--color-neutral-100);
-  --primary: var(--color-neutral-100);
-  --primary-foreground: var(--color-neutral-800);
-  --ring: var(--color-neutral-500);
+  --muted-foreground: oklch(0.68 0.016 277);
+  --popover: oklch(0.25 0.011 277);
+  --popover-foreground: oklch(0.93 0.007 277);
+  --primary: oklch(0.93 0.007 277);
+  --primary-foreground: oklch(0.22 0.012 277);
+  --ring: oklch(0.55 0.024 277);
   --secondary: --alpha(var(--color-white) / 5%);
-  --secondary-foreground: var(--color-neutral-100);
+  --secondary-foreground: oklch(0.93 0.007 277);
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --code: oklch(0.208 0 0);
+  --code: oklch(0.23 0.01 277);
   --code-foreground: var(--foreground);
   --code-highlight: --alpha(var(--color-white) / 4%);
-  --sidebar: oklch(0.16 0 0);
+  --sidebar: oklch(0.18 0.009 277);
   --sidebar-accent: --alpha(var(--color-white) / 4%);
-  --sidebar-accent-foreground: var(--color-neutral-100);
-  --sidebar-border: --alpha(var(--color-white) / 5%);
-  --sidebar-foreground: color-mix(in srgb, var(--color-neutral-100) 64%, var(--sidebar));
-  --sidebar-primary: var(--color-neutral-100);
-  --sidebar-primary-foreground: var(--color-neutral-800);
-  --sidebar-ring: var(--color-neutral-400);
-  --chart-background: oklch(0.145 0 0);
-  --chart-foreground: oklch(0.45 0 0);
-  --chart-foreground-muted: oklch(0.65 0.01 260);
-  --chart-crosshair: oklch(0.45 0 0);
-  --chart-grid: oklch(0.25 0 0);
+  --sidebar-accent-foreground: oklch(0.93 0.007 277);
+  --sidebar-border: --alpha(var(--color-white) / 6%);
+  --sidebar-foreground: color-mix(in srgb, oklch(0.93 0.007 277) 64%, var(--sidebar));
+  --sidebar-primary: oklch(0.93 0.007 277);
+  --sidebar-primary-foreground: oklch(0.22 0.012 277);
+  --sidebar-ring: oklch(0.62 0.02 277);
+  --chart-background: oklch(0.19 0.009 277);
+  --chart-foreground: oklch(0.47 0.014 277);
+  --chart-foreground-muted: oklch(0.65 0.014 277);
+  --chart-crosshair: oklch(0.47 0.014 277);
+  --chart-grid: oklch(0.275 0.011 277);
   --chart-brush-border: var(--chart-grid);
-  --chart-marker-background: oklch(0.25 0.01 260);
-  --chart-marker-border: oklch(0.4 0.01 260);
-  --chart-marker-foreground: oklch(0.9 0 0);
-  --chart-label: oklch(0.75 0.01 260);
+  --chart-marker-background: oklch(0.27 0.011 277);
+  --chart-marker-border: oklch(0.42 0.014 277);
+  --chart-marker-foreground: oklch(0.91 0.007 277);
+  --chart-label: oklch(0.75 0.012 277);
   --chart-scale-01: oklch(0.28 0.03 270);
   --chart-scale-02: oklch(0.38 0.04 270);
   --chart-scale-03: oklch(0.48 0.05 270);
   --chart-scale-04: oklch(0.58 0.06 270);
   --chart-scale-05: oklch(0.68 0.07 270);
-  --chart-scale-pattern-color: oklch(0.145 0 0);
+  --chart-scale-pattern-color: oklch(0.19 0.009 277);
 }
 
 @layer base {
