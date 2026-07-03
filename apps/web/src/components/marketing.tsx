@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { ArrowUpIcon, CheckIcon, CopyIcon } from "lucide-react";
+import { CheckIcon, CopyIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { cn } from "@/lib/utils";
@@ -9,14 +9,31 @@ const INSTALL_COMMAND = "curl -fsSL https://basse.sh/install | bash";
 
 const navLinkClass = "px-1 py-1.5 text-sm font-medium text-muted-foreground hover:text-foreground";
 
+export function Logo({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden className={cn("size-6", className)}>
+      <rect width="24" height="24" rx="7" className="fill-primary" />
+      <g
+        transform="translate(5 5) scale(0.5833)"
+        fill="none"
+        strokeWidth={2.6}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="stroke-primary-foreground"
+      >
+        <path d="m5 12 7-7 7 7" />
+        <path d="M12 19V5" />
+      </g>
+    </svg>
+  );
+}
+
 export function SiteHeader() {
   return (
     <header className="sticky top-0 z-50 border-b border-transparent bg-background/75 backdrop-blur-md backdrop-saturate-[1.8]">
       <div className="mx-auto flex h-16 max-w-[1120px] items-center gap-4 px-7">
         <Link to="/" className="flex items-center gap-[9px]">
-          <span className="inline-flex size-6 items-center justify-center rounded-[7px] bg-primary text-primary-foreground">
-            <ArrowUpIcon className="size-3.5" strokeWidth={2.6} />
-          </span>
+          <Logo />
           <span className="text-base font-semibold tracking-[-0.01em]">basse</span>
         </Link>
         <div className="flex-1" />
@@ -50,9 +67,7 @@ export function SiteFooter() {
     <footer className="border-t">
       <div className="mx-auto flex max-w-[1120px] flex-wrap items-center justify-between gap-4 px-7 py-6">
         <div className="flex items-center gap-[9px]">
-          <span className="inline-flex size-5 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <ArrowUpIcon className="size-[11px]" strokeWidth={2.6} />
-          </span>
+          <Logo className="size-5" />
           <span className="font-mono text-[13px] font-medium text-muted-foreground">basse</span>
         </div>
         <div className="flex gap-5 font-mono text-[12.5px] text-muted-foreground">
