@@ -1,5 +1,8 @@
 import { render } from "@react-email/render";
-import { DeploymentNotificationEmail, type DeploymentNotificationEmailProps } from "./templates/deployment-notification";
+import {
+  DeploymentNotificationEmail,
+  type DeploymentNotificationEmailProps,
+} from "./templates/deployment-notification";
 import { LoginOtpEmail, type LoginOtpEmailProps, type LoginOtpType } from "./templates/login-otp";
 import { MonitorAlertEmail, type MonitorAlertEmailProps } from "./templates/monitor-alert";
 

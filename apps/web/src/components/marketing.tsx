@@ -7,6 +7,8 @@ import { cn } from "@/lib/utils";
 const INSTALL_DISPLAY = "curl -fsSL basse.sh/install | bash";
 const INSTALL_COMMAND = "curl -fsSL https://basse.sh/install | bash";
 
+export const GITHUB_URL = "https://github.com/lassejlv/basse";
+
 const navLinkClass = "px-1 py-1.5 text-sm font-medium text-muted-foreground hover:text-foreground";
 
 export function Logo({ className }: { className?: string }) {
@@ -47,7 +49,7 @@ export function SiteHeader() {
         <a href="#" className={navLinkClass}>
           Docs
         </a>
-        <a href="#" className={navLinkClass}>
+        <a href={GITHUB_URL} target="_blank" rel="noreferrer" className={navLinkClass}>
           GitHub
         </a>
         <ThemeToggle />
@@ -77,7 +79,7 @@ export function SiteFooter() {
           <a href="#" className="hover:text-foreground">
             Docs
           </a>
-          <a href="#" className="hover:text-foreground">
+          <a href={GITHUB_URL} target="_blank" rel="noreferrer" className="hover:text-foreground">
             GitHub
           </a>
           <span>MIT licensed</span>

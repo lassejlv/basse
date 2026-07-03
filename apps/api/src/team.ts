@@ -50,10 +50,9 @@ function toInvitation(row: InvitationRow): TeamInvitation {
   };
 }
 
-async function resolveSessionMember(headers: Headers): Promise<
-  | { organizationId: string; userId: string; role: string }
-  | { response: Response }
-> {
+async function resolveSessionMember(
+  headers: Headers,
+): Promise<{ organizationId: string; userId: string; role: string } | { response: Response }> {
   const session = await auth.api.getSession({ headers });
   if (!session) return { response: new Response("Unauthorized", { status: 401 }) };
   const organizationId = session.session.activeOrganizationId;
@@ -97,7 +96,9 @@ team.get("/", async (c) => {
   const invitationRows = await db
     .select()
     .from(invitation)
-    .where(and(eq(invitation.organizationId, resolved.organizationId), eq(invitation.status, "pending")));
+    .where(
+      and(eq(invitation.organizationId, resolved.organizationId), eq(invitation.status, "pending")),
+    );
 
   return c.json({
     members: memberRows.map(toTeamMember),
@@ -174,10 +175,16 @@ team.patch("/members/:id", async (c) => {
   const [target] = await db
     .select()
     .from(member)
-    .where(and(eq(member.id, c.req.param("id")), eq(member.organizationId, resolved.organizationId)))
+    .where(
+      and(eq(member.id, c.req.param("id")), eq(member.organizationId, resolved.organizationId)),
+    )
     .limit(1);
   if (!target) return c.json({ error: "Member not found" }, 404);
-  if (target.role === "owner" && role !== "owner" && (await ownerCount(resolved.organizationId)) <= 1) {
+  if (
+    target.role === "owner" &&
+    role !== "owner" &&
+    (await ownerCount(resolved.organizationId)) <= 1
+  ) {
     return c.json({ error: "Cannot demote the last owner" }, 400);
   }
 
@@ -187,7 +194,9 @@ team.patch("/members/:id", async (c) => {
     .where(eq(member.id, target.id))
     .returning();
   const [userRow] = await db.select().from(user).where(eq(user.id, target.userId)).limit(1);
-  return c.json(toTeamMember({ ...updated!, name: userRow?.name ?? "", email: userRow?.email ?? "" }));
+  return c.json(
+    toTeamMember({ ...updated!, name: userRow?.name ?? "", email: userRow?.email ?? "" }),
+  );
 });
 
 team.delete("/members/:id", async (c) => {
@@ -198,7 +207,9 @@ team.delete("/members/:id", async (c) => {
   const [target] = await db
     .select()
     .from(member)
-    .where(and(eq(member.id, c.req.param("id")), eq(member.organizationId, resolved.organizationId)))
+    .where(
+      and(eq(member.id, c.req.param("id")), eq(member.organizationId, resolved.organizationId)),
+    )
     .limit(1);
   if (!target) return c.json({ error: "Member not found" }, 404);
   if (target.role === "owner" && (await ownerCount(resolved.organizationId)) <= 1) {
@@ -214,7 +225,12 @@ team.delete("/invitations/:id", async (c) => {
   if (!canManageTeam(resolved.role)) return c.json({ error: "Forbidden" }, 403);
   const deleted = await db
     .delete(invitation)
-    .where(and(eq(invitation.id, c.req.param("id")), eq(invitation.organizationId, resolved.organizationId)))
+    .where(
+      and(
+        eq(invitation.id, c.req.param("id")),
+        eq(invitation.organizationId, resolved.organizationId),
+      ),
+    )
     .returning({ id: invitation.id });
   if (deleted.length === 0) return c.json({ error: "Invitation not found" }, 404);
   return c.body(null, 204);

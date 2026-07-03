@@ -19,7 +19,9 @@ export async function getTeam(): Promise<TeamOverview> {
   return response.json() as Promise<TeamOverview>;
 }
 
-export async function inviteTeamMember(input: InviteTeamMemberInput): Promise<TeamMember | TeamInvitation> {
+export async function inviteTeamMember(
+  input: InviteTeamMemberInput,
+): Promise<TeamMember | TeamInvitation> {
   const response = await fetch(`${apiBaseUrl}/api/team/invitations`, {
     method: "POST",
     credentials: "include",
@@ -30,7 +32,10 @@ export async function inviteTeamMember(input: InviteTeamMemberInput): Promise<Te
   return response.json() as Promise<TeamMember | TeamInvitation>;
 }
 
-export async function updateTeamMember(id: string, input: UpdateTeamMemberInput): Promise<TeamMember> {
+export async function updateTeamMember(
+  id: string,
+  input: UpdateTeamMemberInput,
+): Promise<TeamMember> {
   const response = await fetch(`${apiBaseUrl}/api/team/members/${id}`, {
     method: "PATCH",
     credentials: "include",

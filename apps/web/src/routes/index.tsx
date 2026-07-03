@@ -13,7 +13,13 @@ import {
 import type { ReactNode } from "react";
 import { DatabaseIcon } from "@/components/database-icon";
 import { StatusDot } from "@/components/deploy-status";
-import { DotGrid, InstallCommand, SiteFooter, SiteHeader } from "@/components/marketing";
+import {
+  DotGrid,
+  GITHUB_URL,
+  InstallCommand,
+  SiteFooter,
+  SiteHeader,
+} from "@/components/marketing";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/")({
@@ -284,7 +290,9 @@ function LandingRoute() {
               <ArrowRightIcon className="-mr-0.5 size-4 opacity-90" strokeWidth={2.2} />
             </Link>
             <a
-              href="#"
+              href={GITHUB_URL}
+              target="_blank"
+              rel="noreferrer"
               className="inline-flex h-11 items-center gap-1.5 px-2 text-[15px] font-medium text-foreground hover:text-muted-foreground"
             >
               View on GitHub

@@ -18,9 +18,7 @@ function isDeploymentNotificationStatus(
   return status === "healthy" || status === "failed";
 }
 
-async function loadContext(
-  deploymentId: string,
-): Promise<DeploymentNotificationContext | null> {
+async function loadContext(deploymentId: string): Promise<DeploymentNotificationContext | null> {
   const [row] = await db
     .select({ deployment, app, environment, project })
     .from(deployment)

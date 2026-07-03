@@ -54,10 +54,9 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-async function resolveSessionWorkspace(headers: Headers): Promise<
-  | { organizationId: string; userId: string }
-  | { response: Response }
-> {
+async function resolveSessionWorkspace(
+  headers: Headers,
+): Promise<{ organizationId: string; userId: string } | { response: Response }> {
   const session = await auth.api.getSession({ headers });
   if (!session) return { response: new Response("Unauthorized", { status: 401 }) };
 

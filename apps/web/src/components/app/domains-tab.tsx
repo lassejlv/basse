@@ -2,7 +2,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { PlusIcon, RotateCcwIcon, TrashIcon } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
-import type { LoadBalancerEvent, LoadBalancerIntegration, ManagedLoadBalancer } from "@basse/shared";
+import type {
+  LoadBalancerEvent,
+  LoadBalancerIntegration,
+  ManagedLoadBalancer,
+} from "@basse/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";

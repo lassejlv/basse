@@ -85,7 +85,10 @@ function PricingRoute() {
 
           <div className="flex flex-col rounded-[14px] border border-foreground/20 bg-card p-7 shadow-lg">
             <div className="flex items-start justify-between gap-3">
-              <CardHeading title="Cloud" tagline="We host the dashboard. Your servers stay yours." />
+              <CardHeading
+                title="Cloud"
+                tagline="We host the dashboard. Your servers stay yours."
+              />
               <span className="rounded-full border px-2.5 py-1 font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-muted-foreground">
                 Hosted
               </span>

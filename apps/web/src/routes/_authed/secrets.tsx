@@ -177,7 +177,9 @@ function ApiTokensSection({ organizationId }: { organizationId?: string }) {
                 {token.tokenPrefix} · {token.scopes.join(", ")}
               </p>
               <p className="text-muted-foreground text-xs">
-                {token.lastUsedAt ? `Last used ${new Date(token.lastUsedAt).toLocaleString()}` : "Never used"}
+                {token.lastUsedAt
+                  ? `Last used ${new Date(token.lastUsedAt).toLocaleString()}`
+                  : "Never used"}
               </p>
             </div>
             <Button
@@ -264,7 +266,9 @@ function ApiTokensSection({ organizationId }: { organizationId?: string }) {
                         <input
                           checked={scopes.includes(scope.value)}
                           className="mt-1"
-                          onChange={(event) => toggleScope(scope.value, event.currentTarget.checked)}
+                          onChange={(event) =>
+                            toggleScope(scope.value, event.currentTarget.checked)
+                          }
                           type="checkbox"
                         />
                         <span>

@@ -62,10 +62,7 @@ function validateInput(body: Partial<CreateCronJobInput | UpdateCronJobInput> | 
   return { updates };
 }
 
-async function ownedCronJob(
-  jobId: string,
-  organizationId: string,
-): Promise<CronJobRow | null> {
+async function ownedCronJob(jobId: string, organizationId: string): Promise<CronJobRow | null> {
   const [row] = await db.select().from(appCronJob).where(eq(appCronJob.id, jobId)).limit(1);
   if (!row) return null;
   return (await ownedApp(row.appId, organizationId)) ? row : null;
