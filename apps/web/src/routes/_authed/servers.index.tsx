@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { UseQueryResult } from "@tanstack/react-query";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { CheckIcon, CopyIcon, PlusIcon, ServerIcon } from "lucide-react";
 import { FormEvent, useState } from "react";
@@ -36,13 +37,31 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { authClient } from "@/lib/auth-client";
 import { maskHost, relativeTime } from "@/lib/format";
+import {
+  createDigitalOceanServer,
+  getDigitalOceanConnection,
+  listDigitalOceanRegions,
+  listDigitalOceanSizes,
+} from "@/lib/digitalocean";
+import type {
+  DigitalOceanConnection,
+  DigitalOceanRegion,
+  DigitalOceanSize,
+} from "@/lib/digitalocean";
+import {
+  createHetznerServer,
+  getHetznerConnection,
+  listHetznerLocations,
+  listHetznerServerTypes,
+} from "@/lib/hetzner";
+import type { HetznerConnection, HetznerLocation, HetznerServerType } from "@/lib/hetzner";
 import { createServer, listServers } from "@/lib/servers";
 import { listSshKeys } from "@/lib/ssh-keys";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
 type KeySource = "generate" | "saved" | "paste";
-type ConnectionMode = "ssh" | "outbound";
+type ConnectionMode = "ssh" | "outbound" | "digitalocean" | "hetzner";
 
 export const Route = createFileRoute("/_authed/servers/")({
   component: ServersRoute,
@@ -119,9 +138,8 @@ function ServersRoute() {
                 <Badge size="sm" variant="outline">
                   {server.isSystem
                     ? "local"
-                    : server.connectionMode === "outbound"
-                      ? "outbound agent"
-                      : "ssh"}
+                    : (server.provider ??
+                      (server.connectionMode === "outbound" ? "outbound agent" : "ssh"))}
                 </Badge>
                 <span className="ml-auto text-muted-foreground text-xs">
                   {server.lastSeenAt
@@ -213,6 +231,10 @@ function AddServerDialog({ organizationId }: { organizationId: string | undefine
   const [installCommand, setInstallCommand] = useState("");
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [doRegion, setDoRegion] = useState("");
+  const [doSize, setDoSize] = useState("");
+  const [hzLocation, setHzLocation] = useState("");
+  const [hzServerType, setHzServerType] = useState("");
 
   const sshKeys = useQuery({
     queryKey: ["ssh-keys", organizationId],
@@ -220,6 +242,55 @@ function AddServerDialog({ organizationId }: { organizationId: string | undefine
     enabled: Boolean(organizationId) && open,
   });
   const storedKeys = (sshKeys.data ?? []).filter((key) => key.hasPrivateKey);
+
+  const isDigitalOcean = connectionMode === "digitalocean";
+  const doConnection = useQuery({
+    queryKey: ["digitalocean-connection", organizationId],
+    queryFn: getDigitalOceanConnection,
+    enabled: Boolean(organizationId) && open,
+  });
+  const doRegions = useQuery({
+    queryKey: ["digitalocean-regions", organizationId],
+    queryFn: listDigitalOceanRegions,
+    enabled: Boolean(organizationId) && open && isDigitalOcean && doConnection.data?.connected,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+  const doSizes = useQuery({
+    queryKey: ["digitalocean-sizes", organizationId],
+    queryFn: listDigitalOceanSizes,
+    enabled: Boolean(organizationId) && open && isDigitalOcean && doConnection.data?.connected,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+  const selectedRegion = (doRegions.data ?? []).find((region) => region.slug === doRegion);
+  const regionSizes = (doSizes.data ?? []).filter(
+    (size) => !selectedRegion || selectedRegion.sizes.includes(size.slug),
+  );
+
+  const isHetzner = connectionMode === "hetzner";
+  const hzConnection = useQuery({
+    queryKey: ["hetzner-connection", organizationId],
+    queryFn: getHetznerConnection,
+    enabled: Boolean(organizationId) && open,
+  });
+  const hzLocations = useQuery({
+    queryKey: ["hetzner-locations", organizationId],
+    queryFn: listHetznerLocations,
+    enabled: Boolean(organizationId) && open && isHetzner && hzConnection.data?.connected,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+  const hzServerTypes = useQuery({
+    queryKey: ["hetzner-server-types", organizationId],
+    queryFn: listHetznerServerTypes,
+    enabled: Boolean(organizationId) && open && isHetzner && hzConnection.data?.connected,
+    retry: false,
+    staleTime: 5 * 60_000,
+  });
+  const locationServerTypes = (hzServerTypes.data ?? []).filter(
+    (type) => !hzLocation || type.prices.some((price) => price.location === hzLocation),
+  );
 
   function reset() {
     setName("");
@@ -233,22 +304,45 @@ function AddServerDialog({ organizationId }: { organizationId: string | undefine
     setInstallCommand("");
     setCopied(false);
     setError(null);
+    setDoRegion("");
+    setDoSize("");
+    setHzLocation("");
+    setHzServerType("");
   }
 
   const add = useMutation({
-    mutationFn: () =>
-      createServer({
+    mutationFn: async () => {
+      if (isDigitalOcean) {
+        await createDigitalOceanServer({ name, region: doRegion, size: doSize });
+        return null;
+      }
+      if (isHetzner) {
+        await createHetznerServer({ name, location: hzLocation, serverType: hzServerType });
+        return null;
+      }
+      return createServer({
         name,
         sshHost,
-        connectionMode,
+        connectionMode: connectionMode === "outbound" ? "outbound" : "ssh",
         sshUser: connectionMode === "ssh" ? sshUser : undefined,
         sshPort: connectionMode === "ssh" ? Number(sshPort) : undefined,
         sshKeyId: connectionMode === "ssh" && keySource === "saved" ? sshKeyId : undefined,
         privateKey: connectionMode === "ssh" && keySource === "paste" ? privateKey : undefined,
-      }),
+      });
+    },
     onSuccess: async (created) => {
       setError(null);
       await queryClient.invalidateQueries({ queryKey: ["servers", organizationId] });
+      if (!created) {
+        // Cloud providers: the machine boots in the background, then Basse
+        // provisions it automatically.
+        toast.success(isHetzner ? "Server creating on Hetzner" : "Droplet creating", {
+          description: "Basse installs the agent once it has an IP.",
+        });
+        reset();
+        setOpen(false);
+        return;
+      }
       toast.success("Server added");
       if (created.agentInstallCommand) {
         // Outbound servers need the install command run on the machine —
@@ -345,6 +439,20 @@ function AddServerDialog({ organizationId }: { organizationId: string | undefine
                     onSelect={() => setConnectionMode("outbound")}
                     title="Outbound agent (experimental)"
                   />
+                  <ChoiceCard
+                    checked={connectionMode === "digitalocean"}
+                    description="Basse creates a droplet on your DigitalOcean account and provisions it."
+                    name="connection-mode"
+                    onSelect={() => setConnectionMode("digitalocean")}
+                    title="Create on DigitalOcean"
+                  />
+                  <ChoiceCard
+                    checked={connectionMode === "hetzner"}
+                    description="Basse creates a server on your Hetzner Cloud project and provisions it."
+                    name="connection-mode"
+                    onSelect={() => setConnectionMode("hetzner")}
+                    title="Create on Hetzner"
+                  />
                 </div>
               </fieldset>
               <div className="space-y-2">
@@ -357,32 +465,60 @@ function AddServerDialog({ organizationId }: { organizationId: string | undefine
                   value={name}
                 />
               </div>
-              <div className="flex gap-3">
-                <div className="flex-1 space-y-2">
-                  <Label htmlFor="server-host">
-                    {connectionMode === "outbound" ? "Server address" : "SSH host"}
-                  </Label>
-                  <Input
-                    id="server-host"
-                    onChange={(event) => setSshHost(event.currentTarget.value)}
-                    placeholder="203.0.113.10"
-                    required
-                    value={sshHost}
-                  />
-                </div>
-                {connectionMode === "ssh" ? (
-                  <div className="w-28 space-y-2">
-                    <Label htmlFor="server-port">Port</Label>
+              {isHetzner ? (
+                <HetznerFields
+                  connection={hzConnection}
+                  location={hzLocation}
+                  locations={hzLocations}
+                  onLocationChange={(next) => {
+                    setHzLocation(next);
+                    setHzServerType("");
+                  }}
+                  onServerTypeChange={setHzServerType}
+                  serverType={hzServerType}
+                  serverTypes={locationServerTypes}
+                />
+              ) : isDigitalOcean ? (
+                <DigitalOceanFields
+                  connection={doConnection}
+                  onRegionChange={(next) => {
+                    setDoRegion(next);
+                    setDoSize("");
+                  }}
+                  onSizeChange={setDoSize}
+                  region={doRegion}
+                  regions={doRegions}
+                  size={doSize}
+                  sizes={regionSizes}
+                />
+              ) : (
+                <div className="flex gap-3">
+                  <div className="flex-1 space-y-2">
+                    <Label htmlFor="server-host">
+                      {connectionMode === "outbound" ? "Server address" : "SSH host"}
+                    </Label>
                     <Input
-                      id="server-port"
-                      onChange={(event) => setSshPort(event.currentTarget.value)}
+                      id="server-host"
+                      onChange={(event) => setSshHost(event.currentTarget.value)}
+                      placeholder="203.0.113.10"
                       required
-                      type="number"
-                      value={sshPort}
+                      value={sshHost}
                     />
                   </div>
-                ) : null}
-              </div>
+                  {connectionMode === "ssh" ? (
+                    <div className="w-28 space-y-2">
+                      <Label htmlFor="server-port">Port</Label>
+                      <Input
+                        id="server-port"
+                        onChange={(event) => setSshPort(event.currentTarget.value)}
+                        required
+                        type="number"
+                        value={sshPort}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              )}
               {connectionMode === "ssh" ? (
                 <div className="space-y-2">
                   <Label htmlFor="server-user">SSH user</Label>
@@ -472,7 +608,9 @@ function AddServerDialog({ organizationId }: { organizationId: string | undefine
               <Button
                 disabled={
                   !organizationId ||
-                  (connectionMode === "ssh" && keySource === "saved" && !sshKeyId)
+                  (connectionMode === "ssh" && keySource === "saved" && !sshKeyId) ||
+                  (isDigitalOcean && (!doRegion || !doSize || !doConnection.data?.connected)) ||
+                  (isHetzner && (!hzLocation || !hzServerType || !hzConnection.data?.connected))
                 }
                 loading={add.isPending}
                 type="submit"
@@ -484,5 +622,214 @@ function AddServerDialog({ organizationId }: { organizationId: string | undefine
         )}
       </DialogPopup>
     </Dialog>
+  );
+}
+
+function formatDoSize(size: DigitalOceanSize): string {
+  const ram = size.memory >= 1024 ? `${size.memory / 1024} GB` : `${size.memory} MB`;
+  return `${ram} / ${size.vcpus} vCPU / ${size.disk} GB — $${size.priceMonthly}/mo`;
+}
+
+function DigitalOceanFields({
+  connection,
+  regions,
+  sizes,
+  region,
+  size,
+  onRegionChange,
+  onSizeChange,
+}: {
+  connection: UseQueryResult<DigitalOceanConnection>;
+  regions: UseQueryResult<DigitalOceanRegion[]>;
+  sizes: DigitalOceanSize[];
+  region: string;
+  size: string;
+  onRegionChange: (value: string) => void;
+  onSizeChange: (value: string) => void;
+}) {
+  if (connection.isSuccess && !connection.data.connected) {
+    return (
+      <p className="rounded-lg border border-dashed px-3 py-3 text-muted-foreground text-sm">
+        Connect a DigitalOcean API token in{" "}
+        <Link
+          className="text-foreground underline underline-offset-4"
+          search={{
+            code: undefined,
+            installation_id: undefined,
+            setup_action: undefined,
+            state: undefined,
+          }}
+          to="/secrets"
+        >
+          Secrets
+        </Link>{" "}
+        first. Droplets are created on your account.
+      </p>
+    );
+  }
+
+  const regionList = regions.data ?? [];
+
+  return (
+    <>
+      <div className="space-y-2">
+        <Label>Region</Label>
+        <Select value={region} onValueChange={(value) => onRegionChange(value ?? "")}>
+          <SelectTrigger className="w-full">
+            <SelectValue placeholder={regions.isPending ? "Loading regions…" : "Select a region"}>
+              {(value: string) =>
+                regionList.find((item) => item.slug === value)?.name ?? "Select a region"
+              }
+            </SelectValue>
+          </SelectTrigger>
+          <SelectPopup>
+            {regionList.map((item) => (
+              <SelectItem key={item.slug} value={item.slug}>
+                {item.name} ({item.slug})
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+      </div>
+      <div className="space-y-2">
+        <Label>Size</Label>
+        <Select value={size} onValueChange={(value) => onSizeChange(value ?? "")}>
+          <SelectTrigger className="w-full">
+            <SelectValue placeholder={region ? "Select a size" : "Pick a region first"}>
+              {(value: string) => {
+                const match = sizes.find((item) => item.slug === value);
+                return match ? `${match.slug} — ${formatDoSize(match)}` : "Select a size";
+              }}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectPopup>
+            {sizes.map((item) => (
+              <SelectItem key={item.slug} value={item.slug}>
+                <span className="font-mono text-xs">{item.slug}</span> · {formatDoSize(item)}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+        {region && sizes.length === 0 && !regions.isPending ? (
+          <p className="text-muted-foreground text-xs">No sizes available in this region.</p>
+        ) : null}
+      </div>
+      {regions.isError ? (
+        <p className="text-destructive-foreground text-sm">{regions.error.message}</p>
+      ) : null}
+      <p className="text-muted-foreground text-xs">
+        Ubuntu 24.04 droplet. Basse boots it, waits for its IP, then installs the agent
+        automatically.
+      </p>
+    </>
+  );
+}
+
+function formatHetznerType(type: HetznerServerType, location: string): string {
+  const price = type.prices.find((item) => item.location === location);
+  const priceLabel = price ? ` — €${price.priceMonthly.toFixed(2)}/mo` : "";
+  return `${type.memory} GB / ${type.cores} vCPU / ${type.disk} GB (${type.architecture})${priceLabel}`;
+}
+
+function HetznerFields({
+  connection,
+  locations,
+  serverTypes,
+  location,
+  serverType,
+  onLocationChange,
+  onServerTypeChange,
+}: {
+  connection: UseQueryResult<HetznerConnection>;
+  locations: UseQueryResult<HetznerLocation[]>;
+  serverTypes: HetznerServerType[];
+  location: string;
+  serverType: string;
+  onLocationChange: (value: string) => void;
+  onServerTypeChange: (value: string) => void;
+}) {
+  if (connection.isSuccess && !connection.data.connected) {
+    return (
+      <p className="rounded-lg border border-dashed px-3 py-3 text-muted-foreground text-sm">
+        Connect a Hetzner Cloud API token in{" "}
+        <Link
+          className="text-foreground underline underline-offset-4"
+          search={{
+            code: undefined,
+            installation_id: undefined,
+            setup_action: undefined,
+            state: undefined,
+          }}
+          to="/secrets"
+        >
+          Secrets
+        </Link>{" "}
+        first. Servers are created in your Hetzner project.
+      </p>
+    );
+  }
+
+  const locationList = locations.data ?? [];
+
+  return (
+    <>
+      <div className="space-y-2">
+        <Label>Location</Label>
+        <Select value={location} onValueChange={(value) => onLocationChange(value ?? "")}>
+          <SelectTrigger className="w-full">
+            <SelectValue
+              placeholder={locations.isPending ? "Loading locations…" : "Select a location"}
+            >
+              {(value: string) => {
+                const match = locationList.find((item) => item.slug === value);
+                return match ? `${match.city}, ${match.country}` : "Select a location";
+              }}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectPopup>
+            {locationList.map((item) => (
+              <SelectItem key={item.slug} value={item.slug}>
+                {item.city}, {item.country} ({item.slug})
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+      </div>
+      <div className="space-y-2">
+        <Label>Server type</Label>
+        <Select value={serverType} onValueChange={(value) => onServerTypeChange(value ?? "")}>
+          <SelectTrigger className="w-full">
+            <SelectValue placeholder={location ? "Select a server type" : "Pick a location first"}>
+              {(value: string) => {
+                const match = serverTypes.find((item) => item.slug === value);
+                return match
+                  ? `${match.slug} — ${formatHetznerType(match, location)}`
+                  : "Select a server type";
+              }}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectPopup>
+            {serverTypes.map((item) => (
+              <SelectItem key={item.slug} value={item.slug}>
+                <span className="font-mono text-xs">{item.slug}</span> ·{" "}
+                {formatHetznerType(item, location)}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+        {location && serverTypes.length === 0 && !locations.isPending ? (
+          <p className="text-muted-foreground text-xs">
+            No server types available in this location.
+          </p>
+        ) : null}
+      </div>
+      {locations.isError ? (
+        <p className="text-destructive-foreground text-sm">{locations.error.message}</p>
+      ) : null}
+      <p className="text-muted-foreground text-xs">
+        Ubuntu 24.04 server. Basse boots it, waits for its IP, then installs the agent
+        automatically.
+      </p>
+    </>
   );
 }

@@ -7,6 +7,8 @@ import { createConnection } from "./connection";
 // an enqueue call site — no new queue.
 export type ActionName =
   | "provision-server"
+  | "digitalocean-wait-server"
+  | "hetzner-wait-server"
   | "sync-domains"
   | "sync-app-load-balancers"
   | "deploy-app"

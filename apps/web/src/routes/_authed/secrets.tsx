@@ -10,6 +10,8 @@ import {
   KeyRoundIcon,
   LockIcon,
   PlusIcon,
+  DropletIcon,
+  CloudIcon,
   ShieldCheckIcon,
   TriangleAlertIcon,
 } from "lucide-react";
@@ -37,6 +39,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { createApiToken, deleteApiToken, listApiTokens } from "@/lib/api-tokens";
 import { authClient } from "@/lib/auth-client";
 import { disconnectDepot, getDepotConnection, saveDepotConnection } from "@/lib/depot";
+import {
+  disconnectDigitalOcean,
+  getDigitalOceanConnection,
+  saveDigitalOceanConnection,
+} from "@/lib/digitalocean";
+import { disconnectHetzner, getHetznerConnection, saveHetznerConnection } from "@/lib/hetzner";
 import { disconnectNeon, getNeonConnection, saveNeonConnection } from "@/lib/neon";
 import { NeonIcon } from "@/components/database-icon";
 import {
@@ -186,6 +194,8 @@ function SecretsRoute() {
           <div className="flex flex-col gap-4">
             <DepotSection organizationId={organizationId} />
             <NeonSection organizationId={organizationId} />
+            <DigitalOceanSection organizationId={organizationId} />
+            <HetznerSection organizationId={organizationId} />
           </div>
         </div>
       </div>
@@ -220,11 +230,23 @@ function VaultSummary({ organizationId }: { organizationId?: string }) {
     queryFn: getNeonConnection,
     enabled,
   });
+  const digitalocean = useQuery({
+    queryKey: ["digitalocean-connection", organizationId],
+    queryFn: getDigitalOceanConnection,
+    enabled,
+  });
+  const hetzner = useQuery({
+    queryKey: ["hetzner-connection", organizationId],
+    queryFn: getHetznerConnection,
+    enabled,
+  });
 
   const connectedCount = [
     github.data?.connected,
     depot.data?.connected,
     neon.data?.connected,
+    digitalocean.data?.connected,
+    hetzner.data?.connected,
   ].filter(Boolean).length;
 
   const stats: { label: string; value: string; tone: "success" | "muted" }[] = [
@@ -240,7 +262,7 @@ function VaultSummary({ organizationId }: { organizationId?: string }) {
     },
     {
       label: "integrations",
-      value: `${connectedCount}/3`,
+      value: `${connectedCount}/5`,
       tone: connectedCount > 0 ? "success" : "muted",
     },
   ];
@@ -1314,6 +1336,256 @@ function DepotSection({ organizationId }: { organizationId?: string }) {
                 <DialogClose render={<Button variant="outline">Cancel</Button>} />
                 <Button disabled={!organizationId} loading={save.isPending} type="submit">
                   {connected ? "Update connection" : "Connect Depot"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogPopup>
+        </Dialog>
+        {connected ? (
+          <Button
+            loading={disconnect.isPending}
+            onClick={() => disconnect.mutate()}
+            size="sm"
+            variant="outline"
+          >
+            Disconnect
+          </Button>
+        ) : null}
+      </div>
+    </SectionCard>
+  );
+}
+
+function DigitalOceanSection({ organizationId }: { organizationId?: string }) {
+  const queryClient = useQueryClient();
+  const queryKey = ["digitalocean-connection", organizationId];
+  const [open, setOpen] = useState(false);
+  const [apiToken, setApiToken] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const connection = useQuery({
+    queryKey,
+    queryFn: getDigitalOceanConnection,
+    enabled: Boolean(organizationId),
+  });
+
+  const save = useMutation({
+    mutationFn: () => saveDigitalOceanConnection({ apiToken }),
+    onSuccess: async () => {
+      setApiToken("");
+      setError(null);
+      setOpen(false);
+      toast.success("DigitalOcean API token saved");
+      await queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (mutationError: Error) => setError(mutationError.message),
+  });
+
+  const disconnect = useMutation({
+    mutationFn: disconnectDigitalOcean,
+    onSuccess: async () => {
+      toast.success("DigitalOcean disconnected");
+      await queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (error) =>
+      toast.error("Couldn't disconnect DigitalOcean", { description: toMessage(error) }),
+  });
+
+  const connected = connection.data?.connected;
+
+  return (
+    <SectionCard
+      badge={<ConnectionBadge connected={connected} />}
+      description="Create droplets from the servers page — Basse boots them and installs the agent."
+      icon={<DropletIcon className="size-4.5" />}
+      title="DigitalOcean"
+    >
+      {connected ? (
+        <div className="mt-5 flex items-center gap-3 rounded-lg border bg-background/40 px-3 py-2.5">
+          <StatusDot pulse tone="success" />
+          <div className="min-w-0">
+            <p className="font-medium text-sm">API token</p>
+            <MaskedValue hint={connection.data?.tokenHint} />
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Dialog
+          open={open}
+          onOpenChange={(next) => {
+            setOpen(next);
+            if (!next) setError(null);
+          }}
+        >
+          <DialogTrigger
+            render={
+              <Button size="sm" variant={connected ? "outline" : "default"}>
+                {connected ? "Update API token" : "Connect DigitalOcean"}
+              </Button>
+            }
+          />
+          <DialogPopup className="h-fit max-w-md">
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                save.mutate();
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>
+                  {connected ? "Update DigitalOcean API token" : "Connect DigitalOcean"}
+                </DialogTitle>
+                <DialogDescription>
+                  Create a personal access token in the DigitalOcean control panel under API →
+                  Tokens with read and write scopes. Droplets are created on your account.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogPanel className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="digitalocean-api-token">API token</Label>
+                  <Input
+                    autoComplete="off"
+                    autoFocus
+                    id="digitalocean-api-token"
+                    onChange={(event) => setApiToken(event.currentTarget.value)}
+                    placeholder="dop_v1_…"
+                    required
+                    type="password"
+                    value={apiToken}
+                  />
+                </div>
+                {error ? <ErrorText>{error}</ErrorText> : null}
+              </DialogPanel>
+              <DialogFooter>
+                <DialogClose render={<Button variant="outline">Cancel</Button>} />
+                <Button disabled={!organizationId} loading={save.isPending} type="submit">
+                  {connected ? "Update API token" : "Connect DigitalOcean"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogPopup>
+        </Dialog>
+        {connected ? (
+          <Button
+            loading={disconnect.isPending}
+            onClick={() => disconnect.mutate()}
+            size="sm"
+            variant="outline"
+          >
+            Disconnect
+          </Button>
+        ) : null}
+      </div>
+    </SectionCard>
+  );
+}
+
+function HetznerSection({ organizationId }: { organizationId?: string }) {
+  const queryClient = useQueryClient();
+  const queryKey = ["hetzner-connection", organizationId];
+  const [open, setOpen] = useState(false);
+  const [apiToken, setApiToken] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const connection = useQuery({
+    queryKey,
+    queryFn: getHetznerConnection,
+    enabled: Boolean(organizationId),
+  });
+
+  const save = useMutation({
+    mutationFn: () => saveHetznerConnection({ apiToken }),
+    onSuccess: async () => {
+      setApiToken("");
+      setError(null);
+      setOpen(false);
+      toast.success("Hetzner API token saved");
+      await queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (mutationError: Error) => setError(mutationError.message),
+  });
+
+  const disconnect = useMutation({
+    mutationFn: disconnectHetzner,
+    onSuccess: async () => {
+      toast.success("Hetzner disconnected");
+      await queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (error) =>
+      toast.error("Couldn't disconnect Hetzner", { description: toMessage(error) }),
+  });
+
+  const connected = connection.data?.connected;
+
+  return (
+    <SectionCard
+      badge={<ConnectionBadge connected={connected} />}
+      description="Create Hetzner Cloud servers from the servers page — Basse boots them and installs the agent."
+      icon={<CloudIcon className="size-4.5" />}
+      title="Hetzner"
+    >
+      {connected ? (
+        <div className="mt-5 flex items-center gap-3 rounded-lg border bg-background/40 px-3 py-2.5">
+          <StatusDot pulse tone="success" />
+          <div className="min-w-0">
+            <p className="font-medium text-sm">API token</p>
+            <MaskedValue hint={connection.data?.tokenHint} />
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <Dialog
+          open={open}
+          onOpenChange={(next) => {
+            setOpen(next);
+            if (!next) setError(null);
+          }}
+        >
+          <DialogTrigger
+            render={
+              <Button size="sm" variant={connected ? "outline" : "default"}>
+                {connected ? "Update API token" : "Connect Hetzner"}
+              </Button>
+            }
+          />
+          <DialogPopup className="h-fit max-w-md">
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                save.mutate();
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>
+                  {connected ? "Update Hetzner API token" : "Connect Hetzner"}
+                </DialogTitle>
+                <DialogDescription>
+                  Create an API token in the Hetzner Cloud console under your project → Security →
+                  API tokens with read and write permissions. Servers are created in that project.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogPanel className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="hetzner-api-token">API token</Label>
+                  <Input
+                    autoComplete="off"
+                    autoFocus
+                    id="hetzner-api-token"
+                    onChange={(event) => setApiToken(event.currentTarget.value)}
+                    placeholder="hcloud token"
+                    required
+                    type="password"
+                    value={apiToken}
+                  />
+                </div>
+                {error ? <ErrorText>{error}</ErrorText> : null}
+              </DialogPanel>
+              <DialogFooter>
+                <DialogClose render={<Button variant="outline">Cancel</Button>} />
+                <Button disabled={!organizationId} loading={save.isPending} type="submit">
+                  {connected ? "Update API token" : "Connect Hetzner"}
                 </Button>
               </DialogFooter>
             </form>

@@ -683,6 +683,80 @@ export type SaveDepotConnectionInput = {
   orgId: string;
 };
 
+export type HetznerConnection = {
+  connected: boolean;
+  /** Last 4 characters of the API token, for display only. */
+  tokenHint?: string;
+  updatedAt?: string;
+};
+
+export type SaveHetznerConnectionInput = {
+  apiToken: string;
+};
+
+export type HetznerLocation = {
+  slug: string;
+  name: string;
+  city: string;
+  country: string;
+};
+
+export type HetznerServerType = {
+  slug: string;
+  description: string;
+  cores: number;
+  /** RAM in GB. */
+  memory: number;
+  /** Disk in GB. */
+  disk: number;
+  architecture: string;
+  /** Location slugs this type is available in, with monthly gross price. */
+  prices: { location: string; priceMonthly: number }[];
+};
+
+export type CreateHetznerServerInput = {
+  name: string;
+  location: string;
+  serverType: string;
+};
+
+export type DigitalOceanConnection = {
+  connected: boolean;
+  /** Last 4 characters of the API token, for display only. */
+  tokenHint?: string;
+  updatedAt?: string;
+};
+
+export type SaveDigitalOceanConnectionInput = {
+  apiToken: string;
+};
+
+export type DigitalOceanRegion = {
+  slug: string;
+  name: string;
+  /** Size slugs available in this region. */
+  sizes: string[];
+};
+
+export type DigitalOceanSize = {
+  slug: string;
+  description: string;
+  vcpus: number;
+  /** RAM in MB. */
+  memory: number;
+  /** Disk in GB. */
+  disk: number;
+  priceMonthly: number;
+  /** Region slugs this size is available in. */
+  regions: string[];
+};
+
+export type CreateDigitalOceanServerInput = {
+  name: string;
+  region: string;
+  size: string;
+};
+
 export type NeonConnection = {
   connected: boolean;
   /** Last 4 characters of the API key, for display only. */
@@ -791,6 +865,10 @@ export type Server = {
   status: ServerStatus;
   statusMessage: string | null;
   hostKeyFingerprint: string | null;
+  /** Set when Basse created the machine on a cloud provider. */
+  provider: "digitalocean" | "hetzner" | null;
+  /** The provider's id for the machine (e.g. the droplet id). */
+  providerResourceId: string | null;
   agentTokenHint?: string;
   // Returned only immediately after creating an outbound server.
   agentInstallCommand?: string;

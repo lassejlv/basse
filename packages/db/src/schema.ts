@@ -41,6 +41,10 @@ export const server = pgTable(
     agentUrl: text("agent_url"),
     isSystem: boolean("is_system").notNull().default(false),
     hostKeyFingerprint: text("host_key_fingerprint"),
+    // Set when Basse created the machine on a cloud provider. providerResourceId
+    // is the provider's id for it (e.g. the DigitalOcean droplet id).
+    provider: text("provider", { enum: ["digitalocean", "hetzner"] }),
+    providerResourceId: text("provider_resource_id"),
     status: text("status", {
       enum: ["pending", "provisioning", "active", "error", "unreachable"],
     })
@@ -819,6 +823,30 @@ export const depotConnection = pgTable("depot_connection", {
   projectId: text("project_id").notNull(),
   // Depot organization id — the registry subdomain ({orgId}.registry.depot.dev).
   orgId: text("org_id"),
+  createdAt: timestamp("created_at").notNull(),
+  updatedAt: timestamp("updated_at").notNull(),
+});
+
+// One Hetzner Cloud connection per workspace. `apiToken` is encrypted at rest.
+export const hetznerConnection = pgTable("hetzner_connection", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id")
+    .notNull()
+    .unique()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  apiToken: text("api_token").notNull(),
+  createdAt: timestamp("created_at").notNull(),
+  updatedAt: timestamp("updated_at").notNull(),
+});
+
+// One DigitalOcean connection per workspace. `apiToken` is encrypted at rest.
+export const digitaloceanConnection = pgTable("digitalocean_connection", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id")
+    .notNull()
+    .unique()
+    .references(() => organization.id, { onDelete: "cascade" }),
+  apiToken: text("api_token").notNull(),
   createdAt: timestamp("created_at").notNull(),
   updatedAt: timestamp("updated_at").notNull(),
 });

@@ -267,6 +267,20 @@
       "when": 1783097087930,
       "tag": "0037_rich_boomer",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1783523217300,
+      "tag": "0038_stiff_trauma",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1783523558553,
+      "tag": "0039_narrow_jackal",
+      "breakpoints": true
     }
   ]
 }

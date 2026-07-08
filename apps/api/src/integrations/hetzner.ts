@@ -1,3 +1,8 @@
+import { db, hetznerConnection } from "@basse/db";
+import type { HetznerLocation, HetznerServerType } from "@basse/shared";
+import { eq } from "drizzle-orm";
+import { decryptSecret } from "../lib/crypto";
+
 type HetznerErrorBody = {
   error?: {
     code?: string;
@@ -328,4 +333,180 @@ async function syncTargets(
       server: { id: serverId },
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Cloud servers: Basse-created Hetzner Cloud machines (workspace connection).
+// ---------------------------------------------------------------------------
+
+type HcloudLocation = {
+  name: string;
+  description: string;
+  city: string;
+  country: string;
+};
+
+type HcloudServerType = {
+  name: string;
+  description: string;
+  cores: number;
+  memory: number;
+  disk: number;
+  architecture: string;
+  deprecated: boolean;
+  prices: { location: string; price_monthly: { gross: string } }[];
+};
+
+type HcloudServer = {
+  id: number;
+  status: string;
+  public_net?: { ipv4?: { ip?: string | null } | null };
+};
+
+type HcloudSshKey = {
+  id: number;
+  public_key: string;
+};
+
+export { testHetznerToken as validateHetznerToken };
+
+/** Returns the workspace's decrypted Hetzner Cloud API token, or null. */
+export async function getHetznerToken(organizationId: string): Promise<string | null> {
+  const [connection] = await db
+    .select()
+    .from(hetznerConnection)
+    .where(eq(hetznerConnection.organizationId, organizationId))
+    .limit(1);
+
+  if (!connection) return null;
+  return decryptSecret(connection.apiToken);
+}
+
+export async function listHetznerLocations(token: string): Promise<HetznerLocation[]> {
+  const client = new HetznerClient(token);
+  const response = await client.get<{ locations: HcloudLocation[] }>("/locations?per_page=50");
+  return response.locations.map((location) => ({
+    slug: location.name,
+    name: location.description,
+    city: location.city,
+    country: location.country,
+  }));
+}
+
+export async function listHetznerServerTypes(token: string): Promise<HetznerServerType[]> {
+  const client = new HetznerClient(token);
+  const serverTypes: HcloudServerType[] = [];
+  let page = 1;
+
+  while (page) {
+    const response = await client.get<{ server_types: HcloudServerType[] } & HetznerPagination>(
+      `/server_types?per_page=50&page=${page}`,
+    );
+    serverTypes.push(...response.server_types);
+    page = response.meta?.pagination?.next_page ?? 0;
+  }
+
+  return serverTypes
+    .filter((type) => !type.deprecated)
+    .map((type) => ({
+      slug: type.name,
+      description: type.description,
+      cores: type.cores,
+      memory: type.memory,
+      disk: type.disk,
+      architecture: type.architecture,
+      prices: type.prices.map((price) => ({
+        location: price.location,
+        priceMonthly: Number(price.price_monthly.gross),
+      })),
+    }));
+}
+
+/**
+ * Registers the public key on the Hetzner project (idempotent on fingerprint)
+ * and returns its id. Server creation references keys by id.
+ */
+async function ensureHetznerSshKey(
+  client: HetznerClient,
+  name: string,
+  publicKey: string,
+): Promise<number> {
+  try {
+    const created = await client.post<{ ssh_key: HcloudSshKey }>("/ssh_keys", {
+      name,
+      public_key: publicKey,
+    });
+    return created.ssh_key.id;
+  } catch (error) {
+    // "SSH key with the same fingerprint already exists" — look up its id.
+    if (error instanceof Error && /fingerprint|already exists|uniqueness/i.test(error.message)) {
+      const existing = await client.get<{ ssh_keys: HcloudSshKey[] }>("/ssh_keys?per_page=50");
+      // Compare key material only (algorithm + base64 body), ignoring comments.
+      const keyBody = publicKey.trim().split(/\s+/).slice(0, 2).join(" ");
+      const match = existing.ssh_keys.find(
+        (key) => key.public_key.trim().split(/\s+/).slice(0, 2).join(" ") === keyBody,
+      );
+      if (match) return match.id;
+    }
+    throw error;
+  }
+}
+
+export type CreateHetznerCloudServerInput = {
+  token: string;
+  name: string;
+  location: string;
+  serverType: string;
+  sshPublicKey: string;
+  serverId: string;
+};
+
+/** Creates a Hetzner Cloud server and returns its id. It boots asynchronously. */
+export async function createHetznerCloudServer(
+  input: CreateHetznerCloudServerInput,
+): Promise<string> {
+  const client = new HetznerClient(input.token);
+  const keyId = await ensureHetznerSshKey(client, `basse-${input.serverId}`, input.sshPublicKey);
+
+  const created = await client.post<{ server: HcloudServer }>("/servers", {
+    name: input.name,
+    server_type: input.serverType,
+    location: input.location,
+    image: "ubuntu-24.04",
+    ssh_keys: [keyId],
+    start_after_create: true,
+    labels: {
+      "basse-managed": "true",
+      "basse-server-id": input.serverId,
+    },
+  });
+
+  return String(created.server.id);
+}
+
+export type HetznerCloudServerState = {
+  status: string;
+  publicIpv4: string | null;
+};
+
+export async function getHetznerCloudServer(
+  token: string,
+  hetznerServerId: string,
+): Promise<HetznerCloudServerState> {
+  const client = new HetznerClient(token);
+  const response = await client.get<{ server: HcloudServer }>(
+    `/servers/${encodeURIComponent(hetznerServerId)}`,
+  );
+  return {
+    status: response.server.status,
+    publicIpv4: response.server.public_net?.ipv4?.ip ?? null,
+  };
+}
+
+export async function deleteHetznerCloudServer(
+  token: string,
+  hetznerServerId: string,
+): Promise<void> {
+  const client = new HetznerClient(token);
+  await client.delete(`/servers/${encodeURIComponent(hetznerServerId)}`);
 }

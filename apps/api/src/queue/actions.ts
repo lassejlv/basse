@@ -3,6 +3,8 @@ import { runCronJob } from "../routes/cron-jobs";
 import { runDeployment } from "../deploy/deploy";
 import { syncManagedLoadBalancersForApp } from "../routes/load-balancers";
 import { provisionServer } from "../infra/provision";
+import { waitForDigitalOceanServer } from "../infra/digitalocean-server";
+import { waitForHetznerServer } from "../infra/hetzner-server";
 import { syncServerDomains } from "../deploy/proxy-sync";
 import type { ActionName } from "./queue";
 
@@ -13,6 +15,8 @@ import type { ActionName } from "./queue";
 // would stall and re-run the job).
 export const actionHandlers: Record<ActionName, (entityId: string) => Promise<void>> = {
   "provision-server": (serverId) => provisionServer(serverId),
+  "digitalocean-wait-server": (serverId) => waitForDigitalOceanServer(serverId),
+  "hetzner-wait-server": (serverId) => waitForHetznerServer(serverId),
   "sync-domains": async (serverId) => {
     await syncServerDomains(serverId);
   },

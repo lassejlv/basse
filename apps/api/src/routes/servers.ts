@@ -65,6 +65,8 @@ async function sanitizeServer(
     status: row.status,
     statusMessage: row.statusMessage,
     hostKeyFingerprint: row.hostKeyFingerprint,
+    provider: row.provider,
+    providerResourceId: row.providerResourceId,
     agentTokenHint,
     lastSeenAt: row.lastSeenAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
