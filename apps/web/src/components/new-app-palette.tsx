@@ -23,7 +23,14 @@ import { listServers } from "@/lib/servers";
 import { toast, toMessage } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
-type PaletteView = "root" | "github" | "image" | "database" | "database-server" | "neon";
+type PaletteView =
+  | "root"
+  | "github"
+  | "image"
+  | "database"
+  | "database-server"
+  | "neon"
+  | "neon-name";
 
 type PaletteRow = {
   key: string;
@@ -66,6 +73,7 @@ export function NewAppPalette({
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
   const [databaseKind, setDatabaseKind] = useState<DatabaseKind>("postgres");
+  const [neonRegion, setNeonRegion] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const repos = useQuery({
@@ -239,14 +247,31 @@ export function NewAppPalette({
           icon: <NeonIcon className="size-4" />,
           label: region.name,
           hint: region.id,
+          drill: true,
+          onSelect: () => {
+            setNeonRegion(region.id);
+            goTo("neon-name");
+          },
+        }));
+    }
+
+    if (view === "neon-name") {
+      const name = query.trim() || "neon";
+      return [
+        {
+          key: "__neon-name__",
+          icon: <NeonIcon className="size-4" />,
+          label: `Create ${name}`,
+          hint: neonRegion ?? undefined,
           onSelect: () =>
             create.mutate({
               environmentId,
-              name: "neon",
+              name,
               appKind: "neon",
-              neonRegion: region.id,
+              neonRegion: neonRegion ?? undefined,
             }),
-        }));
+        },
+      ];
     }
 
     if (view === "database") {
@@ -296,6 +321,7 @@ export function NewAppPalette({
     looksLikeRepoUrl,
     query,
     neonRegions.data,
+    neonRegion,
   ]);
 
   useEffect(() => {
@@ -313,7 +339,9 @@ export function NewAppPalette({
             ? "Postgres or Redis"
             : view === "neon"
               ? "Pick a region"
-              : "Pick a server";
+              : view === "neon-name"
+                ? "Database name (defaults to neon)"
+                : "Pick a server";
 
   const emptyText =
     view === "github"
@@ -346,7 +374,7 @@ export function NewAppPalette({
       rows[highlight]?.onSelect();
     } else if (event.key === "Backspace" && query === "" && view !== "root") {
       event.preventDefault();
-      goTo(view === "database-server" ? "database" : "root");
+      goTo(view === "database-server" ? "database" : view === "neon-name" ? "neon" : "root");
     }
   }
 
@@ -365,7 +393,11 @@ export function NewAppPalette({
             <button
               aria-label="Back"
               className="text-muted-foreground transition hover:text-foreground"
-              onClick={() => goTo(view === "database-server" ? "database" : "root")}
+              onClick={() =>
+                goTo(
+                  view === "database-server" ? "database" : view === "neon-name" ? "neon" : "root",
+                )
+              }
               type="button"
             >
               <ArrowLeftIcon className="size-4" />
