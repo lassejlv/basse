@@ -5,21 +5,18 @@ import {
   ContainerIcon,
   CopyIcon,
   ExternalLinkIcon,
+  FingerprintIcon,
   GitBranchIcon,
   KeyRoundIcon,
+  LockIcon,
   PlusIcon,
+  ShieldCheckIcon,
+  TriangleAlertIcon,
 } from "lucide-react";
 import { FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import type { ApiTokenScope } from "@basse/shared";
 import { useClipboard } from "@/components/app/shared";
-import {
-  EmptyNote,
-  ErrorText,
-  Row,
-  RowDeleteButton,
-  RowList,
-  SectionLabel,
-} from "@/components/dashboard";
+import { EmptyNote, ErrorText, RowDeleteButton, SectionLabel } from "@/components/dashboard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -54,6 +51,7 @@ import {
 } from "@/lib/github";
 import { toast, toMessage } from "@/lib/toast";
 import { createSshKey, deleteSshKey, listSshKeys } from "@/lib/ssh-keys";
+import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/_authed/secrets")({
   validateSearch: (search: Record<string, unknown>) => ({
@@ -66,30 +64,199 @@ export const Route = createFileRoute("/_authed/secrets")({
   component: SecretsRoute,
 });
 
+/* Presentation helpers that give credentials a vault-entry feel:
+   masked mono values, dot statuses, and relative "last used" stamps. */
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 60_000) return "just now";
+  const minutes = Math.floor(diff / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+function StatusDot({
+  tone,
+  pulse,
+}: {
+  tone: "success" | "muted" | "warning" | "destructive";
+  pulse?: boolean;
+}) {
+  return (
+    <span className="relative inline-flex size-1.5 shrink-0">
+      {pulse ? (
+        <span
+          className={cn(
+            "absolute inline-flex size-full animate-ping rounded-full opacity-40",
+            tone === "success" && "bg-success",
+          )}
+          aria-hidden
+        />
+      ) : null}
+      <span
+        className={cn(
+          "relative inline-flex size-1.5 rounded-full",
+          tone === "success" && "bg-success",
+          tone === "muted" && "bg-muted-foreground/40",
+          tone === "warning" && "bg-warning",
+          tone === "destructive" && "bg-destructive",
+        )}
+      />
+    </span>
+  );
+}
+
+function MaskedValue({ prefix, hint }: { prefix?: string; hint?: string }) {
+  return (
+    <span className="inline-flex items-baseline gap-0.5 font-mono text-muted-foreground text-xs tabular-nums">
+      {prefix ? <span className="text-foreground/70">{prefix}</span> : null}
+      <span className="tracking-[0.2em]" aria-hidden>
+        ••••••••
+      </span>
+      {hint ? <span className="text-foreground/70">{hint}</span> : null}
+    </span>
+  );
+}
+
+function VaultRow({
+  status,
+  action,
+  children,
+}: {
+  status?: ReactNode;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <li className="group flex items-center gap-3 px-3 py-2.5 transition-colors hover:bg-muted/40">
+      {status}
+      <div className="min-w-0 flex-1">{children}</div>
+      {action ? (
+        <div className="opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+          {action}
+        </div>
+      ) : null}
+    </li>
+  );
+}
+
+function VaultList({ children }: { children: ReactNode }) {
+  return <ul className="divide-y overflow-hidden rounded-lg border bg-background/40">{children}</ul>;
+}
+
 function SecretsRoute() {
   const { data: activeOrganization } = authClient.useActiveOrganization();
   const organizationId = activeOrganization?.id;
 
   return (
-    <section className="flex flex-1 flex-col gap-7 p-4 md:p-6">
-      <div>
-        <SectionLabel>Workspace</SectionLabel>
-        <h1 className="mt-1 font-semibold text-2xl tracking-tight md:text-3xl">Secrets</h1>
+    <section className="flex flex-1 flex-col gap-8 p-4 md:p-6">
+      <header>
+        <div className="flex items-center gap-2">
+          <SectionLabel>Workspace / Vault</SectionLabel>
+        </div>
+        <div className="mt-1 flex items-center gap-2.5">
+          <h1 className="font-semibold text-2xl tracking-tight md:text-3xl">Secrets</h1>
+          <LockIcon aria-hidden className="size-4 text-muted-foreground" />
+        </div>
         <p className="mt-1 text-muted-foreground text-sm">
-          SSH keys and integration credentials for {activeOrganization?.name ?? "this workspace"}.
+          Credentials for {activeOrganization?.name ?? "this workspace"} — stored encrypted, values
+          shown once, fingerprints only after that.
         </p>
-      </div>
+        <VaultSummary organizationId={organizationId} />
+      </header>
 
-      <div className="grid max-w-5xl items-start gap-4 xl:grid-cols-2">
-        <GitHubSection organizationId={organizationId} />
-        <div className="flex flex-col gap-4">
+      <div className="max-w-5xl">
+        <SectionLabel as="h2">Credentials</SectionLabel>
+        <div className="mt-3 grid items-start gap-4 xl:grid-cols-2">
           <ApiTokensSection organizationId={organizationId} />
           <SshKeysSection organizationId={organizationId} />
-          <DepotSection organizationId={organizationId} />
-          <NeonSection organizationId={organizationId} />
+        </div>
+      </div>
+
+      <div className="max-w-5xl">
+        <SectionLabel as="h2">Integrations</SectionLabel>
+        <div className="mt-3 grid items-start gap-4 xl:grid-cols-2">
+          <GitHubSection organizationId={organizationId} />
+          <div className="flex flex-col gap-4">
+            <DepotSection organizationId={organizationId} />
+            <NeonSection organizationId={organizationId} />
+          </div>
         </div>
       </div>
     </section>
+  );
+}
+
+function VaultSummary({ organizationId }: { organizationId?: string }) {
+  const enabled = Boolean(organizationId);
+  const tokens = useQuery({
+    queryKey: ["api-tokens", organizationId],
+    queryFn: listApiTokens,
+    enabled,
+  });
+  const keys = useQuery({
+    queryKey: ["ssh-keys", organizationId],
+    queryFn: listSshKeys,
+    enabled,
+  });
+  const github = useQuery({
+    queryKey: ["github-app-integration", organizationId],
+    queryFn: getGitHubAppIntegration,
+    enabled,
+  });
+  const depot = useQuery({
+    queryKey: ["depot-connection", organizationId],
+    queryFn: getDepotConnection,
+    enabled,
+  });
+  const neon = useQuery({
+    queryKey: ["neon-connection", organizationId],
+    queryFn: getNeonConnection,
+    enabled,
+  });
+
+  const connectedCount = [
+    github.data?.connected,
+    depot.data?.connected,
+    neon.data?.connected,
+  ].filter(Boolean).length;
+
+  const stats: { label: string; value: string; tone: "success" | "muted" }[] = [
+    {
+      label: "API tokens",
+      value: String(tokens.data?.length ?? "—"),
+      tone: (tokens.data?.length ?? 0) > 0 ? "success" : "muted",
+    },
+    {
+      label: "SSH keys",
+      value: String(keys.data?.length ?? "—"),
+      tone: (keys.data?.length ?? 0) > 0 ? "success" : "muted",
+    },
+    {
+      label: "integrations",
+      value: `${connectedCount}/3`,
+      tone: connectedCount > 0 ? "success" : "muted",
+    },
+  ];
+
+  return (
+    <dl className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 font-mono text-xs">
+      {stats.map((stat) => (
+        <div className="flex items-center gap-2" key={stat.label}>
+          <StatusDot tone={stat.tone} />
+          <dd className="text-foreground tabular-nums">{stat.value}</dd>
+          <dt className="text-muted-foreground">{stat.label}</dt>
+        </div>
+      ))}
+      <div className="flex items-center gap-1.5 text-muted-foreground">
+        <ShieldCheckIcon aria-hidden className="size-3.5" />
+        encrypted at rest
+      </div>
+    </dl>
   );
 }
 
@@ -110,6 +277,28 @@ const API_TOKEN_SCOPES: { value: ApiTokenScope; label: string; description: stri
     description: "Mutate workspace resources.",
   },
 ];
+
+const SCOPE_LABELS: Record<ApiTokenScope, string> = {
+  read: "read",
+  "deployments:write": "deploy",
+  write: "write",
+};
+
+function tokenExpiry(expiresAt: string | null): {
+  tone: "success" | "warning" | "destructive";
+  note?: string;
+} {
+  if (!expiresAt) return { tone: "success" };
+  const remaining = new Date(expiresAt).getTime() - Date.now();
+  if (remaining <= 0) return { tone: "destructive", note: "expired" };
+  if (remaining < 7 * 24 * 60 * 60 * 1000) {
+    return {
+      tone: "warning",
+      note: `expires ${new Date(expiresAt).toLocaleDateString()}`,
+    };
+  }
+  return { tone: "success" };
+}
 
 function ApiTokensSection({ organizationId }: { organizationId?: string }) {
   const queryClient = useQueryClient();
@@ -171,28 +360,47 @@ function ApiTokensSection({ organizationId }: { organizationId?: string }) {
     >
       <div className="mt-4">
         {tokenList.length > 0 ? (
-          <RowList>
-            {tokenList.map((token) => (
-              <Row
-                action={
-                  <RowDeleteButton
-                    label={`Delete ${token.name}`}
-                    loading={remove.isPending && remove.variables === token.id}
-                    onClick={() => remove.mutate(token.id)}
-                  />
-                }
-                key={token.id}
-              >
-                <p className="truncate font-medium text-sm">{token.name}</p>
-                <p className="truncate text-muted-foreground text-xs">
-                  {token.tokenPrefix} · {token.scopes.join(", ")} ·{" "}
-                  {token.lastUsedAt
-                    ? `last used ${new Date(token.lastUsedAt).toLocaleString()}`
-                    : "never used"}
-                </p>
-              </Row>
-            ))}
-          </RowList>
+          <VaultList>
+            {tokenList.map((token) => {
+              const expiry = tokenExpiry(token.expiresAt);
+              return (
+                <VaultRow
+                  action={
+                    <RowDeleteButton
+                      confirmMessage={`Revoke ${token.name}? Anything using it loses access immediately.`}
+                      label={`Revoke ${token.name}`}
+                      loading={remove.isPending && remove.variables === token.id}
+                      onClick={() => remove.mutate(token.id)}
+                    />
+                  }
+                  key={token.id}
+                  status={<StatusDot tone={expiry.tone} />}
+                >
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <p className="truncate font-medium text-sm">{token.name}</p>
+                    {token.scopes.map((scope) => (
+                      <Badge key={scope} size="sm" variant="outline">
+                        {SCOPE_LABELS[scope]}
+                      </Badge>
+                    ))}
+                    {expiry.note ? (
+                      <Badge size="sm" variant={expiry.tone === "destructive" ? "error" : "warning"}>
+                        {expiry.note}
+                      </Badge>
+                    ) : null}
+                  </div>
+                  <p className="mt-0.5 flex flex-wrap items-center gap-x-2 text-muted-foreground text-xs">
+                    <MaskedValue prefix={token.tokenPrefix} />
+                    <span>
+                      {token.lastUsedAt
+                        ? `last used ${relativeTime(token.lastUsedAt)}`
+                        : "never used"}
+                    </span>
+                  </p>
+                </VaultRow>
+              );
+            })}
+          </VaultList>
         ) : null}
         {tokens.isSuccess && tokenList.length === 0 ? (
           <EmptyNote>No API tokens yet.</EmptyNote>
@@ -202,7 +410,13 @@ function ApiTokensSection({ organizationId }: { organizationId?: string }) {
         ) : null}
       </div>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          if (!next) setCreatedToken(null);
+        }}
+      >
         <DialogTrigger
           render={
             <Button className="mt-4" size="sm">
@@ -221,8 +435,18 @@ function ApiTokensSection({ organizationId }: { organizationId?: string }) {
             </DialogHeader>
             {createdToken ? (
               <div className="space-y-3">
-                <Label htmlFor="created-api-token">Token</Label>
-                <Textarea id="created-api-token" readOnly value={createdToken} />
+                <div className="rounded-lg border border-warning/40 border-dashed bg-warning/8 p-3">
+                  <p className="flex items-center gap-1.5 font-medium text-warning-foreground text-xs">
+                    <TriangleAlertIcon aria-hidden className="size-3.5" />
+                    One-time reveal — this value is never shown again.
+                  </p>
+                  <Textarea
+                    className="mt-2 font-mono text-xs"
+                    id="created-api-token"
+                    readOnly
+                    value={createdToken}
+                  />
+                </div>
                 <Button onClick={() => copy("created-token", createdToken)} type="button">
                   {copiedId === "created-token" ? <CheckIcon /> : <CopyIcon />}
                   {copiedId === "created-token" ? "Copied" : "Copy token"}
@@ -259,7 +483,7 @@ function ApiTokensSection({ organizationId }: { organizationId?: string }) {
                   <div className="space-y-2">
                     {API_TOKEN_SCOPES.map((scope) => (
                       <label
-                        className="flex items-start gap-2 rounded-md border px-3 py-2 text-sm"
+                        className="flex items-start gap-2 rounded-md border px-3 py-2 text-sm has-checked:border-primary/40 has-checked:bg-muted/40"
                         key={scope.value}
                       >
                         <input
@@ -311,7 +535,7 @@ function SectionCard({
   return (
     <Card className="p-5">
       <div className="flex items-start gap-3">
-        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border bg-muted/30 text-foreground/80">
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border bg-muted/30 text-foreground/80 shadow-[inset_0_1px_0_--theme(--color-white/6%)]">
           {icon}
         </span>
         <div className="min-w-0 flex-1">
@@ -330,6 +554,7 @@ function SectionCard({
 function ConnectionBadge({ connected }: { connected: boolean | undefined }) {
   return connected ? (
     <Badge size="sm" variant="success">
+      <StatusDot pulse tone="success" />
       Connected
     </Badge>
   ) : (
@@ -545,11 +770,14 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
       ) : null}
 
       {connected ? (
-        <div className="mt-5 rounded-lg border px-3 py-2.5 text-sm">
-          <p className="font-medium">{integration.data?.appName}</p>
-          <p className="font-mono text-muted-foreground text-xs">
-            github.com/apps/{integration.data?.appSlug}
-          </p>
+        <div className="mt-5 flex items-center gap-3 rounded-lg border bg-background/40 px-3 py-2.5 text-sm">
+          <StatusDot pulse tone="success" />
+          <div className="min-w-0">
+            <p className="truncate font-medium">{integration.data?.appName}</p>
+            <p className="truncate font-mono text-muted-foreground text-xs">
+              github.com/apps/{integration.data?.appSlug}
+            </p>
+          </div>
         </div>
       ) : null}
 
@@ -581,9 +809,9 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
           <SectionLabel as="h3" className="mb-2">
             Installations
           </SectionLabel>
-          <RowList>
+          <VaultList>
             {savedInstallations.map((installation) => (
-              <Row
+              <VaultRow
                 action={
                   <RowDeleteButton
                     confirmMessage={`Remove ${installation.accountLogin} from this workspace's GitHub installations?`}
@@ -593,15 +821,16 @@ function GitHubSection({ organizationId }: { organizationId?: string }) {
                   />
                 }
                 key={installation.id}
+                status={<StatusDot tone="success" />}
               >
                 <p className="truncate font-medium text-sm">{installation.accountLogin}</p>
                 <p className="truncate text-muted-foreground text-xs">
                   {installation.accountType ?? "account"} ·{" "}
                   {installation.repositorySelection ?? "repositories"}
                 </p>
-              </Row>
+              </VaultRow>
             ))}
-          </RowList>
+          </VaultList>
         </div>
       ) : connected ? (
         <EmptyNote className="mt-4">No GitHub installations saved yet.</EmptyNote>
@@ -659,6 +888,14 @@ async function clearGitHubCallbackSearch(navigate: ReturnType<typeof useNavigate
   });
 }
 
+function splitPublicKey(publicKey: string): { algo: string; tail: string } {
+  const [algo, body] = publicKey.trim().split(/\s+/);
+  return {
+    algo: algo && algo.startsWith("ssh-") ? algo.slice(4) : (algo ?? "key"),
+    tail: body ? body.slice(-16) : "",
+  };
+}
+
 function SshKeysSection({ organizationId }: { organizationId?: string }) {
   const queryClient = useQueryClient();
   const queryKey = ["ssh-keys", organizationId];
@@ -707,7 +944,7 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
         ) : undefined
       }
       description="Private keys Basse can use when connecting to servers in this workspace."
-      icon={<KeyRoundIcon className="size-4.5" />}
+      icon={<FingerprintIcon className="size-4.5" />}
       title="SSH keys"
     >
       <div className="mt-5">
@@ -716,26 +953,40 @@ function SshKeysSection({ organizationId }: { organizationId?: string }) {
         ) : keyList.length === 0 ? (
           <EmptyNote>No SSH keys yet. Add one to connect servers with an existing key.</EmptyNote>
         ) : (
-          <RowList>
-            {keyList.map((key) => (
-              <Row
-                action={
-                  <RowDeleteButton
-                    label={`Delete ${key.name}`}
-                    loading={removeKey.isPending && removeKey.variables === key.id}
-                    onClick={() => removeKey.mutate(key.id)}
-                  />
-                }
-                key={key.id}
-              >
-                <p className="truncate font-medium text-sm">{key.name}</p>
-                <p className="truncate font-mono text-muted-foreground text-xs">
-                  {key.publicKey}
-                  {key.hasPrivateKey ? "" : " · public key only"}
-                </p>
-              </Row>
-            ))}
-          </RowList>
+          <VaultList>
+            {keyList.map((key) => {
+              const fingerprint = splitPublicKey(key.publicKey);
+              return (
+                <VaultRow
+                  action={
+                    <RowDeleteButton
+                      confirmMessage={`Delete ${key.name}? Servers using it can no longer be reached with this key.`}
+                      label={`Delete ${key.name}`}
+                      loading={removeKey.isPending && removeKey.variables === key.id}
+                      onClick={() => removeKey.mutate(key.id)}
+                    />
+                  }
+                  key={key.id}
+                  status={<StatusDot tone={key.hasPrivateKey ? "success" : "muted"} />}
+                >
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <p className="truncate font-medium text-sm">{key.name}</p>
+                    <Badge size="sm" variant="outline">
+                      {fingerprint.algo}
+                    </Badge>
+                    {key.hasPrivateKey ? null : (
+                      <Badge size="sm" variant="secondary">
+                        public only
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="mt-0.5 truncate font-mono text-muted-foreground text-xs">
+                    …{fingerprint.tail}
+                  </p>
+                </VaultRow>
+              );
+            })}
+          </VaultList>
         )}
       </div>
 
@@ -852,11 +1103,12 @@ function NeonSection({ organizationId }: { organizationId?: string }) {
       title="Neon"
     >
       {connected ? (
-        <div className="mt-5 rounded-lg border px-3 py-2.5">
-          <p className="font-medium text-sm">Connected</p>
-          <p className="truncate font-mono text-muted-foreground text-xs">
-            API key ••••{connection.data?.keyHint}
-          </p>
+        <div className="mt-5 flex items-center gap-3 rounded-lg border bg-background/40 px-3 py-2.5">
+          <StatusDot pulse tone="success" />
+          <div className="min-w-0">
+            <p className="font-medium text-sm">API key</p>
+            <MaskedValue hint={connection.data?.keyHint} />
+          </div>
         </div>
       ) : null}
 
@@ -977,12 +1229,15 @@ function DepotSection({ organizationId }: { organizationId?: string }) {
       title="Depot"
     >
       {connected ? (
-        <div className="mt-5 rounded-lg border px-3 py-2.5">
-          <p className="font-medium text-sm">Connected</p>
-          <p className="truncate font-mono text-muted-foreground text-xs">
-            project {connection.data?.projectId} · org {connection.data?.orgId ?? "—"} · token ••••
-            {connection.data?.tokenHint}
-          </p>
+        <div className="mt-5 flex items-center gap-3 rounded-lg border bg-background/40 px-3 py-2.5">
+          <StatusDot pulse tone="success" />
+          <div className="min-w-0">
+            <p className="truncate font-medium text-sm">
+              project {connection.data?.projectId}
+              <span className="text-muted-foreground"> · org {connection.data?.orgId ?? "—"}</span>
+            </p>
+            <MaskedValue hint={connection.data?.tokenHint} />
+          </div>
         </div>
       ) : null}
 
