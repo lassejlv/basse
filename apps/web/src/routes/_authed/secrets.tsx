@@ -145,7 +145,9 @@ function VaultRow({
 }
 
 function VaultList({ children }: { children: ReactNode }) {
-  return <ul className="divide-y overflow-hidden rounded-lg border bg-background/40">{children}</ul>;
+  return (
+    <ul className="divide-y overflow-hidden rounded-lg border bg-background/40">{children}</ul>
+  );
 }
 
 function SecretsRoute() {
@@ -384,7 +386,10 @@ function ApiTokensSection({ organizationId }: { organizationId?: string }) {
                       </Badge>
                     ))}
                     {expiry.note ? (
-                      <Badge size="sm" variant={expiry.tone === "destructive" ? "error" : "warning"}>
+                      <Badge
+                        size="sm"
+                        variant={expiry.tone === "destructive" ? "error" : "warning"}
+                      >
                         {expiry.note}
                       </Badge>
                     ) : null}
