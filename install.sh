@@ -592,6 +592,12 @@ purge_local() {
 		if docker rm -f "$PREFIX-proxy" >/dev/null 2>&1; then
 			removed "the $PREFIX-proxy container"
 		fi
+		if docker rm -f "$PREFIX-postgres" >/dev/null 2>&1; then
+			removed "the $PREFIX-postgres store container"
+		fi
+		if docker volume rm "$PREFIX-pgdata" >/dev/null 2>&1; then
+			removed "the $PREFIX-pgdata store volume"
+		fi
 		nets=$(docker network ls -q --filter "name=^$PREFIX")
 		if [ -n "$nets" ]; then
 			echo "$nets" | xargs docker network rm >/dev/null 2>&1 || true
