@@ -45,6 +45,10 @@ berth
 
 While the repository is private, raw.githubusercontent.com and release downloads need a token. Pass one with `GITHUB_TOKEN=… sh install.sh` or `--github-token`, and fetch the script itself with `curl -H "Authorization: Bearer $GITHUB_TOKEN" …`.
 
+## Releases
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds static musl binaries for x86_64 and arm64 Linux (daemon and CLI) plus the macOS CLI. It then installs a server from the fresh archive on a clean runner as a smoke test, and publishes the archives and checksums that `install.sh` downloads.
+
 ## TUI
 
 Run `berth` with no arguments. Press `?` for every key and `:` for the command palette.
