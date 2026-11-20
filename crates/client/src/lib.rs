@@ -38,6 +38,23 @@ impl Client {
         Self::new(&ctx.url, &ctx.token)
     }
 
+    /// Daemon URL without the API prefix.
+    pub fn url(&self) -> &str {
+        self.base.trim_end_matches(API_PREFIX)
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// The same daemon with a new token, e.g. after rotating it.
+    pub fn with_token(&self, token: &str) -> Self {
+        Self {
+            token: token.to_string(),
+            ..self.clone()
+        }
+    }
+
     fn req(&self, method: Method, path: &str) -> RequestBuilder {
         self.http
             .request(method, format!("{}{path}", self.base))
@@ -153,6 +170,15 @@ impl Client {
         self.delete(&format!("/servers/{id}")).await
     }
 
+    /// Removes what the daemon put on the server (and the services assigned to it), then forgets it.
+    pub async fn purge_server(&self, id: &str, volumes: bool) -> Result<ServerCleanup> {
+        Self::json(self.req(
+            Method::DELETE,
+            &format!("/servers/{id}?purge=true&volumes={volumes}"),
+        ))
+        .await
+    }
+
     pub async fn check_server(&self, id: &str) -> Result<Server> {
         self.post_empty(&format!("/servers/{id}/check")).await
     }
@@ -263,6 +289,37 @@ impl Client {
 
     pub async fn delete_volume(&self, id: &str, purge: bool) -> Result<()> {
         self.delete(&format!("/volumes/{id}?purge={purge}")).await
+    }
+
+    // Settings
+
+    pub async fn settings(&self) -> Result<InstanceSettings> {
+        self.get("/settings").await
+    }
+
+    pub async fn update_settings(&self, body: &UpdateSettings) -> Result<InstanceSettings> {
+        Self::json(self.req(Method::PATCH, "/settings").json(body)).await
+    }
+
+    /// Issues a new token; the old one, and so this client, stop working at once.
+    pub async fn rotate_token(&self) -> Result<RotatedToken> {
+        self.post_empty("/settings/token/rotate").await
+    }
+
+    pub async fn restart_proxy(&self) -> Result<Server> {
+        self.post_empty("/settings/proxy/restart").await
+    }
+
+    pub async fn prune(&self) -> Result<PruneResult> {
+        self.post_empty("/settings/prune").await
+    }
+
+    pub async fn version_check(&self) -> Result<VersionCheck> {
+        self.get("/settings/version").await
+    }
+
+    pub async fn update(&self, body: &UpdateRequest) -> Result<UpdateResult> {
+        self.post("/settings/update", body).await
     }
 
     // Deployments

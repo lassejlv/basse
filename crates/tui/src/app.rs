@@ -1,7 +1,7 @@
 //! Application state, background requests and the actions keys trigger.
 
 use crate::form::{Field, Form, FormKind};
-use client::Client;
+use client::{Client, Config};
 use common::api::*;
 use common::*;
 use futures_util::StreamExt;
@@ -14,6 +14,8 @@ use tokio::task::AbortHandle;
 
 const LOG_CAP: usize = 5000;
 const REFRESH: Duration = Duration::from_secs(3);
+/// Settings are heavier to compute (disk usage, Docker), so they refresh less often.
+const SETTINGS_REFRESH: Duration = Duration::from_secs(15);
 
 /// Results of background work, applied on the UI thread.
 pub enum Msg {
@@ -38,11 +40,23 @@ pub enum Msg {
     FormError(String),
     Toast(String),
     Error(String),
+    Settings(Box<InstanceSettings>),
+    Release(VersionCheck),
+    /// The token was rotated and, unless the context came from the environment, saved.
+    TokenRotated {
+        token: String,
+        saved: bool,
+    },
+    /// The daemon accepted an update and is restarting into `to`.
+    Updating(UpdateResult),
+    UpdateFailed(String),
 }
 
 /// Where to go after a form succeeds.
 pub enum Then {
     Stay,
+    /// Show the settings the daemon answered with.
+    Settings(Box<InstanceSettings>),
     OpenService(Id),
     OpenDeploy(Box<Deployment>),
 }
@@ -53,6 +67,7 @@ pub enum Screen {
     Service,
     Deploy,
     Servers,
+    Settings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -258,6 +273,10 @@ pub enum ConfirmAction {
     DeleteVolume(Id, bool),
     DeleteEnvVar(Id, String),
     RemoveServer(Id),
+    RemoveContext(String),
+    RotateToken,
+    Prune,
+    Update { force: bool },
     Rollback(Id),
     CancelDeploy(Id),
     Stop(Id),
@@ -267,6 +286,8 @@ pub struct Confirm {
     pub title: String,
     pub message: String,
     pub danger: bool,
+    /// Label of the confirm button, e.g. "confirm" or "update".
+    pub yes: &'static str,
     pub action: ConfirmAction,
 }
 
@@ -281,6 +302,7 @@ pub enum Command {
     NewProject,
     NewEnvironment,
     Servers,
+    Settings,
     AddServer,
     SetupProxy,
     Refresh,
@@ -289,7 +311,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 14] = [
+    pub const ALL: [Command; 15] = [
         Command::Deploy,
         Command::Restart,
         Command::Stop,
@@ -299,6 +321,7 @@ impl Command {
         Command::NewProject,
         Command::NewEnvironment,
         Command::Servers,
+        Command::Settings,
         Command::AddServer,
         Command::SetupProxy,
         Command::Refresh,
@@ -317,6 +340,7 @@ impl Command {
             Command::NewProject => "new project",
             Command::NewEnvironment => "new environment",
             Command::Servers => "servers",
+            Command::Settings => "settings",
             Command::AddServer => "add server",
             Command::SetupProxy => "set up proxy on this server",
             Command::Refresh => "refresh",
@@ -335,6 +359,7 @@ impl Command {
             Command::NewProject => "N",
             Command::NewEnvironment => "E",
             Command::Servers => "S",
+            Command::Settings => ",",
             Command::AddServer => "",
             Command::SetupProxy => "",
             Command::Refresh => "ctrl+r",
@@ -365,6 +390,8 @@ pub enum Overlay {
     Confirm(Confirm),
     Palette(Palette),
     Help,
+    /// A freshly rotated token, shown once.
+    Token(String),
 }
 
 pub struct Toast {
@@ -373,10 +400,44 @@ pub struct Toast {
     pub at: Instant,
 }
 
+/// Results sent from background work, tagged with the connection they were made on so replies
+/// from a daemon the TUI has switched away from are dropped.
+#[derive(Clone)]
+pub struct Sender {
+    tx: UnboundedSender<(u64, Msg)>,
+    epoch: u64,
+}
+
+impl Sender {
+    pub fn send(&self, msg: Msg) -> bool {
+        self.tx.send((self.epoch, msg)).is_ok()
+    }
+}
+
+/// The Settings screen: the instance, its release, and the contexts saved on this machine.
+#[derive(Default)]
+pub struct SettingsView {
+    pub settings: Option<InstanceSettings>,
+    pub release: Option<VersionCheck>,
+    pub contexts: Config,
+    pub row: usize,
+    loaded_at: Option<Instant>,
+    /// Screen to return to on esc.
+    pub back: Option<Screen>,
+}
+
+impl SettingsView {
+    pub fn context_names(&self) -> Vec<String> {
+        self.contexts.contexts.keys().cloned().collect()
+    }
+}
+
 pub struct App {
     pub client: Client,
     pub context: String,
-    tx: UnboundedSender<Msg>,
+    tx: UnboundedSender<(u64, Msg)>,
+    /// Bumped on every context switch; see `Sender`.
+    pub epoch: u64,
     pub tick: usize,
     pub info: Option<DaemonInfo>,
     pub connection_error: Option<String>,
@@ -390,6 +451,11 @@ pub struct App {
     pub service: Option<ServiceView>,
     pub deploy: Option<DeployView>,
     pub server_row: usize,
+    pub settings: SettingsView,
+    /// Version the daemon is restarting into after an update.
+    pub updating: Option<String>,
+    /// No new requests while the token is being rotated: the old one is about to stop working.
+    rotating: bool,
     pub overlay: Option<Overlay>,
     pub toast: Option<Toast>,
     pub quit: bool,
@@ -400,11 +466,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(client: Client, context: String, tx: UnboundedSender<Msg>) -> Self {
+    pub fn new(client: Client, context: String, tx: UnboundedSender<(u64, Msg)>) -> Self {
         Self {
             client,
             context,
             tx,
+            epoch: 0,
             tick: 0,
             info: None,
             connection_error: None,
@@ -418,6 +485,9 @@ impl App {
             service: None,
             deploy: None,
             server_row: 0,
+            settings: SettingsView::default(),
+            updating: None,
+            rotating: false,
             overlay: None,
             toast: None,
             quit: false,
@@ -427,14 +497,21 @@ impl App {
         }
     }
 
+    pub fn sender(&self) -> Sender {
+        Sender {
+            tx: self.tx.clone(),
+            epoch: self.epoch,
+        }
+    }
+
     fn spawn<F>(&self, f: impl FnOnce(Client) -> F)
     where
         F: Future<Output = Msg> + Send + 'static,
     {
-        let tx = self.tx.clone();
+        let tx = self.sender();
         let fut = f(self.client.clone());
         tokio::spawn(async move {
-            let _ = tx.send(fut.await);
+            tx.send(fut.await);
         });
     }
 
@@ -492,6 +569,17 @@ impl App {
 
     pub fn refresh(&mut self) {
         self.last_refresh = Some(Instant::now());
+        if self.rotating {
+            return;
+        }
+        if self.screen == Screen::Settings
+            && self
+                .settings
+                .loaded_at
+                .is_none_or(|t| t.elapsed() >= SETTINGS_REFRESH)
+        {
+            self.load_settings();
+        }
         self.spawn(|c| async move { Msg::Info(c.info().await.map_err(|e| format!("{e:#}"))) });
         self.spawn(|c| async move {
             match c.tree().await {
@@ -500,13 +588,13 @@ impl App {
             }
         });
         self.spawn(|c| async move { Msg::Activity(c.activity(50).await.unwrap_or_default()) });
-        if self.screen == Screen::Servers || self.servers.is_empty() {
+        if matches!(self.screen, Screen::Servers | Screen::Settings) || self.servers.is_empty() {
             self.spawn(|c| async move { Msg::Servers(c.servers().await.unwrap_or_default()) });
         }
         let ids: Vec<Id> = match self.screen {
             Screen::Overview => self.env_services().iter().map(|s| s.id.clone()).collect(),
             Screen::Service | Screen::Deploy => self.service.iter().map(|s| s.id.clone()).collect(),
-            Screen::Servers => Vec::new(),
+            Screen::Servers | Screen::Settings => Vec::new(),
         };
         for id in ids {
             self.load_stats(&id);
@@ -575,6 +663,12 @@ impl App {
     pub fn apply(&mut self, msg: Msg) {
         match msg {
             Msg::Info(Ok(info)) => {
+                if self.updating.as_deref() == Some(info.version.as_str()) {
+                    self.updating = None;
+                    self.toast(format!("{} updated to {}", brand::DAEMON_BIN, info.version));
+                    self.load_settings();
+                    self.load_release();
+                }
                 self.info = Some(info);
                 self.connection_error = None;
             }
@@ -662,6 +756,7 @@ impl App {
                 self.refresh();
                 match then {
                     Then::Stay => {}
+                    Then::Settings(s) => self.apply(Msg::Settings(s)),
                     Then::OpenService(id) => self.open_service(&id, Tab::Overview),
                     Then::OpenDeploy(d) => self.open_deploy(*d),
                 }
@@ -678,6 +773,32 @@ impl App {
                 self.refresh();
             }
             Msg::Error(e) => self.error(e),
+            Msg::Settings(s) => {
+                self.settings.settings = Some(*s);
+                self.settings.loaded_at = Some(Instant::now());
+            }
+            Msg::Release(r) => self.settings.release = Some(r),
+            Msg::TokenRotated { token, saved } => {
+                self.rotating = false;
+                self.client = self.client.with_token(&token);
+                self.settings.contexts = Config::load().unwrap_or_default();
+                if !saved {
+                    self.error(format!(
+                        "token rotated · update {} where it is set",
+                        brand::env_var("TOKEN")
+                    ));
+                }
+                self.overlay = Some(Overlay::Token(token));
+                self.refresh();
+            }
+            Msg::Updating(r) => {
+                self.toast(format!("installed {} · restarting", r.to));
+                self.updating = Some(r.to);
+            }
+            Msg::UpdateFailed(e) => {
+                self.updating = None;
+                self.error(e);
+            }
         }
     }
 
@@ -838,6 +959,8 @@ impl App {
     }
 
     fn start_service_logs(&mut self) {
+        let tx = self.sender();
+        let client = self.client.clone();
         let Some(view) = self.service.as_mut() else {
             return;
         };
@@ -846,28 +969,26 @@ impl App {
         }
         view.logs = LogBuffer::new();
         let id = view.id.clone();
-        let client = self.client.clone();
-        let tx = self.tx.clone();
         let handle = tokio::spawn(async move {
             match client.service_logs(&id, 500, true).await {
                 Ok(mut stream) => {
                     while let Some(item) = stream.next().await {
                         match item {
                             Ok(line) => {
-                                if tx.send(Msg::ServiceLog(id.clone(), line)).is_err() {
+                                if !tx.send(Msg::ServiceLog(id.clone(), line)) {
                                     return;
                                 }
                             }
                             Err(e) => {
-                                let _ = tx.send(Msg::ServiceLogEnd(id, Some(format!("{e:#}"))));
+                                tx.send(Msg::ServiceLogEnd(id, Some(format!("{e:#}"))));
                                 return;
                             }
                         }
                     }
-                    let _ = tx.send(Msg::ServiceLogEnd(id, None));
+                    tx.send(Msg::ServiceLogEnd(id, None));
                 }
                 Err(e) => {
-                    let _ = tx.send(Msg::ServiceLogEnd(id, Some(format!("{e:#}"))));
+                    tx.send(Msg::ServiceLogEnd(id, Some(format!("{e:#}"))));
                 }
             }
         });
@@ -898,16 +1019,16 @@ impl App {
         }
         let id = deployment.id.clone();
         let client = self.client.clone();
-        let tx = self.tx.clone();
+        let tx = self.sender();
         let handle = tokio::spawn(async move {
             if let Ok(mut stream) = client.deployment_logs(&id, true).await {
                 while let Some(Ok(line)) = stream.next().await {
-                    if tx.send(Msg::DeployLog(id.clone(), line)).is_err() {
+                    if !tx.send(Msg::DeployLog(id.clone(), line)) {
                         return;
                     }
                 }
             }
-            let _ = tx.send(Msg::DeployLogEnd(id));
+            tx.send(Msg::DeployLogEnd(id));
         });
         self.deploy = Some(DeployView {
             announced: deployment.status.is_finished(),
@@ -983,6 +1104,10 @@ impl App {
             ConfirmAction::DeleteVolume(..) => "volume removed",
             ConfirmAction::DeleteEnvVar(..) => "variable removed · deploy to apply",
             ConfirmAction::RemoveServer(_) => "server removed",
+            ConfirmAction::RemoveContext(_)
+            | ConfirmAction::RotateToken
+            | ConfirmAction::Prune
+            | ConfirmAction::Update { .. } => "",
             ConfirmAction::Rollback(_) => "",
             ConfirmAction::CancelDeploy(_) => "deployment cancelled",
             ConfirmAction::Stop(_) => "service stopped",
@@ -1021,6 +1146,38 @@ impl App {
             ConfirmAction::RemoveServer(id) => {
                 self.act(ok, |c| async move { c.delete_server(&id).await })
             }
+            ConfirmAction::RemoveContext(name) => self.remove_context(&name),
+            ConfirmAction::RotateToken => self.rotate_token(),
+            ConfirmAction::Prune => {
+                self.toast("pruning images…");
+                self.spawn(|c| async move {
+                    match c.prune().await {
+                        Ok(r) => Msg::Toast(format!(
+                            "removed {} images · freed {}",
+                            r.removed_images.len(),
+                            crate::util::bytes(r.reclaimed_bytes)
+                        )),
+                        Err(e) => Msg::Error(format!("{e:#}")),
+                    }
+                });
+                self.settings.loaded_at = None;
+            }
+            ConfirmAction::Update { force } => {
+                let version = self
+                    .settings
+                    .release
+                    .as_ref()
+                    .and_then(|r| r.latest.clone());
+                self.updating = version
+                    .as_deref()
+                    .map(|v| v.trim_start_matches('v').to_string());
+                self.spawn(move |c| async move {
+                    match c.update(&UpdateRequest { version, force }).await {
+                        Ok(r) => Msg::Updating(r),
+                        Err(e) => Msg::UpdateFailed(format!("{e:#}")),
+                    }
+                });
+            }
             ConfirmAction::Rollback(id) => self.spawn(|c| async move {
                 match c.rollback(&id).await {
                     Ok(d) => Msg::Deployed(Box::new(d)),
@@ -1053,6 +1210,205 @@ impl App {
 
     pub fn local_server(&self) -> Option<&Server> {
         self.servers.iter().find(|s| s.kind == ServerKind::Local)
+    }
+
+    // Settings
+
+    pub fn open_settings(&mut self) {
+        if self.screen != Screen::Settings {
+            self.settings.back = Some(self.screen);
+        }
+        self.screen = Screen::Settings;
+        self.settings.contexts = Config::load().unwrap_or_default();
+        let names = self.settings.context_names();
+        self.settings.row = names.iter().position(|n| *n == self.context).unwrap_or(0);
+        self.load_settings();
+        self.load_release();
+        self.refresh();
+    }
+
+    fn load_release(&self) {
+        self.spawn(|c| async move {
+            match c.version_check().await {
+                Ok(r) => Msg::Release(r),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
+    }
+
+    pub fn close_settings(&mut self) {
+        self.screen = match self.settings.back.take() {
+            Some(Screen::Service) if self.service.is_some() => Screen::Service,
+            Some(Screen::Servers) => Screen::Servers,
+            _ => Screen::Overview,
+        };
+        self.refresh();
+    }
+
+    fn load_settings(&mut self) {
+        self.settings.loaded_at = Some(Instant::now());
+        self.spawn(|c| async move {
+            match c.settings().await {
+                Ok(s) => Msg::Settings(Box::new(s)),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
+    }
+
+    /// Applies a settings change and shows the result.
+    pub fn change_settings(&mut self, body: UpdateSettings, ok: String) {
+        self.spawn(|c| async move {
+            match c.update_settings(&body).await {
+                Ok(s) => Msg::FormDone {
+                    toast: ok,
+                    then: Then::Settings(Box::new(s)),
+                },
+                Err(e) => Msg::FormError(format!("{e:#}")),
+            }
+        });
+    }
+
+    pub fn restart_proxy(&mut self) {
+        self.toast("reinstalling the proxy…");
+        self.settings.loaded_at = None;
+        self.act("proxy reinstalled".into(), |c| async move {
+            c.restart_proxy().await
+        });
+    }
+
+    /// Rotates the token and saves it to the context file before anything else is sent.
+    fn rotate_token(&mut self) {
+        self.rotating = true;
+        let (context, url, old) = (
+            self.context.clone(),
+            self.client.url().to_string(),
+            self.client.token().to_string(),
+        );
+        self.spawn(move |c| async move {
+            let token = match c.rotate_token().await {
+                Ok(r) => r.token,
+                Err(e) => return Msg::Error(format!("{e:#}")),
+            };
+            let saved = context != "env"
+                && Config::load().is_ok_and(|mut config| {
+                    config.replace_token(&url, &old, &token) > 0 && config.save().is_ok()
+                });
+            Msg::TokenRotated { token, saved }
+        });
+    }
+
+    /// Connects the TUI to another saved daemon and starts over with its data.
+    pub fn switch_context(&mut self, name: &str) {
+        if name == self.context {
+            return self.toast(format!("already connected to {name}"));
+        }
+        let Some(ctx) = self.settings.contexts.contexts.get(name).cloned() else {
+            return;
+        };
+        let client = match Client::from_context(&ctx) {
+            Ok(c) => c,
+            Err(e) => return self.error(format!("{e:#}")),
+        };
+        self.settings.contexts.current = Some(name.to_string());
+        if let Err(e) = self.settings.contexts.save() {
+            self.error(format!("{e:#}"));
+        }
+        self.stop_streams();
+        if let Some(h) = self.deploy.take().and_then(|v| v.task) {
+            h.abort();
+        }
+        self.epoch += 1;
+        self.client = client;
+        self.context = name.to_string();
+        self.info = None;
+        self.connection_error = None;
+        self.tree = None;
+        self.activity.clear();
+        self.servers.clear();
+        self.details.clear();
+        self.stats.clear();
+        self.service = None;
+        self.overview = OverviewState::default();
+        self.server_row = 0;
+        self.updating = None;
+        self.rotating = false;
+        self.settings.settings = None;
+        self.settings.release = None;
+        self.settings.back = Some(Screen::Overview);
+        self.open_settings();
+        self.toast(format!("connected to {name}"));
+    }
+
+    /// Forgets a saved context, the same way `logout` does on the command line.
+    fn remove_context(&mut self, name: &str) {
+        if name == self.context {
+            return self.error("switch to another context before removing this one");
+        }
+        let mut config = Config::load().unwrap_or_default();
+        match config.forget(name).and_then(|_| config.save()) {
+            Ok(()) => {
+                self.toast(format!(
+                    "forgot {name} · its token still works until rotated"
+                ));
+                self.settings.contexts = config;
+                let n = self.settings.contexts.contexts.len();
+                self.settings.row = self.settings.row.min(n.saturating_sub(1));
+            }
+            Err(e) => self.error(format!("{e:#}")),
+        }
+    }
+
+    pub fn form_public_ip(&mut self) {
+        let Some(s) = &self.settings.settings else {
+            return;
+        };
+        let hint = match (&s.public_ip_override, &s.public_ip) {
+            (Some(_), _) => "auto detects it again".to_string(),
+            (None, Some(ip)) => format!("detected {ip}"),
+            (None, None) => "not detected".to_string(),
+        };
+        let form = Form::new(
+            FormKind::PublicIp,
+            "Public IP",
+            vec![
+                Field::choice("mode", "address", vec!["auto".into(), "fixed".into()])
+                    .selected(usize::from(s.public_ip_override.is_some())),
+                Field::text("ip", "ip")
+                    .value(s.public_ip_override.clone().unwrap_or_default())
+                    .placeholder("203.0.113.10")
+                    .hint(hint),
+            ],
+        )
+        .subtitle("shown in hints and the top bar")
+        .submit("save", None)
+        .focus_on(if s.public_ip_override.is_some() {
+            "ip"
+        } else {
+            "mode"
+        });
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    pub fn form_purge_server(&mut self, server: &Server) {
+        let services = self
+            .all_services()
+            .filter(|s| s.server_id == server.id)
+            .count();
+        let form = Form::new(
+            FormKind::PurgeServer {
+                server_id: server.id.clone(),
+            },
+            "Remove server",
+            vec![Field::toggle("volumes", "volumes", false).hint("also delete app data")],
+        )
+        .subtitle(server.name.clone())
+        .message(format!(
+            "Deletes its {services} service{}, then removes every container, the proxy and the networks the daemon created on {} over SSH.",
+            if services == 1 { "" } else { "s" },
+            server.name
+        ))
+        .submit("remove & clean up", None);
+        self.overlay = Some(Overlay::Form(form));
     }
 
     // Forms
@@ -1410,6 +1766,11 @@ enum Request {
         deploy: bool,
     },
     Server(CreateServer),
+    Settings(UpdateSettings),
+    PurgeServer {
+        id: Id,
+        volumes: bool,
+    },
 }
 
 impl Request {
@@ -1471,6 +1832,24 @@ impl Request {
                     _ => "added but unreachable · check ssh access",
                 };
                 (format!("{} {state}", s.name), Then::Stay)
+            }
+            Request::Settings(body) => {
+                let s = c.update_settings(&body).await?;
+                let toast = match &s.public_ip_override {
+                    Some(ip) => format!("public IP set to {ip}"),
+                    None => "public IP is detected again".into(),
+                };
+                (toast, Then::Settings(Box::new(s)))
+            }
+            Request::PurgeServer { id, volumes } => {
+                let r = c.purge_server(&id, volumes).await?;
+                (
+                    format!(
+                        "server removed · {} containers, {} networks, {} volumes, {} services",
+                        r.containers, r.networks, r.volumes, r.services
+                    ),
+                    Then::Stay,
+                )
             }
         })
     }
@@ -1672,6 +2051,24 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                 port: port(&form.get("port"), false)?.unwrap_or(22),
             })
         }
+        FormKind::PublicIp => {
+            let ip = form.get("ip");
+            if form.choice("mode") == 1 && ip.is_empty() {
+                return Err("enter the address, or pick auto".into());
+            }
+            Request::Settings(UpdateSettings {
+                public_ip_override: Some(if form.choice("mode") == 1 {
+                    ip
+                } else {
+                    String::new()
+                }),
+                manage_proxy: None,
+            })
+        }
+        FormKind::PurgeServer { server_id } => Request::PurgeServer {
+            id: server_id.clone(),
+            volumes: form.on("volumes"),
+        },
         FormKind::EnvVar { .. } => return Err("internal: variable forms submit separately".into()),
     })
 }

@@ -680,6 +680,17 @@ impl Db {
         )
     }
 
+    /// Service name and number of every unfinished deployment.
+    pub fn unfinished_deployments(&self) -> Result<Vec<(String, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT s.name, d.number FROM deployments d JOIN services s ON s.id = d.service_id
+             WHERE d.status IN ('queued', 'building', 'starting') ORDER BY d.created_at",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     fn deployment_query(
         &self,
         tail: &str,

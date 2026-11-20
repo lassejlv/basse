@@ -467,6 +467,75 @@ pub struct DaemonInfo {
     pub ssh_public_key: Option<String>,
 }
 
+/// Everything an operator can see and change about the daemon itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InstanceSettings {
+    pub version: String,
+    pub hostname: String,
+    /// The override when set, else the detected address.
+    pub public_ip: Option<String>,
+    pub public_ip_override: Option<String>,
+    pub listen: String,
+    pub data_dir: String,
+    /// Bytes used by the data directory.
+    pub data_dir_size: u64,
+    /// Install and restart the proxy on the local server automatically.
+    pub manage_proxy: bool,
+    pub proxy: ProxyStatus,
+    pub proxy_image: String,
+    pub docker_version: Option<String>,
+    pub ssh_public_key: Option<String>,
+    /// What a prune would free on the local server; `None` when Docker cannot be asked.
+    pub reclaimable: Option<Reclaimable>,
+    /// Whether systemd supervises the daemon, so a self-update can restart it.
+    pub supervised: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reclaimable {
+    /// Old build images and dangling images a prune would remove.
+    pub images: usize,
+    pub image_bytes: u64,
+    pub build_cache_bytes: u64,
+}
+
+impl Reclaimable {
+    pub fn total(&self) -> u64 {
+        self.image_bytes + self.build_cache_bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PruneResult {
+    pub reclaimed_bytes: u64,
+    /// Image references that were removed.
+    pub removed_images: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionCheck {
+    pub current: String,
+    /// Latest published release tag, e.g. `v0.2.0`; `None` when it could not be fetched.
+    pub latest: Option<String>,
+    pub update_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateResult {
+    pub from: String,
+    pub to: String,
+}
+
+/// What `DELETE /servers/{id}?purge=true` removed from the server.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerCleanup {
+    pub containers: usize,
+    pub networks: usize,
+    pub volumes: usize,
+    /// Services that ran there and were deleted with it.
+    pub services: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceStats {
     pub cpu_percent: f32,

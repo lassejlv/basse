@@ -7,10 +7,12 @@ mod deploy;
 mod docker;
 mod error;
 mod host;
+mod prune;
 mod services;
 mod ssh;
 mod state;
 mod stats;
+mod update;
 
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
@@ -156,14 +158,12 @@ fn init(dirs: &DataDir, opts: InitOptions, listen: Option<String>) -> Result<()>
         }
     }
     let token = config::generate_token();
-    let manage_proxy = match Config::load(dirs) {
-        Ok(existing) if opts.force => existing.manage_proxy && opts.manage_proxy,
-        _ => opts.manage_proxy,
-    };
+    let existing = Config::load(dirs).ok().filter(|_| opts.force);
     let config = Config {
         token_sha256: hex::encode(config::hash_token(&token)),
         listen: listen.unwrap_or_else(config::default_listen),
-        manage_proxy,
+        manage_proxy: opts.manage_proxy && existing.as_ref().is_none_or(|c| c.manage_proxy),
+        public_ip_override: existing.and_then(|c| c.public_ip_override),
     };
     config.save(dirs)?;
     if let Some(path) = &opts.token_file {
@@ -187,7 +187,7 @@ fn init(dirs: &DataDir, opts: InitOptions, listen: Option<String>) -> Result<()>
         .unwrap_or("")
         .parse()
         .unwrap_or(DEFAULT_PORT);
-    let ip = host::public_ip().unwrap_or_else(|| "<server-ip>".into());
+    let ip = config.public_ip().unwrap_or_else(|| "<server-ip>".into());
     let public_key = std::fs::read_to_string(dirs.ssh_public_key()).unwrap_or_default();
     println!("Initialized {}", dirs.root().display());
     println!();
@@ -239,7 +239,7 @@ fn rotate_token(dirs: &DataDir) -> Result<()> {
     println!("  {token}");
     println!();
     println!("Update your CLI with:");
-    let ip = host::public_ip().unwrap_or_else(|| "<server-ip>".into());
+    let ip = config.public_ip().unwrap_or_else(|| "<server-ip>".into());
     let port = config
         .listen
         .rsplit(':')
@@ -310,7 +310,7 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
         tracing::warn!("marked {interrupted} interrupted deployment(s) as failed");
     }
     let listen = listen.unwrap_or_else(|| config.listen.clone());
-    let state = Arc::new(AppState::new(db, dirs, &config)?);
+    let state = Arc::new(AppState::new(db, dirs, &config, listen.clone())?);
     stats::spawn_sampler(state.clone());
     tokio::spawn({
         let state = state.clone();
@@ -325,7 +325,7 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
                     && server.status == ServerStatus::Online
                     && server.proxy != ProxyStatus::Running
                 {
-                    ensure_local_proxy(&state, server).await;
+                    api::ensure_local_proxy(&state, server).await;
                 }
             }
         }
@@ -338,45 +338,6 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
-}
-
-/// Installs the proxy on this machine so domains work without a manual step.
-/// Retries a few times because a fresh server may still be pulling images or settling its network.
-async fn ensure_local_proxy(state: &AppState, server: Server) {
-    const ATTEMPTS: u32 = 5;
-    for attempt in 1..=ATTEMPTS {
-        tracing::info!(
-            "installing the proxy on {} (attempt {attempt})",
-            server.name
-        );
-        let result = async {
-            let docker = state.docker.get(&server).await?;
-            docker::install_proxy(&docker).await
-        }
-        .await;
-        let e = match result {
-            Ok(()) => {
-                state.activity(
-                    common::ActivityLevel::Success,
-                    format!("Proxy installed on {}", server.name),
-                    Some(docker::PROXY_IMAGE.to_string()),
-                );
-                let _ = api::check_server(state, server).await;
-                return;
-            }
-            Err(e) => e,
-        };
-        tracing::warn!("proxy setup failed: {e:#}");
-        if attempt == ATTEMPTS {
-            state.activity(
-                common::ActivityLevel::Error,
-                format!("Proxy setup on {} failed", server.name),
-                Some(format!("{e:#}")),
-            );
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(u64::from(attempt) * 10)).await;
-    }
 }
 
 async fn shutdown_signal() {

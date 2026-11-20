@@ -108,6 +108,10 @@ pub enum FormKind {
         service_id: Id,
     },
     AddServer,
+    PublicIp,
+    PurgeServer {
+        server_id: Id,
+    },
 }
 
 pub enum FormAction {
@@ -123,6 +127,8 @@ pub struct Form {
     pub kind: FormKind,
     pub title: String,
     pub subtitle: String,
+    /// Explanation shown above the fields.
+    pub message: Option<String>,
     pub fields: Vec<Field>,
     pub focus: usize,
     pub error: Option<String>,
@@ -137,6 +143,7 @@ impl Form {
             kind,
             title: title.into(),
             subtitle: String::new(),
+            message: None,
             fields,
             focus: 0,
             error: None,
@@ -151,6 +158,11 @@ impl Form {
 
     pub fn subtitle(mut self, subtitle: impl Into<String>) -> Self {
         self.subtitle = subtitle.into();
+        self
+    }
+
+    pub fn message(mut self, message: impl Into<String>) -> Self {
+        self.message = Some(message.into());
         self
     }
 
@@ -203,6 +215,13 @@ impl Form {
 
     /// Show only the fields that apply to the current choices, and keep defaults in sync.
     fn refresh(&mut self) {
+        if self.kind == FormKind::PublicIp {
+            let fixed = self.choice("mode") == 1;
+            if let Some(ip) = self.field_mut("ip") {
+                ip.visible = fixed;
+            }
+            return;
+        }
         if !matches!(self.kind, FormKind::NewService { .. }) {
             return;
         }
@@ -319,8 +338,14 @@ impl Form {
         let roomy = area.height as usize >= visible.len() * 2 + 9;
         let rows_per_field = if roomy { 2 } else { 1 };
         let width = area.width.saturating_sub(4).min(92);
-        let height =
-            (visible.len() * rows_per_field + 6 + usize::from(self.error.is_some())) as u16;
+        let message_lines = self.message.as_ref().map_or(0, |m| {
+            let inner = usize::from(width.saturating_sub(6)).max(1);
+            m.chars().count().div_ceil(inner) + 1
+        });
+        let height = (visible.len() * rows_per_field
+            + 6
+            + message_lines
+            + usize::from(self.error.is_some())) as u16;
         let rect = area.centered(
             Constraint::Length(width),
             Constraint::Length(height.min(area.height)),
@@ -350,6 +375,16 @@ impl Form {
         let hint_w: u16 = if inner.width >= 76 { 24 } else { 0 };
         let label_w: u16 = 16;
         let mut y = inner.y;
+        if let Some(message) = &self.message {
+            let h = message_lines.saturating_sub(1) as u16;
+            frame.render_widget(
+                Paragraph::new(message.as_str())
+                    .style(theme::text())
+                    .wrap(ratatui::widgets::Wrap { trim: true }),
+                Rect::new(inner.x, y, inner.width, h),
+            );
+            y += h + 1;
+        }
         for (i, field) in self.fields.iter().enumerate().filter(|(_, f)| f.visible) {
             let focused = i == self.focus;
             let hint_w = if matches!(field.kind, FieldKind::Choice(_)) {

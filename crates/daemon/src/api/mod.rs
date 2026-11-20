@@ -4,6 +4,7 @@ mod deployments;
 mod projects;
 mod servers;
 mod services;
+mod settings;
 mod system;
 
 use crate::error::{AppError, json_rejection, query_rejection};
@@ -21,7 +22,7 @@ use serde::de::DeserializeOwned;
 use std::convert::Infallible;
 use std::sync::Arc;
 
-pub use servers::check_server;
+pub use servers::{check_server, ensure_local_proxy};
 
 pub fn router(state: Arc<AppState>) -> Router {
     let api = Router::new()
@@ -62,6 +63,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/deployments/{id}/logs", get(deployments::logs))
         .route("/deployments/{id}/cancel", post(deployments::cancel))
         .route("/deployments/{id}/rollback", post(deployments::rollback))
+        .route("/settings", get(settings::get).patch(settings::update))
+        .route("/settings/token/rotate", post(settings::rotate_token))
+        .route("/settings/proxy/restart", post(settings::restart_proxy))
+        .route("/settings/prune", post(settings::prune))
+        .route("/settings/version", get(settings::version))
+        .route("/settings/update", post(settings::self_update))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth));
     Router::new()
         .nest(API_PREFIX, api)

@@ -35,6 +35,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Service => service(frame, body, app),
         Screen::Deploy => deploy(frame, body, app),
         Screen::Servers => servers(frame, body, app),
+        Screen::Settings => settings(frame, body, app),
     }
     key_bar(frame, keys, app);
     if app.overlay.is_some() {
@@ -56,6 +57,10 @@ pub fn render(frame: &mut Frame, app: &App) {
         Some(Overlay::Help) => {
             dim(frame, area);
             help(frame, area, app);
+        }
+        Some(Overlay::Token(token)) => {
+            dim(frame, area);
+            token_dialog(frame, area, app, token);
         }
         None => {}
     }
@@ -131,6 +136,19 @@ fn top_bar(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
     left.push(match (&app.connection_error, &app.info) {
+        _ if app.updating.is_some() => Span::styled(
+            format!(
+                "{} updating to {}{}",
+                util::spinner(app.tick),
+                app.updating.as_deref().unwrap_or_default(),
+                if app.connection_error.is_some() {
+                    " · reconnecting"
+                } else {
+                    ""
+                }
+            ),
+            theme::fg(theme::INFO),
+        ),
         (Some(_), _) => Span::styled("○ disconnected", theme::fg(theme::ERR)),
         (None, Some(_)) => Span::styled("● connected", theme::fg(theme::OK)),
         (None, None) => Span::styled(
@@ -179,7 +197,7 @@ fn top_bar(frame: &mut Frame, area: Rect, app: &App) {
 type Keys = Vec<(&'static str, &'static str)>;
 
 fn keys_for(app: &App) -> (Keys, Keys) {
-    let right = vec![("?", "help"), ("q", "quit")];
+    let right = vec![(",", "settings"), ("?", "help"), ("q", "quit")];
     let left = match app.screen {
         Screen::Overview if app.overview.filtering => {
             vec![("type", "to filter"), ("⏎", "keep"), ("esc", "clear")]
@@ -261,7 +279,20 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("c", "check"),
             ("p", "set up proxy"),
             ("x", "remove"),
+            ("X", "remove + clean up"),
             ("esc", "back"),
+        ],
+        Screen::Settings => vec![
+            ("↑↓", "context"),
+            ("⏎", "switch"),
+            ("x", "remove"),
+            ("u", "update"),
+            ("i", "public ip"),
+            ("m", "auto proxy"),
+            ("r", "restart proxy"),
+            ("t", "rotate token"),
+            ("k", "copy key"),
+            ("c", "prune"),
         ],
     };
     let right = match app.screen {
@@ -2051,11 +2082,13 @@ fn dialog(
 }
 
 fn confirm(frame: &mut Frame, area: Rect, c: &Confirm) {
+    let text_w = usize::from(64u16.min(area.width.saturating_sub(4)).saturating_sub(6)).max(1);
+    let message_h = c.message.chars().count().div_ceil(text_w).max(2) as u16;
     let inner = dialog(
         frame,
         area,
         64,
-        8,
+        message_h + 6,
         vec![Span::styled(c.title.clone(), theme::text())],
     );
     let [msg, _, keys] = Layout::vertical([
@@ -2082,8 +2115,10 @@ fn confirm(frame: &mut Frame, area: Rect, c: &Confirm) {
         ])),
         keys,
     );
+    let label = format!(" y {} ", c.yes);
+    let label_w = label.chars().count() as u16;
     frame.render_widget(
-        Paragraph::new(Span::styled(" y confirm ", yes)).right_aligned(),
+        Paragraph::new(Span::styled(label, yes)).right_aligned(),
         keys,
     );
     mouse::hit(
@@ -2094,7 +2129,7 @@ fn confirm(frame: &mut Frame, area: Rect, c: &Confirm) {
         ),
     );
     mouse::hit(
-        Rect::new(keys.right().saturating_sub(11), keys.y, 11, 1),
+        Rect::new(keys.right().saturating_sub(label_w), keys.y, label_w, 1),
         Hit::Key(
             crossterm::event::KeyCode::Char('y'),
             crossterm::event::KeyModifiers::NONE,
@@ -2162,6 +2197,7 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
                 (":", "command palette"),
                 ("?", "this help"),
                 ("S", "servers"),
+                (",", "settings"),
                 ("ctrl+r", "refresh"),
                 ("esc", "back"),
                 ("q", "quit"),
@@ -2249,4 +2285,534 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::raw(""));
     }
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+// Settings
+
+const SETTING_KEY_W: usize = 14;
+
+/// A key/value row of a settings panel. `hint` is a key shown, and clickable, at the right edge.
+fn setting_row(
+    frame: &mut Frame,
+    line: Rect,
+    key: &str,
+    value: Vec<Span<'static>>,
+    hint: Option<(&'static str, &'static str)>,
+) {
+    if line.height == 0 || line.width == 0 {
+        return;
+    }
+    let hint_w = hint.map_or(0, |(k, l)| {
+        (k.chars().count() + 1 + l.chars().count()) as u16
+    });
+    let mut spans = vec![Span::styled(
+        format!("{key:<SETTING_KEY_W$}"),
+        theme::muted(),
+    )];
+    spans.extend(value);
+    let value_w = line.width.saturating_sub(hint_w + u16::from(hint_w > 0));
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect {
+            width: value_w,
+            ..line
+        },
+    );
+    if let Some((k, l)) = hint {
+        let rect = Rect::new(
+            line.right().saturating_sub(hint_w),
+            line.y,
+            hint_w.min(line.width),
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(k, theme::accent()),
+                Span::styled(format!(" {l}"), theme::muted()),
+            ])),
+            rect,
+        );
+        if let Some((code, mods)) = mouse::key_for_label(k) {
+            mouse::hit(rect, Hit::Key(code, mods));
+        }
+    }
+}
+
+/// The rows of a panel body, one line each.
+fn lines_of(area: Rect, n: u16) -> Vec<Rect> {
+    (0..n.min(area.height))
+        .map(|i| Rect::new(area.x, area.y + i, area.width, 1))
+        .collect()
+}
+
+fn settings(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(s) = &app.settings.settings else {
+        let block = panel(title("Settings", true), None, true);
+        let inner = inside(&block, area);
+        frame.render_widget(block, area);
+        frame.render_widget(
+            Paragraph::new(format!("{} loading", util::spinner(app.tick))).style(theme::muted()),
+            inner,
+        );
+        return;
+    };
+    let [row1, row2, row3] = Layout::vertical([
+        Constraint::Length(6),
+        Constraint::Length(5),
+        Constraint::Fill(1),
+    ])
+    .spacing(1)
+    .areas(area);
+    instance_panel(frame, row1, app, s);
+    let [proxy, security, maintenance] = Layout::horizontal([Constraint::Fill(1); 3])
+        .spacing(1)
+        .areas(row2);
+    proxy_panel(frame, proxy, s);
+    security_panel(frame, security, s);
+    maintenance_panel(frame, maintenance, s);
+    let [contexts, servers] = Layout::horizontal([Constraint::Fill(2), Constraint::Fill(1)])
+        .spacing(1)
+        .areas(row3);
+    contexts_panel(frame, contexts, app);
+    servers_summary(frame, servers, app);
+}
+
+fn instance_panel(frame: &mut Frame, area: Rect, app: &App, s: &InstanceSettings) {
+    let block = panel(title("Instance", false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let [left, right] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)])
+        .spacing(4)
+        .areas(inner);
+    let update = app
+        .settings
+        .release
+        .as_ref()
+        .filter(|r| r.update_available)
+        .and_then(|r| r.latest.clone());
+    let mut version = vec![Span::styled(s.version.clone(), theme::text())];
+    match (&app.updating, &update, &app.settings.release) {
+        (Some(to), _, _) => version.push(Span::styled(
+            format!("  updating to {to}…"),
+            theme::fg(theme::INFO),
+        )),
+        (None, Some(latest), _) => version.push(Span::styled(
+            format!("  update available {latest}"),
+            theme::accent(),
+        )),
+        (None, None, Some(_)) => version.push(Span::styled("  up to date", theme::muted())),
+        _ => {}
+    }
+    let rows = lines_of(left, 4);
+    setting_row(
+        frame,
+        rows[0],
+        "version",
+        version,
+        update.as_ref().map(|_| ("u", "update")),
+    );
+    setting_row(
+        frame,
+        rows[1],
+        "hostname",
+        vec![Span::styled(s.hostname.clone(), theme::text())],
+        None,
+    );
+    setting_row(
+        frame,
+        rows[2],
+        "public ip",
+        vec![
+            Span::styled(
+                s.public_ip.clone().unwrap_or_else(|| "unknown".into()),
+                theme::text(),
+            ),
+            Span::styled(
+                if s.public_ip_override.is_some() {
+                    "  set by hand"
+                } else {
+                    "  auto-detected"
+                },
+                theme::muted(),
+            ),
+        ],
+        Some(("i", "edit")),
+    );
+    if let Some(row) = rows.get(3) {
+        setting_row(
+            frame,
+            *row,
+            "from a shell",
+            vec![Span::styled(
+                format!("{} update", brand::CLI_BIN),
+                theme::text(),
+            )],
+            None,
+        );
+    }
+    let rows = lines_of(right, 3);
+    let value = |v: String| vec![Span::styled(v, theme::text())];
+    setting_row(frame, rows[0], "listen", value(s.listen.clone()), None);
+    setting_row(
+        frame,
+        rows[1],
+        "data dir",
+        vec![
+            Span::styled(s.data_dir.clone(), theme::text()),
+            Span::styled(
+                format!("  {}", util::bytes(s.data_dir_size)),
+                theme::muted(),
+            ),
+        ],
+        None,
+    );
+    setting_row(
+        frame,
+        rows[2],
+        "docker",
+        value(s.docker_version.clone().unwrap_or_else(|| "unknown".into())),
+        None,
+    );
+}
+
+fn proxy_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
+    let block = panel(title("Proxy", false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let rows = lines_of(inner, 3);
+    let (glyph, label, style) = match s.proxy {
+        ProxyStatus::Running => ("●", "running", theme::fg(theme::OK)),
+        ProxyStatus::Stopped => ("○", "stopped", theme::fg(theme::ERR)),
+        ProxyStatus::Missing => ("○", "not set up", theme::muted()),
+    };
+    setting_row(
+        frame,
+        rows[0],
+        "status",
+        vec![
+            Span::styled(glyph, style),
+            Span::styled(format!(" {label}"), theme::text()),
+        ],
+        Some(("r", "restart")),
+    );
+    let image = s.proxy_image.rsplit('/').next().unwrap_or(&s.proxy_image);
+    setting_row(
+        frame,
+        rows[1],
+        "image",
+        vec![Span::styled(image.to_string(), theme::muted())],
+        None,
+    );
+    setting_row(
+        frame,
+        rows[2],
+        "auto-manage",
+        vec![if s.manage_proxy {
+            Span::styled("● on", theme::fg(theme::OK))
+        } else {
+            Span::styled("○ off", theme::muted())
+        }],
+        Some(("m", "toggle")),
+    );
+}
+
+/// `ssh-ed25519 AAAAC3Nz…q9Lk` and the key's comment.
+fn short_key(key: &str) -> (String, String) {
+    let mut parts = key.split_whitespace();
+    let kind = parts.next().unwrap_or_default();
+    let body = parts.next().unwrap_or_default();
+    let comment = parts.collect::<Vec<_>>().join(" ");
+    let n = body.chars().count();
+    let body = if n > 12 {
+        let head: String = body.chars().take(8).collect();
+        let tail: String = body.chars().skip(n - 4).collect();
+        format!("{head}…{tail}")
+    } else {
+        body.to_string()
+    };
+    (format!("{kind} {body}"), comment)
+}
+
+fn security_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
+    let block = panel(title("Security", false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let rows = lines_of(inner, 3);
+    setting_row(
+        frame,
+        rows[0],
+        "api token",
+        vec![Span::styled("••••••••••••", theme::muted())],
+        Some(("t", "rotate")),
+    );
+    let (key, comment) = s
+        .ssh_public_key
+        .as_deref()
+        .map(short_key)
+        .unwrap_or_else(|| ("none".into(), String::new()));
+    setting_row(
+        frame,
+        rows[1],
+        "ssh key",
+        vec![Span::styled(key, theme::text())],
+        s.ssh_public_key.as_ref().map(|_| ("k", "copy")),
+    );
+    setting_row(
+        frame,
+        rows[2],
+        "",
+        vec![Span::styled(comment, theme::muted())],
+        None,
+    );
+}
+
+fn maintenance_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
+    let block = panel(title("Maintenance", false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let rows = lines_of(inner, 3);
+    let muted = |t: String| vec![Span::styled(t, theme::muted())];
+    match s.reclaimable {
+        Some(r) => {
+            setting_row(
+                frame,
+                rows[0],
+                "reclaimable",
+                vec![Span::styled(util::bytes(r.total()), theme::text())],
+                Some(("c", "prune")),
+            );
+            setting_row(
+                frame,
+                rows[1],
+                "",
+                muted(match r.images {
+                    0 => "no old build images".into(),
+                    1 => "1 old build image".into(),
+                    n => format!("{n} old build images"),
+                }),
+                None,
+            );
+            setting_row(
+                frame,
+                rows[2],
+                "",
+                muted(format!(
+                    "+ build cache {}",
+                    util::bytes(r.build_cache_bytes)
+                )),
+                None,
+            );
+        }
+        None => {
+            setting_row(
+                frame,
+                rows[0],
+                "reclaimable",
+                muted("unknown".into()),
+                Some(("c", "prune")),
+            );
+            setting_row(
+                frame,
+                rows[1],
+                "",
+                muted("Docker did not answer".into()),
+                None,
+            );
+        }
+    }
+}
+
+fn contexts_panel(frame: &mut Frame, area: Rect, app: &App) {
+    let block = panel(title("Contexts", true), None, true);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let names = app.settings.context_names();
+    let name_w = 18;
+    let mut lines = vec![Line::styled(
+        format!("  {:<name_w$}URL", "NAME"),
+        theme::muted(),
+    )];
+    for (i, name) in names.iter().enumerate() {
+        let current = *name == app.context;
+        let selected = i == app.settings.row;
+        let url = app.settings.contexts.contexts[name].url.clone();
+        let tag = if current { "current" } else { "" };
+        let used = 2 + name_w + url.chars().count() + tag.len();
+        let pad = (inner.width as usize).saturating_sub(used);
+        lines.push(
+            Line::from(vec![
+                Span::styled(
+                    if current { "● " } else { "○ " },
+                    if current {
+                        theme::accent()
+                    } else {
+                        theme::muted()
+                    },
+                ),
+                Span::styled(
+                    format!("{:<name_w$}", truncate(name, name_w - 1)),
+                    if selected {
+                        theme::accent()
+                    } else {
+                        theme::text()
+                    },
+                ),
+                Span::styled(url, theme::muted()),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(tag, theme::text()),
+            ])
+            .style(if selected {
+                theme::selected()
+            } else {
+                Style::new()
+            }),
+        );
+    }
+    if names.is_empty() {
+        lines.push(Line::styled(
+            format!(
+                "  no saved contexts · {} login <url> --token <token>",
+                brand::CLI_BIN
+            ),
+            theme::muted(),
+        ));
+    }
+    row_hits(inner, names.len(), 0, Hit::Context);
+    frame.render_widget(Paragraph::new(lines), inner);
+    if inner.height > names.len() as u16 + 2
+        && let Ok(path) = client::Config::path()
+    {
+        frame.render_widget(
+            Paragraph::new(format!("saved in {}", path.display())).style(theme::muted()),
+            Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+        );
+    }
+}
+
+fn servers_summary(frame: &mut Frame, area: Rect, app: &App) {
+    let block = panel(title("Servers", false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let online = app
+        .servers
+        .iter()
+        .filter(|s| s.status == ServerStatus::Online)
+        .count();
+    let proxies = app
+        .servers
+        .iter()
+        .filter(|s| s.proxy == ProxyStatus::Running)
+        .count();
+    let rows = lines_of(inner, 2);
+    setting_row(
+        frame,
+        rows[0],
+        "servers",
+        vec![
+            Span::styled(app.servers.len().to_string(), theme::text()),
+            Span::styled(
+                format!("  {online} online · {} offline", app.servers.len() - online),
+                theme::muted(),
+            ),
+        ],
+        None,
+    );
+    setting_row(
+        frame,
+        rows[1],
+        "proxies",
+        vec![Span::styled(format!("{proxies} running"), theme::text())],
+        None,
+    );
+    if inner.height > 3 {
+        let line = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("S", theme::accent()),
+                Span::styled(" open the servers screen", theme::muted()),
+            ])),
+            line,
+        );
+        mouse::hit(
+            Rect { width: 25, ..line },
+            Hit::Key(
+                crossterm::event::KeyCode::Char('S'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        );
+    }
+}
+
+fn token_dialog(frame: &mut Frame, area: Rect, app: &App, token: &str) {
+    mouse::hit(area, Hit::Block);
+    let inner = dialog(
+        frame,
+        area,
+        80,
+        12,
+        vec![Span::styled("New API token", theme::text())],
+    );
+    let [message, _, token_line, _, note, rule, keys] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "The old token stopped working. This machine's context {} now uses the new one.",
+            app.context
+        ))
+        .style(theme::text())
+        .wrap(Wrap { trim: true }),
+        message,
+    );
+    frame.render_widget(
+        Paragraph::new(format!(" {token}")).style(theme::text().bg(theme::BG)),
+        token_line,
+    );
+    frame.render_widget(
+        Paragraph::new("Shown once. Copy it now to log in from another machine.")
+            .style(theme::muted()),
+        note,
+    );
+    frame.render_widget(
+        Paragraph::new("─".repeat(rule.width as usize)).style(theme::fg(theme::LINE)),
+        rule,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("esc", theme::accent()),
+            Span::styled(" close", theme::muted()),
+        ])),
+        keys,
+    );
+    let done = " ⏎ done ";
+    let done_w = done.chars().count() as u16;
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("c", theme::accent()),
+            Span::styled(" copy   ", theme::muted()),
+            Span::styled(done, theme::chip()),
+        ]))
+        .right_aligned(),
+        keys,
+    );
+    let none = crossterm::event::KeyModifiers::NONE;
+    mouse::hit(
+        Rect::new(keys.x, keys.y, 9, 1),
+        Hit::Key(crossterm::event::KeyCode::Esc, none),
+    );
+    mouse::hit(
+        Rect::new(keys.right().saturating_sub(done_w), keys.y, done_w, 1),
+        Hit::Key(crossterm::event::KeyCode::Enter, none),
+    );
+    mouse::hit(
+        Rect::new(keys.right().saturating_sub(done_w + 9), keys.y, 6, 1),
+        Hit::Key(crossterm::event::KeyCode::Char('c'), none),
+    );
 }

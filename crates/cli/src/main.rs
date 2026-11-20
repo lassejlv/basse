@@ -1,5 +1,6 @@
 //! Command line interface. With no subcommand it opens the TUI.
 
+mod instance;
 mod output;
 mod resolve;
 
@@ -41,6 +42,52 @@ enum Cmd {
     /// Manage saved daemon contexts.
     #[command(subcommand)]
     Context(ContextCmd),
+    /// Forget a saved daemon context on this machine (default: the current one).
+    ///
+    /// This only deletes the local copy of the token: tokens are bearer tokens without a session,
+    /// so the daemon keeps accepting it. Run "token rotate" against the daemon to revoke it.
+    Logout {
+        context: Option<String>,
+        /// Forget every saved context.
+        #[arg(long, conflicts_with = "context")]
+        all: bool,
+    },
+    /// Show or change the settings of the daemon itself.
+    Settings {
+        #[command(subcommand)]
+        cmd: Option<instance::SettingsCmd>,
+    },
+    /// Manage the API token.
+    #[command(subcommand)]
+    Token(TokenCmd),
+    /// The reverse proxy on the daemon's own server.
+    #[command(subcommand)]
+    Proxy(ProxyCmd),
+    /// Remove old build images, dangling images and the build cache on every server.
+    ///
+    /// The live and previous image of each service are kept so rollbacks keep working.
+    Prune,
+    /// Update the daemon of the current context to the latest release and wait for it to restart.
+    Update {
+        /// Release tag to install, e.g. v0.2.0 [default: the latest release].
+        #[arg(long)]
+        tag: Option<String>,
+        /// Install even when the version is not newer, or when systemd does not supervise the daemon.
+        #[arg(long)]
+        force: bool,
+        /// Update this CLI instead, like "upgrade".
+        #[arg(long = "self")]
+        this_cli: bool,
+    },
+    /// Update this CLI binary to the latest release.
+    Upgrade {
+        /// Release tag to install, e.g. v0.2.0 [default: the latest release].
+        #[arg(long)]
+        tag: Option<String>,
+        /// Install even when the version is not newer.
+        #[arg(long)]
+        force: bool,
+    },
     /// Daemon, host and server health.
     Status,
     /// Servers the daemon deploys to.
@@ -107,6 +154,19 @@ enum ContextCmd {
 }
 
 #[derive(Subcommand)]
+enum TokenCmd {
+    /// Issue a new API token; the old one stops working at once. The new token is saved to the
+    /// current context and printed once.
+    Rotate,
+}
+
+#[derive(Subcommand)]
+enum ProxyCmd {
+    /// Reinstall the proxy on the daemon's own server.
+    Restart,
+}
+
+#[derive(Subcommand)]
 enum ServerCmd {
     List,
     /// Add a server reached over SSH with the daemon's key (see "server key").
@@ -125,8 +185,21 @@ enum ServerCmd {
     Proxy {
         name: String,
     },
+    /// Stop managing a server. With --purge, first remove everything the daemon put there.
     Remove {
-        name: String,
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        name: Option<String>,
+        /// Every SSH server.
+        #[arg(long)]
+        all: bool,
+        /// Delete the services assigned to it and remove its containers, proxy and networks.
+        #[arg(long)]
+        purge: bool,
+        /// With --purge, also delete the Docker volumes there, and the data in them.
+        #[arg(long, requires = "purge")]
+        volumes: bool,
+        #[arg(long, short)]
+        yes: bool,
     },
     /// Print the public key servers must trust.
     Key,
@@ -323,13 +396,31 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Some(Cmd::Login { url, token, name }) => return login(&mut config, url, token, name).await,
         Some(Cmd::Context(cmd)) => return context(&mut config, cmd),
+        Some(Cmd::Logout { context, all }) => return instance::logout(&mut config, context, all),
+        Some(Cmd::Upgrade { tag, force })
+        | Some(Cmd::Update {
+            tag,
+            force,
+            this_cli: true,
+        }) => return instance::upgrade_cli(tag, force).await,
         _ => {}
     }
     let (name, ctx) = config.resolve(cli.context.as_deref())?;
     let c = Client::from_context(&ctx)?;
     match cli.command.unwrap_or(Cmd::Tui) {
         Cmd::Tui => tui::run(c, name).await,
-        Cmd::Login { .. } | Cmd::Context(_) => unreachable!("handled above"),
+        Cmd::Login { .. }
+        | Cmd::Context(_)
+        | Cmd::Logout { .. }
+        | Cmd::Upgrade { .. }
+        | Cmd::Update { this_cli: true, .. } => unreachable!("handled above"),
+        Cmd::Settings { cmd } => instance::settings(&c, cmd, json).await,
+        Cmd::Token(TokenCmd::Rotate) => instance::rotate_token(&c, &name, json).await,
+        Cmd::Proxy(ProxyCmd::Restart) => instance::restart_proxy(&c, json).await,
+        Cmd::Prune => instance::prune(&c, json).await,
+        Cmd::Update { tag, force, .. } => {
+            instance::update_daemon(&c, &name, tag, force, json).await
+        }
         Cmd::Status => status(&c, &name, json).await,
         Cmd::Server(cmd) => server(&c, cmd, json).await,
         Cmd::Project(cmd) => project(&c, cmd, json).await,
@@ -515,16 +606,7 @@ fn context(config: &mut Config, cmd: ContextCmd) -> Result<()> {
             config.save()?;
             output::ok(format!("now using {name}"));
         }
-        ContextCmd::Remove { name } => {
-            if config.contexts.remove(&name).is_none() {
-                bail!("unknown context '{name}'");
-            }
-            if config.current.as_deref() == Some(&name) {
-                config.current = config.contexts.keys().next().cloned();
-            }
-            config.save()?;
-            output::ok(format!("removed {name}"));
-        }
+        ContextCmd::Remove { name } => instance::logout(config, Some(name), false)?,
     }
     Ok(())
 }
@@ -680,17 +762,106 @@ async fn server(c: &Client, cmd: ServerCmd, json: bool) -> Result<()> {
             let s = c.setup_proxy(&find_server(c, &name).await?.id).await?;
             output::ok(format!("proxy running on {}", s.name));
         }
-        ServerCmd::Remove { name } => {
-            let s = find_server(c, &name).await?;
-            c.delete_server(&s.id).await?;
-            output::ok(format!("removed {}", s.name));
-        }
+        ServerCmd::Remove {
+            name,
+            all,
+            purge,
+            volumes,
+            yes,
+        } => remove_servers(c, name, all, purge, volumes, yes).await?,
         ServerCmd::Key => match c.info().await?.ssh_public_key {
             Some(key) => println!("{key}"),
             None => bail!("the daemon has no SSH key"),
         },
     }
     Ok(())
+}
+
+async fn remove_servers(
+    c: &Client,
+    name: Option<String>,
+    all: bool,
+    purge: bool,
+    volumes: bool,
+    yes: bool,
+) -> Result<()> {
+    let servers = match name {
+        Some(name) if !all => vec![find_server(c, &name).await?],
+        _ => c
+            .servers()
+            .await?
+            .into_iter()
+            .filter(|s| s.kind == ServerKind::Ssh)
+            .collect(),
+    };
+    if servers.is_empty() {
+        output::note("no remote servers to remove");
+        return Ok(());
+    }
+    if !purge {
+        for s in &servers {
+            c.delete_server(&s.id).await?;
+            output::ok(format!("removed {}", s.name));
+        }
+        return Ok(());
+    }
+    let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
+    confirm(
+        &format!(
+            "Delete the services on {} and remove everything {} put there{}?",
+            names.join(", "),
+            brand::DAEMON_BIN,
+            if volumes {
+                ", volumes and their data included"
+            } else {
+                ""
+            }
+        ),
+        yes,
+    )?;
+    let mut failed = 0;
+    for s in &servers {
+        match c.purge_server(&s.id, volumes).await {
+            Ok(r) => output::ok(format!(
+                "{}: removed {} containers, {} networks, {} volumes and {} services",
+                s.name, r.containers, r.networks, r.volumes, r.services
+            )),
+            Err(e) => {
+                failed += 1;
+                eprintln!("{} {}: {e:#}", paint("!", Tone::Accent), s.name);
+                eprintln!("  {}", muted("clean it up by hand with:"));
+                eprintln!("  {}", manual_cleanup(s, volumes));
+            }
+        }
+    }
+    if failed > 0 {
+        bail!(
+            "{failed} of {} servers could not be cleaned up",
+            servers.len()
+        );
+    }
+    Ok(())
+}
+
+/// What `--purge` does, as one command to run against an unreachable server later.
+fn manual_cleanup(s: &Server, volumes: bool) -> String {
+    let managed = format!("label={}=true", brand::label("managed"));
+    let mut script = format!(
+        "docker rm -f $(docker ps -aq --filter {managed}) {proxy} 2>/dev/null; docker network prune -f --filter {managed}",
+        proxy = brand::PROXY_CONTAINER
+    );
+    if volumes {
+        script.push_str(&format!(
+            "; docker volume rm $(docker volume ls -q --filter {managed}) {}-caddy-data",
+            brand::PREFIX
+        ));
+    }
+    format!(
+        "ssh -p {} {}@{} '{script}'",
+        s.port.unwrap_or(22),
+        s.user.as_deref().unwrap_or("root"),
+        s.host.as_deref().unwrap_or("<host>")
+    )
 }
 
 fn confirm(prompt: &str, yes: bool) -> Result<()> {

@@ -11,7 +11,7 @@
 //! | GET | `/activity?limit=50` | | `Vec<Activity>` |
 //! | GET | `/servers` | | `Vec<Server>` |
 //! | POST | `/servers` | `CreateServer` | `Server` |
-//! | DELETE | `/servers/{id}` | | 204 |
+//! | DELETE | `/servers/{id}?purge=true&volumes=true` | | 204, or `ServerCleanup` with `purge` (removes what the daemon put there, its services included, then forgets it) |
 //! | POST | `/servers/{id}/check` | | `Server` |
 //! | POST | `/servers/{id}/proxy` | | `Server` (installs or restarts the proxy) |
 //! | GET | `/projects` | | `Vec<Project>` |
@@ -39,6 +39,13 @@
 //! | GET | `/deployments/{id}/logs?follow=true` | | NDJSON `LogLine` stream, ends when the deployment finishes |
 //! | POST | `/deployments/{id}/cancel` | | `Deployment` |
 //! | POST | `/deployments/{id}/rollback` | | `Deployment` (new deployment reusing that image) |
+//! | GET | `/settings` | | `InstanceSettings` |
+//! | PATCH | `/settings` | `UpdateSettings` | `InstanceSettings` (persisted in the daemon's config.toml) |
+//! | POST | `/settings/token/rotate` | | `RotatedToken` (the old token stops working at once) |
+//! | POST | `/settings/proxy/restart` | | `Server` (reinstalls the proxy on the local server) |
+//! | POST | `/settings/prune` | | `PruneResult` (old build images, dangling images, build cache) |
+//! | GET | `/settings/version` | | `VersionCheck` (latest release, cached for an hour) |
+//! | POST | `/settings/update` | `UpdateRequest` | `UpdateResult` (replaces the binaries, then the daemon exits to restart) |
 
 use crate::{EnvVar, Id, RestartPolicy, Source};
 use serde::{Deserialize, Serialize};
@@ -131,6 +138,28 @@ pub struct CreateDomain {
 
 fn default_true() -> bool {
     true
+}
+
+/// Fields left as `None` keep their value. An empty `public_ip_override` (or `auto`) clears the
+/// override so the address is detected again.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateSettings {
+    pub public_ip_override: Option<String>,
+    pub manage_proxy: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RotatedToken {
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateRequest {
+    /// Release tag such as `v0.2.0`; defaults to the latest release.
+    pub version: Option<String>,
+    /// Update even when no supervisor restarts the daemon, or when the version is not newer.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

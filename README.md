@@ -32,7 +32,6 @@ Running the script again upgrades in place and keeps your data and token. Other 
 ```sh
 … | sudo sh -s -- --version v0.2.0     # pin a release
 … | sudo sh -s -- --from-source        # build with cargo instead of downloading
-… | sudo sh -s -- --uninstall [--purge]
 ```
 
 On your laptop (macOS or Linux), install only the CLI:
@@ -42,6 +41,29 @@ curl -fsSL https://raw.githubusercontent.com/lassejlv/basse/main/install.sh | sh
 basse login http://<server-ip>:7700 --token <token>
 basse
 ```
+
+## Update
+
+```sh
+basse update     # update the daemon of the current context and wait for it to restart
+basse upgrade    # update this CLI binary (use sudo if it lives in /usr/local/bin)
+```
+
+The daemon downloads the release for its platform, checks its SHA-256, replaces its own binary and the `basse` CLI next to it, and exits so systemd starts the new version. It refuses while a deployment is running. The TUI shows "update available" on the Settings screen, where `u` does the same.
+
+## Uninstall
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/lassejlv/basse/main/uninstall.sh | sudo sh
+```
+
+That removes the daemon, its systemd unit and the binaries, and keeps your apps running and `/var/lib/basse` in place. It asks before removing anything when a terminal is attached; `--yes` skips the question.
+
+- `--purge` removes everything: it first asks the daemon to clean up each remote SSH server (containers, proxy and networks; a server it cannot reach is skipped with the command to clean it up by hand), then removes the app containers, the proxy, the networks, `/var/lib/basse` and the saved CLI logins on this server. App volumes are kept.
+- `--purge --volumes` also deletes the app volumes. **This deletes your app data.**
+- `--cli` removes only the CLI and its saved logins, e.g. on your laptop: `curl … | sh -s -- --cli`. Add `--keep-config` to keep the logins.
+
+`install.sh --uninstall` takes the same options.
 
 While the repository is private, raw.githubusercontent.com and release downloads need a token. Pass one with `GITHUB_TOKEN=… sh install.sh` or `--github-token`, and fetch the script itself with `curl -H "Authorization: Bearer $GITHUB_TOKEN" …`.
 
@@ -61,6 +83,8 @@ The mouse works too: click rows, tabs, dialog fields and the key hints in the bo
 | Service | `1`–`7` or `tab` switch tabs (Overview, Deployments, Logs, Env, Domains, Volumes, Settings), `a` add, `x` remove, `⏎` edit |
 | Logs | `f` follow, `/` search, `n`/`N` next or previous match, `e` errors only, `t` timestamps, `w` wrap |
 | Deploy | Live pipeline and build output, `c` cancel, `esc` back (the deploy keeps running) |
+| Servers | `a` add, `c` check, `p` set up the proxy, `x` remove, `X` remove and clean up everything the daemon put there |
+| Settings (`,` anywhere) | The instance (version and updates, public IP, data dir, Docker), the proxy, the API token and SSH key, pruning old images, and the daemon contexts saved on this machine. `u` update, `i` public IP, `m` auto-manage the proxy, `r` restart the proxy, `t` rotate the token, `k` copy the SSH key, `c` prune, `⏎` switch to the selected context, `x` forget it |
 
 ## CLI
 
@@ -75,6 +99,19 @@ basse rollback web
 basse status
 ```
 
+The instance itself:
+
+```sh
+basse settings                          # version, public IP, proxy, disk use, reclaimable space
+basse settings set public-ip 203.0.113.10   # or "auto" to detect it again
+basse settings set manage-proxy off
+basse token rotate                      # the old token stops working; the new one is saved for you
+basse proxy restart
+basse prune                             # old build images (live and previous kept) and the build cache
+basse server remove edge --purge [--volumes]
+basse logout [context] [--all]          # forgets the token here; rotate it to revoke it
+```
+
 Every command takes `--json` and `--context <name>` (switch between daemons with `basse context use`). Run `basse <command> --help` for the details.
 
 ## Workspace
@@ -83,6 +120,7 @@ Every command takes `--json` and `--context <name>` (switch between daemons with
 |---|---|
 | `crates/common` | Domain types, the HTTP API contract and `brand`, the one place that holds product names |
 | `crates/client` | Typed HTTP client and the saved daemon contexts |
+| `crates/release` | Release lookups, verified downloads and binary replacement for `update` and `upgrade` |
 | `crates/daemon` | The `bassed` binary: axum API, SQLite, Docker through bollard, Caddy proxy, deploy pipeline, SSH servers |
 | `crates/tui` | The ratatui interface |
 | `crates/cli` | The `basse` binary: clap commands that open the TUI by default |

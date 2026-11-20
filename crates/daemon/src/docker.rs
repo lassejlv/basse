@@ -10,13 +10,13 @@ use bollard::models::{
     PortBinding, RestartPolicy as DockerRestart, RestartPolicyNameEnum, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptions, ListContainersOptions, RemoveContainerOptions,
-    RemoveVolumeOptions, StopContainerOptions,
+    CreateContainerOptions, CreateImageOptions, ListContainersOptions, ListNetworksOptions,
+    ListVolumesOptions, RemoveContainerOptions, RemoveVolumeOptions, StopContainerOptions,
 };
 use bollard::{API_DEFAULT_VERSION, Docker};
 use common::{
-    ContainerInfo, Domain, Id, LogLine, LogStream, ProxyStatus, RestartPolicy, Server, ServerKind,
-    brand,
+    ContainerInfo, Domain, Id, LogLine, LogStream, ProxyStatus, RestartPolicy, Server,
+    ServerCleanup, ServerKind, brand,
 };
 use futures_util::StreamExt as _;
 use std::collections::HashMap;
@@ -686,6 +686,60 @@ pub async fn install_proxy(docker: &Docker) -> Result<()> {
     };
     let id = create_container(docker, &spec).await?;
     start_container(docker, &id).await
+}
+
+/// Removes everything the daemon put on a server: managed containers, the proxy, managed
+/// networks and, with `volumes`, managed volumes and the proxy's certificate volume.
+pub async fn purge(docker: &Docker, volumes: bool) -> Result<ServerCleanup> {
+    let mut cleanup = ServerCleanup::default();
+    let mut containers: Vec<String> = list_managed(docker)
+        .await?
+        .into_iter()
+        .filter_map(|c| c.id)
+        .collect();
+    if inspect(docker, brand::PROXY_CONTAINER).await?.is_some() {
+        containers.push(brand::PROXY_CONTAINER.to_string());
+    }
+    for id in &containers {
+        remove_container(docker, id).await?;
+        cleanup.containers += 1;
+    }
+    let managed = HashMap::from([(
+        "label".to_string(),
+        vec![format!("{}=true", brand::label("managed"))],
+    )]);
+    let networks = docker
+        .list_networks(Some(ListNetworksOptions {
+            filters: Some(managed.clone()),
+        }))
+        .await
+        .context("cannot list networks")?;
+    for name in networks.into_iter().filter_map(|n| n.name) {
+        remove_network(docker, &name).await?;
+        cleanup.networks += 1;
+    }
+    if volumes {
+        let listed = docker
+            .list_volumes(Some(ListVolumesOptions {
+                filters: Some(managed),
+            }))
+            .await
+            .context("cannot list volumes")?;
+        let mut names: Vec<String> = listed
+            .volumes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| v.name)
+            .collect();
+        if docker.inspect_volume(&proxy_volume()).await.is_ok() {
+            names.push(proxy_volume());
+        }
+        for name in names {
+            remove_volume(docker, &name).await?;
+            cleanup.volumes += 1;
+        }
+    }
+    Ok(cleanup)
 }
 
 // Errors

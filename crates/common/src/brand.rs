@@ -18,6 +18,8 @@ pub const DIR: &str = "basse";
 pub const PROXY_NETWORK: &str = "basse";
 /// Container name of the reverse proxy on each server.
 pub const PROXY_CONTAINER: &str = "basse-proxy";
+/// GitHub repository that publishes releases, as `owner/name`.
+pub const REPO: &str = "lassejlv/basse";
 
 /// Full environment variable name for a suffix: `env_var("URL")` is `BASSE_URL`.
 pub fn env_var(suffix: &str) -> String {
