@@ -7,6 +7,7 @@ use client::Client;
 use common::api::*;
 use common::*;
 use futures_util::StreamExt as _;
+use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -700,8 +701,467 @@ async fn ssh_server_end_to_end() {
     let lines = collect_logs(api.service_logs(&svc.service.id, 10, false).await.unwrap()).await;
     println!("remote logs: {lines:?}");
 
+    // Backups, restores and rotation exec through the SSH-tunnelled Docker connection.
+    let redis =
+        exercise_database(&api, &env.id, Some(server.id.clone()), DatabaseKind::Redis).await;
+    assert_eq!(redis.server.id, server.id);
+
     let project = api.projects().await.unwrap().remove(0);
     api.delete_project(&project.id).await.unwrap();
     assert!(service_containers(&svc.service.id).is_empty());
     api.delete_server(&server.id).await.unwrap();
+}
+
+// Databases: backup, restore, password rotation and public access against real engines.
+
+/// Runs `docker <args>`, returning trimmed stdout when it exits with 0.
+fn docker_ok(args: &[String]) -> Result<String, String> {
+    let out = Command::new("docker").args(args).output().unwrap();
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
+}
+
+/// Retries a docker command until it succeeds; databases take a while to accept connections.
+async fn until_ok(args: &[String], timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match docker_ok(args) {
+            Ok(out) => return out,
+            Err(e) if Instant::now() >= deadline => panic!("docker {args:?} kept failing: {e}"),
+            Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+        }
+    }
+}
+
+fn strings(args: &[&str]) -> Vec<String> {
+    args.iter().map(|s| s.to_string()).collect()
+}
+
+async fn wait_backup(api: &Client, id: &str) -> Backup {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let b = api.backup(id).await.unwrap();
+        if b.status != BackupStatus::Running {
+            return b;
+        }
+        assert!(Instant::now() < deadline, "backup never finished: {b:?}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Waits for the newest deployment of a service to go live and the service to run.
+async fn wait_live(api: &Client, service_id: &str) -> ServiceDetail {
+    let d = wait_finished(
+        api,
+        &latest_deployment(api, service_id).await.id,
+        Duration::from_secs(300),
+    )
+    .await;
+    assert_eq!(d.status, DeploymentStatus::Live, "{d:?}");
+    wait_state(api, service_id, ServiceState::Running).await
+}
+
+/// Commands that touch one row of test data and probe a connection, per engine.
+struct Probe {
+    /// Exec'd in the database container.
+    write: Vec<String>,
+    mutate: Vec<String>,
+    read: Vec<String>,
+    /// Run in a fresh client container; prints `ping_ok` when connected.
+    ping: Vec<String>,
+    ping_ok: &'static str,
+}
+
+fn probe(info: &DatabaseInfo, client_image: &str) -> Probe {
+    let user = info.username.clone().unwrap_or_default();
+    let pass = info.password.clone();
+    let db = info.database.clone().unwrap_or_default();
+    match info.kind {
+        DatabaseKind::Postgres => {
+            let psql = |sql: &str| {
+                strings(&[
+                    "psql",
+                    "-U",
+                    &user,
+                    "-d",
+                    &db,
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                    "-tAc",
+                    sql,
+                ])
+            };
+            Probe {
+                write: psql(
+                    "CREATE TABLE IF NOT EXISTS notes (t text PRIMARY KEY); \
+                     INSERT INTO notes VALUES ('kept') ON CONFLICT DO NOTHING",
+                ),
+                mutate: psql("DROP TABLE notes"),
+                read: psql("SELECT t FROM notes"),
+                ping: strings(&[client_image, "psql", &info.internal_url, "-tAc", "SELECT 1"]),
+                ping_ok: "1",
+            }
+        }
+        DatabaseKind::Mysql | DatabaseKind::Mariadb => {
+            let client = if info.kind == DatabaseKind::Mysql {
+                "mysql"
+            } else {
+                "mariadb"
+            };
+            let password = format!("-p{pass}");
+            let sql =
+                |sql: &str| strings(&[client, "-u", &user, &password, &db, "-N", "-B", "-e", sql]);
+            Probe {
+                write: sql(
+                    "CREATE TABLE IF NOT EXISTS notes (t VARCHAR(16) PRIMARY KEY); \
+                     REPLACE INTO notes VALUES ('kept')",
+                ),
+                mutate: sql("DROP TABLE notes"),
+                read: sql("SELECT t FROM notes"),
+                ping: strings(&[
+                    client_image,
+                    client,
+                    "-h",
+                    &info.host,
+                    "-u",
+                    &user,
+                    &password,
+                    &db,
+                    "-N",
+                    "-B",
+                    "-e",
+                    "SELECT 1",
+                ]),
+                ping_ok: "1",
+            }
+        }
+        DatabaseKind::Redis => {
+            let cli = |args: &[&str]| {
+                let mut cmd = strings(&["redis-cli", "--no-auth-warning", "-a", &pass]);
+                cmd.extend(strings(args));
+                cmd
+            };
+            Probe {
+                write: cli(&["SET", "note", "kept"]),
+                mutate: cli(&["SET", "note", "changed"]),
+                read: cli(&["GET", "note"]),
+                ping: strings(&[
+                    client_image,
+                    "redis-cli",
+                    "--no-auth-warning",
+                    "-u",
+                    &info.internal_url,
+                    "PING",
+                ]),
+                ping_ok: "PONG",
+            }
+        }
+        DatabaseKind::Mongo => {
+            let eval = |js: &str| {
+                strings(&[
+                    "mongosh",
+                    "--quiet",
+                    "-u",
+                    &user,
+                    "-p",
+                    &pass,
+                    "--authenticationDatabase",
+                    "admin",
+                    "app",
+                    "--eval",
+                    js,
+                ])
+            };
+            Probe {
+                write: eval(
+                    "db.notes.updateOne({ _id: 1 }, { $set: { t: 'kept' } }, { upsert: true })",
+                ),
+                mutate: eval("db.notes.drop()"),
+                read: eval("db.notes.findOne({ _id: 1 }).t"),
+                ping: strings(&[
+                    client_image,
+                    "mongosh",
+                    &info.internal_url,
+                    "--quiet",
+                    "--eval",
+                    "db.runCommand({ ping: 1 }).ok",
+                ]),
+                ping_ok: "1",
+            }
+        }
+    }
+}
+
+fn exec_in(container: &str, cmd: &[String]) -> Result<String, String> {
+    let mut args = strings(&["exec", container]);
+    args.extend_from_slice(cmd);
+    docker_ok(&args)
+}
+
+/// Connects from a fresh container on the environment network, as another service would.
+fn ping(env_id: &str, p: &Probe) -> Result<String, String> {
+    let mut args = strings(&[
+        "run",
+        "--rm",
+        "--network",
+        &format!("{}-env-{env_id}", brand::PREFIX),
+    ]);
+    args.extend_from_slice(&p.ping);
+    docker_ok(&args)
+}
+
+async fn wait_ping(env_id: &str, p: &Probe) {
+    let deadline = Instant::now() + Duration::from_secs(240);
+    loop {
+        match ping(env_id, p) {
+            Ok(out) if out.ends_with(p.ping_ok) => return,
+            other if Instant::now() >= deadline => panic!("cannot connect: {other:?}"),
+            _ => tokio::time::sleep(Duration::from_secs(2)).await,
+        }
+    }
+}
+
+/// Creates a database, writes a row, backs it up, breaks the row, restores it, rotates the
+/// password and checks the new internal URL works and the old one does not.
+async fn exercise_database(
+    api: &Client,
+    env_id: &str,
+    server_id: Option<Id>,
+    kind: DatabaseKind,
+) -> ServiceDetail {
+    let name = kind.image();
+    println!("== {name}: create + deploy");
+    let created = api
+        .create_service(&CreateService {
+            environment_id: env_id.into(),
+            server_id,
+            name: name.into(),
+            source: Source::Database {
+                kind,
+                version: String::new(),
+            },
+            port: None,
+            command: None,
+            restart: RestartPolicy::UnlessStopped,
+            health_path: None,
+            env: vec![],
+            domains: vec![],
+            volumes: vec![],
+            deploy: true,
+        })
+        .await
+        .unwrap();
+    let sid = created.service.id.clone();
+    let image = format!("{}:{}", kind.image(), kind.default_version());
+    let detail = wait_live(api, &sid).await;
+    let info = detail.database.clone().unwrap();
+    assert_eq!(info.version, kind.default_version());
+    assert_eq!(info.host, name);
+    let container = detail.container.unwrap().id;
+    let p = probe(&info, &image);
+    wait_ping(env_id, &p).await;
+    until_ok(
+        &[strings(&["exec", &container]), p.write.clone()].concat(),
+        Duration::from_secs(60),
+    )
+    .await;
+    assert_eq!(exec_in(&container, &p.read).unwrap(), "kept");
+
+    println!("== {name}: backup");
+    let started = api.create_backup(&sid).await.unwrap();
+    assert_eq!(started.status, BackupStatus::Running);
+    let backup = wait_backup(api, &started.id).await;
+    assert_eq!(backup.status, BackupStatus::Done, "{backup:?}");
+    assert!(backup.size_bytes > 0);
+    assert!(backup.file_name.ends_with(".gz"), "{}", backup.file_name);
+    let mut download = api.download_backup(&backup.id).await.unwrap();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = download.next().await {
+        bytes.extend(chunk.unwrap());
+    }
+    assert_eq!(bytes.len() as u64, backup.size_bytes);
+    assert_eq!(&bytes[..2], [0x1f, 0x8b], "not gzip");
+
+    println!("== {name}: restore");
+    exec_in(&container, &p.mutate).unwrap();
+    assert_ne!(exec_in(&container, &p.read).ok().as_deref(), Some("kept"));
+    api.restore_backup(&backup.id).await.unwrap();
+    wait_ping(env_id, &p).await;
+    assert_eq!(exec_in(&container, &p.read).unwrap(), "kept");
+
+    println!("== {name}: rotate password");
+    let rotated = api.rotate_database_password(&sid).await.unwrap();
+    assert_ne!(rotated.password, info.password);
+    assert_ne!(rotated.internal_url, info.internal_url);
+    let detail = if kind == DatabaseKind::Redis {
+        wait_live(api, &sid).await
+    } else {
+        api.service(&sid).await.unwrap()
+    };
+    let url_key = if kind == DatabaseKind::Redis {
+        "REDIS_URL"
+    } else {
+        "DATABASE_URL"
+    };
+    let stored = detail.env.iter().find(|v| v.key == url_key).unwrap();
+    assert_eq!(stored.value, rotated.internal_url);
+    let fresh = probe(&rotated, &image);
+    assert!(ping(env_id, &fresh).unwrap().ends_with(fresh.ping_ok));
+    assert!(
+        ping(env_id, &p)
+            .map(|out| !out.ends_with(p.ping_ok))
+            .unwrap_or(true),
+        "the old password still works"
+    );
+    let container = detail.container.clone().unwrap().id;
+    assert_eq!(exec_in(&container, &fresh.read).unwrap(), "kept");
+
+    println!("== {name}: restart keeps the new password");
+    docker_ok(&strings(&["restart", &container])).unwrap();
+    wait_ping(env_id, &fresh).await;
+    assert_eq!(exec_in(&container, &fresh.read).unwrap(), "kept");
+
+    let activity = api.activity(200).await.unwrap();
+    for message in [
+        "Backup done",
+        "Backup restored",
+        "Database password rotated",
+    ] {
+        assert!(
+            activity
+                .iter()
+                .any(|a| a.service_id.as_deref() == Some(sid.as_str()) && a.message == message),
+            "no '{message}' activity for {name}"
+        );
+    }
+    detail
+}
+
+async fn database_project(api: &Client, name: &str) -> (Project, Environment) {
+    let project = api
+        .create_project(&CreateProject {
+            name: name.into(),
+            description: None,
+        })
+        .await
+        .unwrap();
+    let env = api
+        .tree()
+        .await
+        .unwrap()
+        .projects
+        .into_iter()
+        .find(|p| p.project.id == project.id)
+        .unwrap()
+        .environments
+        .remove(0)
+        .environment;
+    (project, env)
+}
+
+#[tokio::test]
+#[ignore = "needs Docker and the postgres:18-alpine image"]
+async fn postgres_backup_restore_rotate_expose() {
+    let daemon = Daemon::start().await;
+    let api = daemon.client();
+    let (project, env) = database_project(&api, "pg").await;
+    let detail = exercise_database(&api, &env.id, None, DatabaseKind::Postgres).await;
+    let sid = detail.service.id.clone();
+    assert_eq!(
+        detail.volumes[0].mount_path, "/var/lib/postgresql",
+        "postgres 18 keeps PGDATA under the parent directory"
+    );
+
+    println!("== postgres: public access");
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let exposed = api
+        .update_database(
+            &sid,
+            &UpdateDatabase {
+                public_port: Some(port),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(exposed.public_port, Some(port));
+    let live = wait_live(&api, &sid).await;
+    assert_ne!(
+        live.container.as_ref().unwrap().id,
+        detail.container.as_ref().unwrap().id
+    );
+    let user = exposed.username.clone().unwrap();
+    let db = exposed.database.clone().unwrap();
+    let local_url = format!(
+        "postgres://{user}:{}@127.0.0.1:{port}/{db}",
+        exposed.password
+    );
+    let read = until_ok(
+        &strings(&[
+            "run",
+            "--rm",
+            "--network",
+            "host",
+            "postgres:18-alpine",
+            "psql",
+            &local_url,
+            "-tAc",
+            "SELECT t FROM notes",
+        ]),
+        Duration::from_secs(60),
+    )
+    .await;
+    assert_eq!(
+        read, "kept",
+        "data survives the redeploy and is reachable from outside"
+    );
+
+    api.update_database(&sid, &UpdateDatabase { public_port: None })
+        .await
+        .unwrap();
+    let live = wait_live(&api, &sid).await;
+    assert!(live.database.unwrap().public_url.is_none());
+
+    let backups = api.backups(&sid).await.unwrap();
+    api.delete_backup(&backups[0].id).await.unwrap();
+    assert!(api.backups(&sid).await.unwrap().is_empty());
+    api.delete_project(&project.id).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs Docker and the mysql, mariadb, redis and mongo images"]
+async fn other_databases_backup_restore_rotate() {
+    let daemon = Daemon::start().await;
+    let api = daemon.client();
+    let (project, env) = database_project(&api, "dbs").await;
+    for kind in [
+        DatabaseKind::Mysql,
+        DatabaseKind::Mariadb,
+        DatabaseKind::Redis,
+        DatabaseKind::Mongo,
+    ] {
+        exercise_database(&api, &env.id, None, kind).await;
+    }
+    let backups_dir = daemon.dir.path().join("backups");
+    api.delete_project(&project.id).await.unwrap();
+    let left: Vec<_> = std::fs::read_dir(&backups_dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name() != ".staging")
+        .filter(|e| std::fs::read_dir(e.path()).is_ok_and(|mut d| d.next().is_some()))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "backup files survived the project: {left:?}"
+    );
 }
