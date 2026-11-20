@@ -77,12 +77,14 @@ jobs:
       - name: Install a server from the built archive
         run: |
           sudo sh ./install.sh --archive "dist/$CLI_BIN-x86_64-unknown-linux-musl.tar.gz" --no-firewall
-          basse status
+          $CLI_BIN status
           sudo basse status
           curl -fsS http://127.0.0.1:7700/healthz
           docker ps
-      - name: Re-run upgrades in place
-        run: sudo sh ./install.sh --archive "dist/$CLI_BIN-x86_64-unknown-linux-musl.tar.gz" --no-firewall
+      - name: Re-run upgrades in place from the latest published release
+        run: |
+          sudo sh ./install.sh --no-firewall
+          $CLI_BIN status
       - name: Daemon logs
         if: failure()
         run: sudo journalctl -u "$DAEMON_BIN" --no-pager -n 200 || true
