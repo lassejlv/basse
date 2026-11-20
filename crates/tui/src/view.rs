@@ -1,6 +1,7 @@
 //! Drawing. Every screen follows the Paper design: a top bar, bordered panels, a key bar.
 
 use crate::app::*;
+use crate::mouse::{self, Hit};
 use crate::theme;
 use crate::util::{self, truncate};
 use common::*;
@@ -11,6 +12,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 
 pub fn render(frame: &mut Frame, app: &App) {
+    mouse::reset();
     let area = frame.area();
     frame.render_widget(
         Block::new().style(Style::new().bg(theme::BG).fg(theme::TEXT)),
@@ -35,6 +37,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Servers => servers(frame, body, app),
     }
     key_bar(frame, keys, app);
+    if app.overlay.is_some() {
+        mouse::hit(area, Hit::Block);
+    }
     match &app.overlay {
         Some(Overlay::Form(form)) => {
             dim(frame, area);
@@ -54,6 +59,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         }
         None => {}
     }
+    mouse::paint_selection(frame.buffer_mut(), app.mouse.selection.as_ref());
 }
 
 /// Fade everything under a dialog, like the scrim in the design.
@@ -278,9 +284,39 @@ fn key_spans(keys: &[(&'static str, &'static str)]) -> Vec<Span<'static>> {
     spans
 }
 
+/// Make each key hint clickable; `x` is where the first hint starts.
+fn key_hits(keys: &[(&'static str, &'static str)], mut x: u16, y: u16) {
+    for (i, (k, l)) in keys.iter().enumerate() {
+        if i > 0 {
+            x += 3;
+        }
+        let w = (k.chars().count() + 1 + l.chars().count()) as u16;
+        if let Some((code, mods)) = mouse::key_for_label(k) {
+            mouse::hit(Rect::new(x, y, w, 1), Hit::Key(code, mods));
+        }
+        x += w;
+    }
+}
+
+fn keys_width(keys: &[(&'static str, &'static str)]) -> u16 {
+    let text: usize = keys
+        .iter()
+        .map(|(k, l)| k.chars().count() + 1 + l.chars().count())
+        .sum();
+    (text + keys.len().saturating_sub(1) * 3) as u16
+}
+
 fn key_bar(frame: &mut Frame, area: Rect, app: &App) {
     let (left, right) = keys_for(app);
     frame.render_widget(Paragraph::new(Line::from(key_spans(&left))), area);
+    key_hits(&left, area.x, area.y);
+    if app.toast.is_none() {
+        key_hits(
+            &right,
+            area.right().saturating_sub(keys_width(&right)),
+            area.y,
+        );
+    }
     let right = match &app.toast {
         Some(t) => {
             let style = if t.error {
@@ -388,8 +424,10 @@ fn sidebar(frame: &mut Frame, area: Rect, app: &App) {
         );
         return;
     };
+    mouse::hit(projects, Hit::Pane(Pane::Sidebar));
     let items = app.side_items();
     let mut lines = Vec::new();
+    let mut item_lines = Vec::new();
     for (i, item) in items.iter().enumerate() {
         let selected = i == app.overview.side;
         let row_style = if selected {
@@ -449,6 +487,7 @@ fn sidebar(frame: &mut Frame, area: Rect, app: &App) {
                 ])
             }
         };
+        item_lines.push((lines.len(), i));
         lines.push(line.style(row_style));
     }
     if lines.is_empty() {
@@ -462,6 +501,17 @@ fn sidebar(frame: &mut Frame, area: Rect, app: &App) {
         inner.height as usize,
     );
     frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), inner);
+    for (line, i) in item_lines {
+        if let Some(dy) = line
+            .checked_sub(offset)
+            .filter(|dy| *dy < inner.height as usize)
+        {
+            mouse::hit(
+                Rect::new(inner.x, inner.y + dy as u16, inner.width, 1),
+                Hit::Side(i),
+            );
+        }
+    }
 
     let block = panel(title("Servers", false), None, false);
     let inner = inside(&block, servers);
@@ -517,6 +567,17 @@ fn env_state(env: &EnvironmentNode) -> ServiceState {
     } else {
         ServiceState::Stopped
     })
+}
+
+/// Clickable rows of a table drawn in `inner` with a one-line header and `offset` rows scrolled away.
+fn row_hits(inner: Rect, rows: usize, offset: usize, hit: fn(usize) -> Hit) {
+    for i in offset..rows {
+        let y = inner.y + 1 + (i - offset) as u16;
+        if y >= inner.bottom() {
+            break;
+        }
+        mouse::hit(Rect::new(inner.x, y, inner.width, 1), hit(i));
+    }
 }
 
 fn scroll_offset(selected: usize, height: usize) -> usize {
@@ -617,6 +678,8 @@ fn services_table(frame: &mut Frame, area: Rect, app: &App, services: &[&Service
         .collect();
     let empty = rows.is_empty();
     let offset = scroll_offset(app.overview.row, inner.height.saturating_sub(1) as usize);
+    mouse::hit(area, Hit::Pane(Pane::Services));
+    row_hits(inner, rows.len(), offset, Hit::Service);
     let table = Table::new(
         rows.into_iter().skip(offset),
         [
@@ -961,7 +1024,11 @@ fn service(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)), head);
 
     let mut tab_spans = vec![Span::raw(" ")];
+    let mut x = tabs.x + 1;
     for t in Tab::ALL {
+        let w = t.title().chars().count() as u16;
+        mouse::hit(Rect::new(x, tabs.y, w, 1), Hit::Tab(t));
+        x += w + 4;
         let style = if t == view.tab {
             theme::accent().add_modifier(ratatui::style::Modifier::UNDERLINED)
         } else {
@@ -1174,6 +1241,7 @@ fn log_view(
     viewport: &std::cell::Cell<usize>,
 ) {
     viewport.set(area.height as usize);
+    mouse::hit(area, Hit::Logs);
     let visible = logs.visible();
     if visible.is_empty() {
         frame.render_widget(
@@ -1363,6 +1431,7 @@ fn deployments_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView)
         return;
     }
     let offset = scroll_offset(view.row, inner.height.saturating_sub(1) as usize);
+    row_hits(inner, rows.len(), offset, Hit::Row);
     let table = Table::new(
         rows.into_iter().skip(offset),
         [
@@ -1407,6 +1476,7 @@ impl ListPanel<'_> {
             return;
         }
         let offset = scroll_offset(row, inner.height.saturating_sub(1) as usize);
+        row_hits(inner, rows.len(), offset, Hit::Row);
         let table = Table::new(rows.into_iter().skip(offset), self.widths)
             .header(self.header.style(theme::muted()))
             .column_spacing(2);
@@ -1916,6 +1986,7 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
             })
         })
         .collect();
+    row_hits(inner, rows.len(), 0, Hit::Server);
     frame.render_widget(
         Table::new(
             rows,
@@ -2015,6 +2086,20 @@ fn confirm(frame: &mut Frame, area: Rect, c: &Confirm) {
         Paragraph::new(Span::styled(" y confirm ", yes)).right_aligned(),
         keys,
     );
+    mouse::hit(
+        Rect::new(keys.x, keys.y, 8, 1),
+        Hit::Key(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
+    mouse::hit(
+        Rect::new(keys.right().saturating_sub(11), keys.y, 11, 1),
+        Hit::Key(
+            crossterm::event::KeyCode::Char('y'),
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
 }
 
 fn palette(frame: &mut Frame, area: Rect, p: &Palette) {
@@ -2057,6 +2142,12 @@ fn palette(frame: &mut Frame, area: Rect, p: &Palette) {
             }),
         );
     }
+    for i in 0..commands.len() {
+        let y = inner.y + 2 + i as u16;
+        if y < inner.bottom() {
+            mouse::hit(Rect::new(inner.x, y, inner.width, 1), Hit::PaletteRow(i));
+        }
+    }
     if commands.is_empty() {
         lines.push(Line::styled(" no command matches", theme::muted()));
     }
@@ -2074,6 +2165,10 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
                 ("ctrl+r", "refresh"),
                 ("esc", "back"),
                 ("q", "quit"),
+                ("click", "select · double-click opens"),
+                ("wheel", "scroll lists and logs"),
+                ("drag", "select text, copied on release"),
+                ("⇧ drag", "terminal's own selection"),
             ],
         ),
         (
@@ -2118,6 +2213,13 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
         .map(|(_, k)| k.len() as u16 + 2)
         .sum::<u16>()
         + 2;
+    mouse::hit(
+        area,
+        Hit::Key(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
     let inner = dialog(
         frame,
         area,

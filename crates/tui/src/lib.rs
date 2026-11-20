@@ -3,6 +3,7 @@
 mod app;
 mod form;
 mod keys;
+mod mouse;
 mod theme;
 mod util;
 mod view;
@@ -10,14 +11,22 @@ mod view;
 use anyhow::Result;
 use app::{App, Msg};
 use client::Client;
-use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind};
+use crossterm::execute;
 use futures_util::StreamExt;
 use std::time::Duration;
 
 /// Run the TUI against `client` until the user quits. `context` is shown in the top bar.
 pub async fn run(client: Client, context: String) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
+    execute!(std::io::stdout(), EnableMouseCapture)?;
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        hook(info);
+    }));
     let result = event_loop(&mut terminal, client, context).await;
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
@@ -33,7 +42,20 @@ async fn event_loop(
     let mut tick = tokio::time::interval(Duration::from_millis(120));
     app.refresh();
     loop {
-        terminal.draw(|frame| view::render(frame, &app))?;
+        let frame = terminal.draw(|frame| view::render(frame, &app))?;
+        if let Some(sel) = app.mouse.selection.as_mut().filter(|s| s.copy_pending) {
+            sel.copy_pending = false;
+            let text = mouse::selected_text(frame.buffer, sel);
+            if !text.trim().is_empty() {
+                mouse::copy_to_clipboard(&text);
+                let n = text.chars().count();
+                app.toast(format!(
+                    "copied {n} character{}",
+                    if n == 1 { "" } else { "s" }
+                ));
+            }
+            app.mouse.selection = None;
+        }
         tokio::select! {
             _ = tick.tick() => app.on_tick(),
             Some(msg) = rx.recv() => {
@@ -43,7 +65,11 @@ async fn event_loop(
                 }
             }
             event = events.next() => match event {
-                Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => keys::handle(&mut app, key),
+                Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                    app.mouse.selection = None;
+                    keys::handle(&mut app, key);
+                }
+                Some(Ok(Event::Mouse(ev))) => mouse::handle(&mut app, ev),
                 Some(Ok(_)) => {}
                 Some(Err(e)) => return Err(e.into()),
                 None => return Ok(()),
