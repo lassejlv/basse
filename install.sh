@@ -207,30 +207,30 @@ github_curl() {
 
 # Downloads a release asset to $2; fails quietly so the caller can fall back to a source build.
 download_asset() {
-	asset="$1"
-	out="$2"
+	dl_name="$1"
+	dl_out="$2"
 	if [ -z "$TOKEN" ]; then
 		if [ "$VERSION" = latest ]; then
-			url="https://github.com/$REPO/releases/latest/download/$asset"
+			dl_url="https://github.com/$REPO/releases/latest/download/$dl_name"
 		else
-			url="https://github.com/$REPO/releases/download/$VERSION/$asset"
+			dl_url="https://github.com/$REPO/releases/download/$VERSION/$dl_name"
 		fi
-		curl -fsSL "$url" -o "$out" 2>/dev/null
+		curl -fsSL "$dl_url" -o "$dl_out" 2>/dev/null
 		return
 	fi
 	# Private repositories only serve assets through the API, by asset id.
 	if [ "$VERSION" = latest ]; then
-		api="https://api.github.com/repos/$REPO/releases/latest"
+		dl_api="https://api.github.com/repos/$REPO/releases/latest"
 	else
-		api="https://api.github.com/repos/$REPO/releases/tags/$VERSION"
+		dl_api="https://api.github.com/repos/$REPO/releases/tags/$VERSION"
 	fi
-	github_curl "$api" -o "$TMP/release.json" 2>/dev/null || return 1
-	asset_url=$(awk -v name="\"$asset\"" '
+	github_curl "$dl_api" -o "$TMP/release.json" 2>/dev/null || return 1
+	dl_asset_url=$(awk -v name="\"$dl_name\"" '
 		/"url": "https:\/\/api.github.com\/repos\/.*\/releases\/assets\// { gsub(/[",]/, "", $2); url = $2 }
 		/"name":/ { n = $2; gsub(/,$/, "", n); if (n == name) { print url; exit } }
 	' "$TMP/release.json")
-	[ -n "$asset_url" ] || return 1
-	github_curl -H "Accept: application/octet-stream" "$asset_url" -o "$out" 2>/dev/null
+	[ -n "$dl_asset_url" ] || return 1
+	github_curl -H "Accept: application/octet-stream" "$dl_asset_url" -o "$dl_out" 2>/dev/null
 }
 
 verify_checksum() {
@@ -269,16 +269,16 @@ install_binaries() {
 }
 
 fetch_release() {
-	asset="$CLI_BIN-$TARGET.tar.gz"
+	archive="$CLI_BIN-$TARGET.tar.gz"
 	step "Downloading $NAME $VERSION for $TARGET"
-	if ! download_asset "$asset" "$TMP/$asset"; then
+	if ! download_asset "$archive" "$TMP/$archive"; then
 		warn "no release download available for $TARGET; building from source instead"
 		return 1
 	fi
-	if download_asset "$asset.sha256" "$TMP/$asset.sha256"; then
-		verify_checksum "$TMP/$asset" "$TMP/$asset.sha256"
+	if download_asset "$archive.sha256" "$TMP/$archive.sha256"; then
+		verify_checksum "$TMP/$archive" "$TMP/$archive.sha256"
 	fi
-	tar -xzf "$TMP/$asset" -C "$TMP/bin"
+	tar -xzf "$TMP/$archive" -C "$TMP/bin"
 }
 
 build_from_source() {
