@@ -1,5 +1,6 @@
 //! Modal forms: one generic model, rendered as the dialog from the Paper design.
 
+use crate::mouse::{self, Hit};
 use crate::theme;
 use common::Id;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -241,6 +242,22 @@ impl Form {
         from
     }
 
+    /// Focus field `i` from a mouse click; a chip click also picks that choice and a toggle flips.
+    pub fn click(&mut self, i: usize, choice: Option<usize>) {
+        if self.busy || !self.fields.get(i).is_some_and(|f| f.visible) {
+            return;
+        }
+        self.focus = i;
+        let field = &mut self.fields[i];
+        match (&field.kind, choice) {
+            (FieldKind::Choice(options), Some(c)) if c < options.len() => field.choice = c,
+            (FieldKind::Toggle, _) => field.on = !field.on,
+            _ => return,
+        }
+        self.error = None;
+        self.refresh();
+    }
+
     fn move_focus(&mut self, step: isize) {
         let n = self.fields.len() as isize;
         let start = (self.focus as isize + step).rem_euclid(n) as usize;
@@ -346,6 +363,10 @@ impl Form {
                 Constraint::Length(hint_w),
             ])
             .areas(Rect::new(inner.x, y, inner.width, 1));
+            mouse::hit(
+                Rect::new(inner.x, y, inner.width, if roomy { 2 } else { 1 }),
+                Hit::FormField(i),
+            );
             let label = if focused {
                 format!("› {}", field.label)
             } else {
@@ -362,7 +383,14 @@ impl Form {
             let value_line = match &field.kind {
                 FieldKind::Choice(options) => {
                     let mut spans = Vec::new();
+                    let mut x = value_a.x;
                     for (j, opt) in options.iter().enumerate() {
+                        let w = opt.chars().count() as u16 + 2;
+                        mouse::hit(
+                            Rect::new(x, y, w, 1).intersection(value_a),
+                            Hit::FormChoice(i, j),
+                        );
+                        x += w + 1;
                         let style = if j == field.choice {
                             if focused {
                                 theme::chip()
@@ -470,6 +498,14 @@ impl Form {
             left.push(Span::styled(format!(" {l}   "), theme::muted()));
         }
         frame.render_widget(Paragraph::new(Line::from(left)), actions);
+        let mut x = actions.x;
+        for (k, l) in [("tab", "next"), ("⇧tab", "prev"), ("esc", "cancel")] {
+            let w = (k.chars().count() + 1 + l.chars().count()) as u16;
+            if let Some((code, mods)) = mouse::key_for_label(k) {
+                mouse::hit(Rect::new(x, actions.y, w, 1), Hit::Key(code, mods));
+            }
+            x += w + 3;
+        }
         let mut right = vec![];
         if let Some(alt) = self.alt_label {
             right.push(Span::styled("ctrl+s", theme::accent()));
@@ -480,7 +516,20 @@ impl Form {
         } else {
             format!(" ⏎ {} ", self.submit_label)
         };
+        let submit_w = submit.chars().count() as u16;
         right.push(Span::styled(submit, theme::chip()));
+        let submit_x = actions.right().saturating_sub(submit_w);
+        mouse::hit(
+            Rect::new(submit_x, actions.y, submit_w, 1),
+            Hit::Key(crossterm::event::KeyCode::Enter, KeyModifiers::NONE),
+        );
+        if let Some(alt) = self.alt_label {
+            let w = (7 + alt.chars().count()) as u16;
+            mouse::hit(
+                Rect::new(submit_x.saturating_sub(w + 3), actions.y, w, 1),
+                Hit::Key(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            );
+        }
         frame.render_widget(Paragraph::new(Line::from(right).right_aligned()), actions);
     }
 }
