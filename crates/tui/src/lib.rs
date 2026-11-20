@@ -14,10 +14,15 @@ mod view;
 use anyhow::Result;
 use app::{App, Msg};
 use client::Client;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind, MouseEventKind,
+};
 use crossterm::execute;
 use futures_util::StreamExt;
 use std::time::Duration;
+use tokio::time::Instant;
+
+const HOVER_FRAME_DELAY: Duration = Duration::from_millis(50);
 
 /// Run the TUI against `client` until the user quits. `context` is shown in the top bar.
 pub async fn run(client: Client, context: String) -> Result<()> {
@@ -45,8 +50,10 @@ async fn event_loop(
     let mut tick = tokio::time::interval(Duration::from_millis(120));
     app.refresh();
     let mut redraw = true;
+    let mut hover_frame = None;
     loop {
         if redraw {
+            hover_frame = None;
             let frame = terminal.draw(|frame| view::render(frame, &app))?;
             if let Some(sel) = app.mouse.selection.take_if(|s| s.copy_pending) {
                 let text = mouse::selected_text(frame.buffer, &sel);
@@ -63,6 +70,7 @@ async fn event_loop(
         redraw = true;
         tokio::select! {
             _ = tick.tick() => app.on_tick(),
+            _ = tokio::time::sleep_until(hover_frame.unwrap_or_else(Instant::now)), if hover_frame.is_some() => {}
             Some(first) = rx.recv() => {
                 let mut next = Some(first);
                 while let Some((epoch, msg)) = next {
@@ -76,6 +84,12 @@ async fn event_loop(
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                     app.mouse.cancel_gesture();
                     keys::handle(&mut app, key);
+                }
+                Some(Ok(Event::Mouse(ev))) if ev.kind == MouseEventKind::Moved => {
+                    if mouse::handle(&mut app, ev) && hover_frame.is_none() {
+                        hover_frame = Some(Instant::now() + HOVER_FRAME_DELAY);
+                    }
+                    redraw = false;
                 }
                 Some(Ok(Event::Mouse(ev))) => redraw = mouse::handle(&mut app, ev),
                 Some(Ok(_)) => {}
