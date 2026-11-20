@@ -265,13 +265,10 @@ impl Form {
             _ => {
                 let field = &mut self.fields[self.focus];
                 match (&field.kind, key.code) {
-                    (FieldKind::Choice(options), KeyCode::Left | KeyCode::Char('h')) => {
+                    (FieldKind::Choice(options), KeyCode::Left) => {
                         field.choice = (field.choice + options.len() - 1) % options.len();
                     }
-                    (
-                        FieldKind::Choice(options),
-                        KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' '),
-                    ) => {
+                    (FieldKind::Choice(options), KeyCode::Right | KeyCode::Char(' ')) => {
                         field.choice = (field.choice + 1) % options.len();
                     }
                     (FieldKind::Toggle, KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right) => {
@@ -304,7 +301,7 @@ impl Form {
         let visible: Vec<&Field> = self.fields.iter().filter(|f| f.visible).collect();
         let roomy = area.height as usize >= visible.len() * 2 + 9;
         let rows_per_field = if roomy { 2 } else { 1 };
-        let width = area.width.saturating_sub(4).min(84);
+        let width = area.width.saturating_sub(4).min(92);
         let height =
             (visible.len() * rows_per_field + 6 + usize::from(self.error.is_some())) as u16;
         let rect = area.centered(
@@ -333,11 +330,16 @@ impl Form {
         let inner = block.inner(rect).inner(ratatui::layout::Margin::new(2, 1));
         frame.render_widget(block, rect);
 
-        let hint_w: u16 = if inner.width >= 70 { 22 } else { 0 };
+        let hint_w: u16 = if inner.width >= 76 { 24 } else { 0 };
         let label_w: u16 = 16;
         let mut y = inner.y;
         for (i, field) in self.fields.iter().enumerate().filter(|(_, f)| f.visible) {
             let focused = i == self.focus;
+            let hint_w = if matches!(field.kind, FieldKind::Choice(_)) {
+                0
+            } else {
+                hint_w
+            };
             let [label_a, value_a, hint_a] = Layout::horizontal([
                 Constraint::Length(label_w),
                 Constraint::Fill(1),

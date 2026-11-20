@@ -202,9 +202,9 @@ struct CreateArgs {
     branch: String,
     #[arg(long, default_value = "Dockerfile", requires = "repo")]
     dockerfile: String,
-    /// Build context inside the repository.
-    #[arg(long, default_value = ".", requires = "repo")]
-    context: String,
+    /// Build context directory inside the repository.
+    #[arg(long = "build-context", default_value = ".", requires = "repo")]
+    build_context: String,
     /// One-click database: postgres, mysql, mariadb, redis or mongo, optionally with :version.
     #[arg(long, group = "source")]
     database: Option<String>,
@@ -312,7 +312,7 @@ async fn main() {
     }
 }
 
-/// A command line the user can copy, like "berth deploy web".
+/// A command line the user can copy, like "<cli> deploy web".
 fn hint(args: &str) -> String {
     paint(format!("{} {args}", brand::CLI_BIN), Tone::Accent)
 }
@@ -951,7 +951,7 @@ async fn create_service(c: &Client, args: CreateArgs) -> Result<()> {
             repo,
             branch: args.branch,
             dockerfile: args.dockerfile,
-            context: args.context,
+            context: args.build_context,
         },
         (None, None, Some(db)) => {
             let (kind, version) = db

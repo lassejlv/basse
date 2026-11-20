@@ -1112,18 +1112,18 @@ impl App {
             ),
             Field::text("repo", "repository")
                 .placeholder("https://github.com/acme/api")
-                .hint("public or ssh url"),
+                .hint("https or ssh url"),
             Field::text("branch", "branch").value("main"),
             Field::text("dockerfile", "dockerfile")
                 .value("Dockerfile")
-                .hint("relative to repo root"),
+                .hint("path in the repo"),
             Field::text("image", "image").placeholder("ghcr.io/acme/web:latest"),
             Field::choice("engine", "engine", engines),
             Field::text("version", "version").hint("image tag"),
             Field::text("name", "name"),
             Field::text("port", "port")
                 .placeholder("3000")
-                .hint("app port in container"),
+                .hint("app listen port"),
             Field::text("domain", "domain")
                 .placeholder("app.example.com")
                 .hint("optional · https"),
@@ -1142,7 +1142,8 @@ impl App {
             "{} / {}",
             project.project.name, env.environment.name
         ))
-        .submit("create & deploy", Some("create only"));
+        .submit("create & deploy", Some("create only"))
+        .focus_on("repo");
         self.overlay = Some(Overlay::Form(form));
     }
 

@@ -258,10 +258,10 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("esc", "back"),
         ],
     };
-    let right = if app.screen == Screen::Overview {
-        right
-    } else {
-        vec![("esc", "back"), ("q", "quit")]
+    let right = match app.screen {
+        Screen::Overview => right,
+        Screen::Deploy => vec![("q", "quit")],
+        _ => vec![("esc", "back"), ("q", "quit")],
     };
     (left, right)
 }
@@ -1221,7 +1221,11 @@ fn logs_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         right.push(Span::styled("errors only · ", theme::accent()));
     }
     right.push(Span::styled(
-        format!("stdout + stderr · {} lines", logs.lines.len()),
+        format!(
+            "stdout + stderr · {} line{}",
+            logs.lines.len(),
+            if logs.lines.len() == 1 { "" } else { "s" }
+        ),
         theme::muted(),
     ));
     let block = panel(
@@ -1800,10 +1804,7 @@ fn deploy(frame: &mut Frame, area: Rect, app: &App) {
             (None, DeploymentStatus::Live) => {
                 Span::styled("live · old container removed", theme::fg(theme::OK))
             }
-            _ => Span::styled(
-                "zero-downtime · old container serves until health passes",
-                theme::muted(),
-            ),
+            _ => Span::styled("old container serves until healthy", theme::muted()),
         };
         frame.render_widget(Paragraph::new(msg), note);
     }
