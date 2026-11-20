@@ -2643,7 +2643,13 @@ fn reveal(frame: &mut Frame, area: Rect, r: &Reveal) {
     );
     frame.render_widget(note, note_a);
     frame.render_widget(Paragraph::new(rule_line(rule.width)), rule);
-    hint_at(frame, keys.x, keys.y, "c", "copy url");
+    hint_at(
+        frame,
+        keys.x,
+        keys.y,
+        "c",
+        &format!("copy {}", r.what.trim_start_matches("the ")),
+    );
     let chip = " ⏎ done ";
     let chip_w = chip.chars().count() as u16;
     frame.render_widget(
