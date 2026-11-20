@@ -8,6 +8,7 @@ use futures_util::StreamExt;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::AbortHandle;
@@ -38,12 +39,22 @@ pub enum Msg {
     FormError(String),
     Toast(String),
     Error(String),
+    Backups(Id, Vec<Backup>),
+    Schedule(Id, BackupSchedule),
+    /// A backup was started or polled.
+    Backup(Box<Backup>),
+    /// A blocking confirm finished: close it and show the outcome.
+    ConfirmDone(Result<String, String>),
+    /// The password was rotated; show the new URL once.
+    Rotated(Box<DatabaseInfo>),
+    /// Progress of a running download, shown as a busy toast.
+    Progress(String),
 }
 
 /// Where to go after a form succeeds.
 pub enum Then {
     Stay,
-    OpenService(Id),
+    OpenService(Id, Tab),
     OpenDeploy(Box<Deployment>),
 }
 
@@ -67,6 +78,8 @@ pub enum Tab {
     Overview,
     Deployments,
     Logs,
+    Database,
+    Backups,
     Env,
     Domains,
     Volumes,
@@ -74,10 +87,12 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [
+    pub const ALL: [Tab; 9] = [
         Tab::Overview,
         Tab::Deployments,
         Tab::Logs,
+        Tab::Database,
+        Tab::Backups,
         Tab::Env,
         Tab::Domains,
         Tab::Volumes,
@@ -89,6 +104,8 @@ impl Tab {
             Tab::Overview => "Overview",
             Tab::Deployments => "Deployments",
             Tab::Logs => "Logs",
+            Tab::Database => "Database",
+            Tab::Backups => "Backups",
             Tab::Env => "Env",
             Tab::Domains => "Domains",
             Tab::Volumes => "Volumes",
@@ -96,8 +113,12 @@ impl Tab {
         }
     }
 
-    pub fn index(self) -> usize {
-        Tab::ALL.iter().position(|t| *t == self).unwrap_or(0)
+    /// Tabs of a service; the database tabs only exist for database services.
+    pub fn of(database: bool) -> Vec<Tab> {
+        Tab::ALL
+            .into_iter()
+            .filter(|t| database || !matches!(t, Tab::Database | Tab::Backups))
+            .collect()
     }
 }
 
@@ -238,6 +259,18 @@ pub struct ServiceView {
     pub log_task: Option<AbortHandle>,
     pub row: usize,
     pub reveal: bool,
+    /// A database service: shows the Database and Backups tabs.
+    pub database: bool,
+}
+
+impl ServiceView {
+    pub fn tabs(&self) -> Vec<Tab> {
+        Tab::of(self.database)
+    }
+
+    pub fn info(&self) -> Option<&DatabaseInfo> {
+        self.detail.as_ref()?.database.as_ref()
+    }
 }
 
 pub struct DeployView {
@@ -261,6 +294,23 @@ pub enum ConfirmAction {
     Rollback(Id),
     CancelDeploy(Id),
     Stop(Id),
+    /// Publish a database service on a host port, or make it internal with `None`.
+    PublicPort(Id, Option<u16>),
+    RotatePassword(Id),
+    RestoreBackup(Id, String),
+    DeleteBackup(Id),
+}
+
+impl ConfirmAction {
+    /// Actions that keep the dialog open with a spinner until the request returns.
+    fn progress(&self) -> Option<&'static str> {
+        match self {
+            ConfirmAction::PublicPort(..) => Some("applying"),
+            ConfirmAction::RotatePassword(_) => Some("rotating"),
+            ConfirmAction::RestoreBackup(..) => Some("restoring"),
+            _ => None,
+        }
+    }
 }
 
 pub struct Confirm {
@@ -268,6 +318,19 @@ pub struct Confirm {
     pub message: String,
     pub danger: bool,
     pub action: ConfirmAction,
+    /// Label on the confirm chip, e.g. `restore`.
+    pub verb: &'static str,
+    /// Set while a blocking action runs.
+    pub busy: Option<(Instant, &'static str)>,
+}
+
+/// A secret shown once, e.g. the URL after a password rotation.
+pub struct Reveal {
+    pub title: String,
+    pub subtitle: String,
+    pub message: String,
+    pub value: String,
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,12 +427,15 @@ pub enum Overlay {
     Form(Form),
     Confirm(Confirm),
     Palette(Palette),
+    Reveal(Reveal),
     Help,
 }
 
 pub struct Toast {
     pub text: String,
     pub error: bool,
+    /// Work in progress: drawn with a spinner instead of a check mark.
+    pub busy: bool,
     pub at: Instant,
 }
 
@@ -385,6 +451,9 @@ pub struct App {
     pub servers: Vec<Server>,
     pub details: HashMap<Id, ServiceDetail>,
     pub stats: HashMap<Id, ServiceStats>,
+    /// Backups of database services, newest first.
+    pub backups: HashMap<Id, Vec<Backup>>,
+    pub schedules: HashMap<Id, BackupSchedule>,
     pub screen: Screen,
     pub overview: OverviewState,
     pub service: Option<ServiceView>,
@@ -413,6 +482,8 @@ impl App {
             servers: Vec::new(),
             details: HashMap::new(),
             stats: HashMap::new(),
+            backups: HashMap::new(),
+            schedules: HashMap::new(),
             screen: Screen::Overview,
             overview: OverviewState::default(),
             service: None,
@@ -459,6 +530,7 @@ impl App {
         self.toast = Some(Toast {
             text: text.into(),
             error: false,
+            busy: false,
             at: Instant::now(),
         });
     }
@@ -467,6 +539,16 @@ impl App {
         self.toast = Some(Toast {
             text: text.into(),
             error: true,
+            busy: false,
+            at: Instant::now(),
+        });
+    }
+
+    fn progress(&mut self, text: impl Into<String>) {
+        self.toast = Some(Toast {
+            text: text.into(),
+            error: false,
+            busy: true,
             at: Instant::now(),
         });
     }
@@ -487,6 +569,27 @@ impl App {
         }
         if self.screen == Screen::Deploy && self.tick.is_multiple_of(4) {
             self.refresh_deployment();
+        }
+        if self.tick.is_multiple_of(8) {
+            self.poll_running_backups();
+        }
+    }
+
+    /// Follow backups that are still running in the open service.
+    fn poll_running_backups(&self) {
+        let Some(view) = self.service.as_ref().filter(|v| v.database) else {
+            return;
+        };
+        for b in self.backups.get(&view.id).into_iter().flatten() {
+            if b.status == BackupStatus::Running {
+                let id = b.id.clone();
+                self.spawn(|c| async move {
+                    match c.backup(&id).await {
+                        Ok(b) => Msg::Backup(Box::new(b)),
+                        Err(e) => Msg::Error(format!("{e:#}")),
+                    }
+                });
+            }
         }
     }
 
@@ -511,14 +614,39 @@ impl App {
         for id in ids {
             self.load_stats(&id);
         }
-        if let Some(id) = self.selected_service().map(|s| s.id.clone()) {
+        if let Some(s) = self.selected_service() {
+            let (id, database) = (s.id.clone(), is_database(s));
             self.load_detail(&id);
+            if database {
+                self.load_backups(&id);
+            }
         }
         if let Some(view) = &self.service {
-            let id = view.id.clone();
+            let (id, database) = (view.id.clone(), view.database);
             self.load_detail(&id);
             self.load_deployments(&id);
+            if database {
+                self.load_backups(&id);
+            }
         }
+    }
+
+    /// Backups and the schedule of a database service.
+    fn load_backups(&self, id: &str) {
+        let id = id.to_string();
+        let sid = id.clone();
+        self.spawn(|c| async move {
+            match c.backups(&id).await {
+                Ok(b) => Msg::Backups(id, b),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
+        self.spawn(|c| async move {
+            match c.backup_schedule(&sid).await {
+                Ok(s) => Msg::Schedule(sid, s),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
     }
 
     fn load_detail(&self, id: &str) {
@@ -590,6 +718,7 @@ impl App {
             }
             Msg::Detail(d) => {
                 if let Some(view) = self.service.as_mut().filter(|v| v.id == d.service.id) {
+                    view.database |= d.database.is_some();
                     view.detail = Some((*d).clone());
                 }
                 self.details.insert(d.service.id.clone(), *d);
@@ -662,7 +791,7 @@ impl App {
                 self.refresh();
                 match then {
                     Then::Stay => {}
-                    Then::OpenService(id) => self.open_service(&id, Tab::Overview),
+                    Then::OpenService(id, tab) => self.open_service(&id, tab),
                     Then::OpenDeploy(d) => self.open_deploy(*d),
                 }
             }
@@ -678,6 +807,87 @@ impl App {
                 self.refresh();
             }
             Msg::Error(e) => self.error(e),
+            Msg::Backups(id, backups) => {
+                if let Some(view) = self.service.as_mut().filter(|v| v.id == id)
+                    && view.tab == Tab::Backups
+                {
+                    view.row = view.row.min(backups.len().saturating_sub(1));
+                }
+                let finished: Vec<Backup> = backups
+                    .iter()
+                    .filter(|b| b.status != BackupStatus::Running && self.was_running(b))
+                    .cloned()
+                    .collect();
+                self.backups.insert(id, backups);
+                for b in &finished {
+                    self.announce(b);
+                }
+            }
+            Msg::Schedule(id, schedule) => {
+                self.schedules.insert(id, schedule);
+            }
+            Msg::Backup(b) => {
+                let finished = b.status != BackupStatus::Running && self.was_running(&b);
+                let list = self.backups.entry(b.service_id.clone()).or_default();
+                match list.iter_mut().find(|x| x.id == b.id) {
+                    Some(slot) => *slot = (*b).clone(),
+                    None => list.insert(0, (*b).clone()),
+                }
+                if finished {
+                    self.announce(&b);
+                }
+            }
+            Msg::ConfirmDone(result) => {
+                if matches!(self.overlay, Some(Overlay::Confirm(_))) {
+                    self.overlay = None;
+                }
+                match result {
+                    Ok(t) => self.toast(t),
+                    Err(e) => self.error(e),
+                }
+                self.refresh();
+            }
+            Msg::Rotated(info) => {
+                self.overlay = Some(Overlay::Reveal(Reveal {
+                    title: "Password rotated".into(),
+                    subtitle: info.host.clone(),
+                    message: format!(
+                        "The password changed. This is the new internal URL; {} on {} already has it.",
+                        crate::database::url_var(info.kind),
+                        info.host
+                    ),
+                    value: info.internal_url.clone(),
+                    note: format!(
+                        "Redeploy the services that connect to {} so they pick it up. It stays masked on the Database tab after you close this.",
+                        info.host
+                    ),
+                }));
+                self.refresh();
+            }
+            Msg::Progress(text) => self.progress(text),
+        }
+    }
+
+    fn was_running(&self, b: &Backup) -> bool {
+        self.backups
+            .get(&b.service_id)
+            .and_then(|list| list.iter().find(|x| x.id == b.id))
+            .is_some_and(|x| x.status == BackupStatus::Running)
+    }
+
+    /// Toast the outcome of a backup that was running.
+    fn announce(&mut self, b: &Backup) {
+        match b.status {
+            BackupStatus::Done => self.toast(format!(
+                "backup done · {} · {}",
+                crate::util::bytes(b.size_bytes),
+                b.file_name
+            )),
+            BackupStatus::Failed => self.error(format!(
+                "backup failed: {}",
+                b.error.as_deref().unwrap_or("see the daemon log")
+            )),
+            BackupStatus::Running => {}
         }
     }
 
@@ -812,6 +1022,9 @@ impl App {
             log_task: None,
             row: 0,
             reveal: false,
+            database: matches!(tab, Tab::Database | Tab::Backups)
+                || self.details.get(id).is_some_and(|d| d.database.is_some())
+                || self.all_services().any(|s| s.id == id && is_database(s)),
         });
         self.load_detail(id);
         self.load_deployments(id);
@@ -986,6 +1199,10 @@ impl App {
             ConfirmAction::Rollback(_) => "",
             ConfirmAction::CancelDeploy(_) => "deployment cancelled",
             ConfirmAction::Stop(_) => "service stopped",
+            ConfirmAction::DeleteBackup(_) => "backup deleted",
+            ConfirmAction::PublicPort(..)
+            | ConfirmAction::RotatePassword(_)
+            | ConfirmAction::RestoreBackup(..) => "",
         }
         .to_string();
         match action {
@@ -1031,7 +1248,69 @@ impl App {
                 self.act(ok, |c| async move { c.cancel_deployment(&id).await })
             }
             ConfirmAction::Stop(id) => self.act(ok, |c| async move { c.stop(&id).await }),
+            ConfirmAction::DeleteBackup(id) => {
+                self.act(ok, |c| async move { c.delete_backup(&id).await })
+            }
+            ConfirmAction::PublicPort(id, port) => self.spawn(|c| async move {
+                let body = UpdateDatabase { public_port: port };
+                let result =
+                    c.update_database(&id, &body)
+                        .await
+                        .map(|info| match info.public_port {
+                            Some(p) => format!("{} is public on :{p}", info.host),
+                            None => format!("{} is internal only again", info.host),
+                        });
+                Msg::ConfirmDone(result.map_err(|e| format!("{e:#}")))
+            }),
+            ConfirmAction::RotatePassword(id) => self.spawn(|c| async move {
+                match c.rotate_database_password(&id).await {
+                    Ok(info) => Msg::Rotated(Box::new(info)),
+                    Err(e) => Msg::ConfirmDone(Err(format!("{e:#}"))),
+                }
+            }),
+            ConfirmAction::RestoreBackup(id, file) => self.spawn(|c| async move {
+                let result = c
+                    .restore_backup(&id)
+                    .await
+                    .map(|_| format!("restored {file}"));
+                Msg::ConfirmDone(result.map_err(|e| format!("{e:#}")))
+            }),
         }
+    }
+
+    /// The confirm dialog was accepted. Blocking actions keep it open with a spinner until
+    /// their request returns; the rest close it at once.
+    pub fn accept_confirm(&mut self) {
+        let Some(Overlay::Confirm(c)) = &mut self.overlay else {
+            return;
+        };
+        if c.busy.is_some() {
+            return;
+        }
+        if let Some(label) = c.action.progress() {
+            c.busy = Some((Instant::now(), label));
+            let action = c.action.clone();
+            return self.confirm(action);
+        }
+        if let Some(Overlay::Confirm(c)) = self.overlay.take() {
+            self.confirm(c.action);
+        }
+    }
+
+    pub fn copy(&mut self, text: &str, what: &str) {
+        crate::mouse::copy_to_clipboard(text);
+        self.toast(format!("copied {what}"));
+    }
+
+    pub fn backup_now(&mut self, id: &str, name: &str) {
+        self.progress(format!("backing up {name}…"));
+        let id = id.to_string();
+        self.spawn(|c| async move {
+            match c.create_backup(&id).await {
+                Ok(b) => Msg::Backup(Box::new(b)),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
     }
 
     pub fn check_server(&mut self, server: &Server) {
@@ -1121,7 +1400,7 @@ impl App {
                 .hint("path in the repo"),
             Field::text("image", "image").placeholder("ghcr.io/acme/web:latest"),
             Field::choice("engine", "engine", engines),
-            Field::text("version", "version").hint("image tag"),
+            Field::text("version", "version").hint("empty = newest"),
             Field::text("name", "name"),
             Field::text("port", "port")
                 .placeholder("3000")
@@ -1314,11 +1593,177 @@ impl App {
         self.overlay = Some(Overlay::Form(form));
     }
 
+    pub fn form_expose(&mut self) {
+        let Some(view) = &self.service else { return };
+        let (Some(info), Some(detail)) = (view.info(), view.detail.as_ref()) else {
+            return;
+        };
+        let name = detail.service.name.clone();
+        let form = Form::new(
+            FormKind::ExposeDatabase {
+                service_id: view.id.clone(),
+                name: name.clone(),
+            },
+            "Expose database",
+            vec![
+                Field::text("port", "port")
+                    .value(crate::database::suggested_public_port(info.port).to_string())
+                    .hint("host port"),
+            ],
+        )
+        .subtitle(name.clone())
+        .submit("continue", None)
+        .warning(vec![
+            format!(
+                "{name} becomes reachable from the internet on {}.",
+                self.server_address(&detail.server)
+            ),
+            "Anyone who finds the port can try the password. Unexpose it when you are done.".into(),
+        ]);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    /// The address a published port is reachable on.
+    pub fn server_address(&self, server: &Server) -> String {
+        match server.kind {
+            ServerKind::Ssh => server.host.clone(),
+            ServerKind::Local => self
+                .info
+                .as_ref()
+                .map(|i| i.public_ip.clone().unwrap_or_else(|| i.hostname.clone())),
+        }
+        .unwrap_or_else(|| server.name.clone())
+    }
+
+    fn submit_expose(&mut self) {
+        let Some(Overlay::Form(form)) = &mut self.overlay else {
+            return;
+        };
+        let FormKind::ExposeDatabase { service_id, name } = form.kind.clone() else {
+            return;
+        };
+        let p = match port(&form.get("port"), true) {
+            Ok(Some(p)) => p,
+            Ok(None) => return,
+            Err(e) => return form.fail(e),
+        };
+        let address = self
+            .service
+            .as_ref()
+            .and_then(|v| v.detail.as_ref())
+            .map(|d| self.server_address(&d.server))
+            .unwrap_or_default();
+        self.overlay = Some(Overlay::Confirm(Confirm {
+            title: "Expose database".into(),
+            message: format!(
+                "Publish {name} on {address}:{p}? It becomes reachable from the internet, and the container restarts once to apply it."
+            ),
+            danger: true,
+            action: ConfirmAction::PublicPort(service_id, Some(p)),
+            verb: "confirm",
+            busy: None,
+        }));
+    }
+
+    pub fn form_schedule(&mut self) {
+        let Some(view) = &self.service else { return };
+        let s = self.schedules.get(&view.id).copied().unwrap_or_default();
+        let name = view
+            .detail
+            .as_ref()
+            .map(|d| d.service.name.clone())
+            .unwrap_or_default();
+        let form = Form::new(
+            FormKind::BackupSchedule {
+                service_id: view.id.clone(),
+            },
+            "Backup schedule",
+            vec![
+                Field::toggle("enabled", "daily", s.enabled).hint("off keeps old backups"),
+                Field::text("hour", "hour (UTC)").value(s.hour_utc.to_string()),
+                Field::text("keep", "keep")
+                    .value(s.keep.to_string())
+                    .hint("scheduled backups"),
+            ],
+        )
+        .subtitle(name)
+        .submit("save", None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    pub fn form_download(&mut self, backup: &Backup) {
+        let form = Form::new(
+            FormKind::DownloadBackup {
+                backup_id: backup.id.clone(),
+                file_name: backup.file_name.clone(),
+            },
+            "Download backup",
+            vec![
+                Field::text("path", "save to")
+                    .value(format!("./{}", backup.file_name))
+                    .hint(format!("{} · gzip", crate::util::bytes(backup.size_bytes))),
+            ],
+        )
+        .subtitle(backup.file_name.clone())
+        .submit("download", None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    fn submit_download(&mut self) {
+        let Some(Overlay::Form(form)) = &mut self.overlay else {
+            return;
+        };
+        let FormKind::DownloadBackup {
+            backup_id,
+            file_name,
+        } = form.kind.clone()
+        else {
+            return;
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let target =
+            crate::database::download_target(&form.raw("path"), &file_name, home.as_deref());
+        if target.exists() {
+            return form.fail(format!("{} already exists", target.display()));
+        }
+        if let Some(dir) = target.parent().filter(|d| !d.as_os_str().is_empty())
+            && !dir.is_dir()
+        {
+            return form.fail(format!("folder {} does not exist", dir.display()));
+        }
+        let total = self
+            .backups
+            .values()
+            .flatten()
+            .find(|b| b.id == backup_id)
+            .map_or(0, |b| b.size_bytes);
+        self.overlay = None;
+        self.progress(format!("downloading {file_name}"));
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let msg = match download(&client, &backup_id, &target, total, &file_name, &tx).await {
+                Ok(n) => Msg::Toast(format!(
+                    "saved {} · {}",
+                    target.display(),
+                    crate::util::bytes(n)
+                )),
+                Err(e) => Msg::Error(format!("download failed: {e:#}")),
+            };
+            let _ = tx.send(msg);
+        });
+    }
+
     /// Validate the open form and send its request.
     pub fn submit_form(&mut self, alt: bool) {
         let Some(Overlay::Form(form)) = &mut self.overlay else {
             return;
         };
+        match form.kind {
+            FormKind::ExposeDatabase { .. } => return self.submit_expose(),
+            FormKind::DownloadBackup { .. } => return self.submit_download(),
+            _ => {}
+        }
         match build_request(form, alt) {
             Ok(req) => {
                 form.busy = true;
@@ -1393,6 +1838,50 @@ impl App {
     }
 }
 
+pub fn is_database(s: &Service) -> bool {
+    matches!(s.source, Source::Database { .. })
+}
+
+/// Stream a backup to `<target>.part`, reporting progress, then move it into place.
+async fn download(
+    client: &Client,
+    id: &str,
+    target: &std::path::Path,
+    total: u64,
+    name: &str,
+    tx: &UnboundedSender<Msg>,
+) -> anyhow::Result<u64> {
+    use tokio::io::AsyncWriteExt;
+    let part = PathBuf::from(format!("{}.part", target.display()));
+    let result = async {
+        let mut stream = client.download_backup(id).await?;
+        let mut file = tokio::fs::File::create(&part).await?;
+        let mut written = 0u64;
+        let mut last = Instant::now();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            file.write_all(&chunk).await?;
+            written += chunk.len() as u64;
+            if last.elapsed() >= Duration::from_millis(200) {
+                last = Instant::now();
+                let _ = tx.send(Msg::Progress(format!(
+                    "downloading {name} · {} of {}",
+                    crate::util::bytes(written),
+                    crate::util::bytes(total)
+                )));
+            }
+        }
+        file.flush().await?;
+        tokio::fs::rename(&part, target).await?;
+        Ok(written)
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&part).await;
+    }
+    result
+}
+
 /// A validated request from a form, ready to send.
 enum Request {
     Project(CreateProject),
@@ -1410,6 +1899,7 @@ enum Request {
         deploy: bool,
     },
     Server(CreateServer),
+    Schedule(Id, BackupSchedule),
 }
 
 impl Request {
@@ -1427,6 +1917,13 @@ impl Request {
                 let deploy = body.deploy;
                 let d = c.create_service(&body).await?;
                 let name = d.service.name.clone();
+                if is_database(&d.service) {
+                    let note = if deploy { " · deploying" } else { "" };
+                    return Ok((
+                        format!("{name} created{note}"),
+                        Then::OpenService(d.service.id, Tab::Database),
+                    ));
+                }
                 if deploy
                     && let Some(first) = c.deployments(&d.service.id, 1).await?.into_iter().next()
                 {
@@ -1435,7 +1932,10 @@ impl Request {
                         Then::OpenDeploy(Box::new(first)),
                     ));
                 }
-                (format!("{name} created"), Then::OpenService(d.service.id))
+                (
+                    format!("{name} created"),
+                    Then::OpenService(d.service.id, Tab::Overview),
+                )
             }
             Request::Update { id, body, deploy } => {
                 c.update_service(&id, &body).await?;
@@ -1471,6 +1971,13 @@ impl Request {
                     _ => "added but unreachable · check ssh access",
                 };
                 (format!("{} {state}", s.name), Then::Stay)
+            }
+            Request::Schedule(id, body) => {
+                let s = c.set_backup_schedule(&id, &body).await?;
+                (
+                    format!("schedule saved · {}", crate::database::schedule_summary(&s)),
+                    Then::Stay,
+                )
             }
         })
     }
@@ -1672,7 +2179,19 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                 port: port(&form.get("port"), false)?.unwrap_or(22),
             })
         }
-        FormKind::EnvVar { .. } => return Err("internal: variable forms submit separately".into()),
+        FormKind::BackupSchedule { service_id } => Request::Schedule(
+            service_id.clone(),
+            crate::database::parse_schedule(
+                form.on("enabled"),
+                &form.get("hour"),
+                &form.get("keep"),
+            )?,
+        ),
+        FormKind::EnvVar { .. }
+        | FormKind::ExposeDatabase { .. }
+        | FormKind::DownloadBackup { .. } => {
+            return Err("internal: this form submits separately".into());
+        }
     })
 }
 

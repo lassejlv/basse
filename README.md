@@ -59,7 +59,9 @@ The mouse works too: click rows, tabs, dialog fields and the key hints in the bo
 | Screen | Keys |
 |---|---|
 | Overview | `↑↓` move, `tab` switch pane, `⏎` open, `n` new service, `N` new project, `E` new environment, `d` deploy, `r` restart, `s` stop or start, `l` logs, `/` filter, `S` servers |
-| Service | `1`–`7` or `tab` switch tabs (Overview, Deployments, Logs, Env, Domains, Volumes, Settings), `a` add, `x` remove, `⏎` edit |
+| Service | `1`–`9` or `tab` switch tabs (Overview, Deployments, Logs, Database, Backups, Env, Domains, Volumes, Settings; Database and Backups only for databases), `a` add, `x` remove, `⏎` edit |
+| Database | `v` reveal the password, `c`/`C` copy the internal or public URL, `p` expose on a server port or make internal again, `R` rotate the password |
+| Backups | `b` back up now, `R` restore, `D` download to a local file, `x` delete, `e` edit the daily schedule |
 | Logs | `f` follow, `/` search, `n`/`N` next or previous match, `e` errors only, `t` timestamps, `w` wrap |
 | Deploy | Live pipeline and build output, `c` cancel, `esc` back (the deploy keeps running) |
 
