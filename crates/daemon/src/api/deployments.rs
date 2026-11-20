@@ -25,15 +25,16 @@ pub async fn list(
     Path(id): Path<String>,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Vec<Deployment>>> {
-    services::record(&state, &id)?;
+    services::record(&state, &id).await?;
     let limit = q.limit.unwrap_or(20).clamp(1, 500);
-    Ok(Json(state.db.deployments(&id, limit)?))
+    Ok(Json(state.db.deployments(&id, limit).await?))
 }
 
-fn find(state: &AppState, id: &str) -> ApiResult<Deployment> {
+async fn find(state: &AppState, id: &str) -> ApiResult<Deployment> {
     state
         .db
-        .deployment(id)?
+        .deployment(id)
+        .await?
         .ok_or_else(|| AppError::not_found("deployment", id))
 }
 
@@ -41,7 +42,7 @@ pub async fn get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Deployment>> {
-    Ok(Json(find(&state, &id)?))
+    Ok(Json(find(&state, &id).await?))
 }
 
 #[derive(Deserialize)]
@@ -55,7 +56,7 @@ pub async fn logs(
     Path(id): Path<String>,
     Query(q): Query<LogsQuery>,
 ) -> ApiResult<Response> {
-    find(&state, &id)?;
+    find(&state, &id).await?;
     if let Some(log) = state.deploys.log(&id) {
         let (history, rx) = log.subscribe();
         drop(log);
@@ -96,6 +97,6 @@ pub async fn rollback(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Deployment>> {
-    let target = find(&state, &id)?;
-    Ok(Json(deploy::rollback(&state, &target)?))
+    let target = find(&state, &id).await?;
+    Ok(Json(deploy::rollback(&state, &target).await?))
 }

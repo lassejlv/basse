@@ -9,7 +9,9 @@ use support::Daemon;
 
 #[tokio::test]
 async fn auth_is_required_and_errors_are_json() {
-    let daemon = Daemon::start().await;
+    let Some(daemon) = Daemon::start().await else {
+        return;
+    };
     let http = reqwest::Client::new();
     let url = format!("{}{API_PREFIX}/projects", daemon.url);
 
@@ -59,7 +61,9 @@ async fn auth_is_required_and_errors_are_json() {
 
 #[tokio::test]
 async fn projects_environments_and_services_crud() {
-    let daemon = Daemon::start().await;
+    let Some(daemon) = Daemon::start().await else {
+        return;
+    };
     let api = daemon.client();
     let http = reqwest::Client::new();
 
@@ -396,7 +400,9 @@ async fn projects_environments_and_services_crud() {
 
 #[tokio::test]
 async fn ssh_servers_can_be_registered_and_local_is_protected() {
-    let daemon = Daemon::start().await;
+    let Some(daemon) = Daemon::start().await else {
+        return;
+    };
     let api = daemon.client();
     let server = api
         .create_server(&CreateServer {
@@ -435,7 +441,9 @@ async fn ssh_servers_can_be_registered_and_local_is_protected() {
 
 #[tokio::test]
 async fn token_rotation_applies_without_restart_and_init_is_guarded() {
-    let daemon = Daemon::start().await;
+    let Some(daemon) = Daemon::start().await else {
+        return;
+    };
     let old = daemon.client();
     old.projects().await.unwrap();
 
@@ -466,4 +474,84 @@ fn serve_refuses_an_uninitialized_data_dir() {
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("is not initialized"));
+}
+
+/// An install from before the Postgres store: `serve` finds the SQLite file, imports it into the
+/// empty store, keeps the file as a backup and records the move in the activity feed.
+#[tokio::test]
+async fn serve_imports_a_sqlite_store_from_v0_1_0() {
+    let Some(empty_store) = support::pg::database_url() else {
+        return;
+    };
+    let mut sqlite = None;
+    let Some(daemon) = Daemon::start_with(|dir| {
+        let path = dir.join(format!("{}.db", common::brand::DIR));
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(include_str!("fixtures/v0.1.0-store.sql"))
+            .unwrap();
+        sqlite = Some(path);
+        vec![(common::brand::env_var("DATABASE_URL"), empty_store)]
+    })
+    .await
+    else {
+        return;
+    };
+    let api = daemon.client();
+
+    let projects = api.projects().await.unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].name, "shop");
+    let services: Vec<Service> = api
+        .tree()
+        .await
+        .unwrap()
+        .projects
+        .into_iter()
+        .flat_map(|p| p.environments)
+        .flat_map(|e| e.services)
+        .collect();
+    let mut names: Vec<_> = services.iter().map(|s| s.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["api", "web"]);
+    let web = services.iter().find(|s| s.name == "web").unwrap();
+    assert_eq!(web.primary_domain.as_deref(), Some("web.example.test"));
+    let deployments = api.deployments(&web.id, 20).await.unwrap();
+    assert_eq!(
+        deployments
+            .iter()
+            .map(|d| (d.number, d.status))
+            .collect::<Vec<_>>(),
+        [
+            (2, DeploymentStatus::Live),
+            (1, DeploymentStatus::Superseded)
+        ]
+    );
+    let detail = api.service(&web.id).await.unwrap();
+    assert_eq!(
+        detail
+            .env
+            .iter()
+            .map(|v| (v.key.as_str(), v.value.as_str()))
+            .collect::<Vec<_>>(),
+        [("GREETING", "hello"), ("EXTRA", "1")]
+    );
+    assert_eq!(detail.volumes.len(), 1);
+
+    let activity = api.activity(50).await.unwrap();
+    assert_eq!(activity.len(), 10);
+    assert_eq!(
+        activity[0].message,
+        "Moved the store from SQLite to Postgres"
+    );
+    assert_eq!(activity[0].id, 10);
+
+    let sqlite = sqlite.unwrap();
+    assert!(!sqlite.exists());
+    let kept: Vec<_> = std::fs::read_dir(daemon.dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|name| name.contains(".db.migrated-") && name.ends_with(".bak"))
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
 }

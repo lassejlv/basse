@@ -16,7 +16,7 @@ use std::time::Duration;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub async fn list(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<Server>>> {
-    Ok(Json(state.db.servers()?))
+    Ok(Json(state.db.servers().await?))
 }
 
 pub async fn create(
@@ -34,7 +34,7 @@ pub async fn create(
     if body.port == 0 {
         bad_request!("port must be between 1 and 65535");
     }
-    if state.db.server_name_taken(&body.name)? {
+    if state.db.server_name_taken(&body.name).await? {
         conflict!("a server named '{}' already exists", body.name);
     }
     let server = Server {
@@ -50,12 +50,14 @@ pub async fn create(
         last_checked_at: None,
         created_at: Utc::now(),
     };
-    state.db.insert_server(&server)?;
-    state.activity(
-        ActivityLevel::Info,
-        format!("Server {} added", server.name),
-        server.host.clone(),
-    );
+    state.db.insert_server(&server).await?;
+    state
+        .activity(
+            ActivityLevel::Info,
+            format!("Server {} added", server.name),
+            server.host.clone(),
+        )
+        .await;
     Ok(Json(server))
 }
 
@@ -63,23 +65,25 @@ pub async fn delete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
-    let server = state.server(&id)?;
+    let server = state.server(&id).await?;
     if server.kind == ServerKind::Local {
         bad_request!("the local server cannot be removed");
     }
-    if state.db.server_in_use(&id)? {
+    if state.db.server_in_use(&id).await? {
         conflict!(
             "server '{}' still runs services; move or delete them first",
             server.name
         );
     }
-    state.db.delete_server(&id)?;
+    state.db.delete_server(&id).await?;
     state.docker.forget(&id);
-    state.activity(
-        ActivityLevel::Info,
-        format!("Server {} removed", server.name),
-        None,
-    );
+    state
+        .activity(
+            ActivityLevel::Info,
+            format!("Server {} removed", server.name),
+            None,
+        )
+        .await;
     Ok(no_content())
 }
 
@@ -87,7 +91,7 @@ pub async fn check(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Server>> {
-    let server = state.server(&id)?;
+    let server = state.server(&id).await?;
     Ok(Json(check_server(&state, server).await?))
 }
 
@@ -97,18 +101,22 @@ pub async fn proxy(
 ) -> ApiResult<Json<Server>> {
     let (server, docker) = state.docker_for(&id).await?;
     if let Err(e) = docker::install_proxy(&docker).await {
-        state.activity(
-            ActivityLevel::Error,
-            format!("Proxy setup on {} failed", server.name),
-            Some(format!("{e:#}")),
-        );
+        state
+            .activity(
+                ActivityLevel::Error,
+                format!("Proxy setup on {} failed", server.name),
+                Some(format!("{e:#}")),
+            )
+            .await;
         return Err(e.into());
     }
-    state.activity(
-        ActivityLevel::Success,
-        format!("Proxy installed on {}", server.name),
-        Some(docker::PROXY_IMAGE.to_string()),
-    );
+    state
+        .activity(
+            ActivityLevel::Success,
+            format!("Proxy installed on {}", server.name),
+            Some(docker::PROXY_IMAGE.to_string()),
+        )
+        .await;
     Ok(Json(check_server(&state, server).await?))
 }
 
@@ -138,6 +146,6 @@ pub async fn check_server(state: &AppState, mut server: Server) -> anyhow::Resul
         }
     }
     server.last_checked_at = Some(Utc::now());
-    state.db.update_server_check(&server)?;
+    state.db.update_server_check(&server).await?;
     Ok(server)
 }

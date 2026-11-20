@@ -10,9 +10,14 @@ mod docker;
 mod error;
 mod host;
 mod services;
+mod sqlite_import;
 mod ssh;
 mod state;
 mod stats;
+mod store;
+#[cfg(test)]
+#[path = "../tests/support/pg.rs"]
+mod testpg;
 
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
@@ -50,6 +55,18 @@ enum Command {
         /// Don't install and supervise the reverse proxy on this machine.
         #[arg(long)]
         no_proxy: bool,
+        /// Keep state in this Postgres instead of running a managed container.
+        #[arg(long)]
+        database_url: Option<String>,
+        /// Port on 127.0.0.1 the managed Postgres container is published on [default: 5439].
+        #[arg(long)]
+        postgres_port: Option<u16>,
+    },
+    /// Import a SQLite store from an older version into the (empty) Postgres store.
+    /// `serve` does this on its own when it finds one in the data directory.
+    MigrateFromSqlite {
+        /// The SQLite file, e.g. /var/lib/<dir>/<dir>.db.
+        path: PathBuf,
     },
     /// Serve the API (the default).
     Serve,
@@ -76,7 +93,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,bollard=warn,hyper=warn".into()),
+                .unwrap_or_else(|_| "info,bollard=warn,hyper=warn,sqlx=warn".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -88,16 +105,23 @@ fn main() -> Result<()> {
             force,
             token_file,
             no_proxy,
-        } => init(
+            database_url,
+            postgres_port,
+        } => tokio::runtime::Runtime::new()?.block_on(init(
             &dirs,
             InitOptions {
                 force,
                 token_file,
                 manage_proxy: !no_proxy,
+                database_url,
+                postgres_port,
             },
             listen,
-        ),
+        )),
         Command::Serve => tokio::runtime::Runtime::new()?.block_on(serve(dirs, listen)),
+        Command::MigrateFromSqlite { path } => {
+            tokio::runtime::Runtime::new()?.block_on(migrate_from_sqlite(&dirs, &path))
+        }
         Command::Token {
             action: TokenAction::Rotate,
         } => rotate_token(&dirs),
@@ -135,9 +159,11 @@ struct InitOptions {
     force: bool,
     token_file: Option<PathBuf>,
     manage_proxy: bool,
+    database_url: Option<String>,
+    postgres_port: Option<u16>,
 }
 
-fn init(dirs: &DataDir, opts: InitOptions, listen: Option<String>) -> Result<()> {
+async fn init(dirs: &DataDir, opts: InitOptions, listen: Option<String>) -> Result<()> {
     if dirs.is_initialized() && !opts.force {
         bail!(
             "{} is already initialized; pass --force to issue a new token",
@@ -158,14 +184,27 @@ fn init(dirs: &DataDir, opts: InitOptions, listen: Option<String>) -> Result<()>
         }
     }
     let token = config::generate_token();
-    let manage_proxy = match Config::load(dirs) {
-        Ok(existing) if opts.force => existing.manage_proxy && opts.manage_proxy,
-        _ => opts.manage_proxy,
+    let existing = Config::load(dirs).ok().filter(|_| opts.force);
+    let manage_proxy = opts.manage_proxy && existing.as_ref().is_none_or(|c| c.manage_proxy);
+    let database_url = opts
+        .database_url
+        .or_else(|| existing.as_ref().and_then(|c| c.database_url.clone()));
+    let postgres = match existing.and_then(|c| c.postgres) {
+        Some(mut managed) => {
+            managed.port = opts.postgres_port.unwrap_or(managed.port);
+            managed
+        }
+        None => config::ManagedPostgres::generate(
+            opts.postgres_port
+                .unwrap_or_else(config::default_postgres_port),
+        ),
     };
-    let config = Config {
+    let mut config = Config {
         token_sha256: hex::encode(config::hash_token(&token)),
         listen: listen.unwrap_or_else(config::default_listen),
         manage_proxy,
+        postgres: database_url.is_none().then_some(postgres),
+        database_url,
     };
     config.save(dirs)?;
     if let Some(path) = &opts.token_file {
@@ -179,8 +218,7 @@ fn init(dirs: &DataDir, opts: InitOptions, listen: Option<String>) -> Result<()>
         .with_context(|| format!("cannot write {}", path.display()))?;
         config::set_mode(path, 0o600)?;
     }
-    let db = Db::open(&dirs.db())?;
-    ensure_local_server(&db)?;
+    open_store(dirs, &mut config).await?;
 
     let port = config
         .listen
@@ -212,8 +250,75 @@ fn init(dirs: &DataDir, opts: InitOptions, listen: Option<String>) -> Result<()>
     Ok(())
 }
 
-fn ensure_local_server(db: &Db) -> Result<()> {
-    if db.local_server()?.is_some() {
+/// Connects to the store, imports a SQLite store left by an older version, and makes sure the
+/// local server exists.
+async fn open_store(dirs: &DataDir, config: &mut Config) -> Result<Db> {
+    let db = store::connect(dirs, config).await?;
+    let sqlite = dirs.db();
+    let imported = sqlite_import::import_if_present(&db, &sqlite)
+        .await
+        .with_context(|| {
+            format!(
+                "cannot import {} into Postgres; the SQLite file was left untouched. \
+                 Fix the cause and restart, or run `{} migrate-from-sqlite {}`",
+                sqlite.display(),
+                brand::DAEMON_BIN,
+                sqlite.display()
+            )
+        })?;
+    if let Some(imported) = imported {
+        record_import(&db, &sqlite, &imported).await?;
+    }
+    ensure_local_server(&db).await?;
+    Ok(db)
+}
+
+async fn record_import(
+    db: &Db,
+    source: &std::path::Path,
+    imported: &sqlite_import::Imported,
+) -> Result<()> {
+    tracing::info!(
+        "imported {} rows from {} into Postgres; the SQLite file is kept as {}",
+        imported.rows,
+        source.display(),
+        imported.backup.display()
+    );
+    db.insert_activity(&common::Activity {
+        id: 0,
+        at: Utc::now(),
+        level: common::ActivityLevel::Success,
+        service_id: None,
+        service_name: None,
+        project_id: None,
+        message: "Moved the store from SQLite to Postgres".into(),
+        detail: Some(format!(
+            "{} rows imported; the SQLite file is kept as {}",
+            imported.rows,
+            imported.backup.display()
+        )),
+    })
+    .await
+}
+
+async fn migrate_from_sqlite(dirs: &DataDir, path: &std::path::Path) -> Result<()> {
+    require_initialized(dirs)?;
+    let mut config = Config::load(dirs)?;
+    let db = store::connect(dirs, &mut config).await?;
+    let imported = sqlite_import::import(&db, path).await?;
+    record_import(&db, path, &imported).await?;
+    ensure_local_server(&db).await?;
+    println!(
+        "Imported {} rows from {}; the file is kept as {}",
+        imported.rows,
+        path.display(),
+        imported.backup.display()
+    );
+    Ok(())
+}
+
+async fn ensure_local_server(db: &Db) -> Result<()> {
+    if db.local_server().await?.is_some() {
         return Ok(());
     }
     db.insert_server(&Server {
@@ -229,6 +334,7 @@ fn ensure_local_server(db: &Db) -> Result<()> {
         last_checked_at: None,
         created_at: Utc::now(),
     })
+    .await
 }
 
 fn rotate_token(dirs: &DataDir) -> Result<()> {
@@ -271,7 +377,7 @@ Requires=docker.service
 ExecStart={exe} --data-dir {data} serve
 Restart=always
 RestartSec=2
-Environment=RUST_LOG=info
+Environment=RUST_LOG=info,sqlx=warn
 
 [Install]
 WantedBy=multi-user.target
@@ -298,20 +404,19 @@ WantedBy=multi-user.target
 
 async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
     require_initialized(&dirs)?;
-    let config = Config::load(&dirs)?;
+    let mut config = Config::load(&dirs)?;
     dirs.create()?;
     if let Ok(entries) = std::fs::read_dir(dirs.builds_dir()) {
         for entry in entries.flatten() {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
-    let db = Db::open(&dirs.db())?;
-    ensure_local_server(&db)?;
-    let interrupted = db.fail_interrupted_deployments()?;
+    let db = open_store(&dirs, &mut config).await?;
+    let interrupted = db.fail_interrupted_deployments().await?;
     if interrupted > 0 {
         tracing::warn!("marked {interrupted} interrupted deployment(s) as failed");
     }
-    let interrupted = db.fail_interrupted_backups()?;
+    let interrupted = db.fail_interrupted_backups().await?;
     if interrupted > 0 {
         tracing::warn!("marked {interrupted} interrupted backup(s) as failed");
     }
@@ -324,7 +429,7 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
         let state = state.clone();
         let manage_proxy = config.manage_proxy;
         async move {
-            for server in state.db.servers().unwrap_or_default() {
+            for server in state.db.servers().await.unwrap_or_default() {
                 let Ok(server) = api::check_server(&state, server).await else {
                     continue;
                 };
@@ -364,11 +469,13 @@ async fn ensure_local_proxy(state: &AppState, server: Server) {
         .await;
         let e = match result {
             Ok(()) => {
-                state.activity(
-                    common::ActivityLevel::Success,
-                    format!("Proxy installed on {}", server.name),
-                    Some(docker::PROXY_IMAGE.to_string()),
-                );
+                state
+                    .activity(
+                        common::ActivityLevel::Success,
+                        format!("Proxy installed on {}", server.name),
+                        Some(docker::PROXY_IMAGE.to_string()),
+                    )
+                    .await;
                 let _ = api::check_server(state, server).await;
                 return;
             }
@@ -376,11 +483,13 @@ async fn ensure_local_proxy(state: &AppState, server: Server) {
         };
         tracing::warn!("proxy setup failed: {e:#}");
         if attempt == ATTEMPTS {
-            state.activity(
-                common::ActivityLevel::Error,
-                format!("Proxy setup on {} failed", server.name),
-                Some(format!("{e:#}")),
-            );
+            state
+                .activity(
+                    common::ActivityLevel::Error,
+                    format!("Proxy setup on {} failed", server.name),
+                    Some(format!("{e:#}")),
+                )
+                .await;
             return;
         }
         tokio::time::sleep(std::time::Duration::from_secs(u64::from(attempt) * 10)).await;

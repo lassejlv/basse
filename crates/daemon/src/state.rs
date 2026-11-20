@@ -90,9 +90,10 @@ impl AppState {
             .into()
     }
 
-    pub fn server(&self, id: &str) -> Result<Server, AppError> {
+    pub async fn server(&self, id: &str) -> Result<Server, AppError> {
         self.db
-            .server(id)?
+            .server(id)
+            .await?
             .ok_or_else(|| AppError::not_found("server", id))
     }
 
@@ -106,13 +107,13 @@ impl AppState {
     }
 
     pub async fn docker_for(&self, server_id: &str) -> Result<(Server, Docker), AppError> {
-        let server = self.server(server_id)?;
+        let server = self.server(server_id).await?;
         let docker = self.docker.get(&server).await?;
         Ok((server, docker))
     }
 
     /// Records an activity row; failures are logged, never propagated.
-    pub fn activity(&self, level: ActivityLevel, message: String, detail: Option<String>) {
+    pub async fn activity(&self, level: ActivityLevel, message: String, detail: Option<String>) {
         self.insert_activity(Activity {
             id: 0,
             at: Utc::now(),
@@ -122,10 +123,11 @@ impl AppState {
             project_id: None,
             message,
             detail,
-        });
+        })
+        .await;
     }
 
-    pub fn project_activity(&self, project_id: &str, level: ActivityLevel, message: String) {
+    pub async fn project_activity(&self, project_id: &str, level: ActivityLevel, message: String) {
         self.insert_activity(Activity {
             id: 0,
             at: Utc::now(),
@@ -135,10 +137,11 @@ impl AppState {
             project_id: Some(project_id.to_string()),
             message,
             detail: None,
-        });
+        })
+        .await;
     }
 
-    pub fn service_activity(
+    pub async fn service_activity(
         &self,
         service: &Service,
         level: ActivityLevel,
@@ -148,6 +151,7 @@ impl AppState {
         let project_id = self
             .db
             .environment(&service.environment_id)
+            .await
             .ok()
             .flatten()
             .map(|e| e.project_id);
@@ -160,11 +164,12 @@ impl AppState {
             project_id,
             message,
             detail,
-        });
+        })
+        .await;
     }
 
-    fn insert_activity(&self, activity: Activity) {
-        if let Err(e) = self.db.insert_activity(&activity) {
+    async fn insert_activity(&self, activity: Activity) {
+        if let Err(e) = self.db.insert_activity(&activity).await {
             tracing::warn!("cannot record activity '{}': {e:#}", activity.message);
         }
     }

@@ -4,6 +4,8 @@
     reason = "shared by several test crates, each using a subset"
 )]
 
+pub mod pg;
+
 use client::Client;
 use std::net::TcpListener;
 use std::path::Path;
@@ -19,10 +21,19 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub async fn start() -> Self {
+    /// Initializes and serves a daemon on its own Postgres database, or `None` when the tests
+    /// must skip because Docker is unavailable.
+    pub async fn start() -> Option<Self> {
+        Self::start_with(|_| Vec::new()).await
+    }
+
+    /// Like `start`, running `prepare` on the data directory between `init` and `serve`;
+    /// `serve` gets the environment variables it returns.
+    pub async fn start_with(prepare: impl FnOnce(&Path) -> Vec<(String, String)>) -> Option<Self> {
+        let database_url = pg::database_url()?;
         let dir = tempfile::tempdir().unwrap();
         let out = daemon_cmd(dir.path())
-            .args(["init", "--no-proxy"])
+            .args(["init", "--no-proxy", "--database-url", &database_url])
             .output()
             .unwrap();
         assert!(
@@ -32,6 +43,7 @@ impl Daemon {
         );
         let stdout = String::from_utf8(out.stdout).unwrap();
         let token = token_from(&stdout);
+        let serve_env = prepare(dir.path());
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -39,6 +51,7 @@ impl Daemon {
             .port();
         let child = daemon_cmd(dir.path())
             .args(["--listen", &format!("127.0.0.1:{port}"), "serve"])
+            .envs(serve_env)
             .stdout(Stdio::null())
             .stderr(if std::env::var_os("DAEMON_LOGS").is_some() {
                 Stdio::inherit()
@@ -58,12 +71,12 @@ impl Daemon {
             assert!(Instant::now() < deadline, "daemon did not come up");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        Self {
+        Some(Self {
             child,
             url,
             token,
             dir,
-        }
+        })
     }
 
     pub fn client(&self) -> Client {
