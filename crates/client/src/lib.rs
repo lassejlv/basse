@@ -1,0 +1,292 @@
+//! Typed client for the daemon API, plus the local store of daemon contexts.
+
+mod config;
+
+pub use config::{Config, Context};
+
+use anyhow::{Context as _, Result, anyhow};
+use common::api::*;
+use common::*;
+use futures_util::{Stream, StreamExt};
+use reqwest::{Method, RequestBuilder, Response, StatusCode};
+use serde::{Serialize, de::DeserializeOwned};
+use std::pin::Pin;
+
+pub type LogStreamBox = Pin<Box<dyn Stream<Item = Result<LogLine>> + Send>>;
+
+#[derive(Clone)]
+pub struct Client {
+    http: reqwest::Client,
+    base: String,
+    token: String,
+}
+
+impl Client {
+    pub fn new(url: &str, token: &str) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .user_agent(format!("{}/{}", brand::CLI_BIN, env!("CARGO_PKG_VERSION")))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()?;
+        Ok(Self {
+            http,
+            base: format!("{}{}", url.trim_end_matches('/'), API_PREFIX),
+            token: token.to_string(),
+        })
+    }
+
+    pub fn from_context(ctx: &Context) -> Result<Self> {
+        Self::new(&ctx.url, &ctx.token)
+    }
+
+    fn req(&self, method: Method, path: &str) -> RequestBuilder {
+        self.http
+            .request(method, format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+    }
+
+    async fn send(rb: RequestBuilder) -> Result<Response> {
+        let res = rb.send().await.map_err(|e| {
+            if e.is_connect() {
+                anyhow!("cannot reach the daemon: {e}")
+            } else {
+                anyhow!(e)
+            }
+        })?;
+        if res.status().is_success() {
+            return Ok(res);
+        }
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        let message = serde_json::from_str::<ApiError>(&body)
+            .map(|e| e.error)
+            .unwrap_or(body);
+        Err(match status {
+            StatusCode::UNAUTHORIZED => anyhow!("unauthorized: the token was rejected"),
+            _ if message.is_empty() => anyhow!("daemon returned {status}"),
+            _ => anyhow!("{message}"),
+        })
+    }
+
+    async fn json<T: DeserializeOwned>(rb: RequestBuilder) -> Result<T> {
+        Self::send(rb)
+            .await?
+            .json()
+            .await
+            .context("unexpected response from the daemon")
+    }
+
+    async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        Self::json(self.req(Method::GET, path)).await
+    }
+
+    async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+        Self::json(self.req(Method::POST, path).json(body)).await
+    }
+
+    async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        Self::json(self.req(Method::POST, path)).await
+    }
+
+    async fn delete(&self, path: &str) -> Result<()> {
+        Self::send(self.req(Method::DELETE, path)).await.map(drop)
+    }
+
+    async fn stream(&self, path: &str) -> Result<LogStreamBox> {
+        let res = Self::send(self.req(Method::GET, path)).await?;
+        let bytes = res.bytes_stream();
+        let lines = futures_util::stream::unfold(
+            (bytes, Vec::<u8>::new(), false),
+            |(mut bytes, mut buf, mut done)| async move {
+                loop {
+                    if let Some(pos) = buf.iter().position(|b| *b == b'\n') {
+                        let line: Vec<u8> = buf.drain(..=pos).collect();
+                        let line = &line[..line.len() - 1];
+                        if line.iter().all(u8::is_ascii_whitespace) {
+                            continue;
+                        }
+                        let item =
+                            serde_json::from_slice::<LogLine>(line).map_err(anyhow::Error::from);
+                        return Some((item, (bytes, buf, done)));
+                    }
+                    if done {
+                        return None;
+                    }
+                    match bytes.next().await {
+                        Some(Ok(chunk)) => buf.extend_from_slice(&chunk),
+                        Some(Err(e)) => return Some((Err(anyhow!(e)), (bytes, buf, true))),
+                        None => {
+                            done = true;
+                            buf.push(b'\n');
+                        }
+                    }
+                }
+            },
+        );
+        Ok(Box::pin(lines))
+    }
+
+    // Daemon
+
+    pub async fn info(&self) -> Result<DaemonInfo> {
+        self.get("/info").await
+    }
+
+    pub async fn tree(&self) -> Result<Tree> {
+        self.get("/tree").await
+    }
+
+    pub async fn activity(&self, limit: usize) -> Result<Vec<Activity>> {
+        self.get(&format!("/activity?limit={limit}")).await
+    }
+
+    // Servers
+
+    pub async fn servers(&self) -> Result<Vec<Server>> {
+        self.get("/servers").await
+    }
+
+    pub async fn create_server(&self, body: &CreateServer) -> Result<Server> {
+        self.post("/servers", body).await
+    }
+
+    pub async fn delete_server(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/servers/{id}")).await
+    }
+
+    pub async fn check_server(&self, id: &str) -> Result<Server> {
+        self.post_empty(&format!("/servers/{id}/check")).await
+    }
+
+    pub async fn setup_proxy(&self, id: &str) -> Result<Server> {
+        self.post_empty(&format!("/servers/{id}/proxy")).await
+    }
+
+    // Projects and environments
+
+    pub async fn projects(&self) -> Result<Vec<Project>> {
+        self.get("/projects").await
+    }
+
+    pub async fn create_project(&self, body: &CreateProject) -> Result<Project> {
+        self.post("/projects", body).await
+    }
+
+    pub async fn delete_project(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/projects/{id}")).await
+    }
+
+    pub async fn create_environment(
+        &self,
+        project_id: &str,
+        body: &CreateEnvironment,
+    ) -> Result<Environment> {
+        self.post(&format!("/projects/{project_id}/environments"), body)
+            .await
+    }
+
+    pub async fn delete_environment(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/environments/{id}")).await
+    }
+
+    // Services
+
+    pub async fn create_service(&self, body: &CreateService) -> Result<ServiceDetail> {
+        self.post("/services", body).await
+    }
+
+    pub async fn service(&self, id: &str) -> Result<ServiceDetail> {
+        self.get(&format!("/services/{id}")).await
+    }
+
+    pub async fn update_service(&self, id: &str, body: &UpdateService) -> Result<ServiceDetail> {
+        Self::json(
+            self.req(Method::PATCH, &format!("/services/{id}"))
+                .json(body),
+        )
+        .await
+    }
+
+    pub async fn delete_service(&self, id: &str, volumes: bool) -> Result<()> {
+        self.delete(&format!("/services/{id}?volumes={volumes}"))
+            .await
+    }
+
+    pub async fn deploy(&self, id: &str, trigger: &str) -> Result<Deployment> {
+        let body = DeployRequest {
+            trigger: Some(trigger.to_string()),
+        };
+        self.post(&format!("/services/{id}/deploy"), &body).await
+    }
+
+    pub async fn restart(&self, id: &str) -> Result<ServiceDetail> {
+        self.post_empty(&format!("/services/{id}/restart")).await
+    }
+
+    pub async fn stop(&self, id: &str) -> Result<ServiceDetail> {
+        self.post_empty(&format!("/services/{id}/stop")).await
+    }
+
+    pub async fn start(&self, id: &str) -> Result<ServiceDetail> {
+        self.post_empty(&format!("/services/{id}/start")).await
+    }
+
+    pub async fn service_logs(&self, id: &str, tail: usize, follow: bool) -> Result<LogStreamBox> {
+        self.stream(&format!("/services/{id}/logs?tail={tail}&follow={follow}"))
+            .await
+    }
+
+    pub async fn service_stats(&self, id: &str) -> Result<ServiceStats> {
+        self.get(&format!("/services/{id}/stats")).await
+    }
+
+    pub async fn set_env(&self, id: &str, vars: &[EnvVar]) -> Result<Vec<EnvVar>> {
+        Self::json(
+            self.req(Method::PUT, &format!("/services/{id}/env"))
+                .json(vars),
+        )
+        .await
+    }
+
+    pub async fn add_domain(&self, service_id: &str, body: &CreateDomain) -> Result<Domain> {
+        self.post(&format!("/services/{service_id}/domains"), body)
+            .await
+    }
+
+    pub async fn delete_domain(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/domains/{id}")).await
+    }
+
+    pub async fn add_volume(&self, service_id: &str, body: &CreateVolume) -> Result<Volume> {
+        self.post(&format!("/services/{service_id}/volumes"), body)
+            .await
+    }
+
+    pub async fn delete_volume(&self, id: &str, purge: bool) -> Result<()> {
+        self.delete(&format!("/volumes/{id}?purge={purge}")).await
+    }
+
+    // Deployments
+
+    pub async fn deployments(&self, service_id: &str, limit: usize) -> Result<Vec<Deployment>> {
+        self.get(&format!("/services/{service_id}/deployments?limit={limit}"))
+            .await
+    }
+
+    pub async fn deployment(&self, id: &str) -> Result<Deployment> {
+        self.get(&format!("/deployments/{id}")).await
+    }
+
+    pub async fn deployment_logs(&self, id: &str, follow: bool) -> Result<LogStreamBox> {
+        self.stream(&format!("/deployments/{id}/logs?follow={follow}"))
+            .await
+    }
+
+    pub async fn cancel_deployment(&self, id: &str) -> Result<Deployment> {
+        self.post_empty(&format!("/deployments/{id}/cancel")).await
+    }
+
+    pub async fn rollback(&self, id: &str) -> Result<Deployment> {
+        self.post_empty(&format!("/deployments/{id}/rollback"))
+            .await
+    }
+}

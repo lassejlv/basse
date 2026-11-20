@@ -1,0 +1,16 @@
+[package]
+name = "common"
+description = "Shared domain types and HTTP API contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
