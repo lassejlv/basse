@@ -1,4 +1,4 @@
-//! Domain types and the HTTP API contract shared by the Berth daemon, client, CLI and TUI.
+//! Domain types and the HTTP API contract shared by the daemon, client, CLI and TUI.
 //!
 //! Every type here is serialized as JSON on the wire. Enums use `snake_case` tags.
 
@@ -7,15 +7,12 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 pub mod api;
+pub mod brand;
 
 /// Default TCP port the daemon's API listens on.
 pub const DEFAULT_PORT: u16 = 7700;
 /// Prefix of every API route.
 pub const API_PREFIX: &str = "/api/v1";
-/// Docker network shared by the proxy and every service that has a domain.
-pub const PROXY_NETWORK: &str = "berth";
-/// Container name of the reverse proxy on each server.
-pub const PROXY_CONTAINER: &str = "berth-proxy";
 
 pub type Id = String;
 pub type Timestamp = DateTime<Utc>;
@@ -23,7 +20,7 @@ pub type Timestamp = DateTime<Utc>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServerKind {
-    /// The machine berthd runs on, reached through the local Docker socket.
+    /// The machine the daemon runs on, reached through the local Docker socket.
     Local,
     /// A remote machine reached over SSH with the daemon's key.
     Ssh,
@@ -93,7 +90,13 @@ pub enum DatabaseKind {
 }
 
 impl DatabaseKind {
-    pub const ALL: [Self; 5] = [Self::Postgres, Self::Mysql, Self::Mariadb, Self::Redis, Self::Mongo];
+    pub const ALL: [Self; 5] = [
+        Self::Postgres,
+        Self::Mysql,
+        Self::Mariadb,
+        Self::Redis,
+        Self::Mongo,
+    ];
 
     pub fn image(self) -> &'static str {
         match self {
@@ -148,7 +151,11 @@ impl std::str::FromStr for DatabaseKind {
         Self::ALL
             .into_iter()
             .find(|k| k.image() == s || (s == "postgresql" && *k == Self::Postgres))
-            .ok_or_else(|| format!("unknown database '{s}', expected one of postgres, mysql, mariadb, redis, mongo"))
+            .ok_or_else(|| {
+                format!(
+                    "unknown database '{s}', expected one of postgres, mysql, mariadb, redis, mongo"
+                )
+            })
     }
 }
 
@@ -301,7 +308,7 @@ pub struct Domain {
 pub struct Volume {
     pub id: Id,
     pub service_id: Id,
-    /// Short name; the Docker volume is `berth-<service id>-<name>`.
+    /// Short name; the Docker volume is `<brand prefix>-<service id>-<name>`.
     pub name: String,
     pub mount_path: String,
     pub created_at: Timestamp,
@@ -431,7 +438,7 @@ pub struct Activity {
 pub enum LogStream {
     Stdout,
     Stderr,
-    /// Lines written by berthd itself, such as deploy step headers.
+    /// Lines written by the daemon itself, such as deploy step headers.
     System,
 }
 
@@ -525,7 +532,9 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     let ok = !name.is_empty()
         && name.len() <= 48
         && name.starts_with(|c: char| c.is_ascii_lowercase())
-        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         && !name.ends_with('-');
     if ok {
         Ok(())
@@ -566,7 +575,10 @@ mod tests {
 
     #[test]
     fn database_kind_parses() {
-        assert_eq!("postgresql".parse::<DatabaseKind>().unwrap(), DatabaseKind::Postgres);
+        assert_eq!(
+            "postgresql".parse::<DatabaseKind>().unwrap(),
+            DatabaseKind::Postgres
+        );
         assert!("oracle".parse::<DatabaseKind>().is_err());
     }
 }

@@ -1,12 +1,12 @@
-//! Typed client for the berthd API, plus the local store of daemon contexts.
+//! Typed client for the daemon API, plus the local store of daemon contexts.
 
 mod config;
 
 pub use config::{Config, Context};
 
 use anyhow::{Context as _, Result, anyhow};
-use berth_core::api::*;
-use berth_core::*;
+use common::api::*;
+use common::*;
 use futures_util::{Stream, StreamExt};
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
@@ -24,7 +24,7 @@ pub struct Client {
 impl Client {
     pub fn new(url: &str, token: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
-            .user_agent(concat!("berth/", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("{}/{}", brand::CLI_BIN, env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(5))
             .build()?;
         Ok(Self {
@@ -47,7 +47,7 @@ impl Client {
     async fn send(rb: RequestBuilder) -> Result<Response> {
         let res = rb.send().await.map_err(|e| {
             if e.is_connect() {
-                anyhow!("cannot reach berthd: {e}")
+                anyhow!("cannot reach the daemon: {e}")
             } else {
                 anyhow!(e)
             }
@@ -62,7 +62,7 @@ impl Client {
             .unwrap_or(body);
         Err(match status {
             StatusCode::UNAUTHORIZED => anyhow!("unauthorized: the token was rejected"),
-            _ if message.is_empty() => anyhow!("berthd returned {status}"),
+            _ if message.is_empty() => anyhow!("daemon returned {status}"),
             _ => anyhow!("{message}"),
         })
     }
@@ -72,7 +72,7 @@ impl Client {
             .await?
             .json()
             .await
-            .context("unexpected response from berthd")
+            .context("unexpected response from the daemon")
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -104,7 +104,8 @@ impl Client {
                         if line.iter().all(u8::is_ascii_whitespace) {
                             continue;
                         }
-                        let item = serde_json::from_slice::<LogLine>(line).map_err(anyhow::Error::from);
+                        let item =
+                            serde_json::from_slice::<LogLine>(line).map_err(anyhow::Error::from);
                         return Some((item, (bytes, buf, done)));
                     }
                     if done {
@@ -174,8 +175,13 @@ impl Client {
         self.delete(&format!("/projects/{id}")).await
     }
 
-    pub async fn create_environment(&self, project_id: &str, body: &CreateEnvironment) -> Result<Environment> {
-        self.post(&format!("/projects/{project_id}/environments"), body).await
+    pub async fn create_environment(
+        &self,
+        project_id: &str,
+        body: &CreateEnvironment,
+    ) -> Result<Environment> {
+        self.post(&format!("/projects/{project_id}/environments"), body)
+            .await
     }
 
     pub async fn delete_environment(&self, id: &str) -> Result<()> {
@@ -193,15 +199,22 @@ impl Client {
     }
 
     pub async fn update_service(&self, id: &str, body: &UpdateService) -> Result<ServiceDetail> {
-        Self::json(self.req(Method::PATCH, &format!("/services/{id}")).json(body)).await
+        Self::json(
+            self.req(Method::PATCH, &format!("/services/{id}"))
+                .json(body),
+        )
+        .await
     }
 
     pub async fn delete_service(&self, id: &str, volumes: bool) -> Result<()> {
-        self.delete(&format!("/services/{id}?volumes={volumes}")).await
+        self.delete(&format!("/services/{id}?volumes={volumes}"))
+            .await
     }
 
     pub async fn deploy(&self, id: &str, trigger: &str) -> Result<Deployment> {
-        let body = DeployRequest { trigger: Some(trigger.to_string()) };
+        let body = DeployRequest {
+            trigger: Some(trigger.to_string()),
+        };
         self.post(&format!("/services/{id}/deploy"), &body).await
     }
 
@@ -218,7 +231,8 @@ impl Client {
     }
 
     pub async fn service_logs(&self, id: &str, tail: usize, follow: bool) -> Result<LogStreamBox> {
-        self.stream(&format!("/services/{id}/logs?tail={tail}&follow={follow}")).await
+        self.stream(&format!("/services/{id}/logs?tail={tail}&follow={follow}"))
+            .await
     }
 
     pub async fn service_stats(&self, id: &str) -> Result<ServiceStats> {
@@ -226,11 +240,16 @@ impl Client {
     }
 
     pub async fn set_env(&self, id: &str, vars: &[EnvVar]) -> Result<Vec<EnvVar>> {
-        Self::json(self.req(Method::PUT, &format!("/services/{id}/env")).json(vars)).await
+        Self::json(
+            self.req(Method::PUT, &format!("/services/{id}/env"))
+                .json(vars),
+        )
+        .await
     }
 
     pub async fn add_domain(&self, service_id: &str, body: &CreateDomain) -> Result<Domain> {
-        self.post(&format!("/services/{service_id}/domains"), body).await
+        self.post(&format!("/services/{service_id}/domains"), body)
+            .await
     }
 
     pub async fn delete_domain(&self, id: &str) -> Result<()> {
@@ -238,7 +257,8 @@ impl Client {
     }
 
     pub async fn add_volume(&self, service_id: &str, body: &CreateVolume) -> Result<Volume> {
-        self.post(&format!("/services/{service_id}/volumes"), body).await
+        self.post(&format!("/services/{service_id}/volumes"), body)
+            .await
     }
 
     pub async fn delete_volume(&self, id: &str, purge: bool) -> Result<()> {
@@ -248,7 +268,8 @@ impl Client {
     // Deployments
 
     pub async fn deployments(&self, service_id: &str, limit: usize) -> Result<Vec<Deployment>> {
-        self.get(&format!("/services/{service_id}/deployments?limit={limit}")).await
+        self.get(&format!("/services/{service_id}/deployments?limit={limit}"))
+            .await
     }
 
     pub async fn deployment(&self, id: &str) -> Result<Deployment> {
@@ -256,7 +277,8 @@ impl Client {
     }
 
     pub async fn deployment_logs(&self, id: &str, follow: bool) -> Result<LogStreamBox> {
-        self.stream(&format!("/deployments/{id}/logs?follow={follow}")).await
+        self.stream(&format!("/deployments/{id}/logs?follow={follow}"))
+            .await
     }
 
     pub async fn cancel_deployment(&self, id: &str) -> Result<Deployment> {
@@ -264,6 +286,7 @@ impl Client {
     }
 
     pub async fn rollback(&self, id: &str) -> Result<Deployment> {
-        self.post_empty(&format!("/deployments/{id}/rollback")).await
+        self.post_empty(&format!("/deployments/{id}/rollback"))
+            .await
     }
 }

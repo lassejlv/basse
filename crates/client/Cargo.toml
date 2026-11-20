@@ -1,12 +1,12 @@
 [package]
-name = "berth-client"
-description = "HTTP client and context store for the Berth daemon API"
+name = "client"
+description = "HTTP client and context store for the daemon API"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-berth-core.workspace = true
+common.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

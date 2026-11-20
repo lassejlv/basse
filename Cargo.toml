@@ -10,8 +10,8 @@ repository = "https://github.com/lassejlv/rust-deploy"
 rust-version = "1.90"
 
 [workspace.dependencies]
-berth-core = { path = "crates/berth-core" }
-berth-client = { path = "crates/berth-client" }
+common = { path = "crates/common" }
+client = { path = "crates/client" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
