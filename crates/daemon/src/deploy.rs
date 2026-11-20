@@ -25,6 +25,8 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(600);
 /// Pause after attaching a container to the proxy so the proxy has loaded its labels (first
 /// deploy, changed domains) before old containers are stopped.
 const PROXY_DRAIN: Duration = Duration::from_secs(2);
+/// Seconds a database gets to shut down before its replacement starts on the same volume.
+const DATABASE_STOP_SECS: i32 = 30;
 
 /// Where the image of a deployment comes from.
 pub enum Plan {
@@ -370,6 +372,7 @@ async fn run(
         current: None,
         service: None,
         docker: None,
+        stopped_previous: None,
     };
     let started = Instant::now();
     let result = job.pipeline(plan).await;
@@ -386,6 +389,8 @@ struct Job {
     current: Option<StepKind>,
     service: Option<Service>,
     docker: Option<Docker>,
+    /// Live container stopped before the new one started; restarted if the deploy fails.
+    stopped_previous: Option<String>,
 }
 
 impl Job {
@@ -394,6 +399,11 @@ impl Job {
         let rec = db
             .service(&self.d.service_id)?
             .context("the service was deleted")?;
+        // Two database servers must never run on one data volume, so databases are replaced
+        // by stopping the live container first instead of overlapping old and new.
+        let previous = rec
+            .live_container
+            .filter(|_| matches!(rec.service.source, Source::Database { .. }));
         let svc = rec.service;
         let env = db
             .environment(&svc.environment_id)?
@@ -458,7 +468,9 @@ impl Job {
         self.set_status(DeploymentStatus::Starting);
 
         let reused = !matches!(plan, Plan::Source);
-        let container = self.start(&docker, &svc, &env, &image, reused).await?;
+        let container = self
+            .start(&docker, &svc, &env, &image, reused, previous)
+            .await?;
         if let Err(e) = self.health(&docker, &server, &svc, &env, &container).await {
             let tail = docker::tail_logs(&docker, &container, 30).await;
             if !tail.is_empty() {
@@ -506,6 +518,16 @@ impl Job {
                     && let Err(e) = docker::remove_container(docker, id).await
                 {
                     tracing::warn!("cannot remove failed container: {e:#}");
+                }
+                if let (Some(docker), Some(previous)) = (&self.docker, self.stopped_previous.take())
+                {
+                    match docker::start_container(docker, &previous).await {
+                        Ok(()) => self.log.system("Restarted the previous container"),
+                        Err(e) => self.log.push(
+                            LogStream::Stderr,
+                            format!("Cannot restart the previous container: {e:#}"),
+                        ),
+                    }
                 }
                 self.d.status = DeploymentStatus::Failed;
                 self.d.error = Some(message.clone());
@@ -688,6 +710,7 @@ impl Job {
         env: &Environment,
         image: &str,
         reused: bool,
+        previous: Option<String>,
     ) -> Result<String> {
         self.begin(StepKind::Start, None);
         if reused && !docker::image_exists(docker, image).await? {
@@ -701,6 +724,15 @@ impl Job {
         let domains = db.domains(&svc.id)?;
         let volumes = db.volumes(&svc.id)?;
         let vars = db.env(&svc.id)?;
+        let published = match (db.public_port(&svc.id)?, svc.port) {
+            (Some(host_port), Some(port)) => {
+                self.log.system(format!(
+                    "Publishing port {port} on the server as {host_port}"
+                ));
+                vec![(format!("{port}/tcp"), host_port)]
+            }
+            _ => Vec::new(),
+        };
 
         let env_net = docker::env_network(&env.id);
         docker::ensure_network(docker, &env_net).await?;
@@ -739,9 +771,15 @@ impl Job {
             binds,
             restart: svc.restart,
             networks,
-            published: Vec::new(),
+            published,
         };
         docker::remove_container(docker, &spec.name).await?;
+        if let Some(previous) = previous {
+            self.log
+                .system("Stopping the previous container: a database cannot share its data volume");
+            docker::stop_container(docker, &previous, DATABASE_STOP_SECS).await?;
+            self.stopped_previous = Some(previous);
+        }
         let id = docker::create_container(docker, &spec).await?;
         self.d.container_id = Some(id.clone());
         self.persist();

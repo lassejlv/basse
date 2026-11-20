@@ -11,7 +11,8 @@ use serde::de::DeserializeOwned;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const MIGRATIONS: &[&str] = &[r"
+const MIGRATIONS: &[&str] = &[
+    r"
 CREATE TABLE servers (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -104,7 +105,34 @@ CREATE TABLE activity (
     message TEXT NOT NULL,
     detail TEXT
 );
-"];
+",
+    r"
+ALTER TABLE services ADD COLUMN public_port INTEGER;
+CREATE TABLE backups (
+    id TEXT PRIMARY KEY,
+    service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+    number INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    storage TEXT NOT NULL DEFAULT 'local',
+    storage_id TEXT,
+    created_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE (service_id, number)
+);
+CREATE INDEX backups_status ON backups(status);
+CREATE TABLE backup_schedules (
+    service_id TEXT PRIMARY KEY REFERENCES services(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL,
+    hour_utc INTEGER NOT NULL,
+    keep INTEGER NOT NULL,
+    last_run_at TEXT
+);
+",
+];
 
 /// A fresh identifier: 12 lowercase alphanumerics starting with a letter.
 pub fn new_id() -> Id {
@@ -130,6 +158,15 @@ pub struct ServiceRecord {
     pub live_container: Option<String>,
     /// Whether any deployment of the service ever failed.
     pub ever_failed: bool,
+}
+
+/// A service's backup schedule plus when the scheduler last started a backup for it.
+#[derive(Debug, Clone)]
+pub struct ScheduleRecord {
+    pub service_id: Id,
+    pub schedule: BackupSchedule,
+    /// Also set when the schedule is enabled, so enabling never triggers a catch-up run.
+    pub last_run_at: Option<Timestamp>,
 }
 
 /// New service with everything inserted alongside it.
@@ -749,6 +786,199 @@ impl Db {
         Ok(interrupted.len())
     }
 
+    // Databases
+
+    pub fn public_port(&self, service_id: &str) -> Result<Option<u16>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT public_port FROM services WHERE id = ?1",
+                [service_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    pub fn set_public_port(&self, service_id: &str, port: Option<u16>) -> Result<()> {
+        self.lock().execute(
+            "UPDATE services SET public_port = ?2 WHERE id = ?1",
+            params![service_id, port],
+        )?;
+        Ok(())
+    }
+
+    /// Whether another service on the same server already publishes `port`.
+    pub fn public_port_taken(&self, server_id: &str, port: u16, except: &str) -> Result<bool> {
+        self.exists(
+            "SELECT 1 FROM services WHERE server_id = ?1 AND public_port = ?2 AND id != ?3",
+            params![server_id, port, except],
+        )
+    }
+
+    // Backups
+
+    /// Inserts a backup, assigning the next per-service number and the file name
+    /// `<created_at>-<number>.<extension>.gz`.
+    pub fn insert_backup(&self, b: &mut Backup, extension: &str) -> Result<()> {
+        self.tx(|tx| {
+            let number: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(number), 0) + 1 FROM backups WHERE service_id = ?1",
+                [&b.service_id],
+                |row| row.get(0),
+            )?;
+            b.file_name = format!(
+                "{}-{number}.{extension}.gz",
+                b.created_at.format("%Y%m%d-%H%M%S")
+            );
+            tx.execute(
+                "INSERT INTO backups (id, service_id, number, status, trigger, file_name, size_bytes, error,
+                                      storage, storage_id, created_at, finished_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    b.id,
+                    b.service_id,
+                    number,
+                    enum_str(&b.status),
+                    enum_str(&b.trigger),
+                    b.file_name,
+                    i64::try_from(b.size_bytes).unwrap_or(i64::MAX),
+                    b.error,
+                    enum_str(&b.storage),
+                    b.storage_id,
+                    b.created_at,
+                    b.finished_at
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn update_backup(&self, b: &Backup) -> Result<()> {
+        self.lock().execute(
+            "UPDATE backups SET status = ?2, size_bytes = ?3, error = ?4, finished_at = ?5 WHERE id = ?1",
+            params![
+                b.id,
+                enum_str(&b.status),
+                i64::try_from(b.size_bytes).unwrap_or(i64::MAX),
+                b.error,
+                b.finished_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn backup(&self, id: &str) -> Result<Option<Backup>> {
+        Ok(self
+            .backup_query("WHERE id = ?1", params![id])?
+            .into_iter()
+            .next())
+    }
+
+    /// Backups of a service, newest first.
+    pub fn backups(&self, service_id: &str) -> Result<Vec<Backup>> {
+        self.backup_query(
+            "WHERE service_id = ?1 ORDER BY number DESC",
+            params![service_id],
+        )
+    }
+
+    fn backup_query(&self, tail: &str, params: impl rusqlite::Params) -> Result<Vec<Backup>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id, service_id, status, trigger, file_name, size_bytes, error, storage, storage_id,
+                    created_at, finished_at FROM backups {tail}"
+        ))?;
+        let rows = stmt.query_map(params, |row| {
+            let size: i64 = row.get(5)?;
+            Ok(Backup {
+                id: row.get(0)?,
+                service_id: row.get(1)?,
+                status: col_enum(row, 2)?,
+                trigger: col_enum(row, 3)?,
+                file_name: row.get(4)?,
+                size_bytes: u64::try_from(size).unwrap_or_default(),
+                error: row.get(6)?,
+                storage: col_enum(row, 7)?,
+                storage_id: row.get(8)?,
+                created_at: row.get(9)?,
+                finished_at: row.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn delete_backup(&self, id: &str) -> Result<()> {
+        self.lock()
+            .execute("DELETE FROM backups WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Fails backups a previous daemon process left running. Returns how many.
+    pub fn fail_interrupted_backups(&self) -> Result<usize> {
+        Ok(self.lock().execute(
+            "UPDATE backups SET status = 'failed', error = 'daemon restarted', finished_at = ?1
+             WHERE status = 'running'",
+            [Utc::now()],
+        )?)
+    }
+
+    /// The service's schedule, or the disabled default when none was saved.
+    pub fn backup_schedule(&self, service_id: &str) -> Result<ScheduleRecord> {
+        Ok(self
+            .schedule_query("WHERE service_id = ?1", [service_id])?
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| ScheduleRecord {
+                service_id: service_id.to_string(),
+                schedule: BackupSchedule::default(),
+                last_run_at: None,
+            }))
+    }
+
+    pub fn enabled_backup_schedules(&self) -> Result<Vec<ScheduleRecord>> {
+        self.schedule_query("WHERE enabled = 1", [])
+    }
+
+    fn schedule_query<P: rusqlite::Params>(
+        &self,
+        tail: &str,
+        params: P,
+    ) -> Result<Vec<ScheduleRecord>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT service_id, enabled, hour_utc, keep, last_run_at FROM backup_schedules {tail}"
+        ))?;
+        let rows = stmt.query_map(params, |row| {
+            Ok(ScheduleRecord {
+                service_id: row.get(0)?,
+                schedule: BackupSchedule {
+                    enabled: row.get(1)?,
+                    hour_utc: row.get(2)?,
+                    keep: row.get(3)?,
+                },
+                last_run_at: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn save_backup_schedule(&self, r: &ScheduleRecord) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO backup_schedules (service_id, enabled, hour_utc, keep, last_run_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (service_id) DO UPDATE SET enabled = ?2, hour_utc = ?3, keep = ?4, last_run_at = ?5",
+            params![
+                r.service_id,
+                r.schedule.enabled,
+                r.schedule.hour_utc,
+                r.schedule.keep,
+                r.last_run_at
+            ],
+        )?;
+        Ok(())
+    }
+
     // Activity
 
     pub fn insert_activity(&self, a: &Activity) -> Result<()> {
@@ -1095,5 +1325,100 @@ mod tests {
         let d = db.deployment(&d.id).unwrap().unwrap();
         assert_eq!(d.status, DeploymentStatus::Failed);
         assert_eq!(d.error.as_deref(), Some("daemon restarted"));
+    }
+
+    /// A database created by the first schema version opens and migrates to the latest one
+    /// with its rows intact.
+    #[test]
+    fn version_one_databases_migrate() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "BEGIN; {} PRAGMA user_version = 1; COMMIT;",
+            MIGRATIONS[0]
+        ))
+        .unwrap();
+        conn.execute(
+            "INSERT INTO servers (id, name, kind, created_at) VALUES ('s', 'local', 'local', ?1)",
+            [Utc::now()],
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        let version: usize = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len());
+        let servers: i64 = conn
+            .query_row("SELECT COUNT(*) FROM servers", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(servers, 1);
+    }
+
+    #[test]
+    fn backups_number_per_service_and_fail_on_restart() {
+        let db = Db::open_in_memory().unwrap();
+        let srv = server(&db);
+        let (_, env) = project(&db);
+        let svc_id = new_id();
+        db.lock()
+            .execute(
+                "INSERT INTO services (id, environment_id, server_id, name, source, restart, created_at)
+                 VALUES (?1, ?2, ?3, 'db', '{\"type\":\"database\",\"kind\":\"redis\",\"version\":\"8-alpine\"}', 'always', ?4)",
+                params![svc_id, env.id, srv.id, Utc::now()],
+            )
+            .unwrap();
+        let backup = || Backup {
+            id: new_id(),
+            service_id: svc_id.clone(),
+            created_at: "2026-11-20T03:00:00Z".parse().unwrap(),
+            size_bytes: 0,
+            status: BackupStatus::Running,
+            trigger: BackupTrigger::Manual,
+            file_name: String::new(),
+            error: None,
+            storage: BackupStorage::Local,
+            storage_id: None,
+            finished_at: None,
+        };
+        let mut first = backup();
+        db.insert_backup(&mut first, "rdb").unwrap();
+        let mut second = backup();
+        db.insert_backup(&mut second, "rdb").unwrap();
+        assert_eq!(first.file_name, "20261120-030000-1.rdb.gz");
+        assert_eq!(second.file_name, "20261120-030000-2.rdb.gz");
+        second.status = BackupStatus::Done;
+        second.size_bytes = 42;
+        db.update_backup(&second).unwrap();
+
+        assert_eq!(db.fail_interrupted_backups().unwrap(), 1);
+        let list = db.backups(&svc_id).unwrap();
+        assert_eq!(list[0].id, second.id);
+        assert_eq!(list[0].size_bytes, 42);
+        assert_eq!(list[1].status, BackupStatus::Failed);
+        assert_eq!(list[1].error.as_deref(), Some("daemon restarted"));
+
+        assert!(!db.backup_schedule(&svc_id).unwrap().schedule.enabled);
+        let record = ScheduleRecord {
+            service_id: svc_id.clone(),
+            schedule: BackupSchedule {
+                enabled: true,
+                hour_utc: 5,
+                keep: 3,
+            },
+            last_run_at: Some(Utc::now()),
+        };
+        db.save_backup_schedule(&record).unwrap();
+        assert_eq!(
+            db.backup_schedule(&svc_id).unwrap().schedule,
+            record.schedule
+        );
+        assert_eq!(db.enabled_backup_schedules().unwrap().len(), 1);
+
+        db.set_public_port(&svc_id, Some(15432)).unwrap();
+        assert_eq!(db.public_port(&svc_id).unwrap(), Some(15432));
+        assert!(db.public_port_taken(&srv.id, 15432, "other").unwrap());
+        assert!(!db.public_port_taken(&srv.id, 15432, &svc_id).unwrap());
+
+        db.delete_service(&svc_id).unwrap();
+        assert!(db.backup(&second.id).unwrap().is_none());
     }
 }

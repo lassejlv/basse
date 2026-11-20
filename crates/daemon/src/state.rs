@@ -1,6 +1,8 @@
 //! Shared application state handed to every handler and background task.
 
+use crate::backup_store::BackupStore;
 use crate::config::{Config, DataDir};
+use crate::database;
 use crate::db::Db;
 use crate::deploy::Deploys;
 use crate::docker::DockerPool;
@@ -9,7 +11,7 @@ use crate::stats::Stats;
 use anyhow::Result;
 use bollard::Docker;
 use chrono::Utc;
-use common::{Activity, ActivityLevel, Server, Service};
+use common::{Activity, ActivityLevel, BackupStorage, Server, Service};
 use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::SystemTime;
@@ -21,6 +23,7 @@ pub struct AppState {
     pub dirs: DataDir,
     pub deploys: Deploys,
     pub stats: Stats,
+    pub db_locks: database::Locks,
     /// Client used for health checks; does not follow redirects so 3xx counts as healthy.
     pub http: reqwest::Client,
     token: TokenStore,
@@ -74,6 +77,7 @@ impl AppState {
             dirs,
             deploys: Deploys::default(),
             stats: Stats::default(),
+            db_locks: database::Locks::default(),
             http,
             token,
         })
@@ -90,6 +94,15 @@ impl AppState {
         self.db
             .server(id)?
             .ok_or_else(|| AppError::not_found("server", id))
+    }
+
+    /// The store backups with this storage live in.
+    pub fn backup_store(&self, storage: BackupStorage) -> BackupStore {
+        match storage {
+            BackupStorage::Local => BackupStore::Local {
+                root: self.dirs.backups_dir(),
+            },
+        }
     }
 
     pub async fn docker_for(&self, server_id: &str) -> Result<(Server, Docker), AppError> {
