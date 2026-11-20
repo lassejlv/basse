@@ -622,6 +622,18 @@ impl Db {
         .await
     }
 
+    /// Service name and number of every unfinished deployment.
+    pub async fn unfinished_deployments(&self) -> Result<Vec<(String, i64)>> {
+        self.fetch(
+            "SELECT s.name, d.number FROM deployments d JOIN services s ON s.id = d.service_id
+             WHERE d.status IN ('queued', 'building', 'starting') ORDER BY d.created_at"
+                .to_string(),
+            &[],
+            |row| Ok((row.try_get(0)?, row.try_get(1)?)),
+        )
+        .await
+    }
+
     async fn deployment_query(&self, tail: &str, binds: &[&str]) -> Result<Vec<Deployment>> {
         self.fetch(
             format!("{DEPLOYMENT_SELECT} {tail}"),

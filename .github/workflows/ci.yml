@@ -19,5 +19,5 @@ jobs:
         env:
           # <ENV_PREFIX>_TEST_REQUIRE_DOCKER, see crates/common/src/brand.rs.
           BASSE_TEST_REQUIRE_DOCKER: "1"
-      - name: Lint install.sh
-        run: shellcheck -s sh install.sh
+      - name: Lint the install scripts
+        run: shellcheck -s sh install.sh uninstall.sh

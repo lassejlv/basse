@@ -1,0 +1,19 @@
+[package]
+name = "release"
+description = "Published releases: version checks, verified downloads and binary replacement"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+reqwest.workspace = true
+sha2 = "0.10"
+hex = "0.4"
+tar = "0.4"
+flate2 = "1"
+
+[lints]
+workspace = true

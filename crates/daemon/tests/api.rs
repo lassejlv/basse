@@ -476,6 +476,58 @@ fn serve_refuses_an_uninitialized_data_dir() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("is not initialized"));
 }
 
+#[tokio::test]
+async fn settings_persist_and_the_api_rotates_the_token() {
+    let Some(daemon) = Daemon::start().await else {
+        return;
+    };
+    let c = daemon.client();
+
+    let s = c
+        .update_settings(&UpdateSettings {
+            public_ip_override: Some("203.0.113.7".into()),
+            manage_proxy: Some(false),
+        })
+        .await
+        .unwrap();
+    assert_eq!(s.public_ip.as_deref(), Some("203.0.113.7"));
+    assert!(!s.manage_proxy);
+    assert_eq!(
+        c.info().await.unwrap().public_ip.as_deref(),
+        Some("203.0.113.7")
+    );
+    let config = std::fs::read_to_string(daemon.dir.path().join("config.toml")).unwrap();
+    assert!(config.contains("public_ip_override = \"203.0.113.7\""));
+    assert!(config.contains("manage_proxy = false"));
+
+    let err = c
+        .update_settings(&UpdateSettings {
+            public_ip_override: Some("not an ip".into()),
+            manage_proxy: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("not an IP address"), "{err}");
+
+    let s = c
+        .update_settings(&UpdateSettings {
+            public_ip_override: Some("auto".into()),
+            manage_proxy: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(s.public_ip_override, None);
+    assert!(!s.manage_proxy, "fields left out keep their value");
+
+    let rotated = c.rotate_token().await.unwrap();
+    assert!(
+        c.info().await.is_err(),
+        "the old token stops working at once"
+    );
+    let c = c.with_token(&rotated.token);
+    assert_eq!(c.settings().await.unwrap().public_ip_override, None);
+}
+
 /// An install from before the Postgres store: `serve` finds the SQLite file, imports it into the
 /// empty store, keeps the file as a backup and records the move in the activity feed.
 #[tokio::test]

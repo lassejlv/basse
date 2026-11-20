@@ -11,10 +11,10 @@ use crate::stats::Stats;
 use anyhow::Result;
 use bollard::Docker;
 use chrono::Utc;
-use common::{Activity, ActivityLevel, BackupStorage, Server, Service};
+use common::{Activity, ActivityLevel, BackupStorage, Server, Service, VersionCheck};
 use std::path::PathBuf;
-use std::sync::RwLock;
-use std::time::SystemTime;
+use std::sync::{Mutex, RwLock};
+use std::time::{Instant, SystemTime};
 use subtle::ConstantTimeEq as _;
 
 pub struct AppState {
@@ -26,46 +26,65 @@ pub struct AppState {
     pub db_locks: database::Locks,
     /// Client used for health checks; does not follow redirects so 3xx counts as healthy.
     pub http: reqwest::Client,
-    token: TokenStore,
+    /// Address the API listens on.
+    pub listen: String,
+    config: ConfigStore,
+    /// Latest release check, kept for an hour.
+    pub latest_release: Mutex<Option<(Instant, VersionCheck)>>,
 }
 
-/// The token hash from `config.toml`, reloaded whenever the file changes so that
-/// `token rotate` takes effect without a restart.
-struct TokenStore {
+/// `config.toml`, reloaded whenever the file changes so that `token rotate` on the command line
+/// takes effect without a restart, and written through `update` by the settings API.
+struct ConfigStore {
     path: PathBuf,
-    cached: RwLock<(Option<SystemTime>, [u8; 32])>,
+    cached: RwLock<(Option<SystemTime>, Config)>,
+    writing: Mutex<()>,
 }
 
-impl TokenStore {
-    fn current(&self) -> [u8; 32] {
-        let mtime = std::fs::metadata(&self.path)
-            .and_then(|m| m.modified())
-            .ok();
+fn mtime(path: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+impl ConfigStore {
+    fn current(&self) -> Config {
+        let mtime = mtime(&self.path);
         {
             let cached = self.cached.read().unwrap_or_else(|p| p.into_inner());
             if cached.0 == mtime {
-                return cached.1;
+                return cached.1.clone();
             }
         }
         let mut cached = self.cached.write().unwrap_or_else(|p| p.into_inner());
-        match Config::load_path(&self.path).and_then(|c| c.token_hash()) {
-            Ok(hash) => *cached = (mtime, hash),
-            Err(e) => tracing::warn!("cannot reload the API token: {e:#}"),
+        match Config::load_path(&self.path).and_then(|c| c.token_hash().map(|_| c)) {
+            Ok(config) => *cached = (mtime, config),
+            Err(e) => tracing::warn!("cannot reload {}: {e:#}", self.path.display()),
         }
-        cached.1
+        cached.1.clone()
+    }
+
+    /// Changes the config on disk and in memory at once, so the next request already sees it.
+    fn update<T>(
+        &self,
+        dirs: &DataDir,
+        change: impl FnOnce(&mut Config) -> Result<T, AppError>,
+    ) -> Result<(Config, T), AppError> {
+        let _writing = self.writing.lock().unwrap_or_else(|p| p.into_inner());
+        let mut config = self.current();
+        let out = change(&mut config)?;
+        config.save(dirs)?;
+        *self.cached.write().unwrap_or_else(|p| p.into_inner()) =
+            (mtime(&self.path), config.clone());
+        Ok((config, out))
     }
 }
 
 impl AppState {
-    pub fn new(db: Db, dirs: DataDir, config: &Config) -> Result<Self> {
-        let token = TokenStore {
-            cached: RwLock::new((
-                std::fs::metadata(dirs.config())
-                    .and_then(|m| m.modified())
-                    .ok(),
-                config.token_hash()?,
-            )),
+    pub fn new(db: Db, dirs: DataDir, config: &Config, listen: String) -> Result<Self> {
+        config.token_hash()?;
+        let config = ConfigStore {
+            cached: RwLock::new((mtime(&dirs.config()), config.clone())),
             path: dirs.config(),
+            writing: Mutex::new(()),
         };
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -79,15 +98,29 @@ impl AppState {
             stats: Stats::default(),
             db_locks: database::Locks::default(),
             http,
-            token,
+            listen,
+            config,
+            latest_release: Mutex::new(None),
         })
+    }
+
+    /// The daemon's `config.toml` as it is now.
+    pub fn config(&self) -> Config {
+        self.config.current()
+    }
+
+    pub fn update_config<T>(
+        &self,
+        change: impl FnOnce(&mut Config) -> Result<T, AppError>,
+    ) -> Result<(Config, T), AppError> {
+        self.config.update(&self.dirs, change)
     }
 
     /// Constant-time comparison of the presented token's hash with the stored one.
     pub fn token_matches(&self, token: &str) -> bool {
-        crate::config::hash_token(token)
-            .ct_eq(&self.token.current())
-            .into()
+        self.config()
+            .token_hash()
+            .is_ok_and(|hash| crate::config::hash_token(token).ct_eq(&hash).into())
     }
 
     pub async fn server(&self, id: &str) -> Result<Server, AppError> {

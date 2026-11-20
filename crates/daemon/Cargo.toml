@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 common.workspace = true
+release.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

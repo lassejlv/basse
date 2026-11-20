@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 common.workspace = true
 client.workspace = true
+release.workspace = true
 tui = { path = "../tui" }
 anyhow.workspace = true
 tokio.workspace = true

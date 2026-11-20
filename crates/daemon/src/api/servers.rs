@@ -1,15 +1,17 @@
 //! Servers: registration, health checks and proxy installation.
 
-use super::{Json, no_content};
+use super::{Json, Query, no_content};
 use crate::db::new_id;
 use crate::docker;
 use crate::error::{ApiResult, AppError, bad_request, conflict};
+use crate::services;
 use crate::state::AppState;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::response::{IntoResponse as _, Response};
 use chrono::Utc;
 use common::api::CreateServer;
 use common::*;
+use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,30 +63,85 @@ pub async fn create(
     Ok(Json(server))
 }
 
+#[derive(Deserialize)]
+pub struct DeleteServerQuery {
+    #[serde(default)]
+    purge: bool,
+    #[serde(default)]
+    volumes: bool,
+}
+
+/// Forgets a server. With `purge`, first deletes the services assigned to it and removes every
+/// container, network and (with `volumes`) volume the daemon created there.
 pub async fn delete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
+    Query(q): Query<DeleteServerQuery>,
+) -> ApiResult<Response> {
     let server = state.server(&id).await?;
     if server.kind == ServerKind::Local {
         bad_request!("the local server cannot be removed");
     }
-    if state.db.server_in_use(&id).await? {
+    if !q.purge && state.db.server_in_use(&id).await? {
         conflict!(
-            "server '{}' still runs services; move or delete them first",
+            "server '{}' still runs services; move or delete them first, or purge it",
             server.name
         );
     }
+    let cleanup = if q.purge {
+        Some(purge(&state, &server, q.volumes).await?)
+    } else {
+        None
+    };
     state.db.delete_server(&id).await?;
     state.docker.forget(&id);
     state
         .activity(
             ActivityLevel::Info,
             format!("Server {} removed", server.name),
-            None,
+            cleanup.as_ref().map(|c| {
+                format!(
+                    "{} containers, {} networks, {} volumes removed",
+                    c.containers, c.networks, c.volumes
+                )
+            }),
         )
         .await;
-    Ok(no_content())
+    Ok(match cleanup {
+        Some(c) => Json(c).into_response(),
+        None => no_content().into_response(),
+    })
+}
+
+async fn purge(state: &Arc<AppState>, server: &Server, volumes: bool) -> ApiResult<ServerCleanup> {
+    let docker = match tokio::time::timeout(CHECK_TIMEOUT, state.docker.get(server)).await {
+        Ok(Ok(docker)) => docker,
+        Ok(Err(e)) => {
+            return Err(AppError::Conflict(format!(
+                "cannot reach {}: {e:#}",
+                server.name
+            )));
+        }
+        Err(_) => {
+            return Err(AppError::Conflict(format!(
+                "cannot reach {}: timed out",
+                server.name
+            )));
+        }
+    };
+    let on_server: Vec<_> = state
+        .db
+        .services()
+        .await?
+        .into_iter()
+        .filter(|rec| rec.service.server_id == server.id)
+        .collect();
+    for rec in &on_server {
+        services::delete(state, rec, volumes).await?;
+    }
+    let mut cleanup = docker::purge(&docker, volumes).await?;
+    cleanup.services = on_server.len();
+    Ok(cleanup)
 }
 
 pub async fn check(
@@ -99,7 +156,13 @@ pub async fn proxy(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Server>> {
-    let (server, docker) = state.docker_for(&id).await?;
+    let server = state.server(&id).await?;
+    Ok(Json(install_proxy(&state, server).await?))
+}
+
+/// Installs or reinstalls the proxy on a server and records the outcome.
+pub async fn install_proxy(state: &AppState, server: Server) -> ApiResult<Server> {
+    let docker = state.docker.get(&server).await?;
     if let Err(e) = docker::install_proxy(&docker).await {
         state
             .activity(
@@ -117,7 +180,50 @@ pub async fn proxy(
             Some(docker::PROXY_IMAGE.to_string()),
         )
         .await;
-    Ok(Json(check_server(&state, server).await?))
+    Ok(check_server(state, server).await?)
+}
+
+/// Installs the proxy on this machine so domains work without a manual step.
+/// Retries a few times because a fresh server may still be pulling images or settling its network.
+pub async fn ensure_local_proxy(state: &AppState, server: Server) {
+    const ATTEMPTS: u32 = 5;
+    for attempt in 1..=ATTEMPTS {
+        tracing::info!(
+            "installing the proxy on {} (attempt {attempt})",
+            server.name
+        );
+        let result = async {
+            let docker = state.docker.get(&server).await?;
+            docker::install_proxy(&docker).await
+        }
+        .await;
+        let e = match result {
+            Ok(()) => {
+                state
+                    .activity(
+                        ActivityLevel::Success,
+                        format!("Proxy installed on {}", server.name),
+                        Some(docker::PROXY_IMAGE.to_string()),
+                    )
+                    .await;
+                let _ = check_server(state, server).await;
+                return;
+            }
+            Err(e) => e,
+        };
+        tracing::warn!("proxy setup failed: {e:#}");
+        if attempt == ATTEMPTS {
+            state
+                .activity(
+                    ActivityLevel::Error,
+                    format!("Proxy setup on {} failed", server.name),
+                    Some(format!("{e:#}")),
+                )
+                .await;
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(u64::from(attempt) * 10)).await;
+    }
 }
 
 /// Pings Docker on the server and stores status, engine version and proxy status.

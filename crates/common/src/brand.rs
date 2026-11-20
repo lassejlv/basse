@@ -18,6 +18,8 @@ pub const DIR: &str = "basse";
 pub const PROXY_NETWORK: &str = "basse";
 /// Container name of the reverse proxy on each server.
 pub const PROXY_CONTAINER: &str = "basse-proxy";
+/// GitHub repository that publishes releases, as `owner/name`.
+pub const REPO: &str = "lassejlv/basse";
 /// Container of the Postgres database the daemon keeps its own state in.
 pub const STORE_CONTAINER: &str = "basse-postgres";
 /// Docker volume holding that database's files.
