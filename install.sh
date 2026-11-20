@@ -389,9 +389,12 @@ wait_for_proxy() {
 login_local_cli() {
 	token="$1"
 	ctx=$(hostname 2>/dev/null || echo local)
-	HOME=/root "$BIN_DIR/$CLI_BIN" login "http://127.0.0.1:$PORT" --token "$token" --name "$ctx" >/dev/null 2>&1 || true
+	# sudo can keep the caller's XDG_CONFIG_HOME; drop it so root's config lands in /root.
+	env -u XDG_CONFIG_HOME -u "${ENV_PREFIX}_CONFIG" HOME=/root \
+		"$BIN_DIR/$CLI_BIN" login "http://127.0.0.1:$PORT" --token "$token" --name "$ctx" >/dev/null 2>&1 || true
 	if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && has sudo; then
-		sudo -u "$SUDO_USER" -H "$BIN_DIR/$CLI_BIN" login "http://127.0.0.1:$PORT" --token "$token" --name "$ctx" >/dev/null 2>&1 || true
+		sudo -u "$SUDO_USER" -H "$BIN_DIR/$CLI_BIN" login "http://127.0.0.1:$PORT" --token "$token" --name "$ctx" >/dev/null 2>&1 ||
+			warn "could not log in the CLI for $SUDO_USER; run '$CLI_BIN login http://127.0.0.1:$PORT --token <token>' as $SUDO_USER"
 	fi
 }
 
