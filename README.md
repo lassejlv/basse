@@ -11,21 +11,43 @@ Self-hosted deploys from the terminal. A control daemon runs on your server and 
 
 ## Install
 
-On the server (needs Docker and git):
+On a fresh Linux server (Ubuntu, Debian, Fedora, RHEL, Alpine, Arch; x86_64 or arm64), run:
 
 ```sh
-cargo install --git https://github.com/lassejlv/rust-deploy daemon
-sudo berthd init            # prints the API token and the login command
-sudo berthd install-service # systemd unit; or run `berthd serve`
+curl -fsSL https://raw.githubusercontent.com/lassejlv/rust-deploy/main/install.sh | sudo sh
 ```
 
-On your machine:
+The script needs no other preparation:
+
+1. It installs curl, git and ssh, then Docker if it's missing (via get.docker.com), and makes sure Docker is running.
+2. It downloads the static `berthd` and `berth` binaries from the latest GitHub release and checks their SHA-256. If there is no release for your platform, it builds them from source.
+3. It initializes `/var/lib/berth`, installs a systemd unit and starts the daemon.
+4. The daemon starts the Caddy reverse proxy on ports 80 and 443 by itself.
+5. It opens ports 80, 443 and 7700 in ufw or firewalld if one of them is active.
+6. It logs in the `berth` CLI for root and for the user who ran sudo.
+7. It prints the API URL, the token and the login command for your laptop.
+
+Running the script again upgrades in place and keeps your data and token. Other options:
 
 ```sh
-cargo install --git https://github.com/lassejlv/rust-deploy cli
+… | sudo sh -s -- --version v0.2.0     # pin a release
+… | sudo sh -s -- --from-source        # build with cargo instead of downloading
+… | sudo sh -s -- --uninstall [--purge]
+```
+
+On your laptop (macOS or Linux), install only the CLI:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/lassejlv/rust-deploy/main/install.sh | sh -s -- --cli
 berth login http://<server-ip>:7700 --token <token>
-berth                        # opens the TUI
+berth
 ```
+
+While the repository is private, raw.githubusercontent.com and release downloads need a token. Pass one with `GITHUB_TOKEN=… sh install.sh` or `--github-token`, and fetch the script itself with `curl -H "Authorization: Bearer $GITHUB_TOKEN" …`.
+
+## Releases
+
+Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds static musl binaries for x86_64 and arm64 Linux (daemon and CLI) plus the macOS CLI. It then installs a server from the fresh archive on a clean runner as a smoke test, and publishes the archives and checksums that `install.sh` downloads.
 
 ## TUI
 

@@ -21,7 +21,10 @@ pub struct Daemon {
 impl Daemon {
     pub async fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let out = daemon_cmd(dir.path()).arg("init").output().unwrap();
+        let out = daemon_cmd(dir.path())
+            .args(["init", "--no-proxy"])
+            .output()
+            .unwrap();
         assert!(
             out.status.success(),
             "init failed: {}",
