@@ -36,6 +36,8 @@ subtle = "2"
 sysinfo = "0.37"
 tokio-stream = { version = "0.1", features = ["sync"] }
 bytes = "1"
+async-compression = { version = "0.4", features = ["tokio", "gzip"] }
+tokio-util = { version = "0.7", features = ["io"] }
 
 [dev-dependencies]
 client.workspace = true
