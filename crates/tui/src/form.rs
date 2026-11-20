@@ -108,6 +108,10 @@ pub enum FormKind {
         service_id: Id,
     },
     AddServer,
+    PublicIp,
+    PurgeServer {
+        server_id: Id,
+    },
     /// Asks for the host port; submitting opens a confirm dialog.
     ExposeDatabase {
         service_id: Id,
@@ -223,6 +227,13 @@ impl Form {
 
     /// Show only the fields that apply to the current choices, and keep defaults in sync.
     fn refresh(&mut self) {
+        if self.kind == FormKind::PublicIp {
+            let fixed = self.choice("mode") == 1;
+            if let Some(ip) = self.field_mut("ip") {
+                ip.visible = fixed;
+            }
+            return;
+        }
         if matches!(self.kind, FormKind::BackupSchedule { .. }) {
             let hint = crate::database::hour_hint(&self.raw("hour"));
             if let Some(hour) = self.field_mut("hour") {

@@ -7,13 +7,15 @@ on:
   push:
     tags: ["v*"]
   pull_request:
-    paths: ["Cargo.toml", "Cargo.lock", "crates/**", ".github/workflows/release.yml", "install.sh"]
+    paths: ["Cargo.toml", "Cargo.lock", "crates/**", ".github/workflows/release.yml", "install.sh", "uninstall.sh"]
   workflow_dispatch:
 
 env:
   # Product names; keep in sync with crates/common/src/brand.rs and install.sh.
   CLI_BIN: basse
   DAEMON_BIN: bassed
+  PREFIX: basse
+  ENV_PREFIX: BASSE
 
 jobs:
   build:
@@ -85,6 +87,66 @@ jobs:
         run: |
           sudo sh ./install.sh --no-firewall
           $CLI_BIN status
+      - name: Upgrade back to the built archive
+        run: |
+          sudo sh ./install.sh --archive "dist/$CLI_BIN-x86_64-unknown-linux-musl.tar.gz" --no-firewall
+          $CLI_BIN status
+      - name: Self-update under systemd from a local release
+        run: |
+          set -eux
+          tag="v$($DAEMON_BIN --version | awk '{print $2}')"
+          mkdir -p "release/download/$tag"
+          cp dist/* "release/download/$tag/"
+          printf '{"tag_name": "%s"}' "$tag" > release/latest
+          (cd release && nohup python3 -m http.server 8899 >/dev/null 2>&1 &)
+          sudo mkdir -p "/etc/systemd/system/$DAEMON_BIN.service.d"
+          printf '[Service]\nEnvironment=%s_RELEASE_URL=http://127.0.0.1:8899\n' "$ENV_PREFIX" |
+            sudo tee "/etc/systemd/system/$DAEMON_BIN.service.d/release.conf"
+          sudo systemctl daemon-reload
+          sudo systemctl restart "$DAEMON_BIN"
+          until curl -fsS http://127.0.0.1:7700/healthz; do sleep 1; done
+          before=$(systemctl show -p MainPID --value "$DAEMON_BIN")
+          $CLI_BIN update --tag "$tag" --force
+          for _ in $(seq 30); do
+            after=$(systemctl show -p MainPID --value "$DAEMON_BIN")
+            [ "$after" != "$before" ] && [ "$after" != 0 ] && break
+            sleep 1
+          done
+          test "$after" != "$before"
+          until curl -fsS http://127.0.0.1:7700/healthz; do sleep 1; done
+          sudo journalctl -u "$DAEMON_BIN" --no-pager | grep "exiting so systemd starts the new version"
+          $CLI_BIN status
+      - name: Deploy an app with a volume
+        run: |
+          $CLI_BIN project create smoke
+          $CLI_BIN service create smoke web --image traefik/whoami --port 80 --volume data:/data
+          docker ps --filter "label=$PREFIX.managed=true"
+      - name: Install and uninstall only the CLI
+        run: |
+          set -eux
+          sh ./install.sh --cli --archive "dist/$CLI_BIN-x86_64-unknown-linux-musl.tar.gz"
+          "$HOME/.local/bin/$CLI_BIN" status
+          test -f "$HOME/.config/$CLI_BIN/config.toml"
+          sh ./uninstall.sh --cli --yes
+          test ! -e "$HOME/.local/bin/$CLI_BIN"
+          test ! -e "$HOME/.config/$CLI_BIN"
+      - name: Uninstall with --purge
+        run: |
+          set -eux
+          sudo sh ./uninstall.sh --purge --yes
+          if systemctl cat "$DAEMON_BIN" >/dev/null 2>&1; then exit 1; fi
+          if curl -fsS http://127.0.0.1:7700/healthz; then exit 1; fi
+          test ! -e "/usr/local/bin/$DAEMON_BIN"
+          test ! -e "/usr/local/bin/$CLI_BIN"
+          test -z "$(docker ps -aq --filter "label=$PREFIX.managed=true")"
+          if docker inspect "$PREFIX-proxy" >/dev/null 2>&1; then exit 1; fi
+          test ! -d "/var/lib/$CLI_BIN"
+          test -n "$(docker volume ls -q --filter "label=$PREFIX.managed=true")"
+      - name: Uninstall with --purge --volumes deletes the app volumes
+        run: |
+          set -eux
+          sudo sh ./uninstall.sh --purge --volumes --yes
+          test -z "$(docker volume ls -q --filter "label=$PREFIX.managed=true")"
       - name: Daemon logs
         if: failure()
         run: sudo journalctl -u "$DAEMON_BIN" --no-pager -n 200 || true

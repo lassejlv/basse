@@ -37,7 +37,7 @@ async fn event_loop(
     client: Client,
     context: String,
 ) -> Result<()> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Msg>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, Msg)>();
     let mut app = App::new(client, context, tx);
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
@@ -59,10 +59,13 @@ async fn event_loop(
         }
         tokio::select! {
             _ = tick.tick() => app.on_tick(),
-            Some(msg) = rx.recv() => {
-                app.apply(msg);
-                while let Ok(msg) = rx.try_recv() {
-                    app.apply(msg);
+            Some(first) = rx.recv() => {
+                let mut next = Some(first);
+                while let Some((epoch, msg)) = next {
+                    if epoch == app.epoch {
+                        app.apply(msg);
+                    }
+                    next = rx.try_recv().ok();
                 }
             }
             event = events.next() => match event {

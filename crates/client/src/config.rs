@@ -58,6 +58,34 @@ impl Config {
         Ok(())
     }
 
+    /// Forgets a saved context. When it was the current one, another becomes current; returns
+    /// the context now current. Only the local copy of the token goes away: the daemon keeps
+    /// accepting it until it is rotated.
+    pub fn forget(&mut self, name: &str) -> Result<Option<String>> {
+        if self.contexts.remove(name).is_none() {
+            bail!(
+                "unknown context '{name}': see `{} context list`",
+                brand::CLI_BIN
+            );
+        }
+        if self.current.as_deref().is_none_or(|c| c == name) {
+            self.current = self.contexts.keys().next().cloned();
+        }
+        Ok(self.current.clone())
+    }
+
+    /// Stores a rotated token in every context that points at `url` with `old` token.
+    pub fn replace_token(&mut self, url: &str, old: &str, new: &str) -> usize {
+        let mut n = 0;
+        for ctx in self.contexts.values_mut() {
+            if ctx.url.trim_end_matches('/') == url.trim_end_matches('/') && ctx.token == old {
+                ctx.token = new.to_string();
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// The context to use: the `<PREFIX>_URL` + `<PREFIX>_TOKEN` env vars win, then an explicit name, then `current`.
     pub fn resolve(&self, name: Option<&str>) -> Result<(String, Context)> {
         if let (Ok(url), Ok(token)) = (
@@ -79,5 +107,50 @@ impl Config {
                 brand::CLI_BIN
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> Config {
+        let ctx = |url: &str| Context {
+            url: url.into(),
+            token: "t".into(),
+        };
+        Config {
+            current: Some("b".into()),
+            contexts: BTreeMap::from([
+                ("a".into(), ctx("http://a")),
+                ("b".into(), ctx("http://b")),
+                ("c".into(), ctx("http://b")),
+            ]),
+        }
+    }
+
+    #[test]
+    fn forgetting_the_current_context_switches_to_another() {
+        let mut c = config();
+        assert_eq!(c.forget("b").unwrap().as_deref(), Some("a"));
+        assert_eq!(c.forget("c").unwrap().as_deref(), Some("a"));
+        assert_eq!(c.forget("a").unwrap(), None);
+        assert!(c.forget("a").is_err());
+    }
+
+    #[test]
+    fn forgetting_another_context_keeps_the_current_one() {
+        let mut c = config();
+        assert_eq!(c.forget("a").unwrap().as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn rotated_tokens_replace_matching_contexts_only() {
+        let mut c = config();
+        c.contexts.get_mut("c").unwrap().token = "other".into();
+        assert_eq!(c.replace_token("http://b", "t", "new"), 1);
+        assert_eq!(c.contexts["b"].token, "new");
+        assert_eq!(c.contexts["c"].token, "other");
+        assert_eq!(c.contexts["a"].token, "t");
     }
 }

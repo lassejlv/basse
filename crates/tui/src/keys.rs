@@ -36,6 +36,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
             app.screen = Screen::Servers;
             return app.refresh();
         }
+        KeyCode::Char(',') if app.screen != Screen::Settings => return app.open_settings(),
         _ => {}
     }
     match app.screen {
@@ -43,6 +44,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         Screen::Service => service(app, key),
         Screen::Deploy => deploy(app, key),
         Screen::Servers => servers(app, key),
+        Screen::Settings => settings(app, key),
     }
 }
 
@@ -112,8 +114,8 @@ fn overlay(app: &mut App, key: KeyEvent) {
         },
         Some(Overlay::Reveal(r)) => match key.code {
             KeyCode::Char('c') => {
-                let value = r.value.clone();
-                app.copy(&value, "the new URL");
+                let (value, what) = (r.value.clone(), r.what);
+                app.copy(&value, what);
             }
             KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => app.overlay = None,
             _ => {}
@@ -166,6 +168,7 @@ pub fn run_command(app: &mut App, cmd: Command) {
             app.screen = Screen::Servers;
             app.refresh();
         }
+        Command::Settings => app.open_settings(),
         Command::AddServer => app.form_server(),
         Command::SetupProxy => match app.local_server().cloned() {
             Some(s) => app.setup_proxy(&s),
@@ -722,6 +725,14 @@ fn servers(app: &mut App, key: KeyEvent) {
                 app.setup_proxy(&s);
             }
         }
+        KeyCode::Char('X') => {
+            if let Some(s) = selected {
+                if s.kind == ServerKind::Local {
+                    return app.error("the local server cannot be removed");
+                }
+                app.form_purge_server(&s);
+            }
+        }
         KeyCode::Char('x') | KeyCode::Delete => {
             if let Some(s) = selected {
                 if s.kind == ServerKind::Local {
@@ -738,6 +749,116 @@ fn servers(app: &mut App, key: KeyEvent) {
                     ConfirmAction::RemoveServer(s.id),
                 );
             }
+        }
+        _ => {}
+    }
+}
+
+fn settings(app: &mut App, key: KeyEvent) {
+    let names = app.settings.context_names();
+    let selected = names.get(app.settings.row).cloned();
+    let Some(s) = app.settings.settings.clone() else {
+        if key.code == KeyCode::Esc {
+            app.close_settings();
+        }
+        return;
+    };
+    match key.code {
+        KeyCode::Esc => app.close_settings(),
+        KeyCode::Up => app.settings.row = app.settings.row.saturating_sub(1),
+        KeyCode::Down => {
+            app.settings.row = (app.settings.row + 1).min(names.len().saturating_sub(1));
+        }
+        KeyCode::Enter => {
+            if let Some(name) = selected {
+                app.switch_context(&name);
+            }
+        }
+        KeyCode::Char('x') | KeyCode::Delete => {
+            let Some(name) = selected else { return };
+            if name == app.context {
+                return app.error("switch to another context before removing this one");
+            }
+            ask(
+                app,
+                "Remove context",
+                format!(
+                    "Forget {name} and its token on this machine? The token keeps working until it is rotated on that daemon."
+                ),
+                true,
+                ConfirmAction::RemoveContext(name),
+            );
+        }
+        KeyCode::Char('u') => {
+            let latest = app
+                .settings
+                .release
+                .as_ref()
+                .filter(|r| r.update_available)
+                .and_then(|r| r.latest.clone());
+            let Some(latest) = latest else {
+                return app.toast(format!("{} {} is up to date", brand::DAEMON_BIN, s.version));
+            };
+            let restart = if s.supervised {
+                "The daemon restarts and this screen reconnects."
+            } else {
+                "systemd does not supervise the daemon, so it restarts itself in place."
+            };
+            ask_to(
+                app,
+                &format!("Update · {} → {latest}", s.version),
+                format!(
+                    "Update {} on {} to {latest}? {restart} Running apps are not touched.",
+                    brand::DAEMON_BIN,
+                    app.context
+                ),
+                false,
+                ConfirmAction::Update {
+                    force: !s.supervised,
+                },
+                "update",
+            );
+        }
+        KeyCode::Char('i') => app.form_public_ip(),
+        KeyCode::Char('m') => {
+            let on = !s.manage_proxy;
+            app.change_settings(
+                common::api::UpdateSettings {
+                    manage_proxy: Some(on),
+                    ..Default::default()
+                },
+                format!("proxy auto-manage {}", if on { "on" } else { "off" }),
+            );
+        }
+        KeyCode::Char('r') => app.restart_proxy(),
+        KeyCode::Char('t') => ask(
+            app,
+            "Rotate API token",
+            format!(
+                "Issue a new token for {}? The old one stops working at once; this machine saves the new one.",
+                app.context
+            ),
+            true,
+            ConfirmAction::RotateToken,
+        ),
+        KeyCode::Char('k') => match &s.ssh_public_key {
+            Some(k) => {
+                let k = k.clone();
+                app.copy(&k, "the ssh key");
+            }
+            None => app.error("the daemon has no ssh key"),
+        },
+        KeyCode::Char('c') => {
+            let message = match s.reclaimable {
+                Some(r) => format!(
+                    "Remove {} old build image{} and the build cache to free about {}? The live and previous image of every service are kept for rollback.",
+                    r.images,
+                    if r.images == 1 { "" } else { "s" },
+                    crate::util::bytes(r.total())
+                ),
+                None => "Remove old build images and the build cache? The live and previous image of every service are kept for rollback.".into(),
+            };
+            ask(app, "Prune images", message, false, ConfirmAction::Prune);
         }
         _ => {}
     }

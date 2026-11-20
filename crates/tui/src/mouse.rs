@@ -29,6 +29,8 @@ pub enum Hit {
     /// A row in the list of the current service tab.
     Row(usize),
     Server(usize),
+    /// A saved context on the Settings screen.
+    Context(usize),
     /// A scrollable log view.
     Logs,
     FormField(usize),
@@ -239,6 +241,12 @@ fn click(app: &mut App, hit: Hit, double: bool) {
             }
         }
         Hit::Server(i) => app.server_row = i,
+        Hit::Context(i) => {
+            app.settings.row = i;
+            if double {
+                press(app, KeyCode::Enter, KeyModifiers::NONE);
+            }
+        }
         Hit::FormField(i) => {
             if let Some(Overlay::Form(form)) = app.overlay.as_mut() {
                 form.click(i, None);

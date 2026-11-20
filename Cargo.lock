@@ -500,7 +500,7 @@ checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
 
 [[package]]
 name = "cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -508,6 +508,7 @@ dependencies = [
  "client",
  "common",
  "futures-util",
+ "release",
  "serde",
  "serde_json",
  "tokio",
@@ -516,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "common",
@@ -560,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
@@ -799,7 +800,7 @@ dependencies = [
 
 [[package]]
 name = "daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -814,6 +815,7 @@ dependencies = [
  "futures-util",
  "hex",
  "rand 0.9.5",
+ "release",
  "reqwest",
  "rusqlite",
  "serde",
@@ -2883,6 +2885,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
 
 [[package]]
+name = "release"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "common",
+ "flate2",
+ "hex",
+ "reqwest",
+ "serde",
+ "sha2 0.10.9",
+ "tar",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4171,7 +4187,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
