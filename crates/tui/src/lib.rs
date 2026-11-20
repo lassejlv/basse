@@ -1,6 +1,7 @@
 //! Full-screen terminal UI for the deploy daemon, built with ratatui.
 
 mod app;
+mod database;
 mod form;
 mod keys;
 mod mouse;

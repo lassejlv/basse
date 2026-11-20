@@ -1,138 +1,17 @@
-//! SQLite storage: schema, migrations and every query the daemon runs.
+//! Postgres storage: the schema lives in `migrations/`; this is every query the daemon runs.
 
 use anyhow::{Context as _, Result};
 use chrono::Utc;
 use common::*;
 use rand::Rng as _;
-use rusqlite::types::Type;
-use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard};
+use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions, PgRow};
+use sqlx::types::Json;
+use sqlx::{AssertSqlSafe, Connection as _, Postgres, Row as _, Transaction};
+use std::time::Duration;
 
-const MIGRATIONS: &[&str] = &[
-    r"
-CREATE TABLE servers (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    kind TEXT NOT NULL,
-    host TEXT,
-    user TEXT,
-    port INTEGER,
-    status TEXT NOT NULL DEFAULT 'unknown',
-    proxy TEXT NOT NULL DEFAULT 'missing',
-    docker_version TEXT,
-    last_checked_at TEXT,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE projects (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE environments (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE (project_id, name)
-);
-CREATE TABLE services (
-    id TEXT PRIMARY KEY,
-    environment_id TEXT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
-    server_id TEXT NOT NULL REFERENCES servers(id),
-    name TEXT NOT NULL,
-    source TEXT NOT NULL,
-    port INTEGER,
-    command TEXT,
-    restart TEXT NOT NULL,
-    health_path TEXT,
-    stopped INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    UNIQUE (environment_id, name)
-);
-CREATE TABLE env_vars (
-    service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
-    position INTEGER NOT NULL,
-    key TEXT NOT NULL,
-    value TEXT NOT NULL,
-    secret INTEGER NOT NULL,
-    PRIMARY KEY (service_id, key)
-);
-CREATE TABLE domains (
-    id TEXT PRIMARY KEY,
-    service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
-    host TEXT NOT NULL UNIQUE,
-    port INTEGER,
-    tls INTEGER NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE volumes (
-    id TEXT PRIMARY KEY,
-    service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    mount_path TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE (service_id, name)
-);
-CREATE TABLE deployments (
-    id TEXT PRIMARY KEY,
-    service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
-    server_id TEXT NOT NULL,
-    number INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    trigger TEXT NOT NULL,
-    commit_sha TEXT,
-    commit_message TEXT,
-    image TEXT,
-    container_id TEXT,
-    steps TEXT NOT NULL,
-    error TEXT,
-    created_at TEXT NOT NULL,
-    finished_at TEXT,
-    UNIQUE (service_id, number)
-);
-CREATE INDEX deployments_status ON deployments(status);
-CREATE TABLE activity (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    at TEXT NOT NULL,
-    level TEXT NOT NULL,
-    service_id TEXT,
-    service_name TEXT,
-    project_id TEXT,
-    message TEXT NOT NULL,
-    detail TEXT
-);
-",
-    r"
-ALTER TABLE services ADD COLUMN public_port INTEGER;
-CREATE TABLE backups (
-    id TEXT PRIMARY KEY,
-    service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
-    number INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    trigger TEXT NOT NULL,
-    file_name TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL DEFAULT 0,
-    error TEXT,
-    storage TEXT NOT NULL DEFAULT 'local',
-    storage_id TEXT,
-    created_at TEXT NOT NULL,
-    finished_at TEXT,
-    UNIQUE (service_id, number)
-);
-CREATE INDEX backups_status ON backups(status);
-CREATE TABLE backup_schedules (
-    service_id TEXT PRIMARY KEY REFERENCES services(id) ON DELETE CASCADE,
-    enabled INTEGER NOT NULL,
-    hour_utc INTEGER NOT NULL,
-    keep INTEGER NOT NULL,
-    last_run_at TEXT
-);
-",
-];
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 
 /// A fresh identifier: 12 lowercase alphanumerics starting with a letter.
 pub fn new_id() -> Id {
@@ -179,236 +58,242 @@ pub struct NewService<'a> {
 
 #[derive(Clone)]
 pub struct Db {
-    conn: Arc<Mutex<Connection>>,
+    pool: PgPool,
 }
 
 impl Db {
-    pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)
-            .with_context(|| format!("cannot open database {}", path.display()))?;
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
-        )?;
-        migrate(&conn)?;
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-        })
+    /// Connects and applies pending migrations.
+    pub async fn connect(url: &str) -> Result<Self> {
+        let options: PgConnectOptions = url.parse().context("invalid database URL")?;
+        let target = format!(
+            "{}:{}/{}",
+            options.get_host(),
+            options.get_port(),
+            options.get_database().unwrap_or_default()
+        );
+        PgConnection::connect_with(&options)
+            .await
+            .with_context(|| format!("cannot connect to the database at {target}"))?
+            .close()
+            .await?;
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect_lazy_with(options);
+        MIGRATOR
+            .run(&pool)
+            .await
+            .context("database migration failed")?;
+        Ok(Self { pool })
     }
 
-    #[cfg(test)]
-    pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        migrate(&conn)?;
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
-        })
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
-    fn lock(&self) -> MutexGuard<'_, Connection> {
-        self.conn
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn tx<T>(&self, f: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<T>) -> Result<T> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let out = f(&tx)?;
-        tx.commit()?;
-        Ok(out)
+    /// Whether nothing was ever stored: no servers, projects or activity.
+    pub async fn is_empty(&self) -> Result<bool> {
+        Ok(sqlx::query_scalar(
+            "SELECT NOT EXISTS (SELECT 1 FROM servers)
+                AND NOT EXISTS (SELECT 1 FROM projects)
+                AND NOT EXISTS (SELECT 1 FROM activity)",
+        )
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     // Servers
 
-    pub fn servers(&self) -> Result<Vec<Server>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(&format!("{SERVER_SELECT} ORDER BY created_at, rowid"))?;
-        let rows = stmt.query_map([], server_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    pub async fn servers(&self) -> Result<Vec<Server>> {
+        self.fetch(
+            format!("{SERVER_SELECT} ORDER BY created_at, seq"),
+            &[],
+            server_from_row,
+        )
+        .await
     }
 
-    pub fn server(&self, id: &str) -> Result<Option<Server>> {
-        let conn = self.lock();
-        Ok(conn
-            .query_row(
-                &format!("{SERVER_SELECT} WHERE id = ?1"),
-                [id],
-                server_from_row,
-            )
-            .optional()?)
+    pub async fn server(&self, id: &str) -> Result<Option<Server>> {
+        self.fetch_one(
+            format!("{SERVER_SELECT} WHERE id = $1"),
+            &[id],
+            server_from_row,
+        )
+        .await
     }
 
-    pub fn local_server(&self) -> Result<Option<Server>> {
-        let conn = self.lock();
-        Ok(conn
-            .query_row(
-                &format!("{SERVER_SELECT} WHERE kind = 'local' ORDER BY created_at LIMIT 1"),
-                [],
-                server_from_row,
-            )
-            .optional()?)
+    pub async fn local_server(&self) -> Result<Option<Server>> {
+        self.fetch_one(
+            format!("{SERVER_SELECT} WHERE kind = 'local' ORDER BY created_at, seq LIMIT 1"),
+            &[],
+            server_from_row,
+        )
+        .await
     }
 
-    pub fn server_name_taken(&self, name: &str) -> Result<bool> {
-        self.exists("SELECT 1 FROM servers WHERE name = ?1", [name])
+    pub async fn server_name_taken(&self, name: &str) -> Result<bool> {
+        self.exists("SELECT 1 FROM servers WHERE name = $1", &[name])
+            .await
     }
 
-    pub fn insert_server(&self, s: &Server) -> Result<()> {
-        self.lock().execute(
-            "INSERT INTO servers (id, name, kind, host, user, port, status, proxy, docker_version, last_checked_at, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                s.id,
-                s.name,
-                enum_str(&s.kind),
-                s.host,
-                s.user,
-                s.port,
-                enum_str(&s.status),
-                enum_str(&s.proxy),
-                s.docker_version,
-                s.last_checked_at,
-                s.created_at
-            ],
-        )?;
+    pub async fn insert_server(&self, s: &Server) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO servers (id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+        )
+        .bind(&s.id)
+        .bind(&s.name)
+        .bind(enum_str(&s.kind))
+        .bind(&s.host)
+        .bind(&s.user)
+        .bind(s.port.map(i32::from))
+        .bind(enum_str(&s.status))
+        .bind(enum_str(&s.proxy))
+        .bind(&s.docker_version)
+        .bind(s.last_checked_at)
+        .bind(s.created_at)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    pub fn update_server_check(&self, s: &Server) -> Result<()> {
-        self.lock().execute(
-            "UPDATE servers SET status = ?2, proxy = ?3, docker_version = ?4, last_checked_at = ?5 WHERE id = ?1",
-            params![
-                s.id,
-                enum_str(&s.status),
-                enum_str(&s.proxy),
-                s.docker_version,
-                s.last_checked_at
-            ],
-        )?;
+    pub async fn update_server_check(&self, s: &Server) -> Result<()> {
+        sqlx::query(
+            "UPDATE servers SET status = $2, proxy = $3, docker_version = $4, last_checked_at = $5 WHERE id = $1",
+        )
+        .bind(&s.id)
+        .bind(enum_str(&s.status))
+        .bind(enum_str(&s.proxy))
+        .bind(&s.docker_version)
+        .bind(s.last_checked_at)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    pub fn server_in_use(&self, id: &str) -> Result<bool> {
-        self.exists("SELECT 1 FROM services WHERE server_id = ?1", [id])
+    pub async fn server_in_use(&self, id: &str) -> Result<bool> {
+        self.exists("SELECT 1 FROM services WHERE server_id = $1", &[id])
+            .await
     }
 
-    pub fn delete_server(&self, id: &str) -> Result<()> {
-        self.lock()
-            .execute("DELETE FROM servers WHERE id = ?1", [id])?;
-        Ok(())
+    pub async fn delete_server(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM servers WHERE id = $1", id).await
     }
 
     // Projects and environments
 
-    pub fn projects(&self) -> Result<Vec<Project>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, name, description, created_at FROM projects ORDER BY created_at, rowid",
-        )?;
-        let rows = stmt.query_map([], project_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    pub async fn projects(&self) -> Result<Vec<Project>> {
+        self.fetch(
+            "SELECT id, name, description, created_at FROM projects ORDER BY created_at, seq"
+                .into(),
+            &[],
+            project_from_row,
+        )
+        .await
     }
 
-    pub fn project(&self, id: &str) -> Result<Option<Project>> {
-        let conn = self.lock();
-        Ok(conn
-            .query_row(
-                "SELECT id, name, description, created_at FROM projects WHERE id = ?1",
-                [id],
-                project_from_row,
-            )
-            .optional()?)
+    pub async fn project(&self, id: &str) -> Result<Option<Project>> {
+        self.fetch_one(
+            "SELECT id, name, description, created_at FROM projects WHERE id = $1".into(),
+            &[id],
+            project_from_row,
+        )
+        .await
     }
 
-    pub fn project_name_taken(&self, name: &str) -> Result<bool> {
-        self.exists("SELECT 1 FROM projects WHERE name = ?1", [name])
+    pub async fn project_name_taken(&self, name: &str) -> Result<bool> {
+        self.exists("SELECT 1 FROM projects WHERE name = $1", &[name])
+            .await
     }
 
     /// Inserts the project and its first environment together.
-    pub fn insert_project(&self, p: &Project, first_env: &Environment) -> Result<()> {
-        self.tx(|tx| {
-            tx.execute(
-                "INSERT INTO projects (id, name, description, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![p.id, p.name, p.description, p.created_at],
-            )?;
-            insert_environment(tx, first_env)
-        })
-    }
-
-    pub fn delete_project(&self, id: &str) -> Result<()> {
-        self.lock()
-            .execute("DELETE FROM projects WHERE id = ?1", [id])?;
-        Ok(())
-    }
-
-    pub fn environments(&self) -> Result<Vec<Environment>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, project_id, name, created_at FROM environments ORDER BY created_at, rowid",
-        )?;
-        let rows = stmt.query_map([], environment_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn environment(&self, id: &str) -> Result<Option<Environment>> {
-        let conn = self.lock();
-        Ok(conn
-            .query_row(
-                "SELECT id, project_id, name, created_at FROM environments WHERE id = ?1",
-                [id],
-                environment_from_row,
-            )
-            .optional()?)
-    }
-
-    pub fn environment_name_taken(&self, project_id: &str, name: &str) -> Result<bool> {
-        self.exists(
-            "SELECT 1 FROM environments WHERE project_id = ?1 AND name = ?2",
-            [project_id, name],
+    pub async fn insert_project(&self, p: &Project, first_env: &Environment) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO projects (id, name, description, created_at) VALUES ($1, $2, $3, $4)",
         )
-    }
-
-    pub fn insert_environment(&self, e: &Environment) -> Result<()> {
-        self.tx(|tx| insert_environment(tx, e))
-    }
-
-    pub fn delete_environment(&self, id: &str) -> Result<()> {
-        self.lock()
-            .execute("DELETE FROM environments WHERE id = ?1", [id])?;
+        .bind(&p.id)
+        .bind(&p.name)
+        .bind(&p.description)
+        .bind(p.created_at)
+        .execute(&mut *tx)
+        .await?;
+        insert_environment(&mut tx, first_env).await?;
+        tx.commit().await?;
         Ok(())
+    }
+
+    pub async fn delete_project(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM projects WHERE id = $1", id).await
+    }
+
+    pub async fn environments(&self) -> Result<Vec<Environment>> {
+        self.fetch(
+            "SELECT id, project_id, name, created_at FROM environments ORDER BY created_at, seq"
+                .into(),
+            &[],
+            environment_from_row,
+        )
+        .await
+    }
+
+    pub async fn environment(&self, id: &str) -> Result<Option<Environment>> {
+        self.fetch_one(
+            "SELECT id, project_id, name, created_at FROM environments WHERE id = $1".into(),
+            &[id],
+            environment_from_row,
+        )
+        .await
+    }
+
+    pub async fn environment_name_taken(&self, project_id: &str, name: &str) -> Result<bool> {
+        self.exists(
+            "SELECT 1 FROM environments WHERE project_id = $1 AND name = $2",
+            &[project_id, name],
+        )
+        .await
+    }
+
+    pub async fn insert_environment(&self, e: &Environment) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        insert_environment(&mut tx, e).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn delete_environment(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM environments WHERE id = $1", id)
+            .await
     }
 
     // Services
 
-    pub fn services(&self) -> Result<Vec<ServiceRecord>> {
-        self.service_query("ORDER BY s.created_at, s.rowid", [])
+    pub async fn services(&self) -> Result<Vec<ServiceRecord>> {
+        self.service_query("ORDER BY s.created_at, s.seq", &[])
+            .await
     }
 
-    pub fn services_in_environment(&self, env_id: &str) -> Result<Vec<ServiceRecord>> {
+    pub async fn services_in_environment(&self, env_id: &str) -> Result<Vec<ServiceRecord>> {
         self.service_query(
-            "WHERE s.environment_id = ?1 ORDER BY s.created_at",
-            [env_id],
+            "WHERE s.environment_id = $1 ORDER BY s.created_at, s.seq",
+            &[env_id],
         )
+        .await
     }
 
-    pub fn service(&self, id: &str) -> Result<Option<ServiceRecord>> {
+    pub async fn service(&self, id: &str) -> Result<Option<ServiceRecord>> {
         Ok(self
-            .service_query("WHERE s.id = ?1", [id])?
+            .service_query("WHERE s.id = $1", &[id])
+            .await?
             .into_iter()
             .next())
     }
 
-    fn service_query<P: rusqlite::Params>(
-        &self,
-        tail: &str,
-        params: P,
-    ) -> Result<Vec<ServiceRecord>> {
-        let conn = self.lock();
+    async fn service_query(&self, tail: &str, binds: &[&str]) -> Result<Vec<ServiceRecord>> {
         let sql = format!(
             "SELECT s.id, s.environment_id, s.server_id, s.name, s.source, s.port, s.command, s.restart,
                     s.health_path, s.created_at, s.stopped,
-                    (SELECT host FROM domains d WHERE d.service_id = s.id ORDER BY d.created_at, d.rowid LIMIT 1),
+                    (SELECT host FROM domains d WHERE d.service_id = s.id ORDER BY d.created_at, d.seq LIMIT 1),
                     (SELECT id FROM deployments WHERE service_id = s.id AND status = 'live' ORDER BY number DESC LIMIT 1),
                     (SELECT container_id FROM deployments WHERE service_id = s.id AND status = 'live' ORDER BY number DESC LIMIT 1),
                     (SELECT MAX(finished_at) FROM deployments WHERE service_id = s.id AND status IN ('live', 'superseded')),
@@ -416,371 +301,390 @@ impl Db {
                     EXISTS (SELECT 1 FROM deployments WHERE service_id = s.id AND status = 'failed')
              FROM services s {tail}"
         );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params, |row| {
+        self.fetch(sql, binds, |row| {
             let service = Service {
-                id: row.get(0)?,
-                environment_id: row.get(1)?,
-                server_id: row.get(2)?,
-                name: row.get(3)?,
+                id: row.try_get(0)?,
+                environment_id: row.try_get(1)?,
+                server_id: row.try_get(2)?,
+                name: row.try_get(3)?,
                 source: col_json(row, 4)?,
-                port: row.get(5)?,
-                command: row.get(6)?,
+                port: col_port(row, 5)?,
+                command: row.try_get(6)?,
                 restart: col_enum(row, 7)?,
-                health_path: row.get(8)?,
-                created_at: row.get(9)?,
+                health_path: row.try_get(8)?,
+                created_at: row.try_get(9)?,
                 state: ServiceState::New,
-                primary_domain: row.get(11)?,
-                live_deployment_id: row.get(12)?,
-                last_deployed_at: row.get(14)?,
+                primary_domain: row.try_get(11)?,
+                live_deployment_id: row.try_get(12)?,
+                last_deployed_at: row.try_get(14)?,
             };
-            let busy: Option<String> = row.get(15)?;
+            let busy: Option<String> = row.try_get(15)?;
             Ok(ServiceRecord {
                 service,
-                stopped: row.get(10)?,
-                live_container: row.get(13)?,
+                stopped: row.try_get(10)?,
+                live_container: row.try_get(13)?,
                 busy: busy.map(|s| parse_enum(&s, 15)).transpose()?,
-                ever_failed: row.get(16)?,
+                ever_failed: row.try_get(16)?,
             })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .await
     }
 
-    pub fn service_name_taken(
+    pub async fn service_name_taken(
         &self,
         env_id: &str,
         name: &str,
         except: Option<&str>,
     ) -> Result<bool> {
         self.exists(
-            "SELECT 1 FROM services WHERE environment_id = ?1 AND name = ?2 AND id != ?3",
-            params![env_id, name, except.unwrap_or("")],
+            "SELECT 1 FROM services WHERE environment_id = $1 AND name = $2 AND id != $3",
+            &[env_id, name, except.unwrap_or("")],
         )
+        .await
     }
 
-    pub fn insert_service(&self, new: &NewService<'_>) -> Result<()> {
+    pub async fn insert_service(&self, new: &NewService<'_>) -> Result<()> {
         let s = new.service;
-        self.tx(|tx| {
-            tx.execute(
-                "INSERT INTO services (id, environment_id, server_id, name, source, port, command, restart, health_path, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    s.id,
-                    s.environment_id,
-                    s.server_id,
-                    s.name,
-                    json(&s.source),
-                    s.port,
-                    s.command,
-                    enum_str(&s.restart),
-                    s.health_path,
-                    s.created_at
-                ],
-            )?;
-            replace_env(tx, &s.id, new.env)?;
-            for d in new.domains {
-                insert_domain(tx, d)?;
-            }
-            for v in new.volumes {
-                insert_volume(tx, v)?;
-            }
-            Ok(())
-        })
-    }
-
-    pub fn update_service(&self, s: &Service) -> Result<()> {
-        self.lock().execute(
-            "UPDATE services SET name = ?2, source = ?3, port = ?4, command = ?5, restart = ?6,
-                    health_path = ?7, server_id = ?8 WHERE id = ?1",
-            params![
-                s.id,
-                s.name,
-                json(&s.source),
-                s.port,
-                s.command,
-                enum_str(&s.restart),
-                s.health_path,
-                s.server_id
-            ],
-        )?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO services (id, environment_id, server_id, name, source, port, command, restart, health_path, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(&s.id)
+        .bind(&s.environment_id)
+        .bind(&s.server_id)
+        .bind(&s.name)
+        .bind(Json(&s.source))
+        .bind(s.port.map(i32::from))
+        .bind(&s.command)
+        .bind(enum_str(&s.restart))
+        .bind(&s.health_path)
+        .bind(s.created_at)
+        .execute(&mut *tx)
+        .await?;
+        replace_env(&mut tx, &s.id, new.env).await?;
+        for d in new.domains {
+            insert_domain(&mut tx, d).await?;
+        }
+        for v in new.volumes {
+            insert_volume(&mut tx, v).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
-    pub fn set_stopped(&self, service_id: &str, stopped: bool) -> Result<()> {
-        self.lock().execute(
-            "UPDATE services SET stopped = ?2 WHERE id = ?1",
-            params![service_id, stopped],
-        )?;
+    pub async fn update_service(&self, s: &Service) -> Result<()> {
+        sqlx::query(
+            "UPDATE services SET name = $2, source = $3, port = $4, command = $5, restart = $6,
+                    health_path = $7, server_id = $8 WHERE id = $1",
+        )
+        .bind(&s.id)
+        .bind(&s.name)
+        .bind(Json(&s.source))
+        .bind(s.port.map(i32::from))
+        .bind(&s.command)
+        .bind(enum_str(&s.restart))
+        .bind(&s.health_path)
+        .bind(&s.server_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    pub fn delete_service(&self, id: &str) -> Result<()> {
-        self.lock()
-            .execute("DELETE FROM services WHERE id = ?1", [id])?;
+    pub async fn set_stopped(&self, service_id: &str, stopped: bool) -> Result<()> {
+        sqlx::query("UPDATE services SET stopped = $2 WHERE id = $1")
+            .bind(service_id)
+            .bind(stopped)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
-    pub fn env(&self, service_id: &str) -> Result<Vec<EnvVar>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT key, value, secret FROM env_vars WHERE service_id = ?1 ORDER BY position",
-        )?;
-        let rows = stmt.query_map([service_id], |row| {
-            Ok(EnvVar {
-                key: row.get(0)?,
-                value: row.get(1)?,
-                secret: row.get(2)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    pub async fn delete_service(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM services WHERE id = $1", id).await
     }
 
-    pub fn replace_env(&self, service_id: &str, vars: &[EnvVar]) -> Result<()> {
-        self.tx(|tx| replace_env(tx, service_id, vars))
+    pub async fn env(&self, service_id: &str) -> Result<Vec<EnvVar>> {
+        self.fetch(
+            "SELECT key, value, secret FROM env_vars WHERE service_id = $1 ORDER BY position"
+                .into(),
+            &[service_id],
+            |row| {
+                Ok(EnvVar {
+                    key: row.try_get(0)?,
+                    value: row.try_get(1)?,
+                    secret: row.try_get(2)?,
+                })
+            },
+        )
+        .await
+    }
+
+    pub async fn replace_env(&self, service_id: &str, vars: &[EnvVar]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        replace_env(&mut tx, service_id, vars).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     // Domains
 
-    pub fn domains(&self, service_id: &str) -> Result<Vec<Domain>> {
-        self.domain_query(
-            "WHERE service_id = ?1 ORDER BY created_at, rowid",
-            [service_id],
+    pub async fn domains(&self, service_id: &str) -> Result<Vec<Domain>> {
+        self.domain_query("WHERE service_id = $1 ORDER BY created_at, seq", service_id)
+            .await
+    }
+
+    pub async fn domain(&self, id: &str) -> Result<Option<Domain>> {
+        Ok(self
+            .domain_query("WHERE id = $1", id)
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    async fn domain_query(&self, tail: &str, bind: &str) -> Result<Vec<Domain>> {
+        self.fetch(
+            format!("SELECT id, service_id, host, port, tls, created_at FROM domains {tail}"),
+            &[bind],
+            |row| {
+                Ok(Domain {
+                    id: row.try_get(0)?,
+                    service_id: row.try_get(1)?,
+                    host: row.try_get(2)?,
+                    port: col_port(row, 3)?,
+                    tls: row.try_get(4)?,
+                    created_at: row.try_get(5)?,
+                })
+            },
         )
+        .await
     }
 
-    pub fn domain(&self, id: &str) -> Result<Option<Domain>> {
-        Ok(self.domain_query("WHERE id = ?1", [id])?.into_iter().next())
+    pub async fn domain_taken(&self, host: &str) -> Result<bool> {
+        self.exists("SELECT 1 FROM domains WHERE host = $1", &[host])
+            .await
     }
 
-    fn domain_query<P: rusqlite::Params>(&self, tail: &str, params: P) -> Result<Vec<Domain>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT id, service_id, host, port, tls, created_at FROM domains {tail}"
-        ))?;
-        let rows = stmt.query_map(params, |row| {
-            Ok(Domain {
-                id: row.get(0)?,
-                service_id: row.get(1)?,
-                host: row.get(2)?,
-                port: row.get(3)?,
-                tls: row.get(4)?,
-                created_at: row.get(5)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn domain_taken(&self, host: &str) -> Result<bool> {
-        self.exists("SELECT 1 FROM domains WHERE host = ?1", [host])
-    }
-
-    pub fn insert_domain(&self, d: &Domain) -> Result<()> {
-        self.tx(|tx| insert_domain(tx, d))
-    }
-
-    pub fn delete_domain(&self, id: &str) -> Result<()> {
-        self.lock()
-            .execute("DELETE FROM domains WHERE id = ?1", [id])?;
+    pub async fn insert_domain(&self, d: &Domain) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        insert_domain(&mut tx, d).await?;
+        tx.commit().await?;
         Ok(())
+    }
+
+    pub async fn delete_domain(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM domains WHERE id = $1", id).await
     }
 
     // Volumes
 
-    pub fn volumes(&self, service_id: &str) -> Result<Vec<Volume>> {
-        self.volume_query(
-            "WHERE service_id = ?1 ORDER BY created_at, rowid",
-            [service_id],
+    pub async fn volumes(&self, service_id: &str) -> Result<Vec<Volume>> {
+        self.volume_query("WHERE service_id = $1 ORDER BY created_at, seq", service_id)
+            .await
+    }
+
+    pub async fn volume(&self, id: &str) -> Result<Option<Volume>> {
+        Ok(self
+            .volume_query("WHERE id = $1", id)
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    async fn volume_query(&self, tail: &str, bind: &str) -> Result<Vec<Volume>> {
+        self.fetch(
+            format!("SELECT id, service_id, name, mount_path, created_at FROM volumes {tail}"),
+            &[bind],
+            |row| {
+                Ok(Volume {
+                    id: row.try_get(0)?,
+                    service_id: row.try_get(1)?,
+                    name: row.try_get(2)?,
+                    mount_path: row.try_get(3)?,
+                    created_at: row.try_get(4)?,
+                })
+            },
         )
+        .await
     }
 
-    pub fn volume(&self, id: &str) -> Result<Option<Volume>> {
-        Ok(self.volume_query("WHERE id = ?1", [id])?.into_iter().next())
-    }
-
-    fn volume_query<P: rusqlite::Params>(&self, tail: &str, params: P) -> Result<Vec<Volume>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT id, service_id, name, mount_path, created_at FROM volumes {tail}"
-        ))?;
-        let rows = stmt.query_map(params, |row| {
-            Ok(Volume {
-                id: row.get(0)?,
-                service_id: row.get(1)?,
-                name: row.get(2)?,
-                mount_path: row.get(3)?,
-                created_at: row.get(4)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn volume_name_taken(&self, service_id: &str, name: &str) -> Result<bool> {
+    pub async fn volume_name_taken(&self, service_id: &str, name: &str) -> Result<bool> {
         self.exists(
-            "SELECT 1 FROM volumes WHERE service_id = ?1 AND name = ?2",
-            [service_id, name],
+            "SELECT 1 FROM volumes WHERE service_id = $1 AND name = $2",
+            &[service_id, name],
         )
+        .await
     }
 
-    pub fn insert_volume(&self, v: &Volume) -> Result<()> {
-        self.tx(|tx| insert_volume(tx, v))
-    }
-
-    pub fn delete_volume(&self, id: &str) -> Result<()> {
-        self.lock()
-            .execute("DELETE FROM volumes WHERE id = ?1", [id])?;
+    pub async fn insert_volume(&self, v: &Volume) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        insert_volume(&mut tx, v).await?;
+        tx.commit().await?;
         Ok(())
+    }
+
+    pub async fn delete_volume(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM volumes WHERE id = $1", id).await
     }
 
     // Deployments
 
     /// Inserts a queued deployment, assigning the next per-service number.
-    pub fn insert_deployment(&self, d: &mut Deployment, server_id: &str) -> Result<()> {
-        self.tx(|tx| {
-            d.number = tx.query_row(
-                "SELECT COALESCE(MAX(number), 0) + 1 FROM deployments WHERE service_id = ?1",
-                [&d.service_id],
-                |row| row.get(0),
-            )?;
-            tx.execute(
-                "INSERT INTO deployments (id, service_id, server_id, number, status, trigger, commit_sha, commit_message,
-                                          image, container_id, steps, error, created_at, finished_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-                params![
-                    d.id,
-                    d.service_id,
-                    server_id,
-                    d.number,
-                    enum_str(&d.status),
-                    d.trigger,
-                    d.commit,
-                    d.commit_message,
-                    d.image,
-                    d.container_id,
-                    json(&d.steps),
-                    d.error,
-                    d.created_at,
-                    d.finished_at
-                ],
-            )?;
-            Ok(())
-        })
-    }
-
-    pub fn update_deployment(&self, d: &Deployment) -> Result<()> {
-        self.lock().execute(
-            "UPDATE deployments SET status = ?2, commit_sha = ?3, commit_message = ?4, image = ?5,
-                    container_id = ?6, steps = ?7, error = ?8, finished_at = ?9 WHERE id = ?1",
-            params![
-                d.id,
-                enum_str(&d.status),
-                d.commit,
-                d.commit_message,
-                d.image,
-                d.container_id,
-                json(&d.steps),
-                d.error,
-                d.finished_at
-            ],
-        )?;
+    pub async fn insert_deployment(&self, d: &mut Deployment, server_id: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        lock_service(&mut tx, &d.service_id).await?;
+        d.number = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(number), 0) + 1 FROM deployments WHERE service_id = $1",
+        )
+        .bind(&d.service_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO deployments (id, service_id, server_id, number, status, trigger, commit_sha, commit_message,
+                                      image, container_id, steps, error, created_at, finished_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+        )
+        .bind(&d.id)
+        .bind(&d.service_id)
+        .bind(server_id)
+        .bind(d.number)
+        .bind(enum_str(&d.status))
+        .bind(&d.trigger)
+        .bind(&d.commit)
+        .bind(&d.commit_message)
+        .bind(&d.image)
+        .bind(&d.container_id)
+        .bind(Json(&d.steps))
+        .bind(&d.error)
+        .bind(d.created_at)
+        .bind(d.finished_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
-    pub fn deployment(&self, id: &str) -> Result<Option<Deployment>> {
+    pub async fn update_deployment(&self, d: &Deployment) -> Result<()> {
+        sqlx::query(
+            "UPDATE deployments SET status = $2, commit_sha = $3, commit_message = $4, image = $5,
+                    container_id = $6, steps = $7, error = $8, finished_at = $9 WHERE id = $1",
+        )
+        .bind(&d.id)
+        .bind(enum_str(&d.status))
+        .bind(&d.commit)
+        .bind(&d.commit_message)
+        .bind(&d.image)
+        .bind(&d.container_id)
+        .bind(Json(&d.steps))
+        .bind(&d.error)
+        .bind(d.finished_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn deployment(&self, id: &str) -> Result<Option<Deployment>> {
         Ok(self
-            .deployment_query("WHERE id = ?1", params![id])?
+            .deployment_query("WHERE id = $1", &[id])
+            .await?
             .into_iter()
             .next())
     }
 
-    pub fn deployments(&self, service_id: &str, limit: usize) -> Result<Vec<Deployment>> {
+    pub async fn deployments(&self, service_id: &str, limit: usize) -> Result<Vec<Deployment>> {
         self.deployment_query(
-            "WHERE service_id = ?1 ORDER BY number DESC LIMIT ?2",
-            params![service_id, i64::try_from(limit).unwrap_or(i64::MAX)],
+            &format!(
+                "WHERE service_id = $1 ORDER BY number DESC LIMIT {}",
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ),
+            &[service_id],
         )
+        .await
     }
 
-    pub fn live_deployment(&self, service_id: &str) -> Result<Option<Deployment>> {
+    pub async fn live_deployment(&self, service_id: &str) -> Result<Option<Deployment>> {
         Ok(self
             .deployment_query(
-                "WHERE service_id = ?1 AND status = 'live' ORDER BY number DESC LIMIT 1",
-                params![service_id],
-            )?
+                "WHERE service_id = $1 AND status = 'live' ORDER BY number DESC LIMIT 1",
+                &[service_id],
+            )
+            .await?
             .into_iter()
             .next())
     }
 
     /// Unfinished deployments of a service, oldest first.
-    pub fn active_deployments(&self, service_id: &str) -> Result<Vec<Deployment>> {
+    pub async fn active_deployments(&self, service_id: &str) -> Result<Vec<Deployment>> {
         self.deployment_query(
-            "WHERE service_id = ?1 AND status IN ('queued', 'building', 'starting') ORDER BY number",
-            params![service_id],
+            "WHERE service_id = $1 AND status IN ('queued', 'building', 'starting') ORDER BY number",
+            &[service_id],
         )
+        .await
     }
 
     /// Service name and number of every unfinished deployment.
-    pub fn unfinished_deployments(&self) -> Result<Vec<(String, i64)>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(
+    pub async fn unfinished_deployments(&self) -> Result<Vec<(String, i64)>> {
+        self.fetch(
             "SELECT s.name, d.number FROM deployments d JOIN services s ON s.id = d.service_id
-             WHERE d.status IN ('queued', 'building', 'starting') ORDER BY d.created_at",
-        )?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+             WHERE d.status IN ('queued', 'building', 'starting') ORDER BY d.created_at"
+                .to_string(),
+            &[],
+            |row| Ok((row.try_get(0)?, row.try_get(1)?)),
+        )
+        .await
     }
 
-    fn deployment_query(
-        &self,
-        tail: &str,
-        params: impl rusqlite::Params,
-    ) -> Result<Vec<Deployment>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT id, service_id, number, status, trigger, commit_sha, commit_message, image, container_id,
-                    steps, error, created_at, finished_at FROM deployments {tail}"
-        ))?;
-        let rows = stmt.query_map(params, deployment_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    async fn deployment_query(&self, tail: &str, binds: &[&str]) -> Result<Vec<Deployment>> {
+        self.fetch(
+            format!("{DEPLOYMENT_SELECT} {tail}"),
+            binds,
+            deployment_from_row,
+        )
+        .await
     }
 
     /// Servers that ever ran a deployment of this service, plus where it runs now.
-    pub fn deployment_servers(&self, service_id: &str) -> Result<Vec<Id>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT server_id FROM deployments WHERE service_id = ?1
-             UNION SELECT server_id FROM services WHERE id = ?1",
-        )?;
-        let rows = stmt.query_map([service_id], |row| row.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    pub async fn deployment_servers(&self, service_id: &str) -> Result<Vec<Id>> {
+        Ok(sqlx::query_scalar(
+            "SELECT DISTINCT server_id FROM deployments WHERE service_id = $1
+             UNION SELECT server_id FROM services WHERE id = $1",
+        )
+        .bind(service_id)
+        .fetch_all(&self.pool)
+        .await?)
     }
 
     /// Marks `deployment` live and the previously live one superseded, atomically.
-    pub fn switch_live(&self, d: &Deployment) -> Result<()> {
-        self.tx(|tx| {
-            tx.execute(
-                "UPDATE deployments SET status = 'superseded' WHERE service_id = ?1 AND status = 'live' AND id != ?2",
-                params![d.service_id, d.id],
-            )?;
-            tx.execute(
-                "UPDATE deployments SET status = 'live', steps = ?2, finished_at = ?3 WHERE id = ?1",
-                params![d.id, json(&d.steps), d.finished_at],
-            )?;
-            tx.execute("UPDATE services SET stopped = 0 WHERE id = ?1", [&d.service_id])?;
-            Ok(())
-        })
+    pub async fn switch_live(&self, d: &Deployment) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE deployments SET status = 'superseded' WHERE service_id = $1 AND status = 'live' AND id != $2",
+        )
+        .bind(&d.service_id)
+        .bind(&d.id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE deployments SET status = 'live', steps = $2, finished_at = $3 WHERE id = $1",
+        )
+        .bind(&d.id)
+        .bind(Json(&d.steps))
+        .bind(d.finished_at)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE services SET stopped = FALSE WHERE id = $1")
+            .bind(&d.service_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Fails deployments a previous daemon process left unfinished. Returns how many.
-    pub fn fail_interrupted_deployments(&self) -> Result<usize> {
-        let interrupted = {
-            let conn = self.lock();
-            let mut stmt = conn.prepare(
-                "SELECT id, service_id, number, status, trigger, commit_sha, commit_message, image, container_id,
-                        steps, error, created_at, finished_at FROM deployments
-                 WHERE status IN ('queued', 'building', 'starting')",
-            )?;
-            let rows = stmt.query_map([], deployment_from_row)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
+    pub async fn fail_interrupted_deployments(&self) -> Result<usize> {
+        let interrupted = self
+            .deployment_query("WHERE status IN ('queued', 'building', 'starting')", &[])
+            .await?;
         let now = Utc::now();
         for mut d in interrupted.iter().cloned() {
             for step in &mut d.steps {
@@ -792,152 +696,165 @@ impl Db {
             d.status = DeploymentStatus::Failed;
             d.error = Some("daemon restarted".into());
             d.finished_at = Some(now);
-            self.update_deployment(&d)?;
+            self.update_deployment(&d).await?;
         }
         Ok(interrupted.len())
     }
 
     // Databases
 
-    pub fn public_port(&self, service_id: &str) -> Result<Option<u16>> {
-        let conn = self.lock();
-        Ok(conn
-            .query_row(
-                "SELECT public_port FROM services WHERE id = ?1",
-                [service_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten())
+    pub async fn public_port(&self, service_id: &str) -> Result<Option<u16>> {
+        let port: Option<Option<i32>> =
+            sqlx::query_scalar("SELECT public_port FROM services WHERE id = $1")
+                .bind(service_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(port.flatten().and_then(|p| u16::try_from(p).ok()))
     }
 
-    pub fn set_public_port(&self, service_id: &str, port: Option<u16>) -> Result<()> {
-        self.lock().execute(
-            "UPDATE services SET public_port = ?2 WHERE id = ?1",
-            params![service_id, port],
-        )?;
+    pub async fn set_public_port(&self, service_id: &str, port: Option<u16>) -> Result<()> {
+        sqlx::query("UPDATE services SET public_port = $2 WHERE id = $1")
+            .bind(service_id)
+            .bind(port.map(i32::from))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     /// Whether another service on the same server already publishes `port`.
-    pub fn public_port_taken(&self, server_id: &str, port: u16, except: &str) -> Result<bool> {
-        self.exists(
-            "SELECT 1 FROM services WHERE server_id = ?1 AND public_port = ?2 AND id != ?3",
-            params![server_id, port, except],
+    pub async fn public_port_taken(
+        &self,
+        server_id: &str,
+        port: u16,
+        except: &str,
+    ) -> Result<bool> {
+        Ok(sqlx::query(
+            "SELECT 1 FROM services WHERE server_id = $1 AND public_port = $2 AND id != $3",
         )
+        .bind(server_id)
+        .bind(i32::from(port))
+        .bind(except)
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some())
     }
 
     // Backups
 
     /// Inserts a backup, assigning the next per-service number and the file name
     /// `<created_at>-<number>.<extension>.gz`.
-    pub fn insert_backup(&self, b: &mut Backup, extension: &str) -> Result<()> {
-        self.tx(|tx| {
-            let number: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(number), 0) + 1 FROM backups WHERE service_id = ?1",
-                [&b.service_id],
-                |row| row.get(0),
-            )?;
-            b.file_name = format!(
-                "{}-{number}.{extension}.gz",
-                b.created_at.format("%Y%m%d-%H%M%S")
-            );
-            tx.execute(
-                "INSERT INTO backups (id, service_id, number, status, trigger, file_name, size_bytes, error,
-                                      storage, storage_id, created_at, finished_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![
-                    b.id,
-                    b.service_id,
-                    number,
-                    enum_str(&b.status),
-                    enum_str(&b.trigger),
-                    b.file_name,
-                    i64::try_from(b.size_bytes).unwrap_or(i64::MAX),
-                    b.error,
-                    enum_str(&b.storage),
-                    b.storage_id,
-                    b.created_at,
-                    b.finished_at
-                ],
-            )?;
-            Ok(())
-        })
-    }
-
-    pub fn update_backup(&self, b: &Backup) -> Result<()> {
-        self.lock().execute(
-            "UPDATE backups SET status = ?2, size_bytes = ?3, error = ?4, finished_at = ?5 WHERE id = ?1",
-            params![
-                b.id,
-                enum_str(&b.status),
-                i64::try_from(b.size_bytes).unwrap_or(i64::MAX),
-                b.error,
-                b.finished_at
-            ],
-        )?;
+    pub async fn insert_backup(&self, b: &mut Backup, extension: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        lock_service(&mut tx, &b.service_id).await?;
+        let number: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(number), 0) + 1 FROM backups WHERE service_id = $1",
+        )
+        .bind(&b.service_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        b.file_name = format!(
+            "{}-{number}.{extension}.gz",
+            b.created_at.format("%Y%m%d-%H%M%S")
+        );
+        sqlx::query(
+            "INSERT INTO backups (id, service_id, number, status, trigger, file_name, size_bytes, error,
+                                  storage, storage_id, created_at, finished_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        )
+        .bind(&b.id)
+        .bind(&b.service_id)
+        .bind(number)
+        .bind(enum_str(&b.status))
+        .bind(enum_str(&b.trigger))
+        .bind(&b.file_name)
+        .bind(i64::try_from(b.size_bytes).unwrap_or(i64::MAX))
+        .bind(&b.error)
+        .bind(enum_str(&b.storage))
+        .bind(&b.storage_id)
+        .bind(b.created_at)
+        .bind(b.finished_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
-    pub fn backup(&self, id: &str) -> Result<Option<Backup>> {
+    pub async fn update_backup(&self, b: &Backup) -> Result<()> {
+        sqlx::query(
+            "UPDATE backups SET status = $2, size_bytes = $3, error = $4, finished_at = $5 WHERE id = $1",
+        )
+        .bind(&b.id)
+        .bind(enum_str(&b.status))
+        .bind(i64::try_from(b.size_bytes).unwrap_or(i64::MAX))
+        .bind(&b.error)
+        .bind(b.finished_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn backup(&self, id: &str) -> Result<Option<Backup>> {
         Ok(self
-            .backup_query("WHERE id = ?1", params![id])?
+            .backup_query("WHERE id = $1", id)
+            .await?
             .into_iter()
             .next())
     }
 
     /// Backups of a service, newest first.
-    pub fn backups(&self, service_id: &str) -> Result<Vec<Backup>> {
-        self.backup_query(
-            "WHERE service_id = ?1 ORDER BY number DESC",
-            params![service_id],
+    pub async fn backups(&self, service_id: &str) -> Result<Vec<Backup>> {
+        self.backup_query("WHERE service_id = $1 ORDER BY number DESC", service_id)
+            .await
+    }
+
+    async fn backup_query(&self, tail: &str, bind: &str) -> Result<Vec<Backup>> {
+        self.fetch(
+            format!(
+                "SELECT id, service_id, status, trigger, file_name, size_bytes, error, storage, storage_id,
+                        created_at, finished_at FROM backups {tail}"
+            ),
+            &[bind],
+            |row| {
+                let size: i64 = row.try_get(5)?;
+                Ok(Backup {
+                    id: row.try_get(0)?,
+                    service_id: row.try_get(1)?,
+                    status: col_enum(row, 2)?,
+                    trigger: col_enum(row, 3)?,
+                    file_name: row.try_get(4)?,
+                    size_bytes: u64::try_from(size).unwrap_or_default(),
+                    error: row.try_get(6)?,
+                    storage: col_enum(row, 7)?,
+                    storage_id: row.try_get(8)?,
+                    created_at: row.try_get(9)?,
+                    finished_at: row.try_get(10)?,
+                })
+            },
         )
+        .await
     }
 
-    fn backup_query(&self, tail: &str, params: impl rusqlite::Params) -> Result<Vec<Backup>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT id, service_id, status, trigger, file_name, size_bytes, error, storage, storage_id,
-                    created_at, finished_at FROM backups {tail}"
-        ))?;
-        let rows = stmt.query_map(params, |row| {
-            let size: i64 = row.get(5)?;
-            Ok(Backup {
-                id: row.get(0)?,
-                service_id: row.get(1)?,
-                status: col_enum(row, 2)?,
-                trigger: col_enum(row, 3)?,
-                file_name: row.get(4)?,
-                size_bytes: u64::try_from(size).unwrap_or_default(),
-                error: row.get(6)?,
-                storage: col_enum(row, 7)?,
-                storage_id: row.get(8)?,
-                created_at: row.get(9)?,
-                finished_at: row.get(10)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn delete_backup(&self, id: &str) -> Result<()> {
-        self.lock()
-            .execute("DELETE FROM backups WHERE id = ?1", [id])?;
-        Ok(())
+    pub async fn delete_backup(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM backups WHERE id = $1", id).await
     }
 
     /// Fails backups a previous daemon process left running. Returns how many.
-    pub fn fail_interrupted_backups(&self) -> Result<usize> {
-        Ok(self.lock().execute(
-            "UPDATE backups SET status = 'failed', error = 'daemon restarted', finished_at = ?1
+    pub async fn fail_interrupted_backups(&self) -> Result<usize> {
+        let done = sqlx::query(
+            "UPDATE backups SET status = 'failed', error = 'daemon restarted', finished_at = $1
              WHERE status = 'running'",
-            [Utc::now()],
-        )?)
+        )
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(usize::try_from(done.rows_affected()).unwrap_or(usize::MAX))
     }
 
     /// The service's schedule, or the disabled default when none was saved.
-    pub fn backup_schedule(&self, service_id: &str) -> Result<ScheduleRecord> {
+    pub async fn backup_schedule(&self, service_id: &str) -> Result<ScheduleRecord> {
         Ok(self
-            .schedule_query("WHERE service_id = ?1", [service_id])?
+            .schedule_query("WHERE service_id = $1", &[service_id])
+            .await?
             .into_iter()
             .next()
             .unwrap_or_else(|| ScheduleRecord {
@@ -947,201 +864,258 @@ impl Db {
             }))
     }
 
-    pub fn enabled_backup_schedules(&self) -> Result<Vec<ScheduleRecord>> {
-        self.schedule_query("WHERE enabled = 1", [])
+    pub async fn enabled_backup_schedules(&self) -> Result<Vec<ScheduleRecord>> {
+        self.schedule_query("WHERE enabled", &[]).await
     }
 
-    fn schedule_query<P: rusqlite::Params>(
-        &self,
-        tail: &str,
-        params: P,
-    ) -> Result<Vec<ScheduleRecord>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT service_id, enabled, hour_utc, keep, last_run_at FROM backup_schedules {tail}"
-        ))?;
-        let rows = stmt.query_map(params, |row| {
-            Ok(ScheduleRecord {
-                service_id: row.get(0)?,
-                schedule: BackupSchedule {
-                    enabled: row.get(1)?,
-                    hour_utc: row.get(2)?,
-                    keep: row.get(3)?,
-                },
-                last_run_at: row.get(4)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    async fn schedule_query(&self, tail: &str, binds: &[&str]) -> Result<Vec<ScheduleRecord>> {
+        self.fetch(
+            format!(
+                "SELECT service_id, enabled, hour_utc, keep, last_run_at FROM backup_schedules {tail}"
+            ),
+            binds,
+            |row| {
+                let hour: i32 = row.try_get(2)?;
+                let keep: i64 = row.try_get(3)?;
+                Ok(ScheduleRecord {
+                    service_id: row.try_get(0)?,
+                    schedule: BackupSchedule {
+                        enabled: row.try_get(1)?,
+                        hour_utc: u8::try_from(hour).map_err(|e| decode_error(2, e))?,
+                        keep: u32::try_from(keep).map_err(|e| decode_error(3, e))?,
+                    },
+                    last_run_at: row.try_get(4)?,
+                })
+            },
+        )
+        .await
     }
 
-    pub fn save_backup_schedule(&self, r: &ScheduleRecord) -> Result<()> {
-        self.lock().execute(
+    pub async fn save_backup_schedule(&self, r: &ScheduleRecord) -> Result<()> {
+        sqlx::query(
             "INSERT INTO backup_schedules (service_id, enabled, hour_utc, keep, last_run_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT (service_id) DO UPDATE SET enabled = ?2, hour_utc = ?3, keep = ?4, last_run_at = ?5",
-            params![
-                r.service_id,
-                r.schedule.enabled,
-                r.schedule.hour_utc,
-                r.schedule.keep,
-                r.last_run_at
-            ],
-        )?;
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (service_id) DO UPDATE SET enabled = $2, hour_utc = $3, keep = $4, last_run_at = $5",
+        )
+        .bind(&r.service_id)
+        .bind(r.schedule.enabled)
+        .bind(i32::from(r.schedule.hour_utc))
+        .bind(i64::from(r.schedule.keep))
+        .bind(r.last_run_at)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     // Activity
 
-    pub fn insert_activity(&self, a: &Activity) -> Result<()> {
-        self.lock().execute(
+    pub async fn insert_activity(&self, a: &Activity) -> Result<()> {
+        sqlx::query(
             "INSERT INTO activity (at, level, service_id, service_name, project_id, message, detail)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                a.at,
-                enum_str(&a.level),
-                a.service_id,
-                a.service_name,
-                a.project_id,
-                a.message,
-                a.detail
-            ],
-        )?;
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(a.at)
+        .bind(enum_str(&a.level))
+        .bind(&a.service_id)
+        .bind(&a.service_name)
+        .bind(&a.project_id)
+        .bind(&a.message)
+        .bind(&a.detail)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    pub fn activity(&self, limit: usize) -> Result<Vec<Activity>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, at, level, service_id, service_name, project_id, message, detail
-             FROM activity ORDER BY id DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
-            Ok(Activity {
-                id: row.get(0)?,
-                at: row.get(1)?,
-                level: col_enum(row, 2)?,
-                service_id: row.get(3)?,
-                service_name: row.get(4)?,
-                project_id: row.get(5)?,
-                message: row.get(6)?,
-                detail: row.get(7)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    pub async fn activity(&self, limit: usize) -> Result<Vec<Activity>> {
+        self.fetch(
+            format!(
+                "SELECT id, at, level, service_id, service_name, project_id, message, detail
+                 FROM activity ORDER BY id DESC LIMIT {}",
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ),
+            &[],
+            |row| {
+                Ok(Activity {
+                    id: row.try_get(0)?,
+                    at: row.try_get(1)?,
+                    level: col_enum(row, 2)?,
+                    service_id: row.try_get(3)?,
+                    service_name: row.try_get(4)?,
+                    project_id: row.try_get(5)?,
+                    message: row.try_get(6)?,
+                    detail: row.try_get(7)?,
+                })
+            },
+        )
+        .await
     }
 
-    fn exists<P: rusqlite::Params>(&self, sql: &str, params: P) -> Result<bool> {
-        let conn = self.lock();
-        Ok(conn
-            .query_row(sql, params, |_| Ok(()))
-            .optional()?
-            .is_some())
+    // Query helpers
+
+    async fn fetch<T>(
+        &self,
+        sql: String,
+        binds: &[&str],
+        map: fn(&PgRow) -> sqlx::Result<T>,
+    ) -> Result<Vec<T>> {
+        let mut query = sqlx::query(AssertSqlSafe(sql));
+        for bind in binds {
+            query = query.bind(*bind);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(map).collect::<sqlx::Result<_>>()?)
+    }
+
+    async fn fetch_one<T>(
+        &self,
+        sql: String,
+        binds: &[&str],
+        map: fn(&PgRow) -> sqlx::Result<T>,
+    ) -> Result<Option<T>> {
+        Ok(self.fetch(sql, binds, map).await?.into_iter().next())
+    }
+
+    async fn exists(&self, sql: &'static str, binds: &[&str]) -> Result<bool> {
+        let mut query = sqlx::query(sql);
+        for bind in binds {
+            query = query.bind(*bind);
+        }
+        Ok(query.fetch_optional(&self.pool).await?.is_some())
+    }
+
+    async fn execute(&self, sql: &'static str, id: &str) -> Result<()> {
+        sqlx::query(sql).bind(id).execute(&self.pool).await?;
+        Ok(())
     }
 }
 
-fn migrate(conn: &Connection) -> Result<()> {
-    let version: usize = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(version) {
-        conn.execute_batch(&format!(
-            "BEGIN; {sql} PRAGMA user_version = {}; COMMIT;",
-            i + 1
-        ))
-        .with_context(|| format!("database migration {} failed", i + 1))?;
-    }
-    Ok(())
-}
+const SERVER_SELECT: &str = r#"SELECT id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at FROM servers"#;
 
-const SERVER_SELECT: &str = "SELECT id, name, kind, host, user, port, status, proxy, docker_version, last_checked_at, created_at FROM servers";
+const DEPLOYMENT_SELECT: &str = "SELECT id, service_id, number, status, trigger, commit_sha, commit_message, image, container_id,
+        steps, error, created_at, finished_at FROM deployments";
 
-fn server_from_row(row: &Row<'_>) -> rusqlite::Result<Server> {
+fn server_from_row(row: &PgRow) -> sqlx::Result<Server> {
     Ok(Server {
-        id: row.get(0)?,
-        name: row.get(1)?,
+        id: row.try_get(0)?,
+        name: row.try_get(1)?,
         kind: col_enum(row, 2)?,
-        host: row.get(3)?,
-        user: row.get(4)?,
-        port: row.get(5)?,
+        host: row.try_get(3)?,
+        user: row.try_get(4)?,
+        port: col_port(row, 5)?,
         status: col_enum(row, 6)?,
         proxy: col_enum(row, 7)?,
-        docker_version: row.get(8)?,
-        last_checked_at: row.get(9)?,
-        created_at: row.get(10)?,
+        docker_version: row.try_get(8)?,
+        last_checked_at: row.try_get(9)?,
+        created_at: row.try_get(10)?,
     })
 }
 
-fn project_from_row(row: &Row<'_>) -> rusqlite::Result<Project> {
+fn project_from_row(row: &PgRow) -> sqlx::Result<Project> {
     Ok(Project {
-        id: row.get(0)?,
-        name: row.get(1)?,
-        description: row.get(2)?,
-        created_at: row.get(3)?,
+        id: row.try_get(0)?,
+        name: row.try_get(1)?,
+        description: row.try_get(2)?,
+        created_at: row.try_get(3)?,
     })
 }
 
-fn environment_from_row(row: &Row<'_>) -> rusqlite::Result<Environment> {
+fn environment_from_row(row: &PgRow) -> sqlx::Result<Environment> {
     Ok(Environment {
-        id: row.get(0)?,
-        project_id: row.get(1)?,
-        name: row.get(2)?,
-        created_at: row.get(3)?,
+        id: row.try_get(0)?,
+        project_id: row.try_get(1)?,
+        name: row.try_get(2)?,
+        created_at: row.try_get(3)?,
     })
 }
 
-fn deployment_from_row(row: &Row<'_>) -> rusqlite::Result<Deployment> {
+fn deployment_from_row(row: &PgRow) -> sqlx::Result<Deployment> {
     Ok(Deployment {
-        id: row.get(0)?,
-        service_id: row.get(1)?,
-        number: row.get(2)?,
+        id: row.try_get(0)?,
+        service_id: row.try_get(1)?,
+        number: row.try_get(2)?,
         status: col_enum(row, 3)?,
-        trigger: row.get(4)?,
-        commit: row.get(5)?,
-        commit_message: row.get(6)?,
-        image: row.get(7)?,
-        container_id: row.get(8)?,
+        trigger: row.try_get(4)?,
+        commit: row.try_get(5)?,
+        commit_message: row.try_get(6)?,
+        image: row.try_get(7)?,
+        container_id: row.try_get(8)?,
         steps: col_json(row, 9)?,
-        error: row.get(10)?,
-        created_at: row.get(11)?,
-        finished_at: row.get(12)?,
+        error: row.try_get(10)?,
+        created_at: row.try_get(11)?,
+        finished_at: row.try_get(12)?,
     })
 }
 
-fn insert_environment(tx: &Transaction<'_>, e: &Environment) -> rusqlite::Result<()> {
-    tx.execute(
-        "INSERT INTO environments (id, project_id, name, created_at) VALUES (?1, ?2, ?3, ?4)",
-        params![e.id, e.project_id, e.name, e.created_at],
-    )?;
+type Tx = Transaction<'static, Postgres>;
+
+/// Serializes writers that number rows per service (deployments, backups) or replace its env.
+async fn lock_service(tx: &mut Tx, service_id: &str) -> sqlx::Result<()> {
+    sqlx::query("SELECT 1 FROM services WHERE id = $1 FOR UPDATE")
+        .bind(service_id)
+        .fetch_optional(&mut **tx)
+        .await?;
     Ok(())
 }
 
-fn insert_domain(tx: &Transaction<'_>, d: &Domain) -> rusqlite::Result<()> {
-    tx.execute(
-        "INSERT INTO domains (id, service_id, host, port, tls, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![d.id, d.service_id, d.host, d.port, d.tls, d.created_at],
-    )?;
+async fn insert_environment(tx: &mut Tx, e: &Environment) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO environments (id, project_id, name, created_at) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(&e.id)
+    .bind(&e.project_id)
+    .bind(&e.name)
+    .bind(e.created_at)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
-fn insert_volume(tx: &Transaction<'_>, v: &Volume) -> rusqlite::Result<()> {
-    tx.execute(
-        "INSERT INTO volumes (id, service_id, name, mount_path, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![v.id, v.service_id, v.name, v.mount_path, v.created_at],
-    )?;
+async fn insert_domain(tx: &mut Tx, d: &Domain) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO domains (id, service_id, host, port, tls, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(&d.id)
+    .bind(&d.service_id)
+    .bind(&d.host)
+    .bind(d.port.map(i32::from))
+    .bind(d.tls)
+    .bind(d.created_at)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
-fn replace_env(tx: &Transaction<'_>, service_id: &str, vars: &[EnvVar]) -> rusqlite::Result<()> {
-    tx.execute("DELETE FROM env_vars WHERE service_id = ?1", [service_id])?;
+async fn insert_volume(tx: &mut Tx, v: &Volume) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO volumes (id, service_id, name, mount_path, created_at) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(&v.id)
+    .bind(&v.service_id)
+    .bind(&v.name)
+    .bind(&v.mount_path)
+    .bind(v.created_at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn replace_env(tx: &mut Tx, service_id: &str, vars: &[EnvVar]) -> sqlx::Result<()> {
+    lock_service(tx, service_id).await?;
+    sqlx::query("DELETE FROM env_vars WHERE service_id = $1")
+        .bind(service_id)
+        .execute(&mut **tx)
+        .await?;
     for (position, var) in vars.iter().enumerate() {
-        tx.execute(
-            "INSERT INTO env_vars (service_id, position, key, value, secret) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                service_id,
-                i64::try_from(position).unwrap_or(i64::MAX),
-                var.key,
-                var.value,
-                var.secret
-            ],
-        )?;
+        sqlx::query(
+            "INSERT INTO env_vars (service_id, position, key, value, secret) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(service_id)
+        .bind(i32::try_from(position).unwrap_or(i32::MAX))
+        .bind(&var.key)
+        .bind(&var.value)
+        .bind(var.secret)
+        .execute(&mut **tx)
+        .await?;
     }
     Ok(())
 }
@@ -1154,31 +1128,48 @@ fn enum_str<T: Serialize>(value: &T) -> String {
     }
 }
 
-fn parse_enum<T: DeserializeOwned>(s: &str, idx: usize) -> rusqlite::Result<T> {
-    serde_json::from_value(serde_json::Value::String(s.to_string()))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(idx, Type::Text, Box::new(e)))
+fn decode_error(
+    idx: usize,
+    e: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
+) -> sqlx::Error {
+    sqlx::Error::ColumnDecode {
+        index: idx.to_string(),
+        source: e.into(),
+    }
 }
 
-fn col_enum<T: DeserializeOwned>(row: &Row<'_>, idx: usize) -> rusqlite::Result<T> {
-    let s: String = row.get(idx)?;
+fn parse_enum<T: DeserializeOwned>(s: &str, idx: usize) -> sqlx::Result<T> {
+    serde_json::from_value(serde_json::Value::String(s.to_string()))
+        .map_err(|e| decode_error(idx, e))
+}
+
+fn col_enum<T: DeserializeOwned>(row: &PgRow, idx: usize) -> sqlx::Result<T> {
+    let s: String = row.try_get(idx)?;
     parse_enum(&s, idx)
 }
 
-fn json<T: Serialize>(value: &T) -> String {
-    serde_json::to_string(value).expect("domain types always serialize")
+fn col_json<T: DeserializeOwned>(row: &PgRow, idx: usize) -> sqlx::Result<T> {
+    let Json(value) = row.try_get::<Json<T>, _>(idx)?;
+    Ok(value)
 }
 
-fn col_json<T: DeserializeOwned>(row: &Row<'_>, idx: usize) -> rusqlite::Result<T> {
-    let s: String = row.get(idx)?;
-    serde_json::from_str(&s)
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(idx, Type::Text, Box::new(e)))
+fn col_port(row: &PgRow, idx: usize) -> sqlx::Result<Option<u16>> {
+    row.try_get::<Option<i32>, _>(idx)?
+        .map(|p| u16::try_from(p).map_err(|e| decode_error(idx, e)))
+        .transpose()
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
-    fn project(db: &Db) -> (Project, Environment) {
+    /// A migrated store on its own database, or `None` when Docker is unavailable.
+    pub async fn test_db() -> Option<Db> {
+        let url = crate::testpg::database_url()?;
+        Some(Db::connect(&url).await.unwrap())
+    }
+
+    async fn project(db: &Db) -> (Project, Environment) {
         let p = Project {
             id: new_id(),
             name: "shop".into(),
@@ -1191,11 +1182,11 @@ mod tests {
             name: "production".into(),
             created_at: Utc::now(),
         };
-        db.insert_project(&p, &e).unwrap();
+        db.insert_project(&p, &e).await.unwrap();
         (p, e)
     }
 
-    fn server(db: &Db) -> Server {
+    async fn server(db: &Db) -> Server {
         let s = Server {
             id: new_id(),
             name: "local".into(),
@@ -1209,7 +1200,7 @@ mod tests {
             last_checked_at: None,
             created_at: Utc::now(),
         };
-        db.insert_server(&s).unwrap();
+        db.insert_server(&s).await.unwrap();
         s
     }
 
@@ -1231,6 +1222,23 @@ mod tests {
         }
     }
 
+    async fn raw_service(db: &Db, env: &Environment, srv: &Server, source: &str) -> Id {
+        let id = new_id();
+        sqlx::query(
+            "INSERT INTO services (id, environment_id, server_id, name, source, restart, created_at)
+             VALUES ($1, $2, $3, 'web', $4::jsonb, 'always', $5)",
+        )
+        .bind(&id)
+        .bind(&env.id)
+        .bind(&srv.id)
+        .bind(source)
+        .bind(Utc::now())
+        .execute(db.pool())
+        .await
+        .unwrap();
+        id
+    }
+
     #[test]
     fn ids_are_valid_names() {
         for _ in 0..100 {
@@ -1238,11 +1246,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn service_round_trip_with_live_switch() {
-        let db = Db::open_in_memory().unwrap();
-        let srv = server(&db);
-        let (p, env) = project(&db);
+    #[tokio::test]
+    async fn service_round_trip_with_live_switch() {
+        let Some(db) = test_db().await else { return };
+        assert!(db.is_empty().await.unwrap());
+        let srv = server(&db).await;
+        assert!(!db.is_empty().await.unwrap());
+        let (p, env) = project(&db).await;
         let svc = Service {
             id: new_id(),
             environment_id: env.id.clone(),
@@ -1261,122 +1271,135 @@ mod tests {
             last_deployed_at: None,
             live_deployment_id: None,
         };
-        let domain = Domain {
+        let now = Utc::now();
+        let domains = ["a.example.com", "b.example.com"].map(|host| Domain {
             id: new_id(),
             service_id: svc.id.clone(),
-            host: "a.example.com".into(),
+            host: host.into(),
             port: None,
             tls: true,
-            created_at: Utc::now(),
-        };
-        let env_vars = [EnvVar {
-            key: "A".into(),
-            value: "1".into(),
-            secret: false,
-        }];
+            created_at: now,
+        });
+        let env_vars = [
+            EnvVar {
+                key: "B".into(),
+                value: "2".into(),
+                secret: true,
+            },
+            EnvVar {
+                key: "A".into(),
+                value: "1".into(),
+                secret: false,
+            },
+        ];
         db.insert_service(&NewService {
             service: &svc,
             env: &env_vars,
-            domains: std::slice::from_ref(&domain),
+            domains: &domains,
             volumes: &[],
         })
+        .await
         .unwrap();
-        assert!(db.domain_taken("a.example.com").unwrap());
-        assert!(db.service_name_taken(&env.id, "web", None).unwrap());
+        assert!(db.domain_taken("a.example.com").await.unwrap());
+        assert!(db.service_name_taken(&env.id, "web", None).await.unwrap());
         assert!(
             !db.service_name_taken(&env.id, "web", Some(&svc.id))
+                .await
                 .unwrap()
+        );
+        let stored = db.domains(&svc.id).await.unwrap();
+        assert_eq!(
+            stored.iter().map(|d| d.host.as_str()).collect::<Vec<_>>(),
+            ["a.example.com", "b.example.com"],
+            "same-timestamp rows keep insertion order"
         );
 
         let mut first = deployment(&svc.id);
-        db.insert_deployment(&mut first, &srv.id).unwrap();
+        db.insert_deployment(&mut first, &srv.id).await.unwrap();
         let mut second = deployment(&svc.id);
-        db.insert_deployment(&mut second, &srv.id).unwrap();
+        db.insert_deployment(&mut second, &srv.id).await.unwrap();
         assert_eq!((first.number, second.number), (1, 2));
 
-        let rec = db.service(&svc.id).unwrap().unwrap();
+        let rec = db.service(&svc.id).await.unwrap().unwrap();
         assert_eq!(rec.busy, Some(DeploymentStatus::Queued));
         assert_eq!(rec.service.primary_domain.as_deref(), Some("a.example.com"));
+        assert_eq!(rec.service.source, svc.source);
+        assert_eq!(rec.service.port, Some(80));
 
         first.finished_at = Some(Utc::now());
-        db.switch_live(&first).unwrap();
+        db.switch_live(&first).await.unwrap();
         second.finished_at = Some(Utc::now());
-        db.switch_live(&second).unwrap();
-        let first = db.deployment(&first.id).unwrap().unwrap();
+        db.switch_live(&second).await.unwrap();
+        let first = db.deployment(&first.id).await.unwrap().unwrap();
         assert_eq!(first.status, DeploymentStatus::Superseded);
-        let rec = db.service(&svc.id).unwrap().unwrap();
+        let rec = db.service(&svc.id).await.unwrap().unwrap();
         assert_eq!(
             rec.service.live_deployment_id.as_deref(),
             Some(second.id.as_str())
         );
         assert_eq!(rec.busy, None);
-        assert_eq!(db.env(&svc.id).unwrap(), env_vars);
+        assert_eq!(db.env(&svc.id).await.unwrap(), env_vars);
 
-        db.delete_project(&p.id).unwrap();
-        assert!(db.service(&svc.id).unwrap().is_none());
-        assert!(db.deployment(&second.id).unwrap().is_none());
+        db.delete_project(&p.id).await.unwrap();
+        assert!(db.service(&svc.id).await.unwrap().is_none());
+        assert!(db.deployment(&second.id).await.unwrap().is_none());
     }
 
-    #[test]
-    fn interrupted_deployments_fail_on_startup() {
-        let db = Db::open_in_memory().unwrap();
-        let srv = server(&db);
-        let (_, env) = project(&db);
-        let svc_id = new_id();
-        db.lock()
-            .execute(
-                "INSERT INTO services (id, environment_id, server_id, name, source, restart, created_at)
-                 VALUES (?1, ?2, ?3, 'web', '{\"type\":\"image\",\"image\":\"nginx\"}', 'always', ?4)",
-                params![svc_id, env.id, srv.id, Utc::now()],
-            )
-            .unwrap();
+    /// Concurrent deploys of one service still get distinct, contiguous numbers.
+    #[tokio::test]
+    async fn concurrent_deployments_number_contiguously() {
+        let Some(db) = test_db().await else { return };
+        let srv = server(&db).await;
+        let (_, env) = project(&db).await;
+        let svc_id = raw_service(&db, &env, &srv, r#"{"type":"image","image":"nginx"}"#).await;
+        let inserts = (0..10).map(|_| {
+            let db = db.clone();
+            let srv_id = srv.id.clone();
+            let mut d = deployment(&svc_id);
+            async move {
+                db.insert_deployment(&mut d, &srv_id).await.unwrap();
+                d.number
+            }
+        });
+        let mut numbers = futures_util::future::join_all(inserts).await;
+        numbers.sort_unstable();
+        assert_eq!(numbers, (1..=10).collect::<Vec<i64>>());
+    }
+
+    #[tokio::test]
+    async fn interrupted_deployments_fail_on_startup() {
+        let Some(db) = test_db().await else { return };
+        let srv = server(&db).await;
+        let (_, env) = project(&db).await;
+        let svc_id = raw_service(&db, &env, &srv, r#"{"type":"image","image":"nginx"}"#).await;
         let mut d = deployment(&svc_id);
-        db.insert_deployment(&mut d, &srv.id).unwrap();
-        assert_eq!(db.fail_interrupted_deployments().unwrap(), 1);
-        let d = db.deployment(&d.id).unwrap().unwrap();
+        d.steps = vec![Step {
+            kind: StepKind::Pull,
+            status: StepStatus::Running,
+            detail: None,
+            started_at: Some(Utc::now()),
+            finished_at: None,
+        }];
+        db.insert_deployment(&mut d, &srv.id).await.unwrap();
+        assert_eq!(db.fail_interrupted_deployments().await.unwrap(), 1);
+        let d = db.deployment(&d.id).await.unwrap().unwrap();
         assert_eq!(d.status, DeploymentStatus::Failed);
         assert_eq!(d.error.as_deref(), Some("daemon restarted"));
+        assert_eq!(d.steps[0].status, StepStatus::Failed);
     }
 
-    /// A database created by the first schema version opens and migrates to the latest one
-    /// with its rows intact.
-    #[test]
-    fn version_one_databases_migrate() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(&format!(
-            "BEGIN; {} PRAGMA user_version = 1; COMMIT;",
-            MIGRATIONS[0]
-        ))
-        .unwrap();
-        conn.execute(
-            "INSERT INTO servers (id, name, kind, created_at) VALUES ('s', 'local', 'local', ?1)",
-            [Utc::now()],
+    #[tokio::test]
+    async fn backups_number_per_service_and_fail_on_restart() {
+        let Some(db) = test_db().await else { return };
+        let srv = server(&db).await;
+        let (_, env) = project(&db).await;
+        let svc_id = raw_service(
+            &db,
+            &env,
+            &srv,
+            r#"{"type":"database","kind":"redis","version":"8-alpine"}"#,
         )
-        .unwrap();
-        migrate(&conn).unwrap();
-        let version: usize = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, MIGRATIONS.len());
-        let servers: i64 = conn
-            .query_row("SELECT COUNT(*) FROM servers", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(servers, 1);
-    }
-
-    #[test]
-    fn backups_number_per_service_and_fail_on_restart() {
-        let db = Db::open_in_memory().unwrap();
-        let srv = server(&db);
-        let (_, env) = project(&db);
-        let svc_id = new_id();
-        db.lock()
-            .execute(
-                "INSERT INTO services (id, environment_id, server_id, name, source, restart, created_at)
-                 VALUES (?1, ?2, ?3, 'db', '{\"type\":\"database\",\"kind\":\"redis\",\"version\":\"8-alpine\"}', 'always', ?4)",
-                params![svc_id, env.id, srv.id, Utc::now()],
-            )
-            .unwrap();
+        .await;
         let backup = || Backup {
             id: new_id(),
             service_id: svc_id.clone(),
@@ -1391,23 +1414,23 @@ mod tests {
             finished_at: None,
         };
         let mut first = backup();
-        db.insert_backup(&mut first, "rdb").unwrap();
+        db.insert_backup(&mut first, "rdb").await.unwrap();
         let mut second = backup();
-        db.insert_backup(&mut second, "rdb").unwrap();
+        db.insert_backup(&mut second, "rdb").await.unwrap();
         assert_eq!(first.file_name, "20261120-030000-1.rdb.gz");
         assert_eq!(second.file_name, "20261120-030000-2.rdb.gz");
         second.status = BackupStatus::Done;
         second.size_bytes = 42;
-        db.update_backup(&second).unwrap();
+        db.update_backup(&second).await.unwrap();
 
-        assert_eq!(db.fail_interrupted_backups().unwrap(), 1);
-        let list = db.backups(&svc_id).unwrap();
+        assert_eq!(db.fail_interrupted_backups().await.unwrap(), 1);
+        let list = db.backups(&svc_id).await.unwrap();
         assert_eq!(list[0].id, second.id);
         assert_eq!(list[0].size_bytes, 42);
         assert_eq!(list[1].status, BackupStatus::Failed);
         assert_eq!(list[1].error.as_deref(), Some("daemon restarted"));
 
-        assert!(!db.backup_schedule(&svc_id).unwrap().schedule.enabled);
+        assert!(!db.backup_schedule(&svc_id).await.unwrap().schedule.enabled);
         let record = ScheduleRecord {
             service_id: svc_id.clone(),
             schedule: BackupSchedule {
@@ -1417,19 +1440,43 @@ mod tests {
             },
             last_run_at: Some(Utc::now()),
         };
-        db.save_backup_schedule(&record).unwrap();
+        db.save_backup_schedule(&record).await.unwrap();
         assert_eq!(
-            db.backup_schedule(&svc_id).unwrap().schedule,
+            db.backup_schedule(&svc_id).await.unwrap().schedule,
             record.schedule
         );
-        assert_eq!(db.enabled_backup_schedules().unwrap().len(), 1);
+        assert_eq!(db.enabled_backup_schedules().await.unwrap().len(), 1);
 
-        db.set_public_port(&svc_id, Some(15432)).unwrap();
-        assert_eq!(db.public_port(&svc_id).unwrap(), Some(15432));
-        assert!(db.public_port_taken(&srv.id, 15432, "other").unwrap());
-        assert!(!db.public_port_taken(&srv.id, 15432, &svc_id).unwrap());
+        db.set_public_port(&svc_id, Some(15432)).await.unwrap();
+        assert_eq!(db.public_port(&svc_id).await.unwrap(), Some(15432));
+        assert!(db.public_port_taken(&srv.id, 15432, "other").await.unwrap());
+        assert!(!db.public_port_taken(&srv.id, 15432, &svc_id).await.unwrap());
 
-        db.delete_service(&svc_id).unwrap();
-        assert!(db.backup(&second.id).unwrap().is_none());
+        db.delete_service(&svc_id).await.unwrap();
+        assert!(db.backup(&second.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn activity_is_newest_first() {
+        let Some(db) = test_db().await else { return };
+        for message in ["one", "two", "three"] {
+            db.insert_activity(&Activity {
+                id: 0,
+                at: Utc::now(),
+                level: ActivityLevel::Info,
+                service_id: None,
+                service_name: None,
+                project_id: None,
+                message: message.into(),
+                detail: None,
+            })
+            .await
+            .unwrap();
+        }
+        let list = db.activity(2).await.unwrap();
+        assert_eq!(
+            list.iter().map(|a| a.message.as_str()).collect::<Vec<_>>(),
+            ["three", "two"]
+        );
     }
 }

@@ -24,14 +24,14 @@ pub async fn get(State(state): State<Arc<AppState>>) -> ApiResult<Json<InstanceS
 
 async fn settings(state: &AppState) -> ApiResult<InstanceSettings> {
     let config = state.config();
-    let local = state.db.local_server()?;
+    let local = state.db.local_server().await?;
     let docker = match &local {
         Some(server) => state.docker.get(server).await.ok(),
         None => None,
     };
     let (mut proxy, mut docker_version, mut reclaimable) = (None, None, None);
     if let Some(d) = &docker {
-        let deployments = deployments_by_service(state)?;
+        let deployments = deployments_by_service(state).await?;
         proxy = tokio::time::timeout(DOCKER_TIMEOUT, docker::proxy_status(d))
             .await
             .ok()
@@ -87,16 +87,13 @@ fn dir_size(path: &Path) -> u64 {
         .sum()
 }
 
-fn deployments_by_service(state: &AppState) -> ApiResult<HashMap<Id, Vec<Deployment>>> {
-    state
-        .db
-        .services()?
-        .into_iter()
-        .map(|rec| {
-            let deployments = state.db.deployments(&rec.service.id, usize::MAX)?;
-            Ok((rec.service.id, deployments))
-        })
-        .collect()
+async fn deployments_by_service(state: &AppState) -> ApiResult<HashMap<Id, Vec<Deployment>>> {
+    let mut all = HashMap::new();
+    for rec in state.db.services().await? {
+        let deployments = state.db.deployments(&rec.service.id, usize::MAX).await?;
+        all.insert(rec.service.id, deployments);
+    }
+    Ok(all)
 }
 
 pub async fn update(
@@ -109,27 +106,31 @@ pub async fn update(
         Ok(was)
     })?;
     if let Some(ip) = &body.public_ip_override {
-        state.activity(
-            ActivityLevel::Info,
-            "Public IP changed".into(),
-            Some(
-                config
-                    .public_ip_override
-                    .clone()
-                    .unwrap_or_else(|| format!("auto-detected (was set to '{ip}')")),
-            ),
-        );
+        state
+            .activity(
+                ActivityLevel::Info,
+                "Public IP changed".into(),
+                Some(
+                    config
+                        .public_ip_override
+                        .clone()
+                        .unwrap_or_else(|| format!("auto-detected (was set to '{ip}')")),
+                ),
+            )
+            .await;
     }
     if let Some(on) = body.manage_proxy {
-        state.activity(
-            ActivityLevel::Info,
-            format!("Proxy auto-manage turned {}", if on { "on" } else { "off" }),
-            None,
-        );
+        state
+            .activity(
+                ActivityLevel::Info,
+                format!("Proxy auto-manage turned {}", if on { "on" } else { "off" }),
+                None,
+            )
+            .await;
     }
     if config.manage_proxy
         && !was_managing
-        && let Some(local) = state.db.local_server()?
+        && let Some(local) = state.db.local_server().await?
         && local.proxy != ProxyStatus::Running
     {
         let state = state.clone();
@@ -144,14 +145,17 @@ pub async fn rotate_token(State(state): State<Arc<AppState>>) -> ApiResult<Json<
         c.token_sha256 = hex::encode(config::hash_token(&token));
         Ok(())
     })?;
-    state.activity(ActivityLevel::Info, "API token rotated".into(), None);
+    state
+        .activity(ActivityLevel::Info, "API token rotated".into(), None)
+        .await;
     Ok(Json(RotatedToken { token }))
 }
 
 pub async fn restart_proxy(State(state): State<Arc<AppState>>) -> ApiResult<Json<Server>> {
     let local = state
         .db
-        .local_server()?
+        .local_server()
+        .await?
         .ok_or_else(|| AppError::NotFound("no local server is registered".into()))?;
     Ok(Json(servers::install_proxy(&state, local).await?))
 }
@@ -159,12 +163,12 @@ pub async fn restart_proxy(State(state): State<Arc<AppState>>) -> ApiResult<Json
 /// Prunes the local server and every other server that answers; an unreachable remote server is
 /// skipped rather than failing the whole prune.
 pub async fn prune(State(state): State<Arc<AppState>>) -> ApiResult<Json<PruneResult>> {
-    let deployments = deployments_by_service(&state)?;
+    let deployments = deployments_by_service(&state).await?;
     let mut total = PruneResult {
         reclaimed_bytes: 0,
         removed_images: Vec::new(),
     };
-    for server in state.db.servers()? {
+    for server in state.db.servers().await? {
         let local = server.kind == ServerKind::Local;
         let result = async {
             let docker = tokio::time::timeout(DOCKER_TIMEOUT, state.docker.get(&server))
@@ -182,11 +186,13 @@ pub async fn prune(State(state): State<Arc<AppState>>) -> ApiResult<Json<PruneRe
             Err(e) => tracing::warn!(server = %server.name, "prune skipped: {e:#}"),
         }
     }
-    state.activity(
-        ActivityLevel::Success,
-        format!("Pruned {} images", total.removed_images.len()),
-        Some(format!("{} MB freed", total.reclaimed_bytes / 1_000_000)),
-    );
+    state
+        .activity(
+            ActivityLevel::Success,
+            format!("Pruned {} images", total.removed_images.len()),
+            Some(format!("{} MB freed", total.reclaimed_bytes / 1_000_000)),
+        )
+        .await;
     Ok(Json(total))
 }
 

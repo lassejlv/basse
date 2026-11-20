@@ -26,7 +26,7 @@ pub async fn run(state: &AppState, req: UpdateRequest) -> ApiResult<UpdateResult
             cli = brand::CLI_BIN
         );
     }
-    refuse_while_deploying(state)?;
+    refuse_while_deploying(state).await?;
     let target = release::current_target()
         .ok_or_else(|| AppError::BadRequest("no release is published for this platform".into()))?;
     let releases = release::Releases::new()?;
@@ -46,12 +46,14 @@ pub async fn run(state: &AppState, req: UpdateRequest) -> ApiResult<UpdateResult
     let installed = install(&archive, &dir, &exe);
     let _ = std::fs::remove_dir_all(&dir);
     let to = installed?;
-    refuse_while_deploying(state)?;
-    state.activity(
-        ActivityLevel::Success,
-        format!("Updated {} to {to}", brand::DAEMON_BIN),
-        Some(format!("from {current}")),
-    );
+    refuse_while_deploying(state).await?;
+    state
+        .activity(
+            ActivityLevel::Success,
+            format!("Updated {} to {to}", brand::DAEMON_BIN),
+            Some(format!("from {current}")),
+        )
+        .await;
     restart_soon(exe);
     Ok(UpdateResult {
         from: current.to_string(),
@@ -59,8 +61,8 @@ pub async fn run(state: &AppState, req: UpdateRequest) -> ApiResult<UpdateResult
     })
 }
 
-fn refuse_while_deploying(state: &AppState) -> ApiResult<()> {
-    let active = state.db.unfinished_deployments()?;
+async fn refuse_while_deploying(state: &AppState) -> ApiResult<()> {
+    let active = state.db.unfinished_deployments().await?;
     if !active.is_empty() {
         let names: Vec<String> = active
             .iter()

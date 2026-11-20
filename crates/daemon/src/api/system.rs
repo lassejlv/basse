@@ -14,7 +14,7 @@ use std::time::Duration;
 
 pub async fn info(State(state): State<Arc<AppState>>) -> ApiResult<Json<DaemonInfo>> {
     let sample = state.stats.host();
-    let proxy = match state.db.local_server()? {
+    let proxy = match state.db.local_server().await? {
         Some(server) => match state.docker.get(&server).await {
             Ok(d) => tokio::time::timeout(Duration::from_secs(5), docker::proxy_status(&d))
                 .await
@@ -44,11 +44,12 @@ pub async fn info(State(state): State<Arc<AppState>>) -> ApiResult<Json<DaemonIn
 }
 
 pub async fn tree(State(state): State<Arc<AppState>>) -> ApiResult<Json<Tree>> {
-    let services = with_states(&state, state.db.services()?).await;
-    let environments = state.db.environments()?;
+    let services = with_states(&state, state.db.services().await?).await;
+    let environments = state.db.environments().await?;
     let projects = state
         .db
-        .projects()?
+        .projects()
+        .await?
         .into_iter()
         .map(|project| {
             let environments = environments
@@ -82,5 +83,5 @@ pub async fn activity(
     Query(q): Query<ActivityQuery>,
 ) -> ApiResult<Json<Vec<Activity>>> {
     let limit = q.limit.unwrap_or(50).clamp(1, 1000);
-    Ok(Json(state.db.activity(limit)?))
+    Ok(Json(state.db.activity(limit).await?))
 }

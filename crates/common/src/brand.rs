@@ -20,6 +20,12 @@ pub const PROXY_NETWORK: &str = "basse";
 pub const PROXY_CONTAINER: &str = "basse-proxy";
 /// GitHub repository that publishes releases, as `owner/name`.
 pub const REPO: &str = "lassejlv/basse";
+/// Container of the Postgres database the daemon keeps its own state in.
+pub const STORE_CONTAINER: &str = "basse-postgres";
+/// Docker volume holding that database's files.
+pub const STORE_VOLUME: &str = "basse-pgdata";
+/// Docker network the store container is alone on.
+pub const STORE_NETWORK: &str = "basse-store";
 
 /// Full environment variable name for a suffix: `env_var("URL")` is `BASSE_URL`.
 pub fn env_var(suffix: &str) -> String {

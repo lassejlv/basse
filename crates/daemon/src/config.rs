@@ -108,6 +108,25 @@ pub struct Config {
     /// Address shown in hints instead of the detected one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_ip_override: Option<String>,
+    /// An external Postgres for the daemon's own state. When set, no managed container is run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database_url: Option<String>,
+    /// The managed Postgres container, used when `database_url` is unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub postgres: Option<ManagedPostgres>,
+}
+
+/// Credentials and port of the Postgres container the daemon runs for its own state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedPostgres {
+    pub password: String,
+    /// Port on 127.0.0.1 the container is published on.
+    #[serde(default = "default_postgres_port")]
+    pub port: u16,
+}
+
+pub fn default_postgres_port() -> u16 {
+    5439
 }
 
 impl Config {
@@ -200,6 +219,8 @@ mod tests {
             listen: default_listen(),
             manage_proxy: true,
             public_ip_override: None,
+            database_url: None,
+            postgres: None,
         };
         assert_eq!(config.token_hash().unwrap(), hash_token(&token));
     }
@@ -210,6 +231,8 @@ mod tests {
             listen: default_listen(),
             manage_proxy: true,
             public_ip_override: None,
+            database_url: None,
+            postgres: None,
         }
     }
 
@@ -263,5 +286,24 @@ mod tests {
         let c: Config = toml::from_str("token_sha256 = \"ab\"\n").unwrap();
         assert_eq!(c.public_ip_override, None);
         assert!(!toml::to_string(&c).unwrap().contains("public_ip_override"));
+    }
+
+    #[test]
+    fn configs_without_a_store_section_still_load() {
+        let config: Config =
+            toml::from_str("token_sha256 = \"00\"\nlisten = \"0.0.0.0:7700\"\n").unwrap();
+        assert_eq!(config.database_url, None);
+        assert_eq!(config.postgres, None);
+
+        let with_store = Config {
+            postgres: Some(ManagedPostgres {
+                password: "pw".into(),
+                port: default_postgres_port(),
+            }),
+            ..config
+        };
+        let raw = toml::to_string_pretty(&with_store).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(back.postgres, with_store.postgres);
     }
 }

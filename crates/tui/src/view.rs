@@ -1,6 +1,7 @@
 //! Drawing. Every screen follows the Paper design: a top bar, bordered panels, a key bar.
 
 use crate::app::*;
+use crate::database;
 use crate::mouse::{self, Hit};
 use crate::theme;
 use crate::util::{self, truncate};
@@ -48,19 +49,19 @@ pub fn render(frame: &mut Frame, app: &App) {
         }
         Some(Overlay::Confirm(c)) => {
             dim(frame, area);
-            confirm(frame, area, c);
+            confirm(frame, area, c, app.tick);
         }
         Some(Overlay::Palette(p)) => {
             dim(frame, area);
             palette(frame, area, p);
         }
+        Some(Overlay::Reveal(r)) => {
+            dim(frame, area);
+            reveal(frame, area, r);
+        }
         Some(Overlay::Help) => {
             dim(frame, area);
             help(frame, area, app);
-        }
-        Some(Overlay::Token(token)) => {
-            dim(frame, area);
-            token_dialog(frame, area, app, token);
         }
         None => {}
     }
@@ -257,6 +258,36 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                     ("X", "remove + data"),
                 ],
                 Tab::Settings => vec![("tab", "next tab"), ("⏎", "edit"), ("X", "delete service")],
+                Tab::Database => {
+                    let view = app.service.as_ref();
+                    let reveal = view.is_some_and(|v| v.reveal);
+                    let public = view
+                        .and_then(|v| v.info())
+                        .is_some_and(|i| i.public_port.is_some());
+                    let mut keys = vec![
+                        ("tab", "next tab"),
+                        ("v", if reveal { "hide" } else { "reveal" }),
+                        ("c", "copy url"),
+                    ];
+                    if public {
+                        keys.push(("C", "copy public url"));
+                    }
+                    keys.extend([
+                        ("p", if public { "unexpose" } else { "expose" }),
+                        ("R", "rotate password"),
+                        ("d", "deploy"),
+                    ]);
+                    keys
+                }
+                Tab::Backups => vec![
+                    ("tab", "next tab"),
+                    ("↑↓", "move"),
+                    ("b", "back up now"),
+                    ("R", "restore"),
+                    ("D", "download"),
+                    ("x", "delete"),
+                    ("e", "schedule"),
+                ],
                 Tab::Overview => vec![
                     ("tab", "next tab"),
                     ("d", "deploy"),
@@ -349,6 +380,16 @@ fn key_bar(frame: &mut Frame, area: Rect, app: &App) {
         );
     }
     let right = match &app.toast {
+        Some(t) if t.busy => {
+            let max = area.width as usize / 2;
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", util::spinner(app.tick)),
+                    theme::fg(theme::INFO),
+                ),
+                Span::styled(truncate(&t.text, max), theme::muted()),
+            ])
+        }
         Some(t) => {
             let style = if t.error {
                 theme::fg(theme::ERR)
@@ -750,9 +791,9 @@ fn kv<'a>(key: &'a str, value: Vec<Span<'a>>, key_w: usize) -> Line<'a> {
 }
 
 fn service_lines<'a>(
+    app: &App,
     detail: Option<&'a ServiceDetail>,
     service: &'a Service,
-    reveal: bool,
 ) -> Vec<Line<'a>> {
     let w = 10;
     let mut lines = Vec::new();
@@ -784,6 +825,90 @@ fn service_lines<'a>(
         lines.push(Line::styled("loading…", theme::muted()));
         return lines;
     };
+    if let Some(info) = &d.database {
+        let access = match info.public_port {
+            Some(p) => vec![
+                Span::styled(format!("public :{p}"), theme::text()),
+                Span::styled(
+                    format!("  {}", app.server_address(&d.server)),
+                    theme::muted(),
+                ),
+            ],
+            None => vec![Span::styled("internal only", theme::muted())],
+        };
+        lines.push(kv("access", access, w));
+        let schedule = app
+            .schedules
+            .get(&service.id)
+            .map(|s| format!("  {}", database::schedule_summary(s)))
+            .unwrap_or_default();
+        let last = app
+            .backups
+            .get(&service.id)
+            .and_then(|b| database::last_good(b));
+        let backup = match last {
+            Some(b) => Span::styled(util::ago(b.created_at), theme::text()),
+            None => Span::styled("no backups", theme::muted()),
+        };
+        lines.push(kv(
+            "backup",
+            vec![backup, Span::styled(schedule, theme::muted())],
+            w,
+        ));
+    } else {
+        route_lines(&mut lines, d, service, w);
+    }
+    if d.volumes.is_empty() {
+        lines.push(kv("volumes", vec![Span::styled("none", theme::muted())], w));
+    }
+    for (i, v) in d.volumes.iter().enumerate() {
+        lines.push(kv(
+            if i == 0 { "volumes" } else { "" },
+            vec![
+                Span::styled(v.name.clone(), theme::text()),
+                Span::styled(format!("  {}", v.mount_path), theme::muted()),
+            ],
+            w,
+        ));
+    }
+    let secrets = d.env.iter().filter(|v| v.secret).count();
+    lines.push(kv(
+        "env",
+        vec![
+            Span::styled(format!("{} vars", d.env.len()), theme::text()),
+            Span::styled(
+                if secrets > 0 {
+                    format!("  {secrets} secret")
+                } else {
+                    String::new()
+                },
+                theme::muted(),
+            ),
+        ],
+        w,
+    ));
+    let restarts = d
+        .container
+        .as_ref()
+        .map_or(String::new(), |c| format!("  {} restarts", c.restart_count));
+    lines.push(kv(
+        "restart",
+        vec![
+            Span::styled(service.restart.as_str(), theme::text()),
+            Span::styled(restarts, theme::muted()),
+        ],
+        w,
+    ));
+    lines.push(kv(
+        "server",
+        vec![Span::styled(d.server.name.clone(), theme::text())],
+        w,
+    ));
+    lines
+}
+
+/// Routes and the health check of an app service.
+fn route_lines<'a>(lines: &mut Vec<Line<'a>>, d: &ServiceDetail, service: &Service, w: usize) {
     if d.domains.is_empty() {
         let port = service
             .port
@@ -820,54 +945,6 @@ fn service_lines<'a>(
         _ => vec![Span::styled("container must stay up 5s", theme::muted())],
     };
     lines.push(kv("health", health, w));
-    if d.volumes.is_empty() {
-        lines.push(kv("volumes", vec![Span::styled("none", theme::muted())], w));
-    }
-    for (i, v) in d.volumes.iter().enumerate() {
-        lines.push(kv(
-            if i == 0 { "volumes" } else { "" },
-            vec![
-                Span::styled(v.name.clone(), theme::text()),
-                Span::styled(format!("  {}", v.mount_path), theme::muted()),
-            ],
-            w,
-        ));
-    }
-    let secrets = d.env.iter().filter(|v| v.secret).count();
-    let _ = reveal;
-    lines.push(kv(
-        "env",
-        vec![
-            Span::styled(format!("{} vars", d.env.len()), theme::text()),
-            Span::styled(
-                if secrets > 0 {
-                    format!("  {secrets} secret")
-                } else {
-                    String::new()
-                },
-                theme::muted(),
-            ),
-        ],
-        w,
-    ));
-    let restarts = d
-        .container
-        .as_ref()
-        .map_or(String::new(), |c| format!("  {} restarts", c.restart_count));
-    lines.push(kv(
-        "restart",
-        vec![
-            Span::styled(service.restart.as_str(), theme::text()),
-            Span::styled(restarts, theme::muted()),
-        ],
-        w,
-    ));
-    lines.push(kv(
-        "server",
-        vec![Span::styled(d.server.name.clone(), theme::text())],
-        w,
-    ));
-    lines
 }
 
 fn charts(frame: &mut Frame, area: Rect, stats: Option<&ServiceStats>) {
@@ -945,7 +1022,7 @@ fn service_detail(frame: &mut Frame, area: Rect, app: &App, s: &Service) {
     let inner = inside(&block, area);
     frame.render_widget(block, area);
     let detail = app.details.get(&s.id);
-    frame.render_widget(Paragraph::new(service_lines(detail, s, false)), inner);
+    frame.render_widget(Paragraph::new(service_lines(app, detail, s)), inner);
     charts(frame, inner, app.stats.get(&s.id));
 }
 
@@ -1025,7 +1102,10 @@ fn service(frame: &mut Frame, area: Rect, app: &App) {
             .iter()
             .find(|d| d.status == DeploymentStatus::Live);
         let mut meta = Vec::new();
-        if let Some(d) = live {
+        let info = view.info();
+        if let Some(info) = info {
+            meta.push(format!("{} {}", info.kind, info.version));
+        } else if let Some(d) = live {
             meta.push(
                 d.commit
                     .as_deref()
@@ -1038,7 +1118,12 @@ fn service(frame: &mut Frame, area: Rect, app: &App) {
         {
             meta.push(format!("up {}", util::ago(at).trim_end_matches(" ago")));
         }
-        if let Some(dom) = view.detail.as_ref().and_then(|d| d.domains.first()) {
+        if let Some(info) = info {
+            meta.push(match info.public_port {
+                Some(p) => format!("public :{p}"),
+                None => "internal only".into(),
+            });
+        } else if let Some(dom) = view.detail.as_ref().and_then(|d| d.domains.first()) {
             meta.push(format!(
                 "{}://{}",
                 if dom.tls { "https" } else { "http" },
@@ -1056,7 +1141,7 @@ fn service(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut tab_spans = vec![Span::raw(" ")];
     let mut x = tabs.x + 1;
-    for t in Tab::ALL {
+    for t in view.tabs() {
         let w = t.title().chars().count() as u16;
         mouse::hit(Rect::new(x, tabs.y, w, 1), Hit::Tab(t));
         x += w + 4;
@@ -1074,6 +1159,8 @@ fn service(frame: &mut Frame, area: Rect, app: &App) {
         Tab::Overview => service_overview(frame, body, app, view),
         Tab::Deployments => deployments_tab(frame, body, app, view),
         Tab::Logs => logs_tab(frame, body, app, view),
+        Tab::Database => database_tab(frame, body, app, view),
+        Tab::Backups => backups_tab(frame, body, app, view),
         Tab::Env => env_tab(frame, body, view),
         Tab::Domains => domains_tab(frame, body, view),
         Tab::Volumes => volumes_tab(frame, body, view),
@@ -1088,11 +1175,17 @@ fn with_rail(area: Rect) -> (Rect, Rect) {
     (main, rail)
 }
 
+const CONTAINER_H: u16 = 9;
+
 fn rail(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
-    let container_h = 9;
-    let [c_area, d_area] = Layout::vertical([Constraint::Length(container_h), Constraint::Fill(1)])
+    let [c_area, d_area] = Layout::vertical([Constraint::Length(CONTAINER_H), Constraint::Fill(1)])
         .spacing(1)
         .areas(area);
+    container_panel(frame, c_area, view);
+    deployments_panel(frame, d_area, app, view);
+}
+
+fn container_panel(frame: &mut Frame, c_area: Rect, view: &ServiceView) {
     let block = panel(title("Container", false), None, false);
     let inner = inside(&block, c_area);
     frame.render_widget(block, c_area);
@@ -1165,7 +1258,9 @@ fn rail(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         None => vec![Line::styled("no container running", theme::muted())],
     };
     frame.render_widget(Paragraph::new(lines), inner);
+}
 
+fn deployments_panel(frame: &mut Frame, d_area: Rect, app: &App, view: &ServiceView) {
     let block = panel(title("Deployments", false), None, false);
     let inner = inside(&block, d_area);
     frame.render_widget(block, d_area);
@@ -1211,12 +1306,366 @@ fn service_overview(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView
         let inner = inside(&block, main).inner(Margin::new(1, 1));
         frame.render_widget(block, main);
         frame.render_widget(
-            Paragraph::new(service_lines(Some(d), &d.service, view.reveal)),
+            Paragraph::new(service_lines(app, Some(d), &d.service)),
             inner,
         );
         charts(frame, inner, app.stats.get(&view.id));
     }
     rail(frame, rail_area, app, view);
+}
+
+/// A clickable key hint drawn at `(x, y)`; returns its width.
+fn hint_at(frame: &mut Frame, x: u16, y: u16, key: &'static str, label: &str) -> u16 {
+    let w = (key.chars().count() + 1 + label.chars().count()) as u16;
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(key, theme::accent()),
+            Span::styled(format!(" {label}"), theme::muted()),
+        ])),
+        Rect::new(x, y, w, 1),
+    );
+    if let Some((code, mods)) = mouse::key_for_label(key) {
+        mouse::hit(Rect::new(x, y, w, 1), Hit::Key(code, mods));
+    }
+    w
+}
+
+fn rule_line(width: u16) -> Line<'static> {
+    Line::styled("─".repeat(width as usize), theme::fg(theme::LINE))
+}
+
+fn database_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
+    let (main, rail_area) = with_rail(area);
+    let (Some(info), Some(d)) = (view.info(), view.detail.as_ref()) else {
+        let block = panel(title("Connection", true), None, true);
+        let inner = inside(&block, main);
+        frame.render_widget(block, main);
+        frame.render_widget(
+            Paragraph::new(format!("{} loading", util::spinner(app.tick))).style(theme::muted()),
+            inner,
+        );
+        return;
+    };
+    let block = panel(
+        title("Connection", true),
+        Some(Line::styled(
+            format!("{} {}", info.kind, info.version),
+            theme::muted(),
+        )),
+        true,
+    );
+    let inner = inside(&block, main).inner(Margin::new(1, 1));
+    frame.render_widget(block, main);
+
+    let w = 14;
+    let env = d.environment.name.clone();
+    let mut lines = vec![
+        kv(
+            "engine",
+            vec![
+                Span::styled(info.kind.image(), theme::text()),
+                Span::styled(format!("  {}", info.version), theme::muted()),
+            ],
+            w,
+        ),
+        kv(
+            "host",
+            vec![
+                Span::styled(info.host.clone(), theme::text()),
+                Span::styled(
+                    format!("  service name · reachable inside {env}"),
+                    theme::muted(),
+                ),
+            ],
+            w,
+        ),
+        kv(
+            "port",
+            vec![Span::styled(info.port.to_string(), theme::text())],
+            w,
+        ),
+    ];
+    if let Some(user) = &info.username {
+        lines.push(kv(
+            "user",
+            vec![Span::styled(user.clone(), theme::text())],
+            w,
+        ));
+    }
+    if let Some(db) = &info.database {
+        lines.push(kv(
+            "database",
+            vec![Span::styled(db.clone(), theme::text())],
+            w,
+        ));
+    }
+    let password = if view.reveal {
+        Span::styled(info.password.clone(), theme::text())
+    } else {
+        Span::styled("•".repeat(16), theme::muted())
+    };
+    let pw_w = password.width() as u16;
+    let pw_y = lines.len() as u16;
+    lines.push(kv("password", vec![password], w));
+    lines.push(Line::raw(""));
+    lines.push(rule_line(inner.width));
+    lines.push(Line::raw(""));
+    let url_w = (inner.width as usize).saturating_sub(w + 8);
+    let internal_y = lines.len() as u16;
+    lines.push(kv(
+        "internal",
+        vec![Span::styled(
+            truncate(
+                &database::masked(&info.internal_url, &info.password, view.reveal),
+                url_w,
+            ),
+            theme::text(),
+        )],
+        w,
+    ));
+    let public = match (&info.public_url, info.public_port) {
+        (Some(url), _) => Span::styled(
+            truncate(&database::masked(url, &info.password, view.reveal), url_w),
+            theme::text(),
+        ),
+        (None, Some(p)) => Span::styled(
+            format!("published on :{p} · server address unknown"),
+            theme::muted(),
+        ),
+        (None, None) => Span::styled("not exposed", theme::muted()),
+    };
+    lines.push(kv("public", vec![public], w));
+    frame.render_widget(Paragraph::new(lines), inner);
+
+    if inner.height > pw_y {
+        hint_at(
+            frame,
+            inner.x + w as u16 + pw_w + 3,
+            inner.y + pw_y,
+            "v",
+            if view.reveal { "hide" } else { "reveal" },
+        );
+    }
+    let copy_x = inner.right().saturating_sub(6);
+    if inner.height > internal_y + 1 {
+        hint_at(frame, copy_x, inner.y + internal_y, "c", "copy");
+        if info.public_url.is_some() {
+            hint_at(frame, copy_x, inner.y + internal_y + 1, "C", "copy");
+        }
+    }
+    if inner.height > internal_y + 4 {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Other services in {env} connect with the internal URL. It is this service's {}.",
+                database::url_var(info.kind)
+            ))
+            .style(theme::muted())
+            .wrap(Wrap { trim: true }),
+            Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 2),
+        );
+    }
+
+    let [public_a, password_a, container_a] = Layout::vertical([
+        Constraint::Length(6),
+        Constraint::Length(6),
+        Constraint::Length(CONTAINER_H),
+    ])
+    .spacing(1)
+    .areas(rail_area);
+    let block = panel(title("Public access", false), None, false);
+    let inner = inside(&block, public_a);
+    frame.render_widget(block, public_a);
+    let lines = match info.public_port {
+        Some(p) => vec![
+            Line::styled(format!("● public on :{p}"), theme::fg(theme::OK)),
+            Line::styled(
+                format!("open to the internet at {}", app.server_address(&d.server)),
+                theme::muted(),
+            ),
+        ],
+        None => vec![
+            Line::styled("○ internal only", theme::muted()),
+            Line::styled(format!("only services in {env} connect"), theme::muted()),
+        ],
+    };
+    frame.render_widget(Paragraph::new(lines), inner);
+    if inner.height >= 4 {
+        let label = if info.public_port.is_some() {
+            "make internal again"
+        } else {
+            "expose on a server port"
+        };
+        hint_at(frame, inner.x, inner.y + 3, "p", label);
+    }
+
+    let block = panel(title("Password", false), None, false);
+    let inner = inside(&block, password_a);
+    frame.render_widget(block, password_a);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled("replaces it inside the database", theme::muted()),
+            Line::raw(""),
+            Line::raw(""),
+            Line::styled("services that use it need a redeploy", theme::muted()),
+        ]),
+        inner,
+    );
+    if inner.height >= 3 {
+        hint_at(frame, inner.x, inner.y + 2, "R", "rotate password");
+    }
+    container_panel(frame, container_a, view);
+}
+
+fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
+    let (main, rail_area) = with_rail(area);
+    let backups = app
+        .backups
+        .get(&view.id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let total: u64 = backups.iter().map(|b| b.size_bytes).sum();
+    let note = format!(
+        "{} backup{} · {} · local storage",
+        backups.len(),
+        if backups.len() == 1 { "" } else { "s" },
+        util::bytes(total)
+    );
+    let now = chrono::Utc::now();
+    let rows: Vec<Row> = backups
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let selected = i == view.row;
+            let (glyph, age, file) = match b.status {
+                BackupStatus::Running => (
+                    Span::styled(util::spinner(app.tick), theme::fg(theme::INFO)),
+                    util::duration((now - b.created_at).num_seconds()),
+                    Span::styled("backing up…", theme::fg(theme::INFO)),
+                ),
+                BackupStatus::Done => (
+                    Span::styled("●", theme::fg(theme::OK)),
+                    util::ago(b.created_at),
+                    Span::styled(b.file_name.clone(), theme::text()),
+                ),
+                BackupStatus::Failed => (
+                    Span::styled("✕", theme::fg(theme::ERR)),
+                    util::ago(b.created_at),
+                    Span::styled(
+                        b.error.clone().unwrap_or_else(|| "failed".into()),
+                        theme::fg(theme::ERR),
+                    ),
+                ),
+            };
+            let size = if b.status == BackupStatus::Done {
+                Span::styled(util::bytes(b.size_bytes), theme::text())
+            } else {
+                Span::styled("—", theme::muted())
+            };
+            Row::new(vec![
+                Cell::from(glyph),
+                Cell::from(Line::from(vec![
+                    Span::styled(
+                        database::created(b.created_at, now),
+                        if selected {
+                            theme::accent()
+                        } else {
+                            theme::text()
+                        },
+                    ),
+                    Span::styled(format!("  {age}"), theme::muted()),
+                ])),
+                Cell::from(Span::styled(b.trigger.as_str(), theme::muted())),
+                Cell::from(size),
+                Cell::from(file),
+            ])
+            .style(if selected {
+                theme::selected()
+            } else {
+                Style::new()
+            })
+        })
+        .collect();
+    ListPanel {
+        heading: "Backups",
+        note: &note,
+        header: Row::new(["", "CREATED", "TRIGGER", "SIZE", "FILE"]),
+        widths: vec![
+            Constraint::Length(2),
+            Constraint::Length(26),
+            Constraint::Length(10),
+            Constraint::Length(6),
+            Constraint::Fill(1),
+        ],
+        empty: "no backups yet · b to back up now",
+    }
+    .render(frame, main, rows, view.row);
+
+    let [sched_a, _] =
+        Layout::vertical([Constraint::Length(10), Constraint::Fill(1)]).areas(rail_area);
+    let block = panel(title("Schedule", false), None, false);
+    let inner = inside(&block, sched_a);
+    frame.render_widget(block, sched_a);
+    mouse::hit(
+        sched_a,
+        Hit::Key(
+            crossterm::event::KeyCode::Char('e'),
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
+    let Some(s) = app.schedules.get(&view.id) else {
+        frame.render_widget(
+            Paragraph::new(format!("{} loading", util::spinner(app.tick))).style(theme::muted()),
+            inner,
+        );
+        return;
+    };
+    let w = 10;
+    let local = database::local_hour(
+        s.hour_utc,
+        chrono::Offset::fix(chrono::Local::now().offset()),
+    );
+    let lines = vec![
+        kv(
+            "daily",
+            vec![if s.enabled {
+                Span::styled("● on", theme::fg(theme::OK))
+            } else {
+                Span::styled("○ off", theme::muted())
+            }],
+            w,
+        ),
+        kv(
+            "at",
+            vec![
+                Span::styled(format!("{:02}:00 UTC", s.hour_utc), theme::text()),
+                Span::styled(format!("  {local}"), theme::muted()),
+            ],
+            w,
+        ),
+        kv(
+            "keep",
+            vec![
+                Span::styled(s.keep.to_string(), theme::text()),
+                Span::styled("  scheduled backups", theme::muted()),
+            ],
+            w,
+        ),
+        kv(
+            "next",
+            vec![match database::next_run(s, now) {
+                Some(n) => Span::styled(n, theme::text()),
+                None => Span::styled("—", theme::muted()),
+            }],
+            w,
+        ),
+        Line::raw(""),
+        Line::raw(""),
+        Line::styled("manual backups are never pruned", theme::muted()),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+    if inner.height >= 6 {
+        hint_at(frame, inner.x, inner.y + 5, "e", "edit schedule");
+    }
 }
 
 fn log_line<'a>(line: &'a LogLine, logs: &LogBuffer, search: &str, current: bool) -> Line<'a> {
@@ -2081,33 +2530,49 @@ fn dialog(
     inner
 }
 
-fn confirm(frame: &mut Frame, area: Rect, c: &Confirm) {
-    let text_w = usize::from(64u16.min(area.width.saturating_sub(4)).saturating_sub(6)).max(1);
-    let message_h = c.message.chars().count().div_ceil(text_w).max(2) as u16;
+fn confirm(frame: &mut Frame, area: Rect, c: &Confirm, tick: usize) {
+    let width = 72u16.min(area.width.saturating_sub(4));
+    let message = Paragraph::new(c.message.clone())
+        .style(theme::text())
+        .wrap(Wrap { trim: true });
+    let msg_h = message.line_count(width.saturating_sub(6)) as u16;
     let inner = dialog(
         frame,
         area,
-        64,
-        message_h + 6,
+        width,
+        msg_h + 6,
         vec![Span::styled(c.title.clone(), theme::text())],
     );
-    let [msg, _, keys] = Layout::vertical([
+    let [msg, rule, keys] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(inner);
-    frame.render_widget(
-        Paragraph::new(c.message.clone())
-            .style(theme::text())
-            .wrap(Wrap { trim: true }),
-        msg,
-    );
-    let yes = if c.danger {
+    frame.render_widget(message, msg);
+    frame.render_widget(Paragraph::new(rule_line(rule.width)), rule);
+    let style = if c.danger {
         Style::new().fg(theme::BG).bg(theme::ERR)
     } else {
         theme::chip()
     };
+    if let Some((since, label)) = c.busy {
+        let wait = match c.action {
+            ConfirmAction::RestoreBackup(..) => "the database is busy until this finishes",
+            _ => "waiting for the daemon",
+        };
+        frame.render_widget(Paragraph::new(wait).style(theme::muted()), keys);
+        let chip = format!(
+            " {} {label}… {} ",
+            util::spinner(tick),
+            util::duration(since.elapsed().as_secs() as i64)
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(chip, style)).right_aligned(),
+            keys,
+        );
+        return;
+    }
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("esc", theme::accent()),
@@ -2115,10 +2580,10 @@ fn confirm(frame: &mut Frame, area: Rect, c: &Confirm) {
         ])),
         keys,
     );
-    let label = format!(" y {} ", c.yes);
-    let label_w = label.chars().count() as u16;
+    let chip = format!(" y {} ", c.verb);
+    let chip_w = chip.chars().count() as u16;
     frame.render_widget(
-        Paragraph::new(Span::styled(label, yes)).right_aligned(),
+        Paragraph::new(Span::styled(chip, style)).right_aligned(),
         keys,
     );
     mouse::hit(
@@ -2129,9 +2594,66 @@ fn confirm(frame: &mut Frame, area: Rect, c: &Confirm) {
         ),
     );
     mouse::hit(
-        Rect::new(keys.right().saturating_sub(label_w), keys.y, label_w, 1),
+        Rect::new(keys.right().saturating_sub(chip_w), keys.y, chip_w, 1),
         Hit::Key(
             crossterm::event::KeyCode::Char('y'),
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
+}
+
+/// A secret shown once, with copy.
+fn reveal(frame: &mut Frame, area: Rect, r: &Reveal) {
+    let width = 84u16.min(area.width.saturating_sub(4));
+    let text_w = width.saturating_sub(6);
+    let message = Paragraph::new(r.message.clone())
+        .style(theme::text())
+        .wrap(Wrap { trim: true });
+    let note = Paragraph::new(r.note.clone())
+        .style(theme::muted())
+        .wrap(Wrap { trim: true });
+    let (msg_h, note_h) = (
+        message.line_count(text_w) as u16,
+        note.line_count(text_w) as u16,
+    );
+    let inner = dialog(
+        frame,
+        area,
+        width,
+        msg_h + note_h + 10,
+        vec![
+            Span::styled(r.title.clone(), theme::text()),
+            Span::styled(format!(" · {}", r.subtitle), theme::muted()),
+        ],
+    );
+    let [msg, _, value, _, note_a, rule, keys] = Layout::vertical([
+        Constraint::Length(msg_h),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(note_h),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(message, msg);
+    frame.render_widget(
+        Paragraph::new(format!(" {}", r.value)).style(theme::text().bg(theme::BG)),
+        value,
+    );
+    frame.render_widget(note, note_a);
+    frame.render_widget(Paragraph::new(rule_line(rule.width)), rule);
+    hint_at(frame, keys.x, keys.y, "c", "copy url");
+    let chip = " ⏎ done ";
+    let chip_w = chip.chars().count() as u16;
+    frame.render_widget(
+        Paragraph::new(Span::styled(chip, theme::chip())).right_aligned(),
+        keys,
+    );
+    mouse::hit(
+        Rect::new(keys.right().saturating_sub(chip_w), keys.y, chip_w, 1),
+        Hit::Key(
+            crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
         ),
     );
@@ -2741,78 +3263,4 @@ fn servers_summary(frame: &mut Frame, area: Rect, app: &App) {
             ),
         );
     }
-}
-
-fn token_dialog(frame: &mut Frame, area: Rect, app: &App, token: &str) {
-    mouse::hit(area, Hit::Block);
-    let inner = dialog(
-        frame,
-        area,
-        80,
-        12,
-        vec![Span::styled("New API token", theme::text())],
-    );
-    let [message, _, token_line, _, note, rule, keys] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
-    frame.render_widget(
-        Paragraph::new(format!(
-            "The old token stopped working. This machine's context {} now uses the new one.",
-            app.context
-        ))
-        .style(theme::text())
-        .wrap(Wrap { trim: true }),
-        message,
-    );
-    frame.render_widget(
-        Paragraph::new(format!(" {token}")).style(theme::text().bg(theme::BG)),
-        token_line,
-    );
-    frame.render_widget(
-        Paragraph::new("Shown once. Copy it now to log in from another machine.")
-            .style(theme::muted()),
-        note,
-    );
-    frame.render_widget(
-        Paragraph::new("─".repeat(rule.width as usize)).style(theme::fg(theme::LINE)),
-        rule,
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("esc", theme::accent()),
-            Span::styled(" close", theme::muted()),
-        ])),
-        keys,
-    );
-    let done = " ⏎ done ";
-    let done_w = done.chars().count() as u16;
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("c", theme::accent()),
-            Span::styled(" copy   ", theme::muted()),
-            Span::styled(done, theme::chip()),
-        ]))
-        .right_aligned(),
-        keys,
-    );
-    let none = crossterm::event::KeyModifiers::NONE;
-    mouse::hit(
-        Rect::new(keys.x, keys.y, 9, 1),
-        Hit::Key(crossterm::event::KeyCode::Esc, none),
-    );
-    mouse::hit(
-        Rect::new(keys.right().saturating_sub(done_w), keys.y, done_w, 1),
-        Hit::Key(crossterm::event::KeyCode::Enter, none),
-    );
-    mouse::hit(
-        Rect::new(keys.right().saturating_sub(done_w + 9), keys.y, 6, 1),
-        Hit::Key(crossterm::event::KeyCode::Char('c'), none),
-    );
 }

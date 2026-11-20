@@ -22,13 +22,17 @@ The script needs no other preparation:
 
 1. It installs curl, git and ssh, then Docker if it's missing (via get.docker.com), and makes sure Docker is running.
 2. It downloads the static `bassed` and `basse` binaries from the latest GitHub release and checks their SHA-256. If there is no release for your platform, it builds them from source.
-3. It initializes `/var/lib/basse`, installs a systemd unit and starts the daemon.
+3. It initializes `/var/lib/basse`, installs a systemd unit and starts the daemon. The daemon keeps its state in a Postgres 18 container it runs itself (`basse-postgres`, published only on `127.0.0.1:5439`, data in the `basse-pgdata` volume, password generated into `config.toml`).
 4. The daemon starts the Caddy reverse proxy on ports 80 and 443 by itself.
 5. It opens ports 80, 443 and 7700 in ufw or firewalld if one of them is active.
 6. It logs in the `basse` CLI for root and for the user who ran sudo.
 7. It prints the API URL, the token and the login command for your laptop.
 
-Running the script again upgrades in place and keeps your data and token. Other options:
+Running the script again upgrades in place and keeps your data and token. Installs from before the Postgres store kept their state in `/var/lib/basse/basse.db` (SQLite); the upgraded daemon imports that file on its first start, checks the row counts, and renames it to `basse.db.migrated-<timestamp>.bak`. If the import fails it leaves the file untouched and refuses to start, saying why; `bassed migrate-from-sqlite <file>` runs the same import by hand.
+
+To use your own Postgres instead of the managed container, initialize with `bassed init --database-url postgres://…`, set `database_url` in `config.toml`, or set `BASSE_DATABASE_URL`. `--postgres-port` (or `port` under `[postgres]` in `config.toml`) moves the managed container to another local port.
+
+Other options:
 
 ```sh
 … | sudo sh -s -- --version v0.2.0     # pin a release
@@ -81,7 +85,9 @@ The mouse works too: click rows, tabs, dialog fields and the key hints in the bo
 | Screen | Keys |
 |---|---|
 | Overview | `↑↓` move, `tab` switch pane, `⏎` open, `n` new service, `N` new project, `E` new environment, `d` deploy, `r` restart, `s` stop or start, `l` logs, `/` filter, `S` servers |
-| Service | `1`–`7` or `tab` switch tabs (Overview, Deployments, Logs, Env, Domains, Volumes, Settings), `a` add, `x` remove, `⏎` edit |
+| Service | `1`–`9` or `tab` switch tabs (Overview, Deployments, Logs, Database, Backups, Env, Domains, Volumes, Settings; Database and Backups only for databases), `a` add, `x` remove, `⏎` edit |
+| Database | `v` reveal the password, `c`/`C` copy the internal or public URL, `p` expose on a server port or make internal again, `R` rotate the password |
+| Backups | `b` back up now, `R` restore, `D` download to a local file, `x` delete, `e` edit the daily schedule |
 | Logs | `f` follow, `/` search, `n`/`N` next or previous match, `e` errors only, `t` timestamps, `w` wrap |
 | Deploy | Live pipeline and build output, `c` cancel, `esc` back (the deploy keeps running) |
 | Servers | `a` add, `c` check, `p` set up the proxy, `x` remove, `X` remove and clean up everything the daemon put there |
@@ -125,12 +131,12 @@ Every command takes `--json` and `--context <name>` (switch between daemons with
 | `crates/common` | Domain types, the HTTP API contract and `brand`, the one place that holds product names |
 | `crates/client` | Typed HTTP client and the saved daemon contexts |
 | `crates/release` | Release lookups, verified downloads and binary replacement for `update` and `upgrade` |
-| `crates/daemon` | The `bassed` binary: axum API, SQLite, Docker through bollard, Caddy proxy, deploy pipeline, SSH servers |
+| `crates/daemon` | The `bassed` binary: axum API, Postgres through sqlx, Docker through bollard, Caddy proxy, deploy pipeline, SSH servers |
 | `crates/tui` | The ratatui interface |
 | `crates/cli` | The `basse` binary: clap commands that open the TUI by default |
 
 ```sh
-cargo test --workspace
+cargo test --workspace   # Postgres-backed tests start a throwaway postgres:18-alpine container and skip without Docker
 cargo test -p daemon --test docker_e2e -- --ignored --test-threads 1   # needs Docker and free ports 80/443
 ```
 

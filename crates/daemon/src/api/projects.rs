@@ -13,7 +13,7 @@ use common::*;
 use std::sync::Arc;
 
 pub async fn list(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<Project>>> {
-    Ok(Json(state.db.projects()?))
+    Ok(Json(state.db.projects().await?))
 }
 
 pub async fn create(
@@ -21,7 +21,7 @@ pub async fn create(
     Json(body): Json<CreateProject>,
 ) -> ApiResult<Json<Project>> {
     validate_name(&body.name).map_err(AppError::BadRequest)?;
-    if state.db.project_name_taken(&body.name)? {
+    if state.db.project_name_taken(&body.name).await? {
         conflict!("a project named '{}' already exists", body.name);
     }
     let project = Project {
@@ -39,12 +39,14 @@ pub async fn create(
         name: "production".into(),
         created_at: Utc::now(),
     };
-    state.db.insert_project(&project, &production)?;
-    state.project_activity(
-        &project.id,
-        ActivityLevel::Info,
-        format!("Project {} created", project.name),
-    );
+    state.db.insert_project(&project, &production).await?;
+    state
+        .project_activity(
+            &project.id,
+            ActivityLevel::Info,
+            format!("Project {} created", project.name),
+        )
+        .await;
     Ok(Json(project))
 }
 
@@ -54,22 +56,26 @@ pub async fn delete(
 ) -> ApiResult<StatusCode> {
     let project = state
         .db
-        .project(&id)?
+        .project(&id)
+        .await?
         .ok_or_else(|| AppError::not_found("project", &id))?;
     for env in state
         .db
-        .environments()?
+        .environments()
+        .await?
         .iter()
         .filter(|e| e.project_id == id)
     {
         services::delete_environment_services(&state, env).await?;
     }
-    state.db.delete_project(&id)?;
-    state.project_activity(
-        &id,
-        ActivityLevel::Info,
-        format!("Project {} deleted", project.name),
-    );
+    state.db.delete_project(&id).await?;
+    state
+        .project_activity(
+            &id,
+            ActivityLevel::Info,
+            format!("Project {} deleted", project.name),
+        )
+        .await;
     Ok(no_content())
 }
 
@@ -80,10 +86,15 @@ pub async fn create_environment(
 ) -> ApiResult<Json<Environment>> {
     let project = state
         .db
-        .project(&project_id)?
+        .project(&project_id)
+        .await?
         .ok_or_else(|| AppError::not_found("project", &project_id))?;
     validate_name(&body.name).map_err(AppError::BadRequest)?;
-    if state.db.environment_name_taken(&project.id, &body.name)? {
+    if state
+        .db
+        .environment_name_taken(&project.id, &body.name)
+        .await?
+    {
         conflict!(
             "project '{}' already has an environment named '{}'",
             project.name,
@@ -96,12 +107,14 @@ pub async fn create_environment(
         name: body.name,
         created_at: Utc::now(),
     };
-    state.db.insert_environment(&env)?;
-    state.project_activity(
-        &project.id,
-        ActivityLevel::Info,
-        format!("Environment {} created in {}", env.name, project.name),
-    );
+    state.db.insert_environment(&env).await?;
+    state
+        .project_activity(
+            &project.id,
+            ActivityLevel::Info,
+            format!("Environment {} created in {}", env.name, project.name),
+        )
+        .await;
     Ok(Json(env))
 }
 
@@ -111,14 +124,17 @@ pub async fn delete_environment(
 ) -> ApiResult<StatusCode> {
     let env = state
         .db
-        .environment(&id)?
+        .environment(&id)
+        .await?
         .ok_or_else(|| AppError::not_found("environment", &id))?;
     services::delete_environment_services(&state, &env).await?;
-    state.db.delete_environment(&id)?;
-    state.project_activity(
-        &env.project_id,
-        ActivityLevel::Info,
-        format!("Environment {} deleted", env.name),
-    );
+    state.db.delete_environment(&id).await?;
+    state
+        .project_activity(
+            &env.project_id,
+            ActivityLevel::Info,
+            format!("Environment {} deleted", env.name),
+        )
+        .await;
     Ok(no_content())
 }
