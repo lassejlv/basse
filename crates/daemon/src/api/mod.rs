@@ -1,5 +1,6 @@
 //! HTTP API: router, bearer-token auth, JSON extractors and NDJSON streaming helpers.
 
+mod databases;
 mod deployments;
 mod projects;
 mod servers;
@@ -15,7 +16,7 @@ use axum::extract::{FromRequest, FromRequestParts, Request, State};
 use axum::http::{StatusCode, header, request::Parts};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use common::{API_PREFIX, LogLine};
 use futures_util::{Stream, StreamExt as _};
 use serde::de::DeserializeOwned;
@@ -58,6 +59,25 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/domains/{id}", delete(services::delete_domain))
         .route("/services/{id}/volumes", post(services::add_volume))
         .route("/volumes/{id}", delete(services::delete_volume))
+        .route("/services/{id}/database", patch(databases::update))
+        .route(
+            "/services/{id}/database/rotate-password",
+            post(databases::rotate_password),
+        )
+        .route(
+            "/services/{id}/backups",
+            get(databases::list_backups).post(databases::create_backup),
+        )
+        .route(
+            "/services/{id}/backups/schedule",
+            get(databases::get_schedule).put(databases::set_schedule),
+        )
+        .route(
+            "/backups/{id}",
+            get(databases::get_backup).delete(databases::delete_backup),
+        )
+        .route("/backups/{id}/download", get(databases::download_backup))
+        .route("/backups/{id}/restore", post(databases::restore_backup))
         .route("/services/{id}/deployments", get(deployments::list))
         .route("/deployments/{id}", get(deployments::get))
         .route("/deployments/{id}/logs", get(deployments::logs))

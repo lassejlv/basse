@@ -108,13 +108,14 @@ impl DatabaseKind {
         }
     }
 
+    /// Newest stable major tag of the official image.
     pub fn default_version(self) -> &'static str {
         match self {
-            Self::Postgres => "17-alpine",
-            Self::Mysql => "8.4",
-            Self::Mariadb => "11",
-            Self::Redis => "7-alpine",
-            Self::Mongo => "8",
+            Self::Postgres => "18-alpine",
+            Self::Mysql => "9.7",
+            Self::Mariadb => "13",
+            Self::Redis => "8-alpine",
+            Self::Mongo => "9",
         }
     }
 
@@ -127,15 +128,28 @@ impl DatabaseKind {
         }
     }
 
-    /// Where the database keeps its data inside the container.
-    pub fn data_path(self) -> &'static str {
+    /// Where the database keeps its data inside the container for an image tag.
+    ///
+    /// Postgres 18 images keep `PGDATA` in `/var/lib/postgresql/<major>/docker` and refuse to
+    /// start with a mount at the old `/var/lib/postgresql/data`, so newer and non-numeric tags
+    /// mount the parent directory.
+    pub fn data_path(self, version: &str) -> &'static str {
         match self {
-            Self::Postgres => "/var/lib/postgresql/data",
+            Self::Postgres if major_version(version).is_some_and(|major| major < 18) => {
+                "/var/lib/postgresql/data"
+            }
+            Self::Postgres => "/var/lib/postgresql",
             Self::Mysql | Self::Mariadb => "/var/lib/mysql",
             Self::Redis => "/data",
             Self::Mongo => "/data/db",
         }
     }
+}
+
+/// Leading major number of an image tag: `18-alpine` is 18, `9.7` is 9, `latest` is `None`.
+fn major_version(tag: &str) -> Option<u32> {
+    let digits: String = tag.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
 }
 
 impl fmt::Display for DatabaseKind {
@@ -588,6 +602,119 @@ pub struct ServiceDetail {
     pub domains: Vec<Domain>,
     pub volumes: Vec<Volume>,
     pub container: Option<ContainerInfo>,
+    /// Connection details; only for database services.
+    #[serde(default)]
+    pub database: Option<DatabaseInfo>,
+}
+
+/// How to reach a one-click database. Only set on [`ServiceDetail`] for database services.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseInfo {
+    pub kind: DatabaseKind,
+    /// Image tag, e.g. `18-alpine`.
+    pub version: String,
+    /// Hostname other services in the same environment connect to: the service name.
+    pub host: String,
+    /// Port inside the environment network.
+    pub port: u16,
+    /// `None` for Redis, which only has a password.
+    pub username: Option<String>,
+    /// Default database, where the engine has one (Postgres, MySQL, MariaDB).
+    pub database: Option<String>,
+    /// Secret: the TUI and CLI mask it unless asked to reveal it.
+    pub password: String,
+    /// Connection URL for services in the same environment, e.g.
+    /// `postgres://user:pass@db:5432/db`.
+    pub internal_url: String,
+    /// Host port the database is published on, if public access is enabled.
+    pub public_port: Option<u16>,
+    /// Connection URL from outside, using the server's public address. Set when
+    /// `public_port` is set and the address is known.
+    pub public_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupStatus {
+    Running,
+    Done,
+    Failed,
+}
+
+impl BackupStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupTrigger {
+    Manual,
+    Schedule,
+}
+
+impl BackupTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Schedule => "schedule",
+        }
+    }
+}
+
+/// Where a backup file is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupStorage {
+    /// The daemon's data directory: `<data dir>/backups/<service id>/<file>`.
+    #[default]
+    Local,
+}
+
+/// A dump of a database service, gzip-compressed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Backup {
+    pub id: Id,
+    pub service_id: Id,
+    pub created_at: Timestamp,
+    /// Compressed size; 0 while running or after a failure.
+    pub size_bytes: u64,
+    pub status: BackupStatus,
+    pub trigger: BackupTrigger,
+    /// `<timestamp>-<n>.<ext>.gz`, e.g. `20261120-030000-1.dump.gz`; also the download name.
+    pub file_name: String,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub storage: BackupStorage,
+    /// Storage connection the file lives in; `None` for local storage.
+    #[serde(default)]
+    pub storage_id: Option<Id>,
+    pub finished_at: Option<Timestamp>,
+}
+
+/// Daily automatic backups of a database service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupSchedule {
+    pub enabled: bool,
+    /// Hour of the day (UTC, 0-23) the backup runs.
+    pub hour_utc: u8,
+    /// Scheduled backups to keep; older ones are deleted. Manual backups are never pruned.
+    pub keep: u32,
+}
+
+impl Default for BackupSchedule {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hour_utc: 3,
+            keep: 7,
+        }
+    }
 }
 
 /// Error body returned by every failing API call.
@@ -649,5 +776,16 @@ mod tests {
             DatabaseKind::Postgres
         );
         assert!("oracle".parse::<DatabaseKind>().is_err());
+    }
+
+    #[test]
+    fn postgres_18_mounts_the_parent_data_directory() {
+        let pg = DatabaseKind::Postgres;
+        assert_eq!(pg.data_path("17-alpine"), "/var/lib/postgresql/data");
+        assert_eq!(pg.data_path("9.6"), "/var/lib/postgresql/data");
+        assert_eq!(pg.data_path("18-alpine"), "/var/lib/postgresql");
+        assert_eq!(pg.data_path("19"), "/var/lib/postgresql");
+        assert_eq!(pg.data_path("latest"), "/var/lib/postgresql");
+        assert_eq!(DatabaseKind::Redis.data_path("8-alpine"), "/data");
     }
 }

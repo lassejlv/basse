@@ -46,6 +46,25 @@
 //! | POST | `/settings/prune` | | `PruneResult` (old build images, dangling images, build cache) |
 //! | GET | `/settings/version` | | `VersionCheck` (latest release, cached for an hour) |
 //! | POST | `/settings/update` | `UpdateRequest` | `UpdateResult` (replaces the binaries, then the daemon exits to restart) |
+//!
+//! Database services (`Source::Database`) also have these routes; other services get 400.
+//! `ServiceDetail.database` carries their `DatabaseInfo`.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | PATCH | `/services/{id}/database` | `UpdateDatabase` | `DatabaseInfo` (publishing changes redeploy the live image) |
+//! | POST | `/services/{id}/database/rotate-password` | | `DatabaseInfo` with the new password |
+//! | GET | `/services/{id}/backups` | | `Vec<Backup>`, newest first |
+//! | POST | `/services/{id}/backups` | | `Backup` with status `running` (returns at once, runs in background) |
+//! | GET | `/services/{id}/backups/schedule` | | `BackupSchedule` |
+//! | PUT | `/services/{id}/backups/schedule` | `BackupSchedule` | `BackupSchedule` |
+//! | GET | `/backups/{id}` | | `Backup` |
+//! | GET | `/backups/{id}/download` | | the gzip file as `application/gzip` |
+//! | POST | `/backups/{id}/restore` | | `Backup` (returns when the restore has finished) |
+//! | DELETE | `/backups/{id}` | | 204 |
+//!
+//! Backups, restores and password rotations of one service run one at a time; a second one
+//! while another is in progress gets 409. Restore and rotation also need a running container.
 
 use crate::{EnvVar, Id, RestartPolicy, Source};
 use serde::{Deserialize, Serialize};
@@ -160,6 +179,13 @@ pub struct UpdateRequest {
     /// Update even when no supervisor restarts the daemon, or when the version is not newer.
     #[serde(default)]
     pub force: bool,
+}
+
+/// Public access to a database service.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateDatabase {
+    /// Host port to publish the database port on. `None` or `0` makes it internal-only again.
+    pub public_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

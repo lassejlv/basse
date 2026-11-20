@@ -299,10 +299,68 @@ async fn projects_environments_and_services_crud() {
         db.service.source,
         Source::Database {
             kind: DatabaseKind::Postgres,
-            version: "17-alpine".into()
+            version: "18-alpine".into()
         }
     );
-    assert_eq!(db.volumes[0].mount_path, "/var/lib/postgresql/data");
+    assert_eq!(db.volumes[0].mount_path, "/var/lib/postgresql");
+    let info = db.database.clone().expect("database info");
+    assert_eq!((info.host.as_str(), info.port), ("db", 5432));
+    assert_eq!(info.database.as_deref(), Some("db"));
+    assert_eq!(
+        info.internal_url,
+        format!("postgres://db:{}@db:5432/db", info.password)
+    );
+    assert_eq!(info.public_url, None);
+    assert!(api.backups(&db.service.id).await.unwrap().is_empty());
+    let err = api.create_backup(&db.service.id).await.unwrap_err();
+    assert!(err.to_string().contains("not been deployed"), "{err}");
+    assert_eq!(
+        api.backup_schedule(&db.service.id).await.unwrap(),
+        BackupSchedule::default()
+    );
+    let schedule = BackupSchedule {
+        enabled: true,
+        hour_utc: 4,
+        keep: 3,
+    };
+    assert_eq!(
+        api.set_backup_schedule(&db.service.id, &schedule)
+            .await
+            .unwrap(),
+        schedule
+    );
+    let bad = BackupSchedule {
+        hour_utc: 24,
+        ..schedule
+    };
+    assert!(api.set_backup_schedule(&db.service.id, &bad).await.is_err());
+    let exposed = api
+        .update_database(
+            &db.service.id,
+            &UpdateDatabase {
+                public_port: Some(15432),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(exposed.public_port, Some(15432));
+    assert!(
+        api.update_database(
+            &db.service.id,
+            &UpdateDatabase {
+                public_port: Some(443)
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        api.update_database(&updated.service.id, &UpdateDatabase::default())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not a database service")
+    );
     let password = db
         .env
         .iter()

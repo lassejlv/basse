@@ -13,6 +13,8 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::pin::Pin;
 
 pub type LogStreamBox = Pin<Box<dyn Stream<Item = Result<LogLine>> + Send>>;
+/// Raw body chunks of a download.
+pub type ByteStreamBox = Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>;
 
 #[derive(Clone)]
 pub struct Client {
@@ -320,6 +322,78 @@ impl Client {
 
     pub async fn update(&self, body: &UpdateRequest) -> Result<UpdateResult> {
         self.post("/settings/update", body).await
+    }
+
+    // Databases
+
+    /// Publishes a database on a server port, or makes it internal-only with `None`.
+    pub async fn update_database(
+        &self,
+        service_id: &str,
+        body: &UpdateDatabase,
+    ) -> Result<DatabaseInfo> {
+        Self::json(
+            self.req(Method::PATCH, &format!("/services/{service_id}/database"))
+                .json(body),
+        )
+        .await
+    }
+
+    pub async fn rotate_database_password(&self, service_id: &str) -> Result<DatabaseInfo> {
+        self.post_empty(&format!("/services/{service_id}/database/rotate-password"))
+            .await
+    }
+
+    /// Backups of a service, newest first.
+    pub async fn backups(&self, service_id: &str) -> Result<Vec<Backup>> {
+        self.get(&format!("/services/{service_id}/backups")).await
+    }
+
+    /// Starts a backup; poll [`Self::backup`] until it is no longer running.
+    pub async fn create_backup(&self, service_id: &str) -> Result<Backup> {
+        self.post_empty(&format!("/services/{service_id}/backups"))
+            .await
+    }
+
+    pub async fn backup(&self, id: &str) -> Result<Backup> {
+        self.get(&format!("/backups/{id}")).await
+    }
+
+    /// The gzip file of a finished backup.
+    pub async fn download_backup(&self, id: &str) -> Result<ByteStreamBox> {
+        let res = Self::send(self.req(Method::GET, &format!("/backups/{id}/download"))).await?;
+        Ok(Box::pin(res.bytes_stream().map(|chunk| {
+            chunk.map(|c| c.to_vec()).map_err(anyhow::Error::from)
+        })))
+    }
+
+    /// Restores a backup into its database; returns when the restore has finished.
+    pub async fn restore_backup(&self, id: &str) -> Result<Backup> {
+        self.post_empty(&format!("/backups/{id}/restore")).await
+    }
+
+    pub async fn delete_backup(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/backups/{id}")).await
+    }
+
+    pub async fn backup_schedule(&self, service_id: &str) -> Result<BackupSchedule> {
+        self.get(&format!("/services/{service_id}/backups/schedule"))
+            .await
+    }
+
+    pub async fn set_backup_schedule(
+        &self,
+        service_id: &str,
+        schedule: &BackupSchedule,
+    ) -> Result<BackupSchedule> {
+        Self::json(
+            self.req(
+                Method::PUT,
+                &format!("/services/{service_id}/backups/schedule"),
+            )
+            .json(schedule),
+        )
+        .await
     }
 
     // Deployments

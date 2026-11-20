@@ -2,6 +2,7 @@
 
 use crate::ssh::{SshPaths, Tunnel};
 use anyhow::{Context as _, Result, bail};
+use bollard::container::LogOutput;
 use bollard::errors::Error as DockerError;
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::{
@@ -21,6 +22,7 @@ use common::{
 use futures_util::StreamExt as _;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, RwLock};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 
 /// Reverse proxy image run on every server.
 pub const PROXY_IMAGE: &str = "lucaslorentz/caddy-docker-proxy:2.12-alpine";
@@ -488,6 +490,154 @@ pub async fn exec(docker: &Docker, container: &str, cmd: Vec<String>) -> Result<
     }
     let inspected = docker.inspect_exec(&created.id).await?;
     Ok(inspected.exit_code.unwrap_or(-1))
+}
+
+/// How an exec ended: its exit code and the tail of what it wrote to stderr.
+#[derive(Debug)]
+pub struct ExecOutcome {
+    pub exit_code: i64,
+    pub stderr: String,
+}
+
+impl ExecOutcome {
+    /// Fails with the command's stderr unless it exited with 0.
+    pub fn check(self, what: &str) -> Result<()> {
+        if self.exit_code == 0 {
+            return Ok(());
+        }
+        let stderr = self.stderr.trim();
+        if stderr.is_empty() {
+            bail!("{what} exited with code {}", self.exit_code);
+        }
+        bail!("{what} exited with code {}: {stderr}", self.exit_code)
+    }
+}
+
+/// Keeps the last `STDERR_KEEP` bytes of stderr for error messages.
+const STDERR_KEEP: usize = 4096;
+
+/// Runs a command in a container, feeding `stdin` (then closing it) and streaming stdout into
+/// `stdout`. `env` entries are `KEY=value` and override the container's environment.
+pub async fn exec_stream(
+    docker: &Docker,
+    container: &str,
+    cmd: Vec<String>,
+    env: Vec<String>,
+    stdin: Option<&mut (dyn AsyncRead + Unpin + Send)>,
+    stdout: &mut (dyn AsyncWrite + Unpin + Send),
+) -> Result<ExecOutcome> {
+    let created = docker
+        .create_exec(
+            container,
+            CreateExecOptions::<String> {
+                cmd: Some(cmd),
+                env: Some(env),
+                attach_stdin: Some(stdin.is_some()),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .context("cannot create exec")?;
+    let StartExecResults::Attached {
+        mut output,
+        mut input,
+    } = docker
+        .start_exec(&created.id, None)
+        .await
+        .context("cannot start exec")?
+    else {
+        bail!("exec started detached");
+    };
+    let feed = async {
+        if let Some(stdin) = stdin {
+            tokio::io::copy(stdin, &mut input)
+                .await
+                .context("cannot write to the command's stdin")?;
+        }
+        input.shutdown().await.context("cannot close stdin")
+    };
+    let drain = async {
+        let mut stderr: Vec<u8> = Vec::new();
+        while let Some(frame) = output.next().await {
+            match frame.context("exec output failed")? {
+                LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                    stdout
+                        .write_all(&message)
+                        .await
+                        .context("cannot write the command's output")?;
+                }
+                LogOutput::StdErr { message } => {
+                    stderr.extend_from_slice(&message);
+                    let excess = stderr.len().saturating_sub(STDERR_KEEP);
+                    stderr.drain(..excess);
+                }
+                LogOutput::StdIn { .. } => {}
+            }
+        }
+        stdout
+            .flush()
+            .await
+            .context("cannot flush the command's output")?;
+        anyhow::Ok(String::from_utf8_lossy(&stderr).into_owned())
+    };
+    let (fed, stderr) = tokio::join!(feed, drain);
+    let stderr = stderr?;
+    let inspected = docker.inspect_exec(&created.id).await?;
+    let exit_code = inspected.exit_code.unwrap_or(-1);
+    if exit_code == 0 {
+        fed?;
+    }
+    Ok(ExecOutcome { exit_code, stderr })
+}
+
+/// Starts a throwaway container from `image` with `binds` mounted and nothing running but
+/// `sleep`, so commands can be exec'd against a volume while its service is stopped.
+pub async fn start_helper(
+    docker: &Docker,
+    name: &str,
+    image: &str,
+    binds: Vec<String>,
+) -> Result<String> {
+    remove_container(docker, name).await?;
+    let body = ContainerCreateBody {
+        image: Some(image.to_string()),
+        entrypoint: Some(vec!["sleep".into()]),
+        cmd: Some(vec!["3600".into()]),
+        labels: Some(HashMap::from([(
+            brand::label("managed"),
+            "true".to_string(),
+        )])),
+        host_config: Some(HostConfig {
+            binds: Some(binds),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let options = CreateContainerOptions {
+        name: Some(name.to_string()),
+        ..Default::default()
+    };
+    let created = docker
+        .create_container(Some(options), body)
+        .await
+        .with_context(|| format!("cannot create helper container {name}"))?;
+    start_container(docker, &created.id).await?;
+    Ok(created.id)
+}
+
+/// Stops a container, giving it `timeout_secs` to shut down. Already stopped is fine.
+pub async fn stop_container(docker: &Docker, id: &str, timeout_secs: i32) -> Result<()> {
+    let options = StopContainerOptions {
+        t: Some(timeout_secs),
+        ..Default::default()
+    };
+    match docker.stop_container(id, Some(options)).await {
+        Ok(()) => Ok(()),
+        Err(e) if is_not_modified(&e) => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("cannot stop container {}", short_id(id))),
+    }
 }
 
 /// Tail of a container's output, used to explain a failed health check.

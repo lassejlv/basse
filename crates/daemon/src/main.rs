@@ -1,7 +1,9 @@
 //! The control daemon: serves the HTTP API and drives Docker on every registered server.
 
 mod api;
+mod backup_store;
 mod config;
+mod database;
 mod db;
 mod deploy;
 mod docker;
@@ -309,9 +311,15 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
     if interrupted > 0 {
         tracing::warn!("marked {interrupted} interrupted deployment(s) as failed");
     }
+    let interrupted = db.fail_interrupted_backups()?;
+    if interrupted > 0 {
+        tracing::warn!("marked {interrupted} interrupted backup(s) as failed");
+    }
+    let _ = std::fs::remove_dir_all(dirs.backups_dir().join(".staging"));
     let listen = listen.unwrap_or_else(|| config.listen.clone());
     let state = Arc::new(AppState::new(db, dirs, &config, listen.clone())?);
     stats::spawn_sampler(state.clone());
+    database::spawn_scheduler(state.clone());
     tokio::spawn({
         let state = state.clone();
         let manage_proxy = config.manage_proxy;

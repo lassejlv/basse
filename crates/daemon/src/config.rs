@@ -69,6 +69,11 @@ impl DataDir {
         self.builds_dir().join(deployment_id)
     }
 
+    /// Root of local backup storage: `backups/<service id>/<file>`.
+    pub fn backups_dir(&self) -> PathBuf {
+        self.root.join("backups")
+    }
+
     pub fn is_initialized(&self) -> bool {
         self.config().exists()
     }
@@ -80,6 +85,7 @@ impl DataDir {
             self.ssh_dir(),
             self.deployments_dir(),
             self.builds_dir(),
+            self.backups_dir(),
         ] {
             std::fs::create_dir_all(&dir)
                 .with_context(|| format!("cannot create {}", dir.display()))?;

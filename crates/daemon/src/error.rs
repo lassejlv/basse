@@ -23,6 +23,16 @@ impl AppError {
     }
 }
 
+impl std::fmt::Display for AppError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadRequest(m) | Self::NotFound(m) | Self::Conflict(m) => f.write_str(m),
+            Self::Unauthorized => f.write_str("unauthorized"),
+            Self::Internal(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, error) = match self {

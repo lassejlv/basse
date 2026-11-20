@@ -1,5 +1,6 @@
 //! Service lifecycle: validation, creation, computed state, teardown and power actions.
 
+use crate::database::{self, Credentials, generate_password};
 use crate::db::{NewService, ServiceRecord, new_id};
 use crate::deploy;
 use crate::docker::{self, RunState};
@@ -10,7 +11,6 @@ use chrono::Utc;
 use common::api::{CreateService, UpdateService, VolumeSpec};
 use common::*;
 use futures_util::future::join_all;
-use rand::Rng as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -122,15 +122,18 @@ pub async fn detail(state: &AppState, id: &str) -> ApiResult<ServiceDetail> {
     };
     let mut service = rec.service.clone();
     service.state = compute_state(&rec, run, reachable);
+    let env = db.env(id)?;
+    let database = database::info(&service, &server, &env, db.public_port(id)?);
     Ok(ServiceDetail {
         service,
         project,
         environment,
         server,
-        env: db.env(id)?,
+        env,
         domains: db.domains(id)?,
         volumes: db.volumes(id)?,
         container,
+        database,
     })
 }
 
@@ -161,12 +164,12 @@ pub fn create(state: &AppState, body: CreateService) -> ApiResult<ServiceRecord>
     let mut volume_specs = body.volumes;
     let mut port = body.port;
     let mut command = non_empty(body.command);
-    if let Source::Database { kind, .. } = &source {
+    if let Source::Database { kind, version } = &source {
         port = port.or(Some(kind.port()));
         if !volume_specs.iter().any(|v| v.name == "data") {
             volume_specs.push(VolumeSpec {
                 name: "data".into(),
-                mount_path: kind.data_path().into(),
+                mount_path: kind.data_path(version).into(),
             });
         }
         for var in database_env(*kind, &body.name) {
@@ -311,8 +314,10 @@ pub async fn delete(
     for d in state.db.deployments(&svc.id, usize::MAX)? {
         let _ = std::fs::remove_file(state.dirs.deployment_log(&d.id));
     }
+    database::delete_backup_files(state, &svc.id).await;
     state.db.delete_service(&svc.id)?;
     state.deploys.forget_service(&svc.id);
+    state.db_locks.forget_service(&svc.id);
     state.stats.forget_service(&svc.id);
     state.service_activity(svc, ActivityLevel::Info, "Service deleted".into(), None);
     Ok(())
@@ -521,14 +526,6 @@ pub fn validate_volume(name: &str, mount_path: &str) -> ApiResult<()> {
 
 // Databases
 
-fn password() -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
-    let mut rng = rand::rng();
-    (0..24)
-        .map(|_| char::from(ALPHABET[rng.random_range(0..ALPHABET.len())]))
-        .collect()
-}
-
 /// Generated credentials for a one-click database, plus a connection URL for other services.
 fn database_env(kind: DatabaseKind, service_name: &str) -> Vec<EnvVar> {
     let plain = |key: &str, value: &str| EnvVar {
@@ -541,53 +538,59 @@ fn database_env(kind: DatabaseKind, service_name: &str) -> Vec<EnvVar> {
         value: value.into(),
         secret: true,
     };
-    let user = service_name.replace('-', "_");
-    let pass = password();
-    let port = kind.port();
+    let mut user = service_name.replace('-', "_");
+    let reserved: &[&str] = match kind {
+        DatabaseKind::Mysql | DatabaseKind::Mariadb => &[
+            "mysql",
+            "sys",
+            "root",
+            "information_schema",
+            "performance_schema",
+        ],
+        DatabaseKind::Mongo => &["admin", "local", "config"],
+        DatabaseKind::Postgres | DatabaseKind::Redis => &[],
+    };
+    if reserved.contains(&user.as_str()) {
+        user = "app".into();
+    }
+    let pass = generate_password();
+    let creds = Credentials {
+        user: (kind != DatabaseKind::Redis).then(|| user.clone()),
+        password: pass.clone(),
+        database: matches!(
+            kind,
+            DatabaseKind::Postgres | DatabaseKind::Mysql | DatabaseKind::Mariadb
+        )
+        .then(|| user.clone()),
+        root_password: None,
+    };
+    let url = database::connection_url(kind, &creds, service_name, kind.port());
     match kind {
         DatabaseKind::Postgres => vec![
             plain("POSTGRES_USER", &user),
             secret("POSTGRES_PASSWORD", &pass),
             plain("POSTGRES_DB", &user),
-            secret(
-                "DATABASE_URL",
-                &format!("postgres://{user}:{pass}@{service_name}:{port}/{user}"),
-            ),
+            secret("DATABASE_URL", &url),
         ],
         DatabaseKind::Mysql => vec![
-            secret("MYSQL_ROOT_PASSWORD", &password()),
+            secret("MYSQL_ROOT_PASSWORD", &generate_password()),
             plain("MYSQL_DATABASE", &user),
             plain("MYSQL_USER", &user),
             secret("MYSQL_PASSWORD", &pass),
-            secret(
-                "DATABASE_URL",
-                &format!("mysql://{user}:{pass}@{service_name}:{port}/{user}"),
-            ),
+            secret("DATABASE_URL", &url),
         ],
         DatabaseKind::Mariadb => vec![
-            secret("MARIADB_ROOT_PASSWORD", &password()),
+            secret("MARIADB_ROOT_PASSWORD", &generate_password()),
             plain("MARIADB_DATABASE", &user),
             plain("MARIADB_USER", &user),
             secret("MARIADB_PASSWORD", &pass),
-            secret(
-                "DATABASE_URL",
-                &format!("mysql://{user}:{pass}@{service_name}:{port}/{user}"),
-            ),
+            secret("DATABASE_URL", &url),
         ],
-        DatabaseKind::Redis => vec![
-            secret("REDIS_PASSWORD", &pass),
-            secret(
-                "REDIS_URL",
-                &format!("redis://:{pass}@{service_name}:{port}"),
-            ),
-        ],
+        DatabaseKind::Redis => vec![secret("REDIS_PASSWORD", &pass), secret("REDIS_URL", &url)],
         DatabaseKind::Mongo => vec![
             plain("MONGO_INITDB_ROOT_USERNAME", &user),
             secret("MONGO_INITDB_ROOT_PASSWORD", &pass),
-            secret(
-                "DATABASE_URL",
-                &format!("mongodb://{user}:{pass}@{service_name}:{port}"),
-            ),
+            secret("DATABASE_URL", &url),
         ],
     }
 }
@@ -712,5 +715,17 @@ mod tests {
         assert!(get("POSTGRES_PASSWORD").secret);
         assert_eq!(get("POSTGRES_PASSWORD").value.len(), 24);
         assert!(get("DATABASE_URL").value.starts_with("postgres://main_db:"));
+        assert!(get("DATABASE_URL").value.ends_with("@main-db:5432/main_db"));
+        let mongo = database_env(DatabaseKind::Mongo, "docs");
+        let url = &mongo
+            .iter()
+            .find(|v| v.key == "DATABASE_URL")
+            .unwrap()
+            .value;
+        assert!(url.ends_with("@docs:27017/?authSource=admin"), "{url}");
+        let mysql = database_env(DatabaseKind::Mysql, "mysql");
+        let get = |k: &str| &mysql.iter().find(|v| v.key == k).unwrap().value;
+        assert_eq!(get("MYSQL_DATABASE"), "app", "never the system schema");
+        assert_eq!(get("MYSQL_USER"), "app");
     }
 }
