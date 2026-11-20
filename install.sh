@@ -11,12 +11,12 @@
 set -eu
 
 # Product names. Keep in sync with crates/common/src/brand.rs.
-NAME="Berth"
-CLI_BIN="berth"
-DAEMON_BIN="berthd"
-DIR_NAME="berth"
-PREFIX="berth"
-ENV_PREFIX="BERTH"
+NAME="Basse"
+CLI_BIN="basse"
+DAEMON_BIN="bassed"
+DIR_NAME="basse"
+PREFIX="basse"
+ENV_PREFIX="BASSE"
 REPO="lassejlv/rust-deploy"
 PORT=7700
 
