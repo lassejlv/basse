@@ -147,6 +147,7 @@ pub struct OverviewState {
     pub collapsed: HashSet<Id>,
     pub filter: String,
     pub filtering: bool,
+    pub activity_offset: usize,
 }
 
 /// Scrollback with follow mode, search and filters, used for runtime and build logs.
@@ -156,6 +157,7 @@ pub struct LogBuffer {
     pub follow: bool,
     /// Lines scrolled up from the bottom when not following.
     pub offset: usize,
+    pub step_anchor: Option<usize>,
     pub timestamps: bool,
     pub wrap: bool,
     pub errors_only: bool,
@@ -177,6 +179,7 @@ impl LogBuffer {
     pub fn push(&mut self, line: LogLine) {
         if self.lines.len() == LOG_CAP {
             self.lines.pop_front();
+            self.step_anchor = self.step_anchor.and_then(|line| line.checked_sub(1));
         }
         self.lines.push_back(line);
         if !self.follow {
@@ -211,10 +214,33 @@ impl LogBuffer {
     }
 
     pub fn scroll(&mut self, delta: isize, viewport: usize) {
+        if let Some(start) = self.step_anchor {
+            let next = start.saturating_add_signed(-delta);
+            if next > self.lines.len().saturating_sub(viewport) {
+                self.step_anchor = Some(next.min(self.lines.len().saturating_sub(1)));
+                return;
+            }
+            self.step_anchor = None;
+            self.offset = self.lines.len().saturating_sub(start + viewport);
+        }
         let max = self.visible().len().saturating_sub(viewport);
         let next = (self.offset as isize + delta).clamp(0, max as isize) as usize;
         self.offset = next;
         self.follow = next == 0;
+    }
+
+    pub fn jump_to_step(&mut self, kind: StepKind) -> bool {
+        let header = format!("==> {}", kind.as_str());
+        let Some(index) = self
+            .lines
+            .iter()
+            .position(|line| line.stream == LogStream::System && line.line == header)
+        else {
+            return false;
+        };
+        self.follow = false;
+        self.step_anchor = Some(index);
+        true
     }
 
     /// Jump so the n-th match (in visible order) sits in the middle of the viewport.
@@ -266,6 +292,7 @@ pub struct ServiceView {
     pub tab: Tab,
     pub detail: Option<ServiceDetail>,
     pub deployments: Vec<Deployment>,
+    pub deployment_row: usize,
     pub logs: LogBuffer,
     pub log_task: Option<AbortHandle>,
     pub row: usize,
@@ -291,6 +318,7 @@ pub struct DeployView {
     /// Screen to return to on esc.
     pub back: Screen,
     pub announced: bool,
+    pub pipeline_offset: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -519,6 +547,7 @@ pub struct App {
     pub service: Option<ServiceView>,
     pub deploy: Option<DeployView>,
     pub server_row: usize,
+    servers_back: Screen,
     pub settings: SettingsView,
     /// Version the daemon is restarting into after an update.
     pub updating: Option<String>,
@@ -555,6 +584,7 @@ impl App {
             service: None,
             deploy: None,
             server_row: 0,
+            servers_back: Screen::Overview,
             settings: SettingsView::default(),
             updating: None,
             rotating: false,
@@ -1152,6 +1182,7 @@ impl App {
             tab: Tab::Overview,
             detail: self.details.get(id).cloned(),
             deployments: Vec::new(),
+            deployment_row: 0,
             logs: LogBuffer::new(),
             log_task: None,
             row: 0,
@@ -1172,6 +1203,7 @@ impl App {
         };
         view.tab = tab;
         view.row = 0;
+        view.logs.searching = false;
         if tab == Tab::Logs && view.log_task.is_none() {
             self.start_service_logs();
         }
@@ -1265,6 +1297,7 @@ impl App {
             },
             task: Some(handle.abort_handle()),
             back,
+            pipeline_offset: 0,
         });
         self.screen = Screen::Deploy;
     }
@@ -1504,9 +1537,27 @@ impl App {
         self.servers.iter().find(|s| s.kind == ServerKind::Local)
     }
 
+    pub fn open_servers(&mut self) {
+        if self.screen == Screen::Settings && self.settings.back == Some(Screen::Servers) {
+            return self.close_settings();
+        }
+        if self.screen != Screen::Servers {
+            self.servers_back = self.screen;
+            self.screen = Screen::Servers;
+            self.refresh();
+        }
+    }
+
+    pub fn close_servers(&mut self) {
+        self.screen = self.servers_back;
+    }
+
     // Settings
 
     pub fn open_settings(&mut self) {
+        if self.screen == Screen::Servers && self.servers_back == Screen::Settings {
+            return self.close_servers();
+        }
         if self.screen != Screen::Settings {
             self.settings.back = Some(self.screen);
         }
@@ -1532,6 +1583,7 @@ impl App {
         self.screen = match self.settings.back.take() {
             Some(Screen::Service) if self.service.is_some() => Screen::Service,
             Some(Screen::Servers) => Screen::Servers,
+            Some(Screen::Deploy) if self.deploy.is_some() => Screen::Deploy,
             _ => Screen::Overview,
         };
         self.refresh();
@@ -1622,6 +1674,7 @@ impl App {
         self.service = None;
         self.overview = OverviewState::default();
         self.server_row = 0;
+        self.servers_back = Screen::Overview;
         self.updating = None;
         self.rotating = false;
         self.settings.settings = None;

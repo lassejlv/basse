@@ -5,6 +5,8 @@ mod database;
 mod form;
 mod keys;
 mod mouse;
+#[cfg(test)]
+mod mouse_tests;
 mod theme;
 mod util;
 mod view;
@@ -42,21 +44,23 @@ async fn event_loop(
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
     app.refresh();
+    let mut redraw = true;
     loop {
-        let frame = terminal.draw(|frame| view::render(frame, &app))?;
-        if let Some(sel) = app.mouse.selection.as_mut().filter(|s| s.copy_pending) {
-            sel.copy_pending = false;
-            let text = mouse::selected_text(frame.buffer, sel);
-            if !text.trim().is_empty() {
-                mouse::copy_to_clipboard(&text);
-                let n = text.chars().count();
-                app.toast(format!(
-                    "copied {n} character{}",
-                    if n == 1 { "" } else { "s" }
-                ));
+        if redraw {
+            let frame = terminal.draw(|frame| view::render(frame, &app))?;
+            if let Some(sel) = app.mouse.selection.take_if(|s| s.copy_pending) {
+                let text = mouse::selected_text(frame.buffer, &sel);
+                if !text.trim().is_empty() {
+                    mouse::copy_to_clipboard(&text);
+                    let n = text.chars().count();
+                    app.toast(format!(
+                        "copied {n} character{}",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                }
             }
-            app.mouse.selection = None;
         }
+        redraw = true;
         tokio::select! {
             _ = tick.tick() => app.on_tick(),
             Some(first) = rx.recv() => {
@@ -70,10 +74,10 @@ async fn event_loop(
             }
             event = events.next() => match event {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                    app.mouse.selection = None;
+                    app.mouse.cancel_gesture();
                     keys::handle(&mut app, key);
                 }
-                Some(Ok(Event::Mouse(ev))) => mouse::handle(&mut app, ev),
+                Some(Ok(Event::Mouse(ev))) => redraw = mouse::handle(&mut app, ev),
                 Some(Ok(_)) => {}
                 Some(Err(e)) => return Err(e.into()),
                 None => return Ok(()),
