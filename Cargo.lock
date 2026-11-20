@@ -309,6 +309,7 @@ dependencies = [
  "client",
  "common",
  "futures-util",
+ "serde",
  "serde_json",
  "tokio",
  "tui",
