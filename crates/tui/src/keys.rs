@@ -104,13 +104,18 @@ fn overlay(app: &mut App, key: KeyEvent) {
                 }
             }
         },
-        Some(Overlay::Confirm(_)) => match key.code {
-            KeyCode::Char('y') | KeyCode::Enter => {
-                if let Some(Overlay::Confirm(c)) = app.overlay.take() {
-                    app.confirm(c.action);
-                }
-            }
+        Some(Overlay::Confirm(c)) => match key.code {
+            _ if c.busy.is_some() => {}
+            KeyCode::Char('y') | KeyCode::Enter => app.accept_confirm(),
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => app.overlay = None,
+            _ => {}
+        },
+        Some(Overlay::Reveal(r)) => match key.code {
+            KeyCode::Char('c') => {
+                let value = r.value.clone();
+                app.copy(&value, "the new URL");
+            }
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => app.overlay = None,
             _ => {}
         },
         Some(Overlay::Palette(p)) => match key.code {
@@ -173,11 +178,24 @@ pub fn run_command(app: &mut App, cmd: Command) {
 }
 
 fn ask(app: &mut App, title: &str, message: String, danger: bool, action: ConfirmAction) {
+    ask_to(app, title, message, danger, action, "confirm");
+}
+
+fn ask_to(
+    app: &mut App,
+    title: &str,
+    message: String,
+    danger: bool,
+    action: ConfirmAction,
+    verb: &'static str,
+) {
     app.overlay = Some(Overlay::Confirm(Confirm {
         title: title.into(),
         message,
         danger,
         action,
+        verb,
+        busy: None,
     }));
 }
 
@@ -311,17 +329,25 @@ fn service(app: &mut App, key: KeyEvent) {
     };
     let tab = view.tab;
     let viewport = app.log_viewport.get();
+    let tabs = view.tabs();
+    let n = tabs.len();
+    let at = tabs.iter().position(|t| *t == tab).unwrap_or(0);
     match key.code {
         KeyCode::Esc => return app.close_service(),
-        KeyCode::Tab => return app.set_tab(Tab::ALL[(tab.index() + 1) % Tab::ALL.len()]),
-        KeyCode::BackTab => {
-            return app.set_tab(Tab::ALL[(tab.index() + Tab::ALL.len() - 1) % Tab::ALL.len()]);
+        KeyCode::Tab => return app.set_tab(tabs[(at + 1) % n]),
+        KeyCode::BackTab => return app.set_tab(tabs[(at + n - 1) % n]),
+        KeyCode::Char(c @ '1'..='9') => {
+            if let Some(t) = tabs.get(c as usize - '1' as usize) {
+                app.set_tab(*t);
+            }
+            return;
         }
-        KeyCode::Char(c @ '1'..='7') => return app.set_tab(Tab::ALL[c as usize - '1' as usize]),
         _ => {}
     }
+    let backups = app.backups.get(&view.id).cloned().unwrap_or_default();
     let detail = view.detail.clone();
     let rows = match (tab, &detail) {
+        (Tab::Backups, _) => backups.len(),
         (Tab::Deployments, _) => view.deployments.len(),
         (Tab::Env, Some(d)) => d.env.len(),
         (Tab::Domains, Some(d)) => d.domains.len(),
@@ -529,6 +555,92 @@ fn service(app: &mut App, key: KeyEvent) {
                     true,
                     ConfirmAction::DeleteVolume(v.id.clone(), true),
                 );
+            }
+        }
+        (Tab::Database, KeyCode::Char('v')) => {
+            if let Some(view) = app.service.as_mut() {
+                view.reveal = !view.reveal;
+            }
+        }
+        (Tab::Database, KeyCode::Char('c')) => {
+            if let Some(info) = &detail.database {
+                app.copy(&info.internal_url, "internal URL");
+            }
+        }
+        (Tab::Database, KeyCode::Char('C')) => match detail.database.as_ref() {
+            Some(DatabaseInfo {
+                public_url: Some(url),
+                ..
+            }) => app.copy(url, "public URL"),
+            _ => app.error("not exposed · p to expose it first"),
+        },
+        (Tab::Database, KeyCode::Char('p')) => match detail.database.as_ref() {
+            Some(info) if info.public_port.is_some() => ask(
+                app,
+                "Unexpose database",
+                format!(
+                    "Close port {} and make {} internal again? Connections from outside drop, and the container restarts once to apply it.",
+                    info.public_port.unwrap_or_default(),
+                    s.name
+                ),
+                false,
+                ConfirmAction::PublicPort(s.id.clone(), None),
+            ),
+            Some(_) => app.form_expose(),
+            None => {}
+        },
+        (Tab::Database, KeyCode::Char('R')) => {
+            if let Some(info) = &detail.database {
+                let user = info.username.as_deref().unwrap_or("the default user");
+                ask(
+                    app,
+                    "Rotate password",
+                    format!(
+                        "Set a new password for {user} inside {} and update DATABASE_URL? The old password stops working at once. Services that connect to {} keep the old URL until you redeploy them.",
+                        s.name, s.name
+                    ),
+                    true,
+                    ConfirmAction::RotatePassword(s.id.clone()),
+                );
+            }
+        }
+        (Tab::Backups, KeyCode::Char('b')) => app.backup_now(&s.id, &s.name),
+        (Tab::Backups, KeyCode::Char('e')) => app.form_schedule(),
+        (Tab::Backups, KeyCode::Char('R') | KeyCode::Char('D') | KeyCode::Char('x')) => {
+            let Some(b) = backups.get(row) else {
+                return app.error("no backup selected · b to take one");
+            };
+            if key.code != KeyCode::Char('x') && b.status != BackupStatus::Done {
+                return app.error(match b.status {
+                    BackupStatus::Running => "that backup is still running",
+                    _ => "that backup failed and has no file",
+                });
+            }
+            let when = crate::database::created(b.created_at, chrono::Utc::now());
+            match key.code {
+                KeyCode::Char('R') => ask_to(
+                    app,
+                    "Restore backup",
+                    format!(
+                        "Restore {} ({when}) into {}? Everything written since then is replaced. Take a backup first if you may need today's data.",
+                        b.file_name, s.name
+                    ),
+                    true,
+                    ConfirmAction::RestoreBackup(b.id.clone(), b.file_name.clone()),
+                    "restore",
+                ),
+                KeyCode::Char('D') => app.form_download(b),
+                _ => ask_to(
+                    app,
+                    "Delete backup",
+                    format!(
+                        "Delete {} ({when})? The file is removed from storage.",
+                        b.file_name
+                    ),
+                    true,
+                    ConfirmAction::DeleteBackup(b.id.clone()),
+                    "delete",
+                ),
             }
         }
         (Tab::Settings, KeyCode::Enter | KeyCode::Char('e')) => app.form_edit_service(),

@@ -108,6 +108,18 @@ pub enum FormKind {
         service_id: Id,
     },
     AddServer,
+    /// Asks for the host port; submitting opens a confirm dialog.
+    ExposeDatabase {
+        service_id: Id,
+        name: String,
+    },
+    BackupSchedule {
+        service_id: Id,
+    },
+    DownloadBackup {
+        backup_id: Id,
+        file_name: String,
+    },
 }
 
 pub enum FormAction {
@@ -129,6 +141,8 @@ pub struct Form {
     pub submit_label: &'static str,
     pub alt_label: Option<&'static str>,
     pub busy: bool,
+    /// Shown above the actions: the first line with a red ▲, the rest muted.
+    pub warning: Vec<String>,
 }
 
 impl Form {
@@ -143,6 +157,7 @@ impl Form {
             submit_label: "save",
             alt_label: None,
             busy: false,
+            warning: Vec::new(),
         };
         form.refresh();
         form.focus = form.next_visible(0, 1);
@@ -157,6 +172,11 @@ impl Form {
     pub fn submit(mut self, label: &'static str, alt: Option<&'static str>) -> Self {
         self.submit_label = label;
         self.alt_label = alt;
+        self
+    }
+
+    pub fn warning(mut self, lines: Vec<String>) -> Self {
+        self.warning = lines;
         self
     }
 
@@ -203,6 +223,13 @@ impl Form {
 
     /// Show only the fields that apply to the current choices, and keep defaults in sync.
     fn refresh(&mut self) {
+        if matches!(self.kind, FormKind::BackupSchedule { .. }) {
+            let hint = crate::database::hour_hint(&self.raw("hour"));
+            if let Some(hour) = self.field_mut("hour") {
+                hour.hint = hint;
+            }
+            return;
+        }
         if !matches!(self.kind, FormKind::NewService { .. }) {
             return;
         }
@@ -319,8 +346,14 @@ impl Form {
         let roomy = area.height as usize >= visible.len() * 2 + 9;
         let rows_per_field = if roomy { 2 } else { 1 };
         let width = area.width.saturating_sub(4).min(92);
+        let warning_rows = if self.warning.is_empty() {
+            0
+        } else {
+            self.warning.len() + 1
+        };
         let height =
-            (visible.len() * rows_per_field + 6 + usize::from(self.error.is_some())) as u16;
+            (visible.len() * rows_per_field + 6 + warning_rows + usize::from(self.error.is_some()))
+                as u16;
         let rect = area.centered(
             Constraint::Length(width),
             Constraint::Length(height.min(area.height)),
@@ -477,6 +510,25 @@ impl Form {
             }
         }
 
+        if !self.warning.is_empty() {
+            y += 1;
+            for (i, line) in self.warning.iter().enumerate() {
+                let spans = if i == 0 {
+                    vec![
+                        Span::styled("▲ ", theme::fg(theme::ERR)),
+                        Span::styled(line.clone(), theme::text()),
+                    ]
+                } else {
+                    vec![Span::styled(format!("  {line}"), theme::muted())]
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)),
+                    Rect::new(inner.x, y, inner.width, 1),
+                );
+                y += 1;
+            }
+        }
+
         if let Some(error) = &self.error {
             frame.render_widget(
                 Paragraph::new(format!("✕ {error}")).style(theme::fg(theme::ERR)),
@@ -562,6 +614,27 @@ mod tests {
                 Field::text("domain", "domain"),
             ],
         )
+    }
+
+    #[test]
+    fn schedule_hour_hint_follows_the_typed_hour() {
+        let mut form = Form::new(
+            FormKind::BackupSchedule {
+                service_id: "s".into(),
+            },
+            "Backup schedule",
+            vec![
+                Field::toggle("enabled", "daily", true),
+                Field::text("hour", "hour (UTC)").value("3"),
+                Field::text("keep", "keep").value("7"),
+            ],
+        );
+        let hint = |f: &Form| f.fields[1].hint.clone();
+        assert!(hint(&form).ends_with(" local"));
+        form.handle_key(KeyEvent::from(KeyCode::Tab));
+        form.handle_key(KeyEvent::from(KeyCode::Char('9')));
+        assert_eq!(form.get("hour"), "39");
+        assert_eq!(hint(&form), "0-23");
     }
 
     #[test]
