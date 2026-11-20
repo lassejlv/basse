@@ -138,6 +138,22 @@ pub fn ago(at: Timestamp) -> String {
     }
 }
 
+/// A file size such as `512 B`, `3.4 KB` or `1.2 GB`.
+pub fn size(n: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 pub fn bytes(n: u64) -> String {
     let n = n as f64;
     let g = 1024.0 * 1024.0 * 1024.0;

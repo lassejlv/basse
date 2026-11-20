@@ -10,6 +10,7 @@ use common::api::*;
 use common::*;
 use futures_util::StreamExt;
 use output::{Cell, Tone, muted, paint};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = brand::CLI_BIN, version, about = "Deploy and run apps on your own servers", propagate_version = true)]
@@ -97,6 +98,9 @@ enum Cmd {
     /// Persistent volumes of a service.
     #[command(subcommand, alias = "volumes")]
     Volume(VolumeCmd),
+    /// Connection details, public access, backups and passwords of database services.
+    #[command(subcommand, alias = "database")]
+    Db(DbCmd),
 }
 
 #[derive(Subcommand)]
@@ -303,6 +307,61 @@ enum VolumeCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum DbCmd {
+    /// Connection details. The password is masked unless --reveal is given.
+    Info {
+        service: String,
+        /// Show the password.
+        #[arg(long)]
+        reveal: bool,
+    },
+    /// Publish the database on a port of its server, reachable from outside.
+    Expose { service: String, port: u16 },
+    /// Make the database reachable only from its environment again.
+    Unexpose { service: String },
+    /// Back up now and wait for the result.
+    Backup { service: String },
+    /// Backups of a database, newest first.
+    Backups { service: String },
+    /// Replace the database's data with a backup.
+    Restore {
+        service: String,
+        /// Backup id or file name.
+        backup: String,
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Save a backup's gzip file.
+    Download {
+        service: String,
+        /// Backup id or file name.
+        backup: String,
+        /// Where to write it; defaults to the backup's file name.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Show or change daily automatic backups, e.g. "db schedule main --hour 3 --keep 7".
+    Schedule {
+        service: String,
+        /// Hour of the day in UTC (0-23); enables the schedule.
+        #[arg(long, conflicts_with = "off")]
+        hour: Option<u8>,
+        /// Scheduled backups to keep; enables the schedule.
+        #[arg(long, conflicts_with = "off")]
+        keep: Option<u32>,
+        /// Turn scheduled backups off.
+        #[arg(long)]
+        off: bool,
+    },
+    /// Set a new password inside the database and in its stored connection URL.
+    RotatePassword {
+        service: String,
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -431,6 +490,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Domain(cmd) => domain(&c, cmd, json).await,
         Cmd::Vars(cmd) => vars(&c, cmd, json).await,
         Cmd::Volume(cmd) => volume(&c, cmd, json).await,
+        Cmd::Db(cmd) => db(&c, cmd, json).await,
     }
 }
 
@@ -699,7 +759,7 @@ fn confirm(prompt: &str, yes: bool) -> Result<()> {
         return Ok(());
     }
     if !std::io::stdin().is_terminal() {
-        bail!("refusing to delete without --yes when not interactive");
+        bail!("pass --yes to confirm when not interactive");
     }
     print!("{prompt} {} ", muted("[y/N]"));
     std::io::stdout().flush()?;
@@ -1238,6 +1298,315 @@ async fn volume(c: &Client, cmd: VolumeCmd, json: bool) -> Result<()> {
     Ok(())
 }
 
+const MASK: &str = "••••••••";
+
+/// The URL with the password in its userinfo replaced by a mask.
+fn mask_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let Some(at) = rest[..authority_end].rfind('@') else {
+        return url.to_string();
+    };
+    let userinfo = &rest[..at];
+    let user = userinfo.split_once(':').map_or(userinfo, |(user, _)| user);
+    format!("{scheme}://{user}:{MASK}{}", &rest[at..])
+}
+
+/// The service, checked to be a database.
+async fn find_database(c: &Client, query: &str) -> Result<Service> {
+    let (_, _, s) = find(c, query).await?;
+    if !matches!(s.source, Source::Database { .. }) {
+        bail!("{} is not a database service", s.name);
+    }
+    Ok(s)
+}
+
+/// A backup of the service by id, id prefix or file name.
+async fn find_backup(c: &Client, service: &Service, query: &str) -> Result<Backup> {
+    let backups = c.backups(&service.id).await?;
+    let mut matches = backups
+        .iter()
+        .filter(|b| b.id == query || b.file_name == query || b.id.starts_with(query));
+    match (matches.next(), matches.next()) {
+        (Some(b), None) => Ok(b.clone()),
+        (Some(_), Some(_)) => bail!("'{query}' matches several backups of {}", service.name),
+        (None, _) => bail!("{} has no backup '{query}'", service.name),
+    }
+}
+
+fn print_database(info: &DatabaseInfo, name: &str, reveal: bool) {
+    let k = |key: &str| muted(format!("{key:<10}"));
+    let secret = |s: &str| {
+        if reveal { s.to_string() } else { mask_url(s) }
+    };
+    println!(
+        "{name} {}",
+        muted(format!("{} {}", info.kind, info.version))
+    );
+    println!("{}{}:{}", k("host"), info.host, info.port);
+    if let Some(user) = &info.username {
+        println!("{}{user}", k("user"));
+    }
+    if let Some(db) = &info.database {
+        println!("{}{db}", k("database"));
+    }
+    println!(
+        "{}{}",
+        k("password"),
+        if reveal {
+            info.password.clone()
+        } else {
+            muted(MASK)
+        }
+    );
+    println!("{}{}", k("internal"), secret(&info.internal_url));
+    match (&info.public_url, info.public_port) {
+        (Some(url), _) => println!("{}{}", k("public"), secret(url)),
+        (None, Some(port)) => println!(
+            "{}port {port} {}",
+            k("public"),
+            muted("(the server's address is unknown)")
+        ),
+        (None, None) => println!(
+            "{}{} {}",
+            k("public"),
+            muted("off:"),
+            hint(&format!("db expose {name} <port>"))
+        ),
+    }
+    if !reveal {
+        output::note(format!(
+            "add --reveal to show the password: {}",
+            hint(&format!("db info {name} --reveal"))
+        ));
+    }
+}
+
+/// Follows the redeploy a database change queued, if any.
+async fn follow_reconfigure(c: &Client, s: &Service) -> Result<()> {
+    match c.deployments(&s.id, 1).await?.into_iter().next() {
+        Some(d) if !d.status.is_finished() => follow_deployment(c, d).await,
+        _ => Ok(()),
+    }
+}
+
+fn backup_status(status: BackupStatus) -> Cell {
+    let tone = match status {
+        BackupStatus::Done => Tone::Ok,
+        BackupStatus::Running => Tone::Info,
+        BackupStatus::Failed => Tone::Err,
+    };
+    Cell(status.as_str().to_string(), tone)
+}
+
+async fn db(c: &Client, cmd: DbCmd, json: bool) -> Result<()> {
+    match cmd {
+        DbCmd::Info { service, reveal } => {
+            let s = find_database(c, &service).await?;
+            let mut info = c
+                .service(&s.id)
+                .await?
+                .database
+                .context("the daemon returned no connection details")?;
+            if json {
+                if !reveal {
+                    info.password = MASK.into();
+                    info.internal_url = mask_url(&info.internal_url);
+                    info.public_url = info.public_url.as_deref().map(mask_url);
+                }
+                return output::json(&info);
+            }
+            print_database(&info, &s.name, reveal);
+        }
+        DbCmd::Expose { service, port } => {
+            if port == 0 {
+                bail!("port must be between 1 and 65535");
+            }
+            let s = find_database(c, &service).await?;
+            let info = c
+                .update_database(
+                    &s.id,
+                    &UpdateDatabase {
+                        public_port: Some(port),
+                    },
+                )
+                .await?;
+            output::ok(format!("{} is published on port {port}", s.name));
+            follow_reconfigure(c, &s).await?;
+            if let Some(url) = info.public_url {
+                println!("{} {}", muted("public:"), mask_url(&url));
+            }
+        }
+        DbCmd::Unexpose { service } => {
+            let s = find_database(c, &service).await?;
+            c.update_database(&s.id, &UpdateDatabase { public_port: None })
+                .await?;
+            output::ok(format!("{} is internal-only", s.name));
+            follow_reconfigure(c, &s).await?;
+        }
+        DbCmd::Backup { service } => {
+            let s = find_database(c, &service).await?;
+            let mut b = c.create_backup(&s.id).await?;
+            output::note(format!("backing up {} to {}", s.name, b.file_name));
+            while b.status == BackupStatus::Running {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                b = c.backup(&b.id).await?;
+            }
+            if json {
+                return output::json(&b);
+            }
+            match b.status {
+                BackupStatus::Done => output::ok(format!(
+                    "backup {} done ({}, {})",
+                    b.id,
+                    b.file_name,
+                    output::size(b.size_bytes)
+                )),
+                _ => bail!("backup failed: {}", b.error.unwrap_or_default()),
+            }
+        }
+        DbCmd::Backups { service } => {
+            let s = find_database(c, &service).await?;
+            let list = c.backups(&s.id).await?;
+            if json {
+                return output::json(&list);
+            }
+            if list.is_empty() {
+                println!(
+                    "{} {}",
+                    muted("no backups yet:"),
+                    hint(&format!("db backup {}", s.name))
+                );
+            }
+            output::table(
+                &["ID", "STATUS", "FILE", "SIZE", "TRIGGER", "CREATED"],
+                list.iter()
+                    .map(|b| {
+                        vec![
+                            Cell::from(b.id.clone()),
+                            backup_status(b.status),
+                            Cell::from(b.file_name.clone()),
+                            Cell(output::size(b.size_bytes), Tone::Muted),
+                            Cell(b.trigger.as_str().to_string(), Tone::Muted),
+                            Cell(
+                                b.error.clone().unwrap_or_else(|| output::ago(b.created_at)),
+                                if b.error.is_some() {
+                                    Tone::Err
+                                } else {
+                                    Tone::Muted
+                                },
+                            ),
+                        ]
+                    })
+                    .collect(),
+            );
+        }
+        DbCmd::Restore {
+            service,
+            backup,
+            yes,
+        } => {
+            let s = find_database(c, &service).await?;
+            let b = find_backup(c, &s, &backup).await?;
+            confirm(
+                &format!(
+                    "Restore {} into {}? Its current data is replaced.",
+                    b.file_name, s.name
+                ),
+                yes,
+            )?;
+            output::note(format!("restoring {} into {}", b.file_name, s.name));
+            c.restore_backup(&b.id).await?;
+            output::ok(format!("restored {} into {}", b.file_name, s.name));
+        }
+        DbCmd::Download {
+            service,
+            backup,
+            output: path,
+        } => {
+            use tokio::io::AsyncWriteExt as _;
+            let s = find_database(c, &service).await?;
+            let b = find_backup(c, &s, &backup).await?;
+            let path = path.unwrap_or_else(|| PathBuf::from(&b.file_name));
+            let mut stream = c.download_backup(&b.id).await?;
+            let mut file = tokio::fs::File::create(&path)
+                .await
+                .with_context(|| format!("cannot create {}", path.display()))?;
+            while let Some(chunk) = stream.next().await {
+                file.write_all(&chunk?).await?;
+            }
+            file.flush().await?;
+            output::ok(format!(
+                "saved {} ({})",
+                path.display(),
+                output::size(b.size_bytes)
+            ));
+        }
+        DbCmd::Schedule {
+            service,
+            hour,
+            keep,
+            off,
+        } => {
+            let s = find_database(c, &service).await?;
+            let mut schedule = c.backup_schedule(&s.id).await?;
+            if off {
+                schedule.enabled = false;
+            } else if hour.is_some() || keep.is_some() {
+                schedule.enabled = true;
+                schedule.hour_utc = hour.unwrap_or(schedule.hour_utc);
+                schedule.keep = keep.unwrap_or(schedule.keep);
+            }
+            if off || hour.is_some() || keep.is_some() {
+                schedule = c.set_backup_schedule(&s.id, &schedule).await?;
+            }
+            if json {
+                return output::json(&schedule);
+            }
+            if schedule.enabled {
+                output::ok(format!(
+                    "{} is backed up daily at {:02}:00 UTC, keeping the last {}",
+                    s.name, schedule.hour_utc, schedule.keep
+                ));
+            } else {
+                println!(
+                    "{} {}",
+                    muted(format!("scheduled backups of {} are off:", s.name)),
+                    hint(&format!("db schedule {} --hour 3 --keep 7", s.name))
+                );
+            }
+        }
+        DbCmd::RotatePassword { service, yes } => {
+            let s = find_database(c, &service).await?;
+            confirm(
+                &format!(
+                    "Set a new password for {}? Clients using the old one are cut off.",
+                    s.name
+                ),
+                yes,
+            )?;
+            let info = c.rotate_database_password(&s.id).await?;
+            if json {
+                return output::json(&info);
+            }
+            output::ok(format!("rotated the password of {}", s.name));
+            println!("{} {}", muted("internal url:"), info.internal_url);
+            if info.kind == DatabaseKind::Redis {
+                output::note(format!(
+                    "{} is redeployed so a restart keeps the new password",
+                    s.name
+                ));
+            }
+            output::note(
+                "services that copied the old connection URL keep failing until they are updated and redeployed",
+            );
+        }
+    }
+    Ok(())
+}
+
 fn print_log(line: &LogLine, timestamps: bool) {
     let ts = match (timestamps, line.ts) {
         (true, Some(t)) => format!(
@@ -1298,6 +1667,23 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn urls_are_masked() {
+        assert_eq!(
+            mask_url("postgres://app:s3cret@db:5432/app"),
+            format!("postgres://app:{MASK}@db:5432/app")
+        );
+        assert_eq!(
+            mask_url("redis://:s3cret@cache:6379"),
+            format!("redis://:{MASK}@cache:6379")
+        );
+        assert_eq!(
+            mask_url("mongodb://app:p%40ss@mongo:27017/?authSource=admin"),
+            format!("mongodb://app:{MASK}@mongo:27017/?authSource=admin")
+        );
+        assert_eq!(mask_url("not a url"), "not a url");
     }
 
     #[test]

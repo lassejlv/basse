@@ -7,6 +7,7 @@ Self-hosted deploys from the terminal. A control daemon runs on your server and 
 - **Zero-downtime deploys.** A new container must pass its health check before the proxy sends it traffic. Then the old one stops. Rollback redeploys an earlier image without rebuilding.
 - **Domains with automatic HTTPS.** Caddy runs as the reverse proxy on each server and gets certificates on its own.
 - **Logs, env vars and volumes.** Stream container and build logs, manage variables and secrets, and mount named volumes that survive redeploys.
+- **Database backups and access.** Back up one-click databases on demand or daily with retention, download and restore dumps, rotate passwords in place, and publish a database on a server port when you need to reach it from outside.
 - **More servers.** Register extra machines over SSH, and the daemon deploys to them through the same API.
 
 ## Install
@@ -67,6 +68,9 @@ basse project create acme-shop
 basse service create acme-shop web --repo https://github.com/acme/web --port 3000 --domain shop.example.com
 basse service create acme-shop --database postgres
 basse vars set web STRIPE_KEY=sk_live_… --secret --deploy
+basse db info postgres --reveal
+basse db backup postgres
+basse db schedule postgres --hour 3 --keep 7
 basse logs web -f
 basse deploy web
 basse rollback web
