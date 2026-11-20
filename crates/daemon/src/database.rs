@@ -202,7 +202,7 @@ fn database_kind(service: &Service) -> ApiResult<DatabaseKind> {
 
 /// Publishes the database port on the server's `port`, or stops publishing it for `None`
 /// or 0. A live container picks the change up through a redeploy of its image.
-pub fn set_public_port(
+pub async fn set_public_port(
     state: &Arc<AppState>,
     rec: &ServiceRecord,
     port: Option<u16>,
@@ -214,20 +214,26 @@ pub fn set_public_port(
         if matches!(p, 80 | 443) {
             bad_request!("port {p} is reserved for the proxy");
         }
-        if state.db.public_port_taken(&svc.server_id, p, &svc.id)? {
+        if state
+            .db
+            .public_port_taken(&svc.server_id, p, &svc.id)
+            .await?
+        {
             conflict!("another service on this server already publishes port {p}");
         }
     }
-    if state.db.public_port(&svc.id)? == port {
+    if state.db.public_port(&svc.id).await? == port {
         return Ok(());
     }
-    state.db.set_public_port(&svc.id, port)?;
+    state.db.set_public_port(&svc.id, port).await?;
     let (message, detail) = match port {
         Some(p) => ("Public access enabled", Some(format!("port {p}"))),
         None => ("Public access disabled", None),
     };
-    state.service_activity(svc, ActivityLevel::Info, message.into(), detail);
-    deploy::reconfigure(state, rec)?;
+    state
+        .service_activity(svc, ActivityLevel::Info, message.into(), detail)
+        .await;
+    deploy::reconfigure(state, rec).await?;
     Ok(())
 }
 
@@ -262,7 +268,7 @@ async fn target(state: &AppState, rec: &ServiceRecord) -> ApiResult<Target> {
         .config
         .and_then(|c| c.image)
         .unwrap_or_else(|| service.source.label());
-    let creds = Credentials::from_env(kind, &state.db.env(&service.id)?);
+    let creds = Credentials::from_env(kind, &state.db.env(&service.id).await?);
     Ok(Target {
         service,
         kind,
@@ -455,7 +461,7 @@ pub async fn rotate_password(state: &Arc<AppState>, rec: &ServiceRecord) -> ApiR
     creds.password.clone_from(&new);
     let port = t.service.port.unwrap_or(t.kind.port());
     let url = connection_url(t.kind, &creds, &t.service.name, port);
-    let mut vars = state.db.env(&t.service.id)?;
+    let mut vars = state.db.env(&t.service.id).await?;
     for (key, value) in [(keys.password, new), (keys.url, url)] {
         match vars.iter_mut().find(|v| v.key == key) {
             Some(var) => var.value = value,
@@ -466,17 +472,19 @@ pub async fn rotate_password(state: &Arc<AppState>, rec: &ServiceRecord) -> ApiR
             }),
         }
     }
-    state.db.replace_env(&t.service.id, &vars)?;
-    state.service_activity(
-        &t.service,
-        ActivityLevel::Success,
-        "Database password rotated".into(),
-        Some("redeploy services that copied the old connection URL".into()),
-    );
+    state.db.replace_env(&t.service.id, &vars).await?;
+    state
+        .service_activity(
+            &t.service,
+            ActivityLevel::Success,
+            "Database password rotated".into(),
+            Some("redeploy services that copied the old connection URL".into()),
+        )
+        .await;
     if t.kind == DatabaseKind::Redis {
         // The server reads `$REDIS_PASSWORD` at start; recreate the container so a restart keeps
         // the new password.
-        deploy::reconfigure(state, &services::record(state, &t.service.id)?)?;
+        deploy::reconfigure(state, &services::record(state, &t.service.id).await?).await?;
     }
     Ok(())
 }
@@ -573,7 +581,7 @@ pub async fn start_backup(
         storage_id: None,
         finished_at: None,
     };
-    state.db.insert_backup(&mut backup, extension)?;
+    state.db.insert_backup(&mut backup, extension).await?;
     let task = {
         let state = state.clone();
         let backup = backup.clone();
@@ -593,26 +601,30 @@ async fn run_backup(state: &AppState, t: &Target, mut backup: Backup, script: &s
         Ok(size) => {
             backup.status = BackupStatus::Done;
             backup.size_bytes = size;
-            state.service_activity(
-                &t.service,
-                ActivityLevel::Success,
-                "Backup done".into(),
-                Some(format!("{} ({})", backup.file_name, human_size(size))),
-            );
+            state
+                .service_activity(
+                    &t.service,
+                    ActivityLevel::Success,
+                    "Backup done".into(),
+                    Some(format!("{} ({})", backup.file_name, human_size(size))),
+                )
+                .await;
         }
         Err(e) => {
             let message = format!("{e:#}");
             backup.status = BackupStatus::Failed;
             backup.error = Some(message.clone());
-            state.service_activity(
-                &t.service,
-                ActivityLevel::Error,
-                "Backup failed".into(),
-                Some(message),
-            );
+            state
+                .service_activity(
+                    &t.service,
+                    ActivityLevel::Error,
+                    "Backup failed".into(),
+                    Some(message),
+                )
+                .await;
         }
     }
-    if let Err(e) = state.db.update_backup(&backup) {
+    if let Err(e) = state.db.update_backup(&backup).await {
         tracing::warn!(backup = %backup.id, "cannot save backup: {e:#}");
     }
     if backup.trigger == BackupTrigger::Schedule
@@ -686,7 +698,7 @@ pub async fn restore(state: &Arc<AppState>, backup: &Backup) -> ApiResult<()> {
             backup.status.as_str()
         );
     }
-    let rec = services::record(state, &backup.service_id)?;
+    let rec = services::record(state, &backup.service_id).await?;
     let t = target(state, &rec).await?;
     let _guard = state.db_locks.try_acquire(&t.service)?;
     let result = async {
@@ -706,21 +718,25 @@ pub async fn restore(state: &Arc<AppState>, backup: &Backup) -> ApiResult<()> {
     .await;
     match result {
         Ok(()) => {
-            state.service_activity(
-                &t.service,
-                ActivityLevel::Success,
-                "Backup restored".into(),
-                Some(backup.file_name.clone()),
-            );
+            state
+                .service_activity(
+                    &t.service,
+                    ActivityLevel::Success,
+                    "Backup restored".into(),
+                    Some(backup.file_name.clone()),
+                )
+                .await;
             Ok(())
         }
         Err(e) => {
-            state.service_activity(
-                &t.service,
-                ActivityLevel::Error,
-                "Restore failed".into(),
-                Some(format!("{e:#}")),
-            );
+            state
+                .service_activity(
+                    &t.service,
+                    ActivityLevel::Error,
+                    "Restore failed".into(),
+                    Some(format!("{e:#}")),
+                )
+                .await;
             Err(e
                 .context(format!("cannot restore {}", backup.file_name))
                 .into())
@@ -737,7 +753,8 @@ async fn restore_redis(
 ) -> Result<()> {
     let data = state
         .db
-        .volumes(&t.service.id)?
+        .volumes(&t.service.id)
+        .await?
         .into_iter()
         .find(|v| v.name == "data")
         .context("the service has no data volume")?;
@@ -781,7 +798,7 @@ pub async fn delete_backup(state: &AppState, backup: &Backup) -> ApiResult<()> {
         .backup_store(backup.storage)
         .delete(&backup_key(&backup.service_id, &backup.file_name))
         .await?;
-    state.db.delete_backup(&backup.id)?;
+    state.db.delete_backup(&backup.id).await?;
     Ok(())
 }
 
@@ -804,7 +821,7 @@ pub async fn delete_backup_files(state: &AppState, service_id: &str) {
 
 // Schedules
 
-pub fn set_schedule(
+pub async fn set_schedule(
     state: &AppState,
     rec: &ServiceRecord,
     schedule: BackupSchedule,
@@ -817,14 +834,14 @@ pub fn set_schedule(
     if schedule.keep == 0 {
         bad_request!("keep must be at least 1");
     }
-    let mut record = state.db.backup_schedule(&svc.id)?;
+    let mut record = state.db.backup_schedule(&svc.id).await?;
     let restarts = schedule.enabled
         && (!record.schedule.enabled || record.schedule.hour_utc != schedule.hour_utc);
     if restarts {
         record.last_run_at = Some(Utc::now());
     }
     record.schedule = schedule;
-    state.db.save_backup_schedule(&record)?;
+    state.db.save_backup_schedule(&record).await?;
     let detail = if schedule.enabled {
         format!(
             "daily at {:02}:00 UTC, keeping {}",
@@ -833,12 +850,14 @@ pub fn set_schedule(
     } else {
         "off".into()
     };
-    state.service_activity(
-        svc,
-        ActivityLevel::Info,
-        "Backup schedule updated".into(),
-        Some(detail),
-    );
+    state
+        .service_activity(
+            svc,
+            ActivityLevel::Info,
+            "Backup schedule updated".into(),
+            Some(detail),
+        )
+        .await;
     Ok(schedule)
 }
 
@@ -891,14 +910,14 @@ fn prune_candidates(backups: &[Backup], keep: u32) -> Vec<&Backup> {
 }
 
 async fn prune(state: &AppState, service_id: &str) -> Result<()> {
-    let keep = state.db.backup_schedule(service_id)?.schedule.keep;
-    let backups = state.db.backups(service_id)?;
+    let keep = state.db.backup_schedule(service_id).await?.schedule.keep;
+    let backups = state.db.backups(service_id).await?;
     for backup in prune_candidates(&backups, keep) {
         state
             .backup_store(backup.storage)
             .delete(&backup_key(&backup.service_id, &backup.file_name))
             .await?;
-        state.db.delete_backup(&backup.id)?;
+        state.db.delete_backup(&backup.id).await?;
     }
     Ok(())
 }
@@ -916,7 +935,7 @@ pub fn spawn_scheduler(state: Arc<AppState>) {
 
 async fn run_due_backups(state: &Arc<AppState>) {
     let now = Utc::now();
-    let schedules = match state.db.enabled_backup_schedules() {
+    let schedules = match state.db.enabled_backup_schedules().await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("cannot read backup schedules: {e:#}");
@@ -927,25 +946,29 @@ async fn run_due_backups(state: &Arc<AppState>) {
         if !is_due(&record.schedule, record.last_run_at, now) {
             continue;
         }
-        let Ok(Some(rec)) = state.db.service(&record.service_id) else {
+        let Ok(Some(rec)) = state.db.service(&record.service_id).await else {
             continue;
         };
         match start_backup(state, &rec, BackupTrigger::Schedule).await {
             Ok(_) => {}
             // Another backup or a deploy holds the database: try again on the next tick.
             Err(AppError::Conflict(_)) => continue,
-            Err(e) => state.service_activity(
-                &rec.service,
-                ActivityLevel::Error,
-                "Scheduled backup skipped".into(),
-                Some(e.to_string()),
-            ),
+            Err(e) => {
+                state
+                    .service_activity(
+                        &rec.service,
+                        ActivityLevel::Error,
+                        "Scheduled backup skipped".into(),
+                        Some(e.to_string()),
+                    )
+                    .await
+            }
         }
         let record = ScheduleRecord {
             last_run_at: Some(now),
             ..record
         };
-        if let Err(e) = state.db.save_backup_schedule(&record) {
+        if let Err(e) = state.db.save_backup_schedule(&record).await {
             tracing::warn!("cannot save backup schedule: {e:#}");
         }
     }

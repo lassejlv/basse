@@ -474,11 +474,12 @@ uninstall() {
 			ids=$(docker ps -aq --filter "label=$PREFIX.managed=true")
 			# shellcheck disable=SC2086
 			[ -n "$ids" ] && docker rm -f $ids >/dev/null
-			docker rm -f "$PREFIX-proxy" >/dev/null 2>&1 || true
+			docker rm -f "$PREFIX-proxy" "$PREFIX-postgres" >/dev/null 2>&1 || true
+			docker volume rm "$PREFIX-pgdata" >/dev/null 2>&1 || true
 			docker network ls -q --filter "name=^$PREFIX" | xargs -r docker network rm >/dev/null 2>&1 || true
 		fi
 		rm -rf "$DATA_DIR"
-		ok "Removed $NAME, its containers and $DATA_DIR (Docker volumes are kept)"
+		ok "Removed $NAME, its containers, its database and $DATA_DIR (app volumes are kept)"
 	else
 		ok "Removed $NAME; your data in $DATA_DIR and running apps were kept"
 	fi

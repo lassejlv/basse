@@ -139,14 +139,14 @@ impl DeployLog {
 }
 
 /// Queues a deployment and starts its background task. Returns the queued row at once.
-pub fn enqueue(
+pub async fn enqueue(
     state: &Arc<AppState>,
     rec: &ServiceRecord,
     trigger: &str,
     plan: Plan,
 ) -> ApiResult<Deployment> {
     let service = &rec.service;
-    let server = state.server(&service.server_id)?;
+    let server = state.server(&service.server_id).await?;
     let kinds: &[StepKind] = match (&plan, &service.source) {
         (Plan::Source, Source::Git { .. }) => &[
             StepKind::Clone,
@@ -202,7 +202,7 @@ pub fn enqueue(
         created_at: Utc::now(),
         finished_at: None,
     };
-    state.db.insert_deployment(&mut d, &server.id)?;
+    state.db.insert_deployment(&mut d, &server.id).await?;
 
     let log = Arc::new(DeployLog::create(&state.dirs.deployment_log(&d.id)));
     log.system(format!(
@@ -232,15 +232,20 @@ pub fn enqueue(
 }
 
 /// Queues a redeploy of the live image when a live container must pick up new configuration.
-pub fn reconfigure(state: &Arc<AppState>, rec: &ServiceRecord) -> ApiResult<Option<Deployment>> {
+pub async fn reconfigure(
+    state: &Arc<AppState>,
+    rec: &ServiceRecord,
+) -> ApiResult<Option<Deployment>> {
     if rec.stopped || (rec.service.live_deployment_id.is_none() && rec.busy.is_none()) {
         return Ok(None);
     }
-    enqueue(state, rec, "config", Plan::Reconfigure).map(Some)
+    enqueue(state, rec, "config", Plan::Reconfigure)
+        .await
+        .map(Some)
 }
 
 /// Queues a new deployment that runs the image of `target`.
-pub fn rollback(state: &Arc<AppState>, target: &Deployment) -> ApiResult<Deployment> {
+pub async fn rollback(state: &Arc<AppState>, target: &Deployment) -> ApiResult<Deployment> {
     if target.image.is_none()
         || !matches!(
             target.status,
@@ -257,7 +262,8 @@ pub fn rollback(state: &Arc<AppState>, target: &Deployment) -> ApiResult<Deploym
     }
     let rec = state
         .db
-        .service(&target.service_id)?
+        .service(&target.service_id)
+        .await?
         .ok_or_else(|| AppError::not_found("service", &target.service_id))?;
     enqueue(
         state,
@@ -265,13 +271,15 @@ pub fn rollback(state: &Arc<AppState>, target: &Deployment) -> ApiResult<Deploym
         "rollback",
         Plan::Rollback(Box::new(target.clone())),
     )
+    .await
 }
 
 /// Aborts a queued or running deployment and removes what it created.
 pub async fn cancel(state: &Arc<AppState>, deployment_id: &str) -> ApiResult<Deployment> {
     let d = state
         .db
-        .deployment(deployment_id)?
+        .deployment(deployment_id)
+        .await?
         .ok_or_else(|| AppError::not_found("deployment", deployment_id))?;
     if d.status.is_finished() {
         conflict!(
@@ -296,7 +304,8 @@ pub async fn cancel(state: &Arc<AppState>, deployment_id: &str) -> ApiResult<Dep
     };
     let mut d = state
         .db
-        .deployment(deployment_id)?
+        .deployment(deployment_id)
+        .await?
         .ok_or_else(|| AppError::not_found("deployment", deployment_id))?;
     remove_build_dir(state, deployment_id);
     if d.status.is_finished() {
@@ -317,17 +326,19 @@ pub async fn cancel(state: &Arc<AppState>, deployment_id: &str) -> ApiResult<Dep
     d.status = DeploymentStatus::Cancelled;
     d.error = Some("cancelled".into());
     d.finished_at = Some(now);
-    state.db.update_deployment(&d)?;
+    state.db.update_deployment(&d).await?;
     if let Some(log) = log {
         log.system(format!("Deployment #{} cancelled", d.number));
     }
-    if let Some(rec) = state.db.service(&d.service_id)? {
-        state.service_activity(
-            &rec.service,
-            ActivityLevel::Info,
-            format!("Deploy #{} cancelled", d.number),
-            None,
-        );
+    if let Some(rec) = state.db.service(&d.service_id).await? {
+        state
+            .service_activity(
+                &rec.service,
+                ActivityLevel::Info,
+                format!("Deploy #{} cancelled", d.number),
+                None,
+            )
+            .await;
     }
     Ok(d)
 }
@@ -397,7 +408,8 @@ impl Job {
     async fn pipeline(&mut self, plan: Plan) -> Result<()> {
         let db = &self.state.db;
         let rec = db
-            .service(&self.d.service_id)?
+            .service(&self.d.service_id)
+            .await?
             .context("the service was deleted")?;
         // Two database servers must never run on one data volume, so databases are replaced
         // by stopping the live container first instead of overlapping old and new.
@@ -406,10 +418,12 @@ impl Job {
             .filter(|_| matches!(rec.service.source, Source::Database { .. }));
         let svc = rec.service;
         let env = db
-            .environment(&svc.environment_id)?
+            .environment(&svc.environment_id)
+            .await?
             .context("the environment was deleted")?;
         let server = db
-            .server(&svc.server_id)?
+            .server(&svc.server_id)
+            .await?
             .context("the server was deleted")?;
         let docker = self.state.docker.get(&server).await?;
         self.service = Some(svc.clone());
@@ -419,12 +433,14 @@ impl Job {
             svc.source.label(),
             server.name
         ));
-        self.state.service_activity(
-            &svc,
-            ActivityLevel::Info,
-            format!("Deploy #{} started", self.d.number),
-            Some(self.d.trigger.clone()),
-        );
+        self.state
+            .service_activity(
+                &svc,
+                ActivityLevel::Info,
+                format!("Deploy #{} started", self.d.number),
+                Some(self.d.trigger.clone()),
+            )
+            .await;
 
         let image = match (&plan, &svc.source) {
             (
@@ -436,7 +452,7 @@ impl Job {
                     context,
                 },
             ) => {
-                self.set_status(DeploymentStatus::Building);
+                self.set_status(DeploymentStatus::Building).await;
                 let dir = self.clone_repo(repo, branch).await?;
                 let tag = docker::build_tag(&svc.id, self.d.number);
                 self.build(&docker, &svc, &dir, context, dockerfile, &tag)
@@ -444,13 +460,13 @@ impl Job {
                 tag
             }
             (Plan::Source, Source::Image { image }) => {
-                self.set_status(DeploymentStatus::Building);
+                self.set_status(DeploymentStatus::Building).await;
                 let image = docker::normalize_image(image);
                 self.pull(&docker, &image).await?;
                 image
             }
             (Plan::Source, Source::Database { kind, version }) => {
-                self.set_status(DeploymentStatus::Building);
+                self.set_status(DeploymentStatus::Building).await;
                 let image = format!("{}:{version}", kind.image());
                 self.pull(&docker, &image).await?;
                 image
@@ -460,12 +476,13 @@ impl Job {
                 .clone()
                 .context("rollback target has no image")?,
             (Plan::Reconfigure, _) => db
-                .live_deployment(&svc.id)?
+                .live_deployment(&svc.id)
+                .await?
                 .and_then(|d| d.image)
                 .context("the service has no live deployment to reconfigure")?,
         };
         self.d.image = Some(image.clone());
-        self.set_status(DeploymentStatus::Starting);
+        self.set_status(DeploymentStatus::Starting).await;
 
         let reused = !matches!(plan, Plan::Source);
         let container = self
@@ -482,7 +499,8 @@ impl Job {
             return Err(e);
         }
         let routed =
-            !docker::proxy_labels(&self.state.db.domains(&svc.id)?, svc.port, &svc.id).is_empty();
+            !docker::proxy_labels(&self.state.db.domains(&svc.id).await?, svc.port, &svc.id)
+                .is_empty();
         self.switch(&docker, &svc, &container, routed).await?;
         self.cleanup(&svc, &container).await;
         Ok(())
@@ -496,18 +514,20 @@ impl Job {
                 self.log
                     .system(format!("Deployment #{} is live ({elapsed})", self.d.number));
                 if let Some(svc) = &self.service {
-                    self.state.service_activity(
-                        svc,
-                        ActivityLevel::Success,
-                        format!("Deploy #{} is live", self.d.number),
-                        Some(elapsed),
-                    );
+                    self.state
+                        .service_activity(
+                            svc,
+                            ActivityLevel::Success,
+                            format!("Deploy #{} is live", self.d.number),
+                            Some(elapsed),
+                        )
+                        .await;
                 }
             }
             Err(e) => {
                 let message = format!("{e:#}");
                 if let Some(kind) = self.current.take() {
-                    self.mark(kind, StepStatus::Failed, None);
+                    self.mark(kind, StepStatus::Failed, None).await;
                 }
                 for step in &mut self.d.steps {
                     if step.status == StepStatus::Pending {
@@ -532,21 +552,29 @@ impl Job {
                 self.d.status = DeploymentStatus::Failed;
                 self.d.error = Some(message.clone());
                 self.d.finished_at = Some(Utc::now());
-                self.persist();
+                self.persist().await;
                 self.log
                     .push(LogStream::Stderr, format!("Deployment failed: {message}"));
                 match &self.service {
-                    Some(svc) => self.state.service_activity(
-                        svc,
-                        ActivityLevel::Error,
-                        format!("Deploy #{} failed", self.d.number),
-                        Some(message),
-                    ),
-                    None => self.state.activity(
-                        ActivityLevel::Error,
-                        format!("Deploy #{} failed", self.d.number),
-                        Some(message),
-                    ),
+                    Some(svc) => {
+                        self.state
+                            .service_activity(
+                                svc,
+                                ActivityLevel::Error,
+                                format!("Deploy #{} failed", self.d.number),
+                                Some(message),
+                            )
+                            .await
+                    }
+                    None => {
+                        self.state
+                            .activity(
+                                ActivityLevel::Error,
+                                format!("Deploy #{} failed", self.d.number),
+                                Some(message),
+                            )
+                            .await
+                    }
                 }
             }
         }
@@ -555,7 +583,8 @@ impl Job {
     // Steps
 
     async fn clone_repo(&mut self, repo: &str, branch: &str) -> Result<PathBuf> {
-        self.begin(StepKind::Clone, Some(format!("{repo}@{branch}")));
+        self.begin(StepKind::Clone, Some(format!("{repo}@{branch}")))
+            .await;
         let dir = self.state.dirs.build_dir(&self.d.id);
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
@@ -595,7 +624,7 @@ impl Job {
         self.d.commit = Some(sha);
         self.d.commit_message = Some(subject);
         let _ = std::fs::remove_dir_all(dir.join(".git"));
-        self.end(StepKind::Clone, Some(short));
+        self.end(StepKind::Clone, Some(short)).await;
         Ok(dir)
     }
 
@@ -633,7 +662,7 @@ impl Job {
         dockerfile: &str,
         tag: &str,
     ) -> Result<()> {
-        self.begin(StepKind::Build, None);
+        self.begin(StepKind::Build, None).await;
         let context_dir = safe_join(repo_dir, context)?;
         let dockerfile_rel = clean_relative(dockerfile)?;
         if !context_dir.join(&dockerfile_rel).is_file() {
@@ -676,7 +705,7 @@ impl Job {
                     continue;
                 }
                 if let Some(progress) = build_progress(line) {
-                    self.detail(StepKind::Build, progress);
+                    self.detail(StepKind::Build, progress).await;
                 }
                 self.log.push(LogStream::Stdout, line);
             }
@@ -684,12 +713,12 @@ impl Job {
         if !docker::image_exists(docker, tag).await? {
             bail!("image build finished without producing {tag}");
         }
-        self.end(StepKind::Build, Some(tag.to_string()));
+        self.end(StepKind::Build, Some(tag.to_string())).await;
         Ok(())
     }
 
     async fn pull(&mut self, docker: &Docker, image: &str) -> Result<()> {
-        self.begin(StepKind::Pull, Some(image.to_string()));
+        self.begin(StepKind::Pull, Some(image.to_string())).await;
         let log = self.log.clone();
         match docker::pull_image(docker, image, |line| log.push(LogStream::Stdout, line)).await {
             Ok(()) => {}
@@ -699,7 +728,7 @@ impl Job {
             }
             Err(e) => return Err(e),
         }
-        self.end(StepKind::Pull, Some(image.to_string()));
+        self.end(StepKind::Pull, Some(image.to_string())).await;
         Ok(())
     }
 
@@ -712,7 +741,7 @@ impl Job {
         reused: bool,
         previous: Option<String>,
     ) -> Result<String> {
-        self.begin(StepKind::Start, None);
+        self.begin(StepKind::Start, None).await;
         if reused && !docker::image_exists(docker, image).await? {
             if image.starts_with(&format!("{}/", brand::PREFIX)) {
                 bail!("image {image} no longer exists on the server; deploy from source instead");
@@ -721,10 +750,10 @@ impl Job {
             docker::pull_image(docker, image, |line| log.push(LogStream::Stdout, line)).await?;
         }
         let db = &self.state.db;
-        let domains = db.domains(&svc.id)?;
-        let volumes = db.volumes(&svc.id)?;
-        let vars = db.env(&svc.id)?;
-        let published = match (db.public_port(&svc.id)?, svc.port) {
+        let domains = db.domains(&svc.id).await?;
+        let volumes = db.volumes(&svc.id).await?;
+        let vars = db.env(&svc.id).await?;
+        let published = match (db.public_port(&svc.id).await?, svc.port) {
             (Some(host_port), Some(port)) => {
                 self.log.system(format!(
                     "Publishing port {port} on the server as {host_port}"
@@ -772,6 +801,7 @@ impl Job {
             restart: svc.restart,
             networks,
             published,
+            publish_ip: None,
         };
         docker::remove_container(docker, &spec.name).await?;
         if let Some(previous) = previous {
@@ -782,10 +812,10 @@ impl Job {
         }
         let id = docker::create_container(docker, &spec).await?;
         self.d.container_id = Some(id.clone());
-        self.persist();
+        self.persist().await;
         docker::start_container(docker, &id).await?;
         self.log.system(format!("Started container {}", spec.name));
-        self.end(StepKind::Start, Some(spec.name));
+        self.end(StepKind::Start, Some(spec.name)).await;
         Ok(id)
     }
 
@@ -801,7 +831,8 @@ impl Job {
             self.begin(
                 StepKind::Health,
                 Some(format!("running for {}s", STABLE_FOR.as_secs())),
-            );
+            )
+            .await;
             let deadline = Instant::now() + STABLE_FOR;
             while Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -810,7 +841,8 @@ impl Job {
             self.end(
                 StepKind::Health,
                 Some(format!("running for {}s", STABLE_FOR.as_secs())),
-            );
+            )
+            .await;
             return Ok(());
         };
         let path = if path.starts_with('/') {
@@ -818,7 +850,8 @@ impl Job {
         } else {
             format!("/{path}")
         };
-        self.begin(StepKind::Health, Some(format!("GET {path}")));
+        self.begin(StepKind::Health, Some(format!("GET {path}")))
+            .await;
         let deadline = Instant::now() + HEALTH_TIMEOUT;
         let mut last_error = String::from("no response");
         loop {
@@ -835,7 +868,7 @@ impl Job {
                         Ok(res) if res.status().is_success() || res.status().is_redirection() => {
                             let detail = format!("GET {path} -> {}", res.status().as_u16());
                             self.log.system(format!("Health check passed: {detail}"));
-                            self.end(StepKind::Health, Some(detail));
+                            self.end(StepKind::Health, Some(detail)).await;
                             return Ok(());
                         }
                         Ok(res) => last_error = format!("HTTP {}", res.status()),
@@ -849,7 +882,8 @@ impl Job {
                     .to_vec();
                 match docker::exec(docker, container, cmd).await? {
                     0 => {
-                        self.end(StepKind::Health, Some(format!("GET {path} -> ok")));
+                        self.end(StepKind::Health, Some(format!("GET {path} -> ok")))
+                            .await;
                         return Ok(());
                     }
                     126 | 127 => {
@@ -859,7 +893,8 @@ impl Job {
                             StepKind::Health,
                             StepStatus::Skipped,
                             Some("skipped (remote)".into()),
-                        );
+                        )
+                        .await;
                         self.current = None;
                         return Ok(());
                     }
@@ -888,7 +923,7 @@ impl Job {
         container: &str,
         routed: bool,
     ) -> Result<()> {
-        self.begin(StepKind::Switch, None);
+        self.begin(StepKind::Switch, None).await;
         if routed {
             let alias = docker::proxy_alias(&svc.id);
             docker::connect_to_proxy(docker, container, &alias).await?;
@@ -905,20 +940,21 @@ impl Job {
         self.current = None;
         self.d.status = DeploymentStatus::Live;
         self.d.finished_at = Some(now);
-        self.state.db.switch_live(&self.d)?;
+        self.state.db.switch_live(&self.d).await?;
         self.log.system("Traffic switched to the new container");
         Ok(())
     }
 
     /// Removes previous containers. Failures are logged; the deployment stays live.
     async fn cleanup(&mut self, svc: &Service, keep: &str) {
-        self.begin(StepKind::Cleanup, None);
+        self.begin(StepKind::Cleanup, None).await;
         let mut removed = 0;
         let mut errors = Vec::new();
         let servers = self
             .state
             .db
             .deployment_servers(&svc.id)
+            .await
             .unwrap_or_default();
         for server_id in servers {
             let Ok((_, docker)) = self.state.docker_for(&server_id).await else {
@@ -936,7 +972,7 @@ impl Job {
         );
         self.log.system(format!("Cleanup: {detail}"));
         if errors.is_empty() {
-            self.end(StepKind::Cleanup, Some(detail));
+            self.end(StepKind::Cleanup, Some(detail)).await;
         } else {
             for e in &errors {
                 self.log.push(LogStream::Stderr, format!("Cleanup: {e}"));
@@ -945,23 +981,24 @@ impl Job {
                 StepKind::Cleanup,
                 StepStatus::Failed,
                 Some(errors.join("; ")),
-            );
+            )
+            .await;
             self.current = None;
         }
     }
 
     // Bookkeeping
 
-    fn set_status(&mut self, status: DeploymentStatus) {
+    async fn set_status(&mut self, status: DeploymentStatus) {
         self.d.status = status;
-        self.persist();
+        self.persist().await;
     }
 
     fn step_mut(&mut self, kind: StepKind) -> Option<&mut Step> {
         self.d.steps.iter_mut().find(|s| s.kind == kind)
     }
 
-    fn begin(&mut self, kind: StepKind, detail: Option<String>) {
+    async fn begin(&mut self, kind: StepKind, detail: Option<String>) {
         if let Some(step) = self.step_mut(kind) {
             step.status = StepStatus::Running;
             step.started_at = Some(Utc::now());
@@ -969,22 +1006,22 @@ impl Job {
         }
         self.current = Some(kind);
         self.log.system(format!("==> {}", kind.as_str()));
-        self.persist();
+        self.persist().await;
     }
 
-    fn detail(&mut self, kind: StepKind, detail: String) {
+    async fn detail(&mut self, kind: StepKind, detail: String) {
         if let Some(step) = self.step_mut(kind) {
             step.detail = Some(detail);
         }
-        self.persist();
+        self.persist().await;
     }
 
-    fn end(&mut self, kind: StepKind, detail: Option<String>) {
-        self.mark(kind, StepStatus::Done, detail);
+    async fn end(&mut self, kind: StepKind, detail: Option<String>) {
+        self.mark(kind, StepStatus::Done, detail).await;
         self.current = None;
     }
 
-    fn mark(&mut self, kind: StepKind, status: StepStatus, detail: Option<String>) {
+    async fn mark(&mut self, kind: StepKind, status: StepStatus, detail: Option<String>) {
         if let Some(step) = self.step_mut(kind) {
             step.status = status;
             step.finished_at = Some(Utc::now());
@@ -992,11 +1029,11 @@ impl Job {
                 step.detail = detail;
             }
         }
-        self.persist();
+        self.persist().await;
     }
 
-    fn persist(&self) {
-        if let Err(e) = self.state.db.update_deployment(&self.d) {
+    async fn persist(&self) {
+        if let Err(e) = self.state.db.update_deployment(&self.d).await {
             tracing::warn!(deployment = %self.d.id, "cannot save deployment: {e:#}");
         }
     }

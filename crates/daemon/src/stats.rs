@@ -200,7 +200,7 @@ fn disk_usage(path: &Path) -> (u64, u64) {
 }
 
 async fn sample_services(state: &AppState) {
-    let Ok(recs) = state.db.services() else {
+    let Ok(recs) = state.db.services().await else {
         return;
     };
     for rec in recs {
@@ -239,20 +239,24 @@ async fn sample_services(state: &AppState) {
             && code != 0
             && !seen.crash_reported
         {
-            state.service_activity(
-                &rec.service,
-                ActivityLevel::Error,
-                "Container crashed".into(),
-                Some(format!("exit code {code}")),
-            );
+            state
+                .service_activity(
+                    &rec.service,
+                    ActivityLevel::Error,
+                    "Container crashed".into(),
+                    Some(format!("exit code {code}")),
+                )
+                .await;
             seen.crash_reported = true;
         } else if previous.is_some() && restart_count > seen.restart_count {
-            state.service_activity(
-                &rec.service,
-                ActivityLevel::Error,
-                "Container restarted after a crash".into(),
-                Some(format!("exit code {exit_code}, restart #{restart_count}")),
-            );
+            state
+                .service_activity(
+                    &rec.service,
+                    ActivityLevel::Error,
+                    "Container restarted after a crash".into(),
+                    Some(format!("exit code {exit_code}, restart #{restart_count}")),
+                )
+                .await;
         }
         if run == RunState::Running {
             seen.crash_reported = false;

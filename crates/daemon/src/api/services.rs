@@ -27,9 +27,9 @@ pub async fn create(
     Json(body): Json<CreateService>,
 ) -> ApiResult<Json<ServiceDetail>> {
     let deploy_now = body.deploy;
-    let rec = services::create(&state, body)?;
+    let rec = services::create(&state, body).await?;
     if deploy_now {
-        deploy::enqueue(&state, &rec, "api", Plan::Source)?;
+        deploy::enqueue(&state, &rec, "api", Plan::Source).await?;
     }
     Ok(Json(services::detail(&state, &rec.service.id).await?))
 }
@@ -46,7 +46,7 @@ pub async fn update(
     Path(id): Path<String>,
     Json(body): Json<UpdateService>,
 ) -> ApiResult<Json<ServiceDetail>> {
-    services::update(&state, &id, body)?;
+    services::update(&state, &id, body).await?;
     Ok(Json(services::detail(&state, &id).await?))
 }
 
@@ -61,7 +61,7 @@ pub async fn delete(
     Path(id): Path<String>,
     Query(q): Query<DeleteServiceQuery>,
 ) -> ApiResult<StatusCode> {
-    let rec = services::record(&state, &id)?;
+    let rec = services::record(&state, &id).await?;
     services::delete(&state, &rec, q.volumes).await?;
     Ok(no_content())
 }
@@ -83,8 +83,10 @@ pub async fn deploy(
     {
         bad_request!("invalid trigger '{trigger}'");
     }
-    let rec = services::record(&state, &id)?;
-    Ok(Json(deploy::enqueue(&state, &rec, &trigger, Plan::Source)?))
+    let rec = services::record(&state, &id).await?;
+    Ok(Json(
+        deploy::enqueue(&state, &rec, &trigger, Plan::Source).await?,
+    ))
 }
 
 pub async fn restart(
@@ -123,7 +125,7 @@ pub async fn logs(
     Path(id): Path<String>,
     Query(q): Query<LogsQuery>,
 ) -> ApiResult<Response> {
-    let rec = services::record(&state, &id)?;
+    let rec = services::record(&state, &id).await?;
     let missing = || {
         AppError::NotFound(format!(
             "'{}' has no container to read logs from",
@@ -177,7 +179,7 @@ pub async fn stats(
     if let Some(s) = state.stats.service(&id) {
         return Ok(Json(s));
     }
-    let rec = services::record(&state, &id)?;
+    let rec = services::record(&state, &id).await?;
     let sampled = match &rec.live_container {
         Some(container) => match state.docker_for(&rec.service.server_id).await {
             Ok((_, docker)) => stats::sample_now(&docker, container).await,
@@ -199,16 +201,18 @@ pub async fn set_env(
     Path(id): Path<String>,
     Json(vars): Json<Vec<EnvVar>>,
 ) -> ApiResult<Json<Vec<EnvVar>>> {
-    let rec = services::record(&state, &id)?;
+    let rec = services::record(&state, &id).await?;
     services::validate_env(&vars)?;
-    state.db.replace_env(&id, &vars)?;
-    state.service_activity(
-        &rec.service,
-        ActivityLevel::Info,
-        "Environment variables updated".into(),
-        Some(format!("{} variables, applied on next deploy", vars.len())),
-    );
-    Ok(Json(state.db.env(&id)?))
+    state.db.replace_env(&id, &vars).await?;
+    state
+        .service_activity(
+            &rec.service,
+            ActivityLevel::Info,
+            "Environment variables updated".into(),
+            Some(format!("{} variables, applied on next deploy", vars.len())),
+        )
+        .await;
+    Ok(Json(state.db.env(&id).await?))
 }
 
 pub async fn add_domain(
@@ -216,12 +220,12 @@ pub async fn add_domain(
     Path(id): Path<String>,
     Json(body): Json<CreateDomain>,
 ) -> ApiResult<Json<Domain>> {
-    let rec = services::record(&state, &id)?;
+    let rec = services::record(&state, &id).await?;
     let host = services::validate_host(&body.host)?;
     if body.port == Some(0) {
         bad_request!("port must be between 1 and 65535");
     }
-    if state.db.domain_taken(&host)? {
+    if state.db.domain_taken(&host).await? {
         conflict!("domain '{host}' is already in use");
     }
     let domain = Domain {
@@ -232,14 +236,16 @@ pub async fn add_domain(
         tls: body.tls,
         created_at: Utc::now(),
     };
-    state.db.insert_domain(&domain)?;
-    state.service_activity(
-        &rec.service,
-        ActivityLevel::Info,
-        "Domain added".into(),
-        Some(domain.host.clone()),
-    );
-    deploy::reconfigure(&state, &rec)?;
+    state.db.insert_domain(&domain).await?;
+    state
+        .service_activity(
+            &rec.service,
+            ActivityLevel::Info,
+            "Domain added".into(),
+            Some(domain.host.clone()),
+        )
+        .await;
+    deploy::reconfigure(&state, &rec).await?;
     Ok(Json(domain))
 }
 
@@ -249,17 +255,20 @@ pub async fn delete_domain(
 ) -> ApiResult<StatusCode> {
     let domain = state
         .db
-        .domain(&id)?
+        .domain(&id)
+        .await?
         .ok_or_else(|| AppError::not_found("domain", &id))?;
-    let rec = services::record(&state, &domain.service_id)?;
-    state.db.delete_domain(&id)?;
-    state.service_activity(
-        &rec.service,
-        ActivityLevel::Info,
-        "Domain removed".into(),
-        Some(domain.host),
-    );
-    deploy::reconfigure(&state, &rec)?;
+    let rec = services::record(&state, &domain.service_id).await?;
+    state.db.delete_domain(&id).await?;
+    state
+        .service_activity(
+            &rec.service,
+            ActivityLevel::Info,
+            "Domain removed".into(),
+            Some(domain.host),
+        )
+        .await;
+    deploy::reconfigure(&state, &rec).await?;
     Ok(no_content())
 }
 
@@ -268,9 +277,9 @@ pub async fn add_volume(
     Path(id): Path<String>,
     Json(body): Json<CreateVolume>,
 ) -> ApiResult<Json<Volume>> {
-    let rec = services::record(&state, &id)?;
+    let rec = services::record(&state, &id).await?;
     services::validate_volume(&body.name, &body.mount_path)?;
-    if state.db.volume_name_taken(&id, &body.name)? {
+    if state.db.volume_name_taken(&id, &body.name).await? {
         conflict!(
             "'{}' already has a volume named '{}'",
             rec.service.name,
@@ -279,7 +288,8 @@ pub async fn add_volume(
     }
     if state
         .db
-        .volumes(&id)?
+        .volumes(&id)
+        .await?
         .iter()
         .any(|v| v.mount_path == body.mount_path)
     {
@@ -292,16 +302,18 @@ pub async fn add_volume(
         mount_path: body.mount_path,
         created_at: Utc::now(),
     };
-    state.db.insert_volume(&volume)?;
-    state.service_activity(
-        &rec.service,
-        ActivityLevel::Info,
-        "Volume added".into(),
-        Some(format!(
-            "{} at {}, mounted on next deploy",
-            volume.name, volume.mount_path
-        )),
-    );
+    state.db.insert_volume(&volume).await?;
+    state
+        .service_activity(
+            &rec.service,
+            ActivityLevel::Info,
+            "Volume added".into(),
+            Some(format!(
+                "{} at {}, mounted on next deploy",
+                volume.name, volume.mount_path
+            )),
+        )
+        .await;
     Ok(Json(volume))
 }
 
@@ -318,9 +330,10 @@ pub async fn delete_volume(
 ) -> ApiResult<StatusCode> {
     let volume = state
         .db
-        .volume(&id)?
+        .volume(&id)
+        .await?
         .ok_or_else(|| AppError::not_found("volume", &id))?;
-    let rec = services::record(&state, &volume.service_id)?;
+    let rec = services::record(&state, &volume.service_id).await?;
     if q.purge {
         let (_, docker) = state.docker_for(&rec.service.server_id).await?;
         let name = docker::volume_name(&rec.service.id, &volume.name);
@@ -331,13 +344,15 @@ pub async fn delete_volume(
             );
         }
     }
-    state.db.delete_volume(&id)?;
+    state.db.delete_volume(&id).await?;
     let detail = if q.purge { "data purged" } else { "data kept" };
-    state.service_activity(
-        &rec.service,
-        ActivityLevel::Info,
-        format!("Volume {} removed", volume.name),
-        Some(detail.into()),
-    );
+    state
+        .service_activity(
+            &rec.service,
+            ActivityLevel::Info,
+            format!("Volume {} removed", volume.name),
+            Some(detail.into()),
+        )
+        .await;
     Ok(no_content())
 }

@@ -198,6 +198,8 @@ pub struct ContainerSpec {
     pub networks: Vec<(String, Vec<String>)>,
     /// Published ports as `(\"443/udp\", 443)`.
     pub published: Vec<(String, u16)>,
+    /// Host address the published ports bind to; every interface when unset.
+    pub publish_ip: Option<String>,
 }
 
 pub async fn create_container(docker: &Docker, spec: &ContainerSpec) -> Result<String> {
@@ -212,7 +214,7 @@ pub async fn create_container(docker: &Docker, spec: &ContainerSpec) -> Result<S
         .iter()
         .map(|(port, host)| {
             let binding = PortBinding {
-                host_ip: None,
+                host_ip: spec.publish_ip.clone(),
                 host_port: Some(host.to_string()),
             };
             (port.clone(), Some(vec![binding]))
