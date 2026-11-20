@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "berthd"
+name = "bassed"
 path = "src/main.rs"
 
 [dependencies]

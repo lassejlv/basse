@@ -12,8 +12,8 @@ on:
 
 env:
   # Product names; keep in sync with crates/common/src/brand.rs and install.sh.
-  CLI_BIN: berth
-  DAEMON_BIN: berthd
+  CLI_BIN: basse
+  DAEMON_BIN: bassed
 
 jobs:
   build:
@@ -77,8 +77,8 @@ jobs:
       - name: Install a server from the built archive
         run: |
           sudo sh ./install.sh --archive "dist/$CLI_BIN-x86_64-unknown-linux-musl.tar.gz" --no-firewall
-          berth status
-          sudo berth status
+          basse status
+          sudo basse status
           curl -fsS http://127.0.0.1:7700/healthz
           docker ps
       - name: Re-run upgrades in place

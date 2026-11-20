@@ -1,4 +1,4 @@
-# Berth
+# Basse
 
 Self-hosted deploys from the terminal. A control daemon runs on your server and builds, runs and routes your apps. You drive it with a CLI and a full-screen TUI, from that machine or from your laptop.
 
@@ -14,17 +14,17 @@ Self-hosted deploys from the terminal. A control daemon runs on your server and 
 On a fresh Linux server (Ubuntu, Debian, Fedora, RHEL, Alpine, Arch; x86_64 or arm64), run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/lassejlv/rust-deploy/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/lassejlv/basse/main/install.sh | sudo sh
 ```
 
 The script needs no other preparation:
 
 1. It installs curl, git and ssh, then Docker if it's missing (via get.docker.com), and makes sure Docker is running.
-2. It downloads the static `berthd` and `berth` binaries from the latest GitHub release and checks their SHA-256. If there is no release for your platform, it builds them from source.
-3. It initializes `/var/lib/berth`, installs a systemd unit and starts the daemon.
+2. It downloads the static `bassed` and `basse` binaries from the latest GitHub release and checks their SHA-256. If there is no release for your platform, it builds them from source.
+3. It initializes `/var/lib/basse`, installs a systemd unit and starts the daemon.
 4. The daemon starts the Caddy reverse proxy on ports 80 and 443 by itself.
 5. It opens ports 80, 443 and 7700 in ufw or firewalld if one of them is active.
-6. It logs in the `berth` CLI for root and for the user who ran sudo.
+6. It logs in the `basse` CLI for root and for the user who ran sudo.
 7. It prints the API URL, the token and the login command for your laptop.
 
 Running the script again upgrades in place and keeps your data and token. Other options:
@@ -38,9 +38,9 @@ Running the script again upgrades in place and keeps your data and token. Other 
 On your laptop (macOS or Linux), install only the CLI:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/lassejlv/rust-deploy/main/install.sh | sh -s -- --cli
-berth login http://<server-ip>:7700 --token <token>
-berth
+curl -fsSL https://raw.githubusercontent.com/lassejlv/basse/main/install.sh | sh -s -- --cli
+basse login http://<server-ip>:7700 --token <token>
+basse
 ```
 
 While the repository is private, raw.githubusercontent.com and release downloads need a token. Pass one with `GITHUB_TOKEN=… sh install.sh` or `--github-token`, and fetch the script itself with `curl -H "Authorization: Bearer $GITHUB_TOKEN" …`.
@@ -51,7 +51,7 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds static musl b
 
 ## TUI
 
-Run `berth` with no arguments. Press `?` for every key and `:` for the command palette.
+Run `basse` with no arguments. Press `?` for every key and `:` for the command palette.
 
 | Screen | Keys |
 |---|---|
@@ -63,17 +63,17 @@ Run `berth` with no arguments. Press `?` for every key and `:` for the command p
 ## CLI
 
 ```sh
-berth project create acme-shop
-berth service create acme-shop web --repo https://github.com/acme/web --port 3000 --domain shop.example.com
-berth service create acme-shop --database postgres
-berth vars set web STRIPE_KEY=sk_live_… --secret --deploy
-berth logs web -f
-berth deploy web
-berth rollback web
-berth status
+basse project create acme-shop
+basse service create acme-shop web --repo https://github.com/acme/web --port 3000 --domain shop.example.com
+basse service create acme-shop --database postgres
+basse vars set web STRIPE_KEY=sk_live_… --secret --deploy
+basse logs web -f
+basse deploy web
+basse rollback web
+basse status
 ```
 
-Every command takes `--json` and `--context <name>` (switch between daemons with `berth context use`). Run `berth <command> --help` for the details.
+Every command takes `--json` and `--context <name>` (switch between daemons with `basse context use`). Run `basse <command> --help` for the details.
 
 ## Workspace
 
@@ -81,13 +81,13 @@ Every command takes `--json` and `--context <name>` (switch between daemons with
 |---|---|
 | `crates/common` | Domain types, the HTTP API contract and `brand`, the one place that holds product names |
 | `crates/client` | Typed HTTP client and the saved daemon contexts |
-| `crates/daemon` | The `berthd` binary: axum API, SQLite, Docker through bollard, Caddy proxy, deploy pipeline, SSH servers |
+| `crates/daemon` | The `bassed` binary: axum API, SQLite, Docker through bollard, Caddy proxy, deploy pipeline, SSH servers |
 | `crates/tui` | The ratatui interface |
-| `crates/cli` | The `berth` binary: clap commands that open the TUI by default |
+| `crates/cli` | The `basse` binary: clap commands that open the TUI by default |
 
 ```sh
 cargo test --workspace
 cargo test -p daemon --test docker_e2e -- --ignored --test-threads 1   # needs Docker and free ports 80/443
 ```
 
-The TUI design lives in Paper: [Berth TUI](https://app.paper.design/file/01M7X3Z4P0WETSB6Q8Q6WXA4TR/p-1-0).
+The TUI design lives in Paper: [Basse TUI](https://app.paper.design/file/01M7X3Z4P0WETSB6Q8Q6WXA4TR/p-1-0).
