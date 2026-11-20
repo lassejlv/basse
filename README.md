@@ -54,6 +54,8 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds static musl b
 
 Run `basse` with no arguments. Press `?` for every key and `:` for the command palette.
 
+The mouse works too: click rows, tabs, dialog fields and the key hints in the bottom bar, double-click a service to open it, and use the wheel to scroll lists and logs. Drag to select text anywhere; it is copied to your clipboard on release through OSC 52, which also works over SSH. Hold Shift while dragging to use your terminal's own selection instead.
+
 | Screen | Keys |
 |---|---|
 | Overview | `↑↓` move, `tab` switch pane, `⏎` open, `n` new service, `N` new project, `E` new environment, `d` deploy, `r` restart, `s` stop or start, `l` logs, `/` filter, `S` servers |

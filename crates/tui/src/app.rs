@@ -394,6 +394,7 @@ pub struct App {
     pub toast: Option<Toast>,
     pub quit: bool,
     last_refresh: Option<Instant>,
+    pub mouse: crate::mouse::MouseState,
     /// Height of the log viewport at the last draw, for paging.
     pub log_viewport: Cell<usize>,
 }
@@ -421,6 +422,7 @@ impl App {
             toast: None,
             quit: false,
             last_refresh: None,
+            mouse: crate::mouse::MouseState::new(),
             log_viewport: Cell::new(20),
         }
     }
