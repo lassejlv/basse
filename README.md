@@ -14,7 +14,7 @@ Self-hosted deploys from the terminal. A control daemon runs on your server and 
 On a fresh Linux server (Ubuntu, Debian, Fedora, RHEL, Alpine, Arch; x86_64 or arm64), run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/lassejlv/rust-deploy/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/lassejlv/basse/main/install.sh | sudo sh
 ```
 
 The script needs no other preparation:
@@ -38,7 +38,7 @@ Running the script again upgrades in place and keeps your data and token. Other 
 On your laptop (macOS or Linux), install only the CLI:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/lassejlv/rust-deploy/main/install.sh | sh -s -- --cli
+curl -fsSL https://raw.githubusercontent.com/lassejlv/basse/main/install.sh | sh -s -- --cli
 basse login http://<server-ip>:7700 --token <token>
 basse
 ```

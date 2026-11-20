@@ -3,8 +3,8 @@
 # service, the reverse proxy, firewall ports and a logged-in CLI.
 # With --cli it installs only the CLI, on Linux or macOS.
 #
-#   curl -fsSL https://raw.githubusercontent.com/lassejlv/rust-deploy/main/install.sh | sudo sh
-#   curl -fsSL https://raw.githubusercontent.com/lassejlv/rust-deploy/main/install.sh | sh -s -- --cli
+#   curl -fsSL https://raw.githubusercontent.com/lassejlv/basse/main/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/lassejlv/basse/main/install.sh | sh -s -- --cli
 #
 # Run with --help for every option. Safe to re-run: an existing install is upgraded in place.
 
@@ -17,7 +17,7 @@ DAEMON_BIN="bassed"
 DIR_NAME="basse"
 PREFIX="basse"
 ENV_PREFIX="BASSE"
-REPO="lassejlv/rust-deploy"
+REPO="lassejlv/basse"
 PORT=7700
 
 DATA_DIR="/var/lib/$DIR_NAME"
