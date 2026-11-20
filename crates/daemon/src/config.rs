@@ -94,6 +94,9 @@ pub struct Config {
     pub token_sha256: String,
     #[serde(default = "default_listen")]
     pub listen: String,
+    /// Install the proxy on the local server at startup when it is missing or stopped.
+    #[serde(default)]
+    pub manage_proxy: bool,
 }
 
 impl Config {
@@ -134,14 +137,14 @@ pub fn hash_token(token: &str) -> [u8; 32] {
 }
 
 #[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> Result<()> {
+pub fn set_mode(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .with_context(|| format!("cannot set permissions on {}", path.display()))
 }
 
 #[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
+pub fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 
@@ -156,6 +159,7 @@ mod tests {
         let config = Config {
             token_sha256: hex::encode(hash_token(&token)),
             listen: default_listen(),
+            manage_proxy: true,
         };
         assert_eq!(config.token_hash().unwrap(), hash_token(&token));
     }

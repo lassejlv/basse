@@ -1,0 +1,106 @@
+name: release
+
+# Builds static Linux binaries (daemon + CLI) and macOS CLI binaries.
+# Pull requests only build; a pushed v* tag publishes a GitHub release that install.sh downloads.
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: ["Cargo.toml", "Cargo.lock", "crates/**", ".github/workflows/release.yml", "install.sh"]
+  workflow_dispatch:
+
+env:
+  # Product names; keep in sync with crates/common/src/brand.rs and install.sh.
+  CLI_BIN: berth
+  DAEMON_BIN: berthd
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            packages: -p daemon -p cli
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            packages: -p daemon -p cli
+          - target: aarch64-apple-darwin
+            os: macos-15
+            packages: -p cli
+          - target: x86_64-apple-darwin
+            os: macos-15
+            packages: -p cli
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+          rustup default stable
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.packages }}
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="target/${{ matrix.target }}/release"
+          bins="$CLI_BIN"
+          [[ "${{ matrix.packages }}" == *daemon* ]] && bins="$DAEMON_BIN $CLI_BIN"
+          mkdir -p dist
+          archive="dist/$CLI_BIN-${{ matrix.target }}.tar.gz"
+          tar -czf "$archive" -C "$out" $bins
+          (cd dist && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
+          for b in $bins; do "$out/$b" --version || file "$out/$b"; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: x86_64-unknown-linux-musl
+          path: dist
+      - name: Install a server from the built archive
+        run: |
+          sudo sh ./install.sh --archive "dist/$CLI_BIN-x86_64-unknown-linux-musl.tar.gz" --no-firewall
+          berth status
+          sudo berth status
+          curl -fsS http://127.0.0.1:7700/healthz
+          docker ps
+      - name: Re-run upgrades in place
+        run: sudo sh ./install.sh --archive "dist/$CLI_BIN-x86_64-unknown-linux-musl.tar.gz" --no-firewall
+      - name: Daemon logs
+        if: failure()
+        run: sudo journalctl -u "$DAEMON_BIN" --no-pager -n 200 || true
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, smoke]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes \
+            || gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber

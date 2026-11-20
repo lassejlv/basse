@@ -42,6 +42,12 @@ enum Command {
         /// Re-initialize: issue a new token (data, servers and the SSH key are kept).
         #[arg(long)]
         force: bool,
+        /// Also write the token to this file (mode 0600), for install scripts.
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+        /// Don't install and supervise the reverse proxy on this machine.
+        #[arg(long)]
+        no_proxy: bool,
     },
     /// Serve the API (the default).
     Serve,
@@ -76,7 +82,19 @@ fn main() -> Result<()> {
     let dirs = DataDir::new(cli.data_dir.unwrap_or_else(config::default_data_dir));
     let listen = cli.listen;
     match cli.command.unwrap_or(Command::Serve) {
-        Command::Init { force } => init(&dirs, force, listen),
+        Command::Init {
+            force,
+            token_file,
+            no_proxy,
+        } => init(
+            &dirs,
+            InitOptions {
+                force,
+                token_file,
+                manage_proxy: !no_proxy,
+            },
+            listen,
+        ),
         Command::Serve => tokio::runtime::Runtime::new()?.block_on(serve(dirs, listen)),
         Command::Token {
             action: TokenAction::Rotate,
@@ -111,8 +129,14 @@ fn require_initialized(dirs: &DataDir) -> Result<()> {
     Ok(())
 }
 
-fn init(dirs: &DataDir, force: bool, listen: Option<String>) -> Result<()> {
-    if dirs.is_initialized() && !force {
+struct InitOptions {
+    force: bool,
+    token_file: Option<PathBuf>,
+    manage_proxy: bool,
+}
+
+fn init(dirs: &DataDir, opts: InitOptions, listen: Option<String>) -> Result<()> {
+    if dirs.is_initialized() && !opts.force {
         bail!(
             "{} is already initialized; pass --force to issue a new token",
             dirs.root().display()
@@ -132,11 +156,27 @@ fn init(dirs: &DataDir, force: bool, listen: Option<String>) -> Result<()> {
         }
     }
     let token = config::generate_token();
+    let manage_proxy = match Config::load(dirs) {
+        Ok(existing) if opts.force => existing.manage_proxy && opts.manage_proxy,
+        _ => opts.manage_proxy,
+    };
     let config = Config {
         token_sha256: hex::encode(config::hash_token(&token)),
         listen: listen.unwrap_or_else(config::default_listen),
+        manage_proxy,
     };
     config.save(dirs)?;
+    if let Some(path) = &opts.token_file {
+        std::fs::write(
+            path,
+            format!(
+                "{token}
+"
+            ),
+        )
+        .with_context(|| format!("cannot write {}", path.display()))?;
+        config::set_mode(path, 0o600)?;
+    }
     let db = Db::open(&dirs.db())?;
     ensure_local_server(&db)?;
 
@@ -274,9 +314,19 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
     stats::spawn_sampler(state.clone());
     tokio::spawn({
         let state = state.clone();
+        let manage_proxy = config.manage_proxy;
         async move {
             for server in state.db.servers().unwrap_or_default() {
-                let _ = api::check_server(&state, server).await;
+                let Ok(server) = api::check_server(&state, server).await else {
+                    continue;
+                };
+                if manage_proxy
+                    && server.kind == ServerKind::Local
+                    && server.status == ServerStatus::Online
+                    && server.proxy != ProxyStatus::Running
+                {
+                    ensure_local_proxy(&state, server).await;
+                }
             }
         }
     });
@@ -288,6 +338,45 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// Installs the proxy on this machine so domains work without a manual step.
+/// Retries a few times because a fresh server may still be pulling images or settling its network.
+async fn ensure_local_proxy(state: &AppState, server: Server) {
+    const ATTEMPTS: u32 = 5;
+    for attempt in 1..=ATTEMPTS {
+        tracing::info!(
+            "installing the proxy on {} (attempt {attempt})",
+            server.name
+        );
+        let result = async {
+            let docker = state.docker.get(&server).await?;
+            docker::install_proxy(&docker).await
+        }
+        .await;
+        let e = match result {
+            Ok(()) => {
+                state.activity(
+                    common::ActivityLevel::Success,
+                    format!("Proxy installed on {}", server.name),
+                    Some(docker::PROXY_IMAGE.to_string()),
+                );
+                let _ = api::check_server(state, server).await;
+                return;
+            }
+            Err(e) => e,
+        };
+        tracing::warn!("proxy setup failed: {e:#}");
+        if attempt == ATTEMPTS {
+            state.activity(
+                common::ActivityLevel::Error,
+                format!("Proxy setup on {} failed", server.name),
+                Some(format!("{e:#}")),
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(u64::from(attempt) * 10)).await;
+    }
 }
 
 async fn shutdown_signal() {
