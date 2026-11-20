@@ -138,8 +138,8 @@ impl Db {
 
     pub async fn insert_server(&self, s: &Server) -> Result<()> {
         sqlx::query(
-            r#"INSERT INTO servers (id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+            r#"INSERT INTO servers (id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at, ssh_key_secret_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
         )
         .bind(&s.id)
         .bind(&s.name)
@@ -152,8 +152,18 @@ impl Db {
         .bind(&s.docker_version)
         .bind(s.last_checked_at)
         .bind(s.created_at)
+        .bind(&s.ssh_key_secret_id)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn set_server_key(&self, id: &str, secret_id: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE servers SET ssh_key_secret_id = $2 WHERE id = $1")
+            .bind(id)
+            .bind(secret_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -895,6 +905,119 @@ impl Db {
         Ok(())
     }
 
+    // Secrets
+
+    /// Every secret, oldest first, with what uses it.
+    pub async fn secrets(&self) -> Result<Vec<Secret>> {
+        let mut secrets = self
+            .fetch(
+                format!("{SECRET_SELECT} ORDER BY created_at, seq"),
+                &[],
+                secret_from_row,
+            )
+            .await?;
+        let usages = self.secret_usages().await?;
+        for secret in &mut secrets {
+            secret.used_by = usages
+                .iter()
+                .filter(|(id, _)| *id == secret.id)
+                .map(|(_, usage)| usage.clone())
+                .collect();
+        }
+        Ok(secrets)
+    }
+
+    pub async fn secret(&self, id: &str) -> Result<Option<Secret>> {
+        let Some(mut secret) = self
+            .fetch_one(
+                format!("{SECRET_SELECT} WHERE id = $1"),
+                &[id],
+                secret_from_row,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        secret.used_by = self
+            .secret_usages()
+            .await?
+            .into_iter()
+            .filter(|(owner, _)| *owner == secret.id)
+            .map(|(_, usage)| usage)
+            .collect();
+        Ok(Some(secret))
+    }
+
+    /// `(secret id, usage)` for everything that references a secret.
+    async fn secret_usages(&self) -> Result<Vec<(Id, Usage)>> {
+        let rows = sqlx::query(SECRET_USAGES).fetch_all(&self.pool).await?;
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    row.try_get(0)?,
+                    Usage {
+                        kind: col_enum(row, 1)?,
+                        id: row.try_get(2)?,
+                        name: row.try_get(3)?,
+                    },
+                ))
+            })
+            .collect::<sqlx::Result<_>>()
+            .map_err(Into::into)
+    }
+
+    pub async fn secret_name_taken(&self, name: &str) -> Result<bool> {
+        self.exists("SELECT 1 FROM secrets WHERE name = $1", &[name])
+            .await
+    }
+
+    pub async fn secret_ciphertext(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        Ok(
+            sqlx::query_scalar("SELECT ciphertext FROM secrets WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    pub async fn insert_secret(&self, s: &Secret, ciphertext: &[u8]) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO secrets (id, name, kind, public_part, ciphertext, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&s.id)
+        .bind(&s.name)
+        .bind(enum_str(&s.kind))
+        .bind(&s.public_part)
+        .bind(ciphertext)
+        .bind(s.created_at)
+        .bind(s.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Saves a renamed secret, and a new value when `ciphertext` is set.
+    pub async fn update_secret(&self, s: &Secret, ciphertext: Option<&[u8]>) -> Result<()> {
+        sqlx::query(
+            "UPDATE secrets SET name = $2, public_part = $3, updated_at = $4,
+                    ciphertext = COALESCE($5, ciphertext)
+             WHERE id = $1",
+        )
+        .bind(&s.id)
+        .bind(&s.name)
+        .bind(&s.public_part)
+        .bind(s.updated_at)
+        .bind(ciphertext)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_secret(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM secrets WHERE id = $1", id).await
+    }
+
     // Activity
 
     pub async fn insert_activity(&self, a: &Activity) -> Result<()> {
@@ -977,7 +1100,25 @@ impl Db {
     }
 }
 
-const SERVER_SELECT: &str = r#"SELECT id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at FROM servers"#;
+const SERVER_SELECT: &str = r#"SELECT id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at, ssh_key_secret_id FROM servers"#;
+
+const SECRET_SELECT: &str =
+    "SELECT id, name, kind, public_part, created_at, updated_at FROM secrets";
+
+const SECRET_USAGES: &str = "SELECT ssh_key_secret_id, 'server', id, name FROM servers
+     WHERE ssh_key_secret_id IS NOT NULL ORDER BY 1, 4";
+
+fn secret_from_row(row: &PgRow) -> sqlx::Result<Secret> {
+    Ok(Secret {
+        id: row.try_get(0)?,
+        name: row.try_get(1)?,
+        kind: col_enum(row, 2)?,
+        public_part: row.try_get(3)?,
+        created_at: row.try_get(4)?,
+        updated_at: row.try_get(5)?,
+        used_by: Vec::new(),
+    })
+}
 
 const DEPLOYMENT_SELECT: &str = "SELECT id, service_id, number, status, trigger, commit_sha, commit_message, image, container_id,
         steps, error, created_at, finished_at FROM deployments";
@@ -995,6 +1136,7 @@ fn server_from_row(row: &PgRow) -> sqlx::Result<Server> {
         docker_version: row.try_get(8)?,
         last_checked_at: row.try_get(9)?,
         created_at: row.try_get(10)?,
+        ssh_key_secret_id: row.try_get(11)?,
     })
 }
 
@@ -1182,6 +1324,7 @@ pub mod tests {
             host: None,
             user: None,
             port: None,
+            ssh_key_secret_id: None,
             status: ServerStatus::Unknown,
             proxy: ProxyStatus::Missing,
             docker_version: None,

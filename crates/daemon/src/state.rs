@@ -7,6 +7,7 @@ use crate::db::Db;
 use crate::deploy::Deploys;
 use crate::docker::DockerPool;
 use crate::error::AppError;
+use crate::secrets::{MasterKey, Secrets};
 use crate::stats::Stats;
 use anyhow::Result;
 use bollard::Docker;
@@ -24,6 +25,7 @@ pub struct AppState {
     pub deploys: Deploys,
     pub stats: Stats,
     pub db_locks: database::Locks,
+    pub secrets: Secrets,
     /// Client used for health checks; does not follow redirects so 3xx counts as healthy.
     pub http: reqwest::Client,
     token: TokenStore,
@@ -71,8 +73,10 @@ impl AppState {
             .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(3))
             .build()?;
+        let secrets = Secrets::new(db.clone(), MasterKey::load(&dirs.master_key())?);
         Ok(Self {
-            docker: DockerPool::new(crate::ssh::paths(&dirs.ssh_dir())),
+            docker: DockerPool::new(crate::ssh::paths(&dirs.ssh_dir()), secrets.clone()),
+            secrets,
             db,
             dirs,
             deploys: Deploys::default(),

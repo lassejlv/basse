@@ -85,6 +85,10 @@ impl Client {
         Self::json(self.req(Method::POST, path).json(body)).await
     }
 
+    async fn patch<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+        Self::json(self.req(Method::PATCH, path).json(body)).await
+    }
+
     async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Self::json(self.req(Method::POST, path)).await
     }
@@ -161,6 +165,47 @@ impl Client {
 
     pub async fn setup_proxy(&self, id: &str) -> Result<Server> {
         self.post_empty(&format!("/servers/{id}/proxy")).await
+    }
+
+    /// Changes the key a server connects with; the daemon reconnects and checks it.
+    pub async fn update_server(&self, id: &str, body: &UpdateServer) -> Result<Server> {
+        self.patch(&format!("/servers/{id}"), body).await
+    }
+
+    // Secrets
+
+    pub async fn secrets(&self) -> Result<Vec<Secret>> {
+        self.get("/secrets").await
+    }
+
+    pub async fn secret(&self, id: &str) -> Result<Secret> {
+        self.get(&format!("/secrets/{id}")).await
+    }
+
+    pub async fn create_secret(&self, body: &CreateSecret) -> Result<Secret> {
+        self.post("/secrets", body).await
+    }
+
+    /// Has the daemon generate an ed25519 key; the result carries its public key.
+    pub async fn generate_ssh_key(&self, name: &str) -> Result<Secret> {
+        self.post(
+            "/secrets/generate-ssh-key",
+            &GenerateSshKey { name: name.into() },
+        )
+        .await
+    }
+
+    pub async fn update_secret(&self, id: &str, body: &UpdateSecret) -> Result<Secret> {
+        self.patch(&format!("/secrets/{id}"), body).await
+    }
+
+    pub async fn delete_secret(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/secrets/{id}")).await
+    }
+
+    /// The decrypted value. The daemon records every reveal in the activity feed.
+    pub async fn reveal_secret(&self, id: &str) -> Result<RevealedSecret> {
+        self.post_empty(&format!("/secrets/{id}/reveal")).await
     }
 
     // Projects and environments

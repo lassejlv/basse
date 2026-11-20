@@ -101,6 +101,58 @@ enum Cmd {
     /// Connection details, public access, backups and passwords of database services.
     #[command(subcommand, alias = "database")]
     Db(DbCmd),
+    /// Encrypted secrets: SSH keys for servers, S3 credentials and other values.
+    #[command(subcommand, alias = "secret")]
+    Secrets(SecretsCmd),
+}
+
+#[derive(Subcommand)]
+enum SecretsCmd {
+    List,
+    /// Import a secret. The value is read from --file, or from stdin, never from arguments.
+    Add {
+        name: String,
+        /// ssh-key, s3 or generic.
+        #[arg(long)]
+        kind: SecretKind,
+        /// File holding the value: the private key, the S3 secret access key, or the value.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Access key id of s3 credentials (the secret access key comes from --file or stdin).
+        #[arg(long)]
+        access_key_id: Option<String>,
+    },
+    /// Generate a new ed25519 key in the daemon and print its public key.
+    GenerateSshKey {
+        name: String,
+    },
+    /// Kind, public part and users of a secret; never its value.
+    Show {
+        secret: String,
+    },
+    /// Print the decrypted value. Every reveal is recorded in the activity feed.
+    Reveal {
+        secret: String,
+    },
+    Rename {
+        secret: String,
+        new_name: String,
+    },
+    /// Replace the value, read from --file or stdin like `add`.
+    Replace {
+        secret: String,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        access_key_id: Option<String>,
+    },
+    /// Delete a secret that nothing uses any more.
+    #[command(alias = "remove")]
+    Rm {
+        secret: String,
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -113,7 +165,7 @@ enum ContextCmd {
 #[derive(Subcommand)]
 enum ServerCmd {
     List,
-    /// Add a server reached over SSH with the daemon's key (see "server key").
+    /// Add a server reached over SSH with the daemon's key (see "server key") or --key.
     Add {
         name: String,
         host: String,
@@ -121,6 +173,14 @@ enum ServerCmd {
         user: String,
         #[arg(long, default_value_t = 22)]
         port: u16,
+        /// An ssh-key secret to connect with instead of the daemon's key.
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Connect with an ssh-key secret, or with the daemon's own key when none is given.
+    SetKey {
+        name: String,
+        secret: Option<String>,
     },
     Check {
         name: String,
@@ -491,6 +551,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Vars(cmd) => vars(&c, cmd, json).await,
         Cmd::Volume(cmd) => volume(&c, cmd, json).await,
         Cmd::Db(cmd) => db(&c, cmd, json).await,
+        Cmd::Secrets(cmd) => secrets(&c, cmd, json).await,
     }
 }
 
@@ -706,31 +767,35 @@ async fn server(c: &Client, cmd: ServerCmd, json: bool) -> Result<()> {
             host,
             user,
             port,
+            key,
         } => {
+            let key = match key {
+                Some(key) => Some(find_secret(c, &key).await?),
+                None => None,
+            };
             let s = c
                 .create_server(&CreateServer {
                     name,
                     host,
                     user,
                     port,
+                    ssh_key_secret_id: key.as_ref().map(|k| k.id.clone()),
                 })
                 .await?;
             let s = c.check_server(&s.id).await?;
-            if s.status == ServerStatus::Online {
-                output::ok(format!(
-                    "{} is online (docker {})",
-                    s.name,
-                    s.docker_version.unwrap_or_default()
-                ));
-            } else {
-                output::note(format!("{} was added but is not reachable yet.", s.name));
-                println!(
-                    "{} trust the key from {} on it, then run {}",
-                    muted("next:"),
-                    hint("server key"),
-                    hint(&format!("server check {}", s.name))
-                );
-            }
+            report_server_check(&s, key.as_ref());
+        }
+        ServerCmd::SetKey { name, secret } => {
+            let server = find_server(c, &name).await?;
+            let key = match secret {
+                Some(secret) => Some(find_secret(c, &secret).await?),
+                None => None,
+            };
+            let body = UpdateServer {
+                ssh_key_secret_id: Some(key.as_ref().map(|k| k.id.clone()).unwrap_or_default()),
+            };
+            let s = c.update_server(&server.id, &body).await?;
+            report_server_check(&s, key.as_ref());
         }
         ServerCmd::Check { name } => {
             let s = c.check_server(&find_server(c, &name).await?.id).await?;
@@ -749,6 +814,220 @@ async fn server(c: &Client, cmd: ServerCmd, json: bool) -> Result<()> {
             Some(key) => println!("{key}"),
             None => bail!("the daemon has no SSH key"),
         },
+    }
+    Ok(())
+}
+
+/// Prints whether a newly added or re-keyed server answers, and what to do when it does not.
+fn report_server_check(s: &Server, key: Option<&Secret>) {
+    if s.status == ServerStatus::Online {
+        output::ok(format!(
+            "{} is online (docker {})",
+            s.name,
+            s.docker_version.clone().unwrap_or_default()
+        ));
+        return;
+    }
+    output::note(format!("{} is not reachable yet.", s.name));
+    let source = match key {
+        Some(k) => hint(&format!("secrets show {}", k.name)),
+        None => hint("server key"),
+    };
+    println!(
+        "{} add the public key from {source} to ~/.ssh/authorized_keys on it, then run {}",
+        muted("next:"),
+        hint(&format!("server check {}", s.name))
+    );
+}
+
+async fn find_secret(c: &Client, query: &str) -> Result<Secret> {
+    c.secrets()
+        .await?
+        .into_iter()
+        .find(|s| s.name == query || s.id == query)
+        .with_context(|| format!("no secret '{query}'"))
+}
+
+/// Reads a secret value from `file`, or from stdin when no file is given.
+fn read_value(file: Option<&PathBuf>) -> Result<String> {
+    use std::io::{IsTerminal as _, Read as _};
+    if let Some(path) = file {
+        return std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read {}", path.display()));
+    }
+    if std::io::stdin().is_terminal() {
+        eprintln!("{}", muted("Paste the value, then press Ctrl-D:"));
+    }
+    let mut value = String::new();
+    std::io::stdin()
+        .read_to_string(&mut value)
+        .context("cannot read the value from stdin")?;
+    Ok(value)
+}
+
+fn secret_value(
+    kind: SecretKind,
+    file: Option<&PathBuf>,
+    access_key_id: Option<String>,
+) -> Result<SecretValue> {
+    if kind != SecretKind::S3Credentials && access_key_id.is_some() {
+        bail!("--access-key-id only applies to s3 credentials");
+    }
+    let raw = read_value(file)?;
+    Ok(match kind {
+        SecretKind::SshKey => SecretValue::SshKey { private_key: raw },
+        SecretKind::S3Credentials => SecretValue::S3Credentials {
+            access_key_id: access_key_id.context("s3 credentials need --access-key-id")?,
+            secret_access_key: raw.trim().to_string(),
+        },
+        SecretKind::Generic => SecretValue::Generic {
+            value: raw.strip_suffix('\n').unwrap_or(&raw).to_string(),
+        },
+    })
+}
+
+fn used_by(secret: &Secret) -> String {
+    if secret.used_by.is_empty() {
+        return "—".into();
+    }
+    secret
+        .used_by
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn print_secret(s: &Secret) {
+    let row = |label: &str, value: String| println!("{:<10} {value}", muted(label));
+    row("name", s.name.clone());
+    row("kind", s.kind.label().into());
+    match s.kind {
+        SecretKind::SshKey => row("public key", s.public_part.clone().unwrap_or_default()),
+        SecretKind::S3Credentials => row("access key", s.public_part.clone().unwrap_or_default()),
+        SecretKind::Generic => {}
+    }
+    row("used by", used_by(s));
+    row("updated", output::ago(s.updated_at));
+}
+
+async fn secrets(c: &Client, cmd: SecretsCmd, json: bool) -> Result<()> {
+    match cmd {
+        SecretsCmd::List => {
+            let list = c.secrets().await?;
+            if json {
+                return output::json(&list);
+            }
+            if list.is_empty() {
+                output::note(format!(
+                    "no secrets yet; add one with {} or {}",
+                    hint("secrets add <name> --kind ssh-key --file <key>"),
+                    hint("secrets generate-ssh-key <name>")
+                ));
+            }
+            output::table(
+                &["SECRET", "KIND", "PUBLIC", "USED BY", "UPDATED"],
+                list.iter()
+                    .map(|s| {
+                        let public = s.public_part.as_deref().map_or("—".into(), |p| {
+                            let short: String = p.chars().take(32).collect();
+                            if short.len() < p.len() {
+                                format!("{short}…")
+                            } else {
+                                short
+                            }
+                        });
+                        vec![
+                            Cell::from(s.name.clone()),
+                            Cell(s.kind.label().into(), Tone::Muted),
+                            Cell(public, Tone::Muted),
+                            Cell::from(used_by(s)),
+                            Cell(output::ago(s.updated_at), Tone::Muted),
+                        ]
+                    })
+                    .collect(),
+            );
+        }
+        SecretsCmd::Add {
+            name,
+            kind,
+            file,
+            access_key_id,
+        } => {
+            let value = secret_value(kind, file.as_ref(), access_key_id)?;
+            let s = c.create_secret(&CreateSecret { name, value }).await?;
+            if json {
+                return output::json(&s);
+            }
+            output::ok(format!("added {} ({})", s.name, s.kind.label()));
+            if let (SecretKind::SshKey, Some(public)) = (s.kind, &s.public_part) {
+                println!("{public}");
+            }
+        }
+        SecretsCmd::GenerateSshKey { name } => {
+            let s = c.generate_ssh_key(&name).await?;
+            if json {
+                return output::json(&s);
+            }
+            output::ok(format!(
+                "generated {}; add this public key to ~/.ssh/authorized_keys on your servers:",
+                s.name
+            ));
+            println!("{}", s.public_part.unwrap_or_default());
+        }
+        SecretsCmd::Show { secret } => {
+            let s = find_secret(c, &secret).await?;
+            if json {
+                return output::json(&s);
+            }
+            print_secret(&s);
+        }
+        SecretsCmd::Reveal { secret } => {
+            let s = find_secret(c, &secret).await?;
+            let revealed = c.reveal_secret(&s.id).await?;
+            if json {
+                return output::json(&revealed);
+            }
+            match revealed.value {
+                SecretValue::SshKey { private_key } => print!("{private_key}"),
+                SecretValue::S3Credentials {
+                    access_key_id,
+                    secret_access_key,
+                } => {
+                    println!("{:<18} {access_key_id}", muted("access key id"));
+                    println!("{:<18} {secret_access_key}", muted("secret access key"));
+                }
+                SecretValue::Generic { value } => println!("{value}"),
+            }
+        }
+        SecretsCmd::Rename { secret, new_name } => {
+            let s = find_secret(c, &secret).await?;
+            let body = UpdateSecret {
+                name: Some(new_name),
+                value: None,
+            };
+            let s = c.update_secret(&s.id, &body).await?;
+            output::ok(format!("renamed to {}", s.name));
+        }
+        SecretsCmd::Replace {
+            secret,
+            file,
+            access_key_id,
+        } => {
+            let s = find_secret(c, &secret).await?;
+            let body = UpdateSecret {
+                name: None,
+                value: Some(secret_value(s.kind, file.as_ref(), access_key_id)?),
+            };
+            let s = c.update_secret(&s.id, &body).await?;
+            output::ok(format!("replaced the value of {}", s.name));
+        }
+        SecretsCmd::Rm { secret, yes } => {
+            let s = find_secret(c, &secret).await?;
+            confirm(&format!("Delete secret {}?", s.name), yes)?;
+            c.delete_secret(&s.id).await?;
+            output::ok(format!("deleted {}", s.name));
+        }
     }
     Ok(())
 }

@@ -3,6 +3,7 @@
 mod databases;
 mod deployments;
 mod projects;
+mod secrets;
 mod servers;
 mod services;
 mod system;
@@ -30,7 +31,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/tree", get(system::tree))
         .route("/activity", get(system::activity))
         .route("/servers", get(servers::list).post(servers::create))
-        .route("/servers/{id}", delete(servers::delete))
+        .route(
+            "/servers/{id}",
+            patch(servers::update).delete(servers::delete),
+        )
         .route("/servers/{id}/check", post(servers::check))
         .route("/servers/{id}/proxy", post(servers::proxy))
         .route("/projects", get(projects::list).post(projects::create))
@@ -77,6 +81,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/backups/{id}/download", get(databases::download_backup))
         .route("/backups/{id}/restore", post(databases::restore_backup))
+        .route("/secrets", get(secrets::list).post(secrets::create))
+        .route("/secrets/generate-ssh-key", post(secrets::generate_ssh_key))
+        .route(
+            "/secrets/{id}",
+            get(secrets::get)
+                .patch(secrets::update)
+                .delete(secrets::delete),
+        )
+        .route("/secrets/{id}/reveal", post(secrets::reveal))
         .route("/services/{id}/deployments", get(deployments::list))
         .route("/deployments/{id}", get(deployments::get))
         .route("/deployments/{id}/logs", get(deployments::logs))

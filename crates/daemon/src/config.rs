@@ -39,6 +39,11 @@ impl DataDir {
         self.root.join(format!("{}.db", brand::DIR))
     }
 
+    /// 32 random bytes every secret is encrypted with.
+    pub fn master_key(&self) -> PathBuf {
+        self.root.join("master.key")
+    }
+
     pub fn ssh_dir(&self) -> PathBuf {
         self.root.join("ssh")
     }

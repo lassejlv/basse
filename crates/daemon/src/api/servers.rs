@@ -1,5 +1,6 @@
 //! Servers: registration, health checks and proxy installation.
 
+use super::secrets::secret_of_kind;
 use super::{Json, no_content};
 use crate::db::new_id;
 use crate::docker;
@@ -8,7 +9,7 @@ use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::Utc;
-use common::api::CreateServer;
+use common::api::{CreateServer, UpdateServer};
 use common::*;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +38,9 @@ pub async fn create(
     if state.db.server_name_taken(&body.name).await? {
         conflict!("a server named '{}' already exists", body.name);
     }
+    if let Some(id) = &body.ssh_key_secret_id {
+        secret_of_kind(&state, id, SecretKind::SshKey).await?;
+    }
     let server = Server {
         id: new_id(),
         name: body.name,
@@ -44,6 +48,7 @@ pub async fn create(
         host: Some(host.to_string()),
         user: Some(body.user),
         port: Some(body.port),
+        ssh_key_secret_id: body.ssh_key_secret_id,
         status: ServerStatus::Unknown,
         proxy: ProxyStatus::Missing,
         docker_version: None,
@@ -59,6 +64,37 @@ pub async fn create(
         )
         .await;
     Ok(Json(server))
+}
+
+/// Switches the key a server connects with, then reconnects and checks it.
+pub async fn update(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateServer>,
+) -> ApiResult<Json<Server>> {
+    let mut server = state.server(&id).await?;
+    let Some(key) = body.ssh_key_secret_id else {
+        return Ok(Json(server));
+    };
+    if server.kind == ServerKind::Local {
+        bad_request!("the local server is reached without SSH");
+    }
+    let key = Some(key).filter(|k| !k.is_empty());
+    let label = match &key {
+        Some(key) => secret_of_kind(&state, key, SecretKind::SshKey).await?.name,
+        None => "the daemon's own key".to_string(),
+    };
+    state.db.set_server_key(&id, key.as_deref()).await?;
+    state.docker.forget(&id);
+    server.ssh_key_secret_id = key;
+    state
+        .activity(
+            ActivityLevel::Info,
+            format!("Server {} now connects with {label}", server.name),
+            None,
+        )
+        .await;
+    Ok(Json(check_server(&state, server).await?))
 }
 
 pub async fn delete(

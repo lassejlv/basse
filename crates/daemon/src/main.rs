@@ -9,6 +9,7 @@ mod deploy;
 mod docker;
 mod error;
 mod host;
+mod secrets;
 mod services;
 mod sqlite_import;
 mod ssh;
@@ -171,6 +172,7 @@ async fn init(dirs: &DataDir, opts: InitOptions, listen: Option<String>) -> Resu
         );
     }
     dirs.create()?;
+    secrets::MasterKey::load_or_create(&dirs.master_key())?;
     if !dirs.ssh_key().exists() {
         let status = std::process::Command::new("ssh-keygen")
             .args(["-q", "-t", "ed25519", "-N", "", "-C"])
@@ -328,6 +330,7 @@ async fn ensure_local_server(db: &Db) -> Result<()> {
         host: None,
         user: None,
         port: None,
+        ssh_key_secret_id: None,
         status: ServerStatus::Unknown,
         proxy: ProxyStatus::Missing,
         docker_version: None,
@@ -406,6 +409,8 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
     require_initialized(&dirs)?;
     let mut config = Config::load(&dirs)?;
     dirs.create()?;
+    secrets::MasterKey::load_or_create(&dirs.master_key())?;
+    ssh::clear_temp_keys(&ssh::paths(&dirs.ssh_dir()));
     if let Ok(entries) = std::fs::read_dir(dirs.builds_dir()) {
         for entry in entries.flatten() {
             let _ = std::fs::remove_dir_all(entry.path());

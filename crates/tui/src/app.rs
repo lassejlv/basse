@@ -2177,6 +2177,7 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                     .filter(|u| !u.is_empty())
                     .unwrap_or("root".into()),
                 port: port(&form.get("port"), false)?.unwrap_or(22),
+                ssh_key_secret_id: None,
             })
         }
         FormKind::BackupSchedule { service_id } => Request::Schedule(

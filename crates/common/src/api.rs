@@ -11,6 +11,7 @@
 //! | GET | `/activity?limit=50` | | `Vec<Activity>` |
 //! | GET | `/servers` | | `Vec<Server>` |
 //! | POST | `/servers` | `CreateServer` | `Server` |
+//! | PATCH | `/servers/{id}` | `UpdateServer` | `Server` (reconnects with the new key and checks it) |
 //! | DELETE | `/servers/{id}` | | 204 |
 //! | POST | `/servers/{id}/check` | | `Server` |
 //! | POST | `/servers/{id}/proxy` | | `Server` (installs or restarts the proxy) |
@@ -48,7 +49,7 @@
 //! | PATCH | `/services/{id}/database` | `UpdateDatabase` | `DatabaseInfo` (publishing changes redeploy the live image) |
 //! | POST | `/services/{id}/database/rotate-password` | | `DatabaseInfo` with the new password |
 //! | GET | `/services/{id}/backups` | | `Vec<Backup>`, newest first |
-//! | POST | `/services/{id}/backups` | | `Backup` with status `running` (returns at once, runs in background) |
+//! | POST | `/services/{id}/backups` |  | `Backup` with status `running` (returns at once, runs in background) |
 //! | GET | `/services/{id}/backups/schedule` | | `BackupSchedule` |
 //! | PUT | `/services/{id}/backups/schedule` | `BackupSchedule` | `BackupSchedule` |
 //! | GET | `/backups/{id}` | | `Backup` |
@@ -58,8 +59,21 @@
 //!
 //! Backups, restores and password rotations of one service run one at a time; a second one
 //! while another is in progress gets 409. Restore and rotation also need a running container.
+//!
+//! Secrets are encrypted at rest with the daemon's master key. No route but `reveal` returns a
+//! value, and every reveal is recorded in the activity feed.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | GET | `/secrets` | | `Vec<Secret>` |
+//! | POST | `/secrets` | `CreateSecret` | `Secret` (create or import) |
+//! | POST | `/secrets/generate-ssh-key` | `GenerateSshKey` | `Secret` with the new ed25519 public key |
+//! | GET | `/secrets/{id}` | | `Secret` |
+//! | PATCH | `/secrets/{id}` | `UpdateSecret` | `Secret` (rename, or replace the value with one of the same kind) |
+//! | DELETE | `/secrets/{id}` | | 204; 409 naming its users while it is in use |
+//! | POST | `/secrets/{id}/reveal` | | `RevealedSecret` |
 
-use crate::{EnvVar, Id, RestartPolicy, Source};
+use crate::{EnvVar, Id, RestartPolicy, SecretValue, Source};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +84,34 @@ pub struct CreateServer {
     pub user: String,
     #[serde(default = "default_ssh_port")]
     pub port: u16,
+    /// An `ssh_key` secret to connect with instead of the daemon's own key.
+    #[serde(default)]
+    pub ssh_key_secret_id: Option<Id>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateServer {
+    /// An `ssh_key` secret id, or an empty string to go back to the daemon's own key.
+    /// `None` keeps the current key.
+    pub ssh_key_secret_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSecret {
+    pub name: String,
+    pub value: SecretValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateSshKey {
+    pub name: String,
+}
+
+/// Fields left as `None` keep their value. A new `value` must be of the secret's kind.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateSecret {
+    pub name: Option<String>,
+    pub value: Option<SecretValue>,
 }
 
 fn default_ssh_user() -> String {
