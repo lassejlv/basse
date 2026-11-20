@@ -1,15 +1,16 @@
 //! Database services: connection details, public access, password rotation and backups.
 
-use super::{Json, no_content};
+use super::{Json, no_content, optional_json};
 use crate::database;
 use crate::error::{ApiResult, AppError};
 use crate::services;
 use crate::state::AppState;
 use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse as _, Response};
-use common::api::UpdateDatabase;
+use common::api::{CreateBackup, UpdateDatabase};
 use common::*;
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
@@ -53,10 +54,18 @@ pub async fn list_backups(
 pub async fn create_backup(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    body: Bytes,
 ) -> ApiResult<Json<Backup>> {
+    let body: CreateBackup = optional_json(&body)?;
     let rec = services::record(&state, &id).await?;
     Ok(Json(
-        database::start_backup(&state, &rec, BackupTrigger::Manual).await?,
+        database::start_backup(
+            &state,
+            &rec,
+            BackupTrigger::Manual,
+            body.storage_id.as_deref(),
+        )
+        .await?,
     ))
 }
 

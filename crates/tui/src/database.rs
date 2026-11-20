@@ -60,6 +60,7 @@ pub fn parse_schedule(enabled: bool, hour: &str, keep: &str) -> Result<BackupSch
         enabled,
         hour_utc,
         keep,
+        storage_id: None,
     })
 }
 
@@ -178,7 +179,8 @@ mod tests {
             Ok(BackupSchedule {
                 enabled: true,
                 hour_utc: 3,
-                keep: 7
+                keep: 7,
+                storage_id: None,
             })
         );
         assert!(parse_schedule(true, "24", "7").is_err());
@@ -217,6 +219,7 @@ mod tests {
             enabled: true,
             hour_utc: 3,
             keep: 7,
+            storage_id: None,
         };
         let now = Utc.with_ymd_and_hms(2026, 11, 20, 15, 0, 0).unwrap();
         assert_eq!(next_run(&s, now).as_deref(), Some("in 12h"));
@@ -224,7 +227,7 @@ mod tests {
         assert_eq!(next_run(&s, now).as_deref(), Some("in 40m"));
         let off = BackupSchedule {
             enabled: false,
-            ..s
+            ..s.clone()
         };
         assert_eq!(next_run(&off, now), None);
         assert_eq!(schedule_summary(&off), "no schedule");

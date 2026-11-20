@@ -198,6 +198,37 @@ impl Client {
         self.patch(&format!("/servers/{id}"), body).await
     }
 
+    // Storage connections
+
+    pub async fn storages(&self) -> Result<Vec<StorageConnection>> {
+        self.get("/storage").await
+    }
+
+    pub async fn storage(&self, id: &str) -> Result<StorageConnection> {
+        self.get(&format!("/storage/{id}")).await
+    }
+
+    pub async fn create_storage(&self, body: &CreateStorage) -> Result<StorageConnection> {
+        self.post("/storage", body).await
+    }
+
+    pub async fn update_storage(
+        &self,
+        id: &str,
+        body: &UpdateStorage,
+    ) -> Result<StorageConnection> {
+        self.patch(&format!("/storage/{id}"), body).await
+    }
+
+    pub async fn delete_storage(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/storage/{id}")).await
+    }
+
+    /// Writes, reads back and deletes a probe object; the result is also saved on the connection.
+    pub async fn test_storage(&self, id: &str) -> Result<StorageTest> {
+        self.post_empty(&format!("/storage/{id}/test")).await
+    }
+
     // Secrets
 
     pub async fn secrets(&self) -> Result<Vec<Secret>> {
@@ -394,10 +425,20 @@ impl Client {
         self.get(&format!("/services/{service_id}/backups")).await
     }
 
-    /// Starts a backup; poll [`Self::backup`] until it is no longer running.
-    pub async fn create_backup(&self, service_id: &str) -> Result<Backup> {
-        self.post_empty(&format!("/services/{service_id}/backups"))
-            .await
+    /// Starts a backup into a storage connection, or the data directory when `storage_id` is
+    /// `None`; poll [`Self::backup`] until it is no longer running.
+    pub async fn create_backup(
+        &self,
+        service_id: &str,
+        storage_id: Option<&str>,
+    ) -> Result<Backup> {
+        self.post(
+            &format!("/services/{service_id}/backups"),
+            &CreateBackup {
+                storage_id: storage_id.map(str::to_string),
+            },
+        )
+        .await
     }
 
     pub async fn backup(&self, id: &str) -> Result<Backup> {

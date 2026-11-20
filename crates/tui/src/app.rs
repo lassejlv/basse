@@ -1476,7 +1476,7 @@ impl App {
         self.progress(format!("backing up {name}…"));
         let id = id.to_string();
         self.spawn(|c| async move {
-            match c.create_backup(&id).await {
+            match c.create_backup(&id, None).await {
                 Ok(b) => Msg::Backup(Box::new(b)),
                 Err(e) => Msg::Error(format!("{e:#}")),
             }
@@ -2039,7 +2039,7 @@ impl App {
 
     pub fn form_schedule(&mut self) {
         let Some(view) = &self.service else { return };
-        let s = self.schedules.get(&view.id).copied().unwrap_or_default();
+        let s = self.schedules.get(&view.id).cloned().unwrap_or_default();
         let name = view
             .detail
             .as_ref()

@@ -18,6 +18,9 @@ mod state;
 mod stats;
 mod store;
 #[cfg(test)]
+#[path = "../tests/support/minio.rs"]
+mod testminio;
+#[cfg(test)]
 #[path = "../tests/support/pg.rs"]
 mod testpg;
 mod update;

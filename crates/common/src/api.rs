@@ -66,6 +66,7 @@
 //!
 //! Backups, restores and password rotations of one service run one at a time; a second one
 //! while another is in progress gets 409. Restore and rotation also need a running container.
+//! Download and restore read from whichever store the backup lives in, local or S3.
 //!
 //! Secrets are encrypted at rest with the daemon's master key. No route but `reveal` returns a
 //! value, and every reveal is recorded in the activity feed.
@@ -79,6 +80,17 @@
 //! | PATCH | `/secrets/{id}` | `UpdateSecret` | `Secret` (rename, or replace the value with one of the same kind) |
 //! | DELETE | `/secrets/{id}` | | 204; 409 naming its users while it is in use |
 //! | POST | `/secrets/{id}/reveal` | | `RevealedSecret` |
+//!
+//! Storage connections are S3-compatible buckets for backups.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | GET | `/storage` | | `Vec<StorageConnection>` |
+//! | POST | `/storage` | `CreateStorage` | `StorageConnection` |
+//! | GET | `/storage/{id}` | | `StorageConnection` |
+//! | PATCH | `/storage/{id}` | `UpdateStorage` | `StorageConnection` |
+//! | DELETE | `/storage/{id}` | | 204; 409 while backups or schedules use it |
+//! | POST | `/storage/{id}/test` | | `StorageTest` (puts, reads and deletes a probe object) |
 
 use crate::{EnvVar, Id, RestartPolicy, SecretValue, Source};
 use serde::{Deserialize, Serialize};
@@ -234,4 +246,41 @@ pub struct UpdateDatabase {
 pub struct CreateVolume {
     pub name: String,
     pub mount_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateStorage {
+    pub name: String,
+    pub endpoint: String,
+    #[serde(default = "default_region")]
+    pub region: String,
+    pub bucket: String,
+    #[serde(default)]
+    pub path_prefix: String,
+    #[serde(default)]
+    pub path_style: bool,
+    pub credentials_secret_id: Id,
+}
+
+fn default_region() -> String {
+    "us-east-1".into()
+}
+
+/// Fields left as `None` keep their value.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateStorage {
+    pub name: Option<String>,
+    pub endpoint: Option<String>,
+    pub region: Option<String>,
+    pub bucket: Option<String>,
+    pub path_prefix: Option<String>,
+    pub path_style: Option<bool>,
+    pub credentials_secret_id: Option<Id>,
+}
+
+/// Body of a manual database backup.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateBackup {
+    /// Storage connection to write to; `None` keeps the backup in the data directory.
+    pub storage_id: Option<Id>,
 }

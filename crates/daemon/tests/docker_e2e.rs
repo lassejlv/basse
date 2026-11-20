@@ -976,7 +976,7 @@ async fn exercise_database(
     assert_eq!(exec_in(&container, &p.read).unwrap(), "kept");
 
     println!("== {name}: backup");
-    let started = api.create_backup(&sid).await.unwrap();
+    let started = api.create_backup(&sid, None).await.unwrap();
     assert_eq!(started.status, BackupStatus::Running);
     let backup = wait_backup(api, &started.id).await;
     assert_eq!(backup.status, BackupStatus::Done, "{backup:?}");

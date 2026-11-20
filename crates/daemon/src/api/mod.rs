@@ -7,6 +7,7 @@ mod secrets;
 mod servers;
 mod services;
 mod settings;
+mod storage;
 mod system;
 
 use crate::error::{AppError, json_rejection, query_rejection};
@@ -91,6 +92,14 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .delete(secrets::delete),
         )
         .route("/secrets/{id}/reveal", post(secrets::reveal))
+        .route("/storage", get(storage::list).post(storage::create))
+        .route(
+            "/storage/{id}",
+            get(storage::get)
+                .patch(storage::update)
+                .delete(storage::delete),
+        )
+        .route("/storage/{id}/test", post(storage::test))
         .route("/services/{id}/deployments", get(deployments::list))
         .route("/deployments/{id}", get(deployments::get))
         .route("/deployments/{id}/logs", get(deployments::logs))

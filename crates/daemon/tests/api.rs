@@ -316,7 +316,7 @@ async fn projects_environments_and_services_crud() {
     );
     assert_eq!(info.public_url, None);
     assert!(api.backups(&db.service.id).await.unwrap().is_empty());
-    let err = api.create_backup(&db.service.id).await.unwrap_err();
+    let err = api.create_backup(&db.service.id, None).await.unwrap_err();
     assert!(err.to_string().contains("not been deployed"), "{err}");
     assert_eq!(
         api.backup_schedule(&db.service.id).await.unwrap(),
@@ -326,6 +326,7 @@ async fn projects_environments_and_services_crud() {
         enabled: true,
         hour_utc: 4,
         keep: 3,
+        storage_id: None,
     };
     assert_eq!(
         api.set_backup_schedule(&db.service.id, &schedule)

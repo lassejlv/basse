@@ -4,6 +4,7 @@
     reason = "shared by several test crates, each using a subset"
 )]
 
+pub mod minio;
 pub mod pg;
 
 use client::Client;

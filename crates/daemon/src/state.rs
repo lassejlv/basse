@@ -9,10 +9,12 @@ use crate::docker::DockerPool;
 use crate::error::AppError;
 use crate::secrets::{MasterKey, Secrets};
 use crate::stats::Stats;
-use anyhow::Result;
+use anyhow::{Context as _, Result, bail};
 use bollard::Docker;
 use chrono::Utc;
-use common::{Activity, ActivityLevel, BackupStorage, Server, Service, VersionCheck};
+use common::{
+    Activity, ActivityLevel, BackupStorage, Server, Service, StorageConnection, VersionCheck,
+};
 use std::path::PathBuf;
 use std::sync::{Mutex, RwLock};
 use std::time::{Instant, SystemTime};
@@ -135,12 +137,41 @@ impl AppState {
     }
 
     /// The store backups with this storage live in.
-    pub fn backup_store(&self, storage: BackupStorage) -> BackupStore {
-        match storage {
-            BackupStorage::Local => BackupStore::Local {
+    pub async fn backup_store(
+        &self,
+        storage: BackupStorage,
+        storage_id: Option<&str>,
+    ) -> Result<BackupStore> {
+        match (storage, storage_id) {
+            (BackupStorage::Local, _) => Ok(BackupStore::Local {
                 root: self.dirs.backups_dir(),
-            },
+            }),
+            (BackupStorage::S3, Some(id)) => {
+                let conn = self
+                    .db
+                    .storage(id)
+                    .await?
+                    .with_context(|| format!("storage connection '{id}' no longer exists"))?;
+                BackupStore::for_connection(&conn, &self.secrets).await
+            }
+            (BackupStorage::S3, None) => bail!("an S3 backup without a storage connection"),
         }
+    }
+
+    /// Where a new backup with this optional storage connection goes.
+    pub async fn storage_target(
+        &self,
+        storage_id: Option<&str>,
+    ) -> Result<(BackupStorage, Option<StorageConnection>), AppError> {
+        let Some(id) = storage_id.filter(|id| !id.is_empty()) else {
+            return Ok((BackupStorage::Local, None));
+        };
+        let conn = self
+            .db
+            .storage(id)
+            .await?
+            .ok_or_else(|| AppError::not_found("storage connection", id))?;
+        Ok((BackupStorage::S3, Some(conn)))
     }
 
     pub async fn docker_for(&self, server_id: &str) -> Result<(Server, Docker), AppError> {

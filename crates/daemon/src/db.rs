@@ -881,7 +881,7 @@ impl Db {
     async fn schedule_query(&self, tail: &str, binds: &[&str]) -> Result<Vec<ScheduleRecord>> {
         self.fetch(
             format!(
-                "SELECT service_id, enabled, hour_utc, keep, last_run_at FROM backup_schedules {tail}"
+                "SELECT service_id, enabled, hour_utc, keep, last_run_at, storage_id FROM backup_schedules {tail}"
             ),
             binds,
             |row| {
@@ -893,6 +893,7 @@ impl Db {
                         enabled: row.try_get(1)?,
                         hour_utc: u8::try_from(hour).map_err(|e| decode_error(2, e))?,
                         keep: u32::try_from(keep).map_err(|e| decode_error(3, e))?,
+                        storage_id: row.try_get(5)?,
                     },
                     last_run_at: row.try_get(4)?,
                 })
@@ -903,15 +904,17 @@ impl Db {
 
     pub async fn save_backup_schedule(&self, r: &ScheduleRecord) -> Result<()> {
         sqlx::query(
-            "INSERT INTO backup_schedules (service_id, enabled, hour_utc, keep, last_run_at)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (service_id) DO UPDATE SET enabled = $2, hour_utc = $3, keep = $4, last_run_at = $5",
+            "INSERT INTO backup_schedules (service_id, enabled, hour_utc, keep, last_run_at, storage_id)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (service_id) DO UPDATE SET enabled = $2, hour_utc = $3, keep = $4, last_run_at = $5,
+                    storage_id = $6",
         )
         .bind(&r.service_id)
         .bind(r.schedule.enabled)
         .bind(i32::from(r.schedule.hour_utc))
         .bind(i64::from(r.schedule.keep))
         .bind(r.last_run_at)
+        .bind(&r.schedule.storage_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1030,6 +1033,71 @@ impl Db {
         self.execute("DELETE FROM secrets WHERE id = $1", id).await
     }
 
+    // Storage connections
+
+    pub async fn storages(&self) -> Result<Vec<StorageConnection>> {
+        self.fetch(
+            format!("{STORAGE_SELECT} ORDER BY created_at, seq"),
+            &[],
+            storage_from_row,
+        )
+        .await
+    }
+
+    pub async fn storage(&self, id: &str) -> Result<Option<StorageConnection>> {
+        self.fetch_one(
+            format!("{STORAGE_SELECT} WHERE id = $1"),
+            &[id],
+            storage_from_row,
+        )
+        .await
+    }
+
+    pub async fn storage_name_taken(&self, name: &str) -> Result<bool> {
+        self.exists("SELECT 1 FROM storage_connections WHERE name = $1", &[name])
+            .await
+    }
+
+    /// Inserts or updates a connection, `last_test` included.
+    pub async fn save_storage(&self, s: &StorageConnection) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO storage_connections (id, name, endpoint, region, bucket, path_prefix,
+                    path_style, credentials_secret_id, created_at, last_test)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (id) DO UPDATE SET name = $2, endpoint = $3, region = $4, bucket = $5,
+                    path_prefix = $6, path_style = $7, credentials_secret_id = $8, last_test = $10",
+        )
+        .bind(&s.id)
+        .bind(&s.name)
+        .bind(&s.endpoint)
+        .bind(&s.region)
+        .bind(&s.bucket)
+        .bind(&s.path_prefix)
+        .bind(s.path_style)
+        .bind(&s.credentials_secret_id)
+        .bind(s.created_at)
+        .bind(s.last_test.as_ref().map(Json))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// How many backups live in a connection and how many schedules write to it.
+    pub async fn storage_usage(&self, id: &str) -> Result<(i64, i64)> {
+        Ok(sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM backups WHERE storage_id = $1),
+                    (SELECT COUNT(*) FROM backup_schedules WHERE storage_id = $1)",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    pub async fn delete_storage(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM storage_connections WHERE id = $1", id)
+            .await
+    }
+
     // Activity
 
     pub async fn insert_activity(&self, a: &Activity) -> Result<()> {
@@ -1118,7 +1186,30 @@ const SECRET_SELECT: &str =
     "SELECT id, name, kind, public_part, created_at, updated_at FROM secrets";
 
 const SECRET_USAGES: &str = "SELECT ssh_key_secret_id, 'server', id, name FROM servers
-     WHERE ssh_key_secret_id IS NOT NULL ORDER BY 1, 4";
+     WHERE ssh_key_secret_id IS NOT NULL
+     UNION ALL
+     SELECT credentials_secret_id, 'storage', id, name FROM storage_connections
+     ORDER BY 1, 2, 4";
+
+const STORAGE_SELECT: &str = "SELECT id, name, endpoint, region, bucket, path_prefix, path_style,
+        credentials_secret_id, created_at, last_test FROM storage_connections";
+
+fn storage_from_row(row: &PgRow) -> sqlx::Result<StorageConnection> {
+    Ok(StorageConnection {
+        id: row.try_get(0)?,
+        name: row.try_get(1)?,
+        endpoint: row.try_get(2)?,
+        region: row.try_get(3)?,
+        bucket: row.try_get(4)?,
+        path_prefix: row.try_get(5)?,
+        path_style: row.try_get(6)?,
+        credentials_secret_id: row.try_get(7)?,
+        created_at: row.try_get(8)?,
+        last_test: row
+            .try_get::<Option<Json<StorageTest>>, _>(9)?
+            .map(|Json(t)| t),
+    })
+}
 
 fn secret_from_row(row: &PgRow) -> sqlx::Result<Secret> {
     Ok(Secret {
@@ -1580,6 +1671,7 @@ pub mod tests {
                 enabled: true,
                 hour_utc: 5,
                 keep: 3,
+                storage_id: None,
             },
             last_run_at: Some(Utc::now()),
         };

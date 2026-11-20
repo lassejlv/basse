@@ -715,6 +715,7 @@ mod tests {
                 enabled: true,
                 hour_utc: 4,
                 keep: 14,
+                storage_id: None,
             },
             last_run_at: Some(created),
         };

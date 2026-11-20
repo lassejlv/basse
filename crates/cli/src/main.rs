@@ -151,6 +151,45 @@ enum Cmd {
     /// Encrypted secrets: SSH keys for servers, S3 credentials and other values.
     #[command(subcommand, alias = "secret")]
     Secrets(SecretsCmd),
+    /// S3-compatible storage connections for backups (AWS S3, R2, B2, MinIO, ...).
+    #[command(subcommand)]
+    Storage(StorageCmd),
+}
+
+#[derive(Subcommand)]
+enum StorageCmd {
+    List,
+    /// Add a connection and test it. Credentials are an s3 secret (see "secrets add --kind s3").
+    Add {
+        name: String,
+        /// S3 API base URL, e.g. https://s3.eu-west-1.amazonaws.com.
+        #[arg(long)]
+        endpoint: String,
+        /// Signing region; "auto" for Cloudflare R2.
+        #[arg(long, default_value = "us-east-1")]
+        region: String,
+        #[arg(long)]
+        bucket: String,
+        /// Key prefix inside the bucket.
+        #[arg(long, default_value = "")]
+        prefix: String,
+        /// Address the bucket as <endpoint>/<bucket> (MinIO and most self-hosted stores).
+        #[arg(long)]
+        path_style: bool,
+        /// The s3 credentials secret.
+        #[arg(long)]
+        credentials: String,
+    },
+    /// Put, read back and delete a probe object.
+    Test {
+        storage: String,
+    },
+    #[command(alias = "remove")]
+    Rm {
+        storage: String,
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -454,7 +493,12 @@ enum DbCmd {
     /// Make the database reachable only from its environment again.
     Unexpose { service: String },
     /// Back up now and wait for the result.
-    Backup { service: String },
+    Backup {
+        service: String,
+        /// Storage connection to write to (see "storage list"); defaults to the data directory.
+        #[arg(long)]
+        storage: Option<String>,
+    },
     /// Backups of a database, newest first.
     Backups { service: String },
     /// Replace the database's data with a backup.
@@ -486,6 +530,9 @@ enum DbCmd {
         /// Turn scheduled backups off.
         #[arg(long)]
         off: bool,
+        /// Where scheduled backups go: a storage connection, or "local" for the data directory.
+        #[arg(long, conflicts_with = "off")]
+        storage: Option<String>,
     },
     /// Set a new password inside the database and in its stored connection URL.
     RotatePassword {
@@ -643,6 +690,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Volume(cmd) => volume(&c, cmd, json).await,
         Cmd::Db(cmd) => db(&c, cmd, json).await,
         Cmd::Secrets(cmd) => secrets(&c, cmd, json).await,
+        Cmd::Storage(cmd) => storage(&c, cmd, json).await,
     }
 }
 
@@ -1201,6 +1249,143 @@ fn manual_cleanup(s: &Server, volumes: bool) -> String {
         s.user.as_deref().unwrap_or("root"),
         s.host.as_deref().unwrap_or("<host>")
     )
+}
+
+async fn find_storage(c: &Client, query: &str) -> Result<StorageConnection> {
+    c.storages()
+        .await?
+        .into_iter()
+        .find(|s| s.name == query || s.id == query)
+        .with_context(|| format!("no storage connection '{query}'"))
+}
+
+/// `local` or the storage connection's name.
+fn storage_label(storages: &[StorageConnection], storage_id: Option<&str>) -> String {
+    match storage_id {
+        None => "local".into(),
+        Some(id) => storages
+            .iter()
+            .find(|s| s.id == id)
+            .map_or_else(|| id.to_string(), |s| format!("s3:{}", s.name)),
+    }
+}
+
+fn print_storage_test(name: &str, t: &StorageTest) {
+    if t.ok {
+        output::ok(format!(
+            "{name} works: put, get and delete took {} ms",
+            t.latency_ms.unwrap_or_default()
+        ));
+    } else {
+        eprintln!(
+            "{} {name}: {}",
+            paint("✕", Tone::Err),
+            t.error.as_deref().unwrap_or("test failed")
+        );
+    }
+}
+
+async fn storage(c: &Client, cmd: StorageCmd, json: bool) -> Result<()> {
+    match cmd {
+        StorageCmd::List => {
+            let list = c.storages().await?;
+            if json {
+                return output::json(&list);
+            }
+            if list.is_empty() {
+                output::note(format!(
+                    "no storage connections yet; add one with {}",
+                    hint("storage add <name> --endpoint <url> --bucket <b> --credentials <secret>")
+                ));
+            }
+            output::table(
+                &["STORAGE", "ENDPOINT", "BUCKET", "PREFIX", "LAST TEST"],
+                list.iter()
+                    .map(|s| {
+                        let test = match &s.last_test {
+                            None => Cell("never tested".into(), Tone::Muted),
+                            Some(t) if t.ok => Cell(
+                                format!(
+                                    "ok, {} ms, {}",
+                                    t.latency_ms.unwrap_or_default(),
+                                    output::ago(t.at)
+                                ),
+                                Tone::Ok,
+                            ),
+                            Some(t) => Cell(
+                                format!(
+                                    "failed {}: {}",
+                                    output::ago(t.at),
+                                    t.error.as_deref().unwrap_or_default()
+                                ),
+                                Tone::Err,
+                            ),
+                        };
+                        vec![
+                            Cell::from(s.name.clone()),
+                            Cell(s.endpoint.clone(), Tone::Muted),
+                            Cell::from(s.bucket.clone()),
+                            Cell(
+                                if s.path_prefix.is_empty() {
+                                    "—".into()
+                                } else {
+                                    s.path_prefix.clone()
+                                },
+                                Tone::Muted,
+                            ),
+                            test,
+                        ]
+                    })
+                    .collect(),
+            );
+        }
+        StorageCmd::Add {
+            name,
+            endpoint,
+            region,
+            bucket,
+            prefix,
+            path_style,
+            credentials,
+        } => {
+            let secret = find_secret(c, &credentials).await?;
+            let s = c
+                .create_storage(&CreateStorage {
+                    name,
+                    endpoint,
+                    region,
+                    bucket,
+                    path_prefix: prefix,
+                    path_style,
+                    credentials_secret_id: secret.id,
+                })
+                .await?;
+            let t = c.test_storage(&s.id).await?;
+            if json {
+                return output::json(&c.storage(&s.id).await?);
+            }
+            output::ok(format!("added {}", s.name));
+            print_storage_test(&s.name, &t);
+        }
+        StorageCmd::Test { storage } => {
+            let s = find_storage(c, &storage).await?;
+            let t = c.test_storage(&s.id).await?;
+            if json {
+                return output::json(&t);
+            }
+            print_storage_test(&s.name, &t);
+            if !t.ok {
+                std::process::exit(1);
+            }
+        }
+        StorageCmd::Rm { storage, yes } => {
+            let s = find_storage(c, &storage).await?;
+            confirm(&format!("Remove storage connection {}?", s.name), yes)?;
+            c.delete_storage(&s.id).await?;
+            output::ok(format!("removed {}", s.name));
+        }
+    }
+    Ok(())
 }
 
 fn confirm(prompt: &str, yes: bool) -> Result<()> {
@@ -1896,10 +2081,21 @@ async fn db(c: &Client, cmd: DbCmd, json: bool) -> Result<()> {
             output::ok(format!("{} is internal-only", s.name));
             follow_reconfigure(c, &s).await?;
         }
-        DbCmd::Backup { service } => {
+        DbCmd::Backup { service, storage } => {
             let s = find_database(c, &service).await?;
-            let mut b = c.create_backup(&s.id).await?;
-            output::note(format!("backing up {} to {}", s.name, b.file_name));
+            let target = match storage {
+                Some(name) => Some(find_storage(c, &name).await?),
+                None => None,
+            };
+            let mut b = c
+                .create_backup(&s.id, target.as_ref().map(|t| t.id.as_str()))
+                .await?;
+            output::note(format!(
+                "backing up {} to {} in {}",
+                s.name,
+                b.file_name,
+                target.map_or("local storage".into(), |t| t.name)
+            ));
             while b.status == BackupStatus::Running {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 b = c.backup(&b.id).await?;
@@ -1923,6 +2119,7 @@ async fn db(c: &Client, cmd: DbCmd, json: bool) -> Result<()> {
             if json {
                 return output::json(&list);
             }
+            let storages = c.storages().await?;
             if list.is_empty() {
                 println!(
                     "{} {}",
@@ -1931,7 +2128,9 @@ async fn db(c: &Client, cmd: DbCmd, json: bool) -> Result<()> {
                 );
             }
             output::table(
-                &["ID", "STATUS", "FILE", "SIZE", "TRIGGER", "CREATED"],
+                &[
+                    "ID", "STATUS", "FILE", "SIZE", "WHERE", "TRIGGER", "CREATED",
+                ],
                 list.iter()
                     .map(|b| {
                         vec![
@@ -1939,6 +2138,10 @@ async fn db(c: &Client, cmd: DbCmd, json: bool) -> Result<()> {
                             backup_status(b.status),
                             Cell::from(b.file_name.clone()),
                             Cell(output::size(b.size_bytes), Tone::Muted),
+                            Cell(
+                                storage_label(&storages, b.storage_id.as_deref()),
+                                Tone::Muted,
+                            ),
                             Cell(b.trigger.as_str().to_string(), Tone::Muted),
                             Cell(
                                 b.error.clone().unwrap_or_else(|| output::ago(b.created_at)),
@@ -1999,26 +2202,37 @@ async fn db(c: &Client, cmd: DbCmd, json: bool) -> Result<()> {
             hour,
             keep,
             off,
+            storage,
         } => {
             let s = find_database(c, &service).await?;
             let mut schedule = c.backup_schedule(&s.id).await?;
+            let changes = hour.is_some() || keep.is_some() || storage.is_some();
             if off {
                 schedule.enabled = false;
-            } else if hour.is_some() || keep.is_some() {
+            } else if changes {
                 schedule.enabled = true;
                 schedule.hour_utc = hour.unwrap_or(schedule.hour_utc);
                 schedule.keep = keep.unwrap_or(schedule.keep);
+                schedule.storage_id = match storage.as_deref() {
+                    None => schedule.storage_id,
+                    Some("local") => None,
+                    Some(name) => Some(find_storage(c, name).await?.id),
+                };
             }
-            if off || hour.is_some() || keep.is_some() {
+            if off || changes {
                 schedule = c.set_backup_schedule(&s.id, &schedule).await?;
             }
             if json {
                 return output::json(&schedule);
             }
             if schedule.enabled {
+                let storages = c.storages().await?;
                 output::ok(format!(
-                    "{} is backed up daily at {:02}:00 UTC, keeping the last {}",
-                    s.name, schedule.hour_utc, schedule.keep
+                    "{} is backed up daily at {:02}:00 UTC to {}, keeping the last {}",
+                    s.name,
+                    schedule.hour_utc,
+                    storage_label(&storages, schedule.storage_id.as_deref()),
+                    schedule.keep
                 ));
             } else {
                 println!(

@@ -677,6 +677,18 @@ pub enum BackupStorage {
     /// The daemon's data directory: `<data dir>/backups/<service id>/<file>`.
     #[default]
     Local,
+    /// An S3-compatible storage connection, named by `storage_id`:
+    /// `<path prefix>/<service id>/<file>` in its bucket.
+    S3,
+}
+
+impl BackupStorage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::S3 => "s3",
+        }
+    }
 }
 
 /// A dump of a database service, gzip-compressed.
@@ -701,13 +713,17 @@ pub struct Backup {
 }
 
 /// Daily automatic backups of a database service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupSchedule {
     pub enabled: bool,
     /// Hour of the day (UTC, 0-23) the backup runs.
     pub hour_utc: u8,
-    /// Scheduled backups to keep; older ones are deleted. Manual backups are never pruned.
+    /// Scheduled backups to keep per store; older ones are deleted. Manual backups are never
+    /// pruned.
     pub keep: u32,
+    /// Storage connection scheduled backups go to; `None` keeps them in the data directory.
+    #[serde(default)]
+    pub storage_id: Option<Id>,
 }
 
 impl Default for BackupSchedule {
@@ -716,6 +732,7 @@ impl Default for BackupSchedule {
             enabled: false,
             hour_utc: 3,
             keep: 7,
+            storage_id: None,
         }
     }
 }
@@ -854,6 +871,39 @@ impl fmt::Display for Usage {
 pub struct RevealedSecret {
     pub secret: Secret,
     pub value: SecretValue,
+}
+
+/// An S3-compatible bucket backups can be kept in: AWS S3, Cloudflare R2, Backblaze B2, MinIO
+/// and others.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageConnection {
+    pub id: Id,
+    pub name: String,
+    /// Base URL of the S3 API, e.g. `https://s3.eu-west-1.amazonaws.com` or
+    /// `https://<account>.r2.cloudflarestorage.com`.
+    pub endpoint: String,
+    /// Signing region; `auto` for R2.
+    pub region: String,
+    pub bucket: String,
+    /// Key prefix inside the bucket, without leading or trailing slashes; may be empty.
+    pub path_prefix: String,
+    /// Address the bucket as `<endpoint>/<bucket>` instead of `<bucket>.<endpoint>`
+    /// (MinIO and most self-hosted stores need this).
+    pub path_style: bool,
+    /// The `s3_credentials` secret used to sign requests.
+    pub credentials_secret_id: Id,
+    pub created_at: Timestamp,
+    pub last_test: Option<StorageTest>,
+}
+
+/// Outcome of `POST /storage/{id}/test`: put, get and delete of a small probe object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageTest {
+    pub ok: bool,
+    pub at: Timestamp,
+    pub error: Option<String>,
+    /// Time the three requests took together.
+    pub latency_ms: Option<u64>,
 }
 
 /// Error body returned by every failing API call.
