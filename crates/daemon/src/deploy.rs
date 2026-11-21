@@ -6,18 +6,20 @@ use crate::error::{ApiResult, AppError, bad_request, conflict};
 use crate::state::AppState;
 use anyhow::{Context as _, Result, anyhow, bail};
 use bollard::Docker;
-use bollard::query_parameters::BuildImageOptions;
+use bollard::query_parameters::{BuildImageOptions, RemoveContainerOptions, RemoveImageOptions};
 use chrono::Utc;
 use common::*;
 use futures_util::StreamExt as _;
 use std::collections::HashMap;
 use std::fs::File;
+use std::future::Future;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Output, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
+use tokio::io::AsyncReadExt as _;
+use tokio::sync::{broadcast, watch};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const STABLE_FOR: Duration = Duration::from_secs(5);
@@ -46,13 +48,52 @@ pub struct Deploys {
 }
 
 struct Running {
-    handle: JoinHandle<()>,
+    phase: watch::Sender<Phase>,
     log: Arc<DeployLog>,
-    server_id: Id,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Working,
+    Cancelling,
+    CuttingOver,
+    Finishing,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("cancelled")]
+struct Cancelled;
+
+fn transition(phase: &watch::Sender<Phase>, next: Phase) -> bool {
+    phase.send_if_modified(|phase| {
+        if *phase != Phase::Working {
+            return false;
+        }
+        *phase = next;
+        true
+    })
+}
+
+async fn cancellation_requested(phase: &watch::Sender<Phase>) {
+    let _ = phase
+        .subscribe()
+        .wait_for(|p| *p == Phase::Cancelling)
+        .await;
+}
+
+async fn interruptible<T>(
+    phase: &watch::Sender<Phase>,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::select! {
+        biased;
+        () = cancellation_requested(phase) => Err(Cancelled.into()),
+        result = work => result,
+    }
 }
 
 impl Deploys {
-    fn lock_for(&self, service_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub(crate) fn lock_for(&self, service_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         lock(&self.locks)
             .entry(service_id.to_string())
             .or_default()
@@ -69,9 +110,16 @@ impl Deploys {
     pub fn forget_service(&self, service_id: &str) {
         lock(&self.locks).remove(service_id);
     }
+}
 
-    fn take(&self, deployment_id: &str) -> Option<Running> {
-        lock(&self.running).remove(deployment_id)
+struct Registration {
+    state: Arc<AppState>,
+    id: Id,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        lock(&self.state.deploys.running).remove(&self.id);
     }
 }
 
@@ -202,32 +250,43 @@ pub async fn enqueue(
         created_at: Utc::now(),
         finished_at: None,
     };
-    state.db.insert_deployment(&mut d, &server.id).await?;
-
     let log = Arc::new(DeployLog::create(&state.dirs.deployment_log(&d.id)));
+    let (phase, _) = watch::channel(Phase::Working);
+    let registration = Registration {
+        state: state.clone(),
+        id: d.id.clone(),
+    };
+    lock(&state.deploys.running).insert(
+        d.id.clone(),
+        Running {
+            phase: phase.clone(),
+            log: log.clone(),
+        },
+    );
+    if let Err(e) = state.db.insert_deployment(&mut d, &server.id).await {
+        let _ = tokio::fs::remove_file(state.dirs.deployment_log(&d.id)).await;
+        return Err(e.into());
+    }
     log.system(format!(
         "Deployment #{} queued (trigger: {trigger})",
         d.number
     ));
-    let service_lock = state.deploys.lock_for(&service.id);
-    // Holding the registry lock while spawning guarantees the entry exists before the task
-    // can try to remove it.
-    let mut running = lock(&state.deploys.running);
-    let handle = tokio::spawn(run(
-        state.clone(),
-        d.clone(),
-        plan,
-        log.clone(),
-        service_lock,
-    ));
-    running.insert(
-        d.id.clone(),
-        Running {
-            handle,
+    tokio::spawn(run(
+        Job {
+            state: state.clone(),
+            d: d.clone(),
+            phase,
             log,
-            server_id: server.id,
+            service: None,
+            docker: None,
+            stopped_previous: None,
+            build_tag: None,
+            creating_container: false,
         },
-    );
+        plan,
+        state.deploys.lock_for(&service.id),
+        registration,
+    ));
     Ok(d)
 }
 
@@ -288,124 +347,81 @@ pub async fn cancel(state: &Arc<AppState>, deployment_id: &str) -> ApiResult<Dep
             d.status.as_str()
         );
     }
-    let running = state.deploys.take(deployment_id);
-    let log = match running {
-        Some(Running {
-            handle,
-            log,
-            server_id,
-        }) => {
-            handle.abort();
-            let _ = handle.await;
-            remove_deployment_containers(state, &server_id, deployment_id).await;
-            Some(log)
+    let mut phase = {
+        let running = lock(&state.deploys.running);
+        let Some(running) = running.get(deployment_id) else {
+            conflict!("deployment #{} is no longer running", d.number);
+        };
+        if !transition(&running.phase, Phase::Cancelling) {
+            match *running.phase.borrow() {
+                Phase::Cancelling => {}
+                Phase::CuttingOver => {
+                    conflict!("deployment #{} has started switching traffic", d.number);
+                }
+                _ => conflict!("deployment #{} is already finishing", d.number),
+            }
         }
-        None => None,
+        running.phase.subscribe()
     };
-    let mut d = state
+    while phase.changed().await.is_ok() {}
+    let d = state
         .db
         .deployment(deployment_id)
         .await?
         .ok_or_else(|| AppError::not_found("deployment", deployment_id))?;
-    remove_build_dir(state, deployment_id);
-    if d.status.is_finished() {
-        return Ok(d);
-    }
-    let now = Utc::now();
-    for step in &mut d.steps {
-        match step.status {
-            StepStatus::Running => {
-                step.status = StepStatus::Failed;
-                step.detail = Some("cancelled".into());
-                step.finished_at = Some(now);
-            }
-            StepStatus::Pending => step.status = StepStatus::Skipped,
-            _ => {}
-        }
-    }
-    d.status = DeploymentStatus::Cancelled;
-    d.error = Some("cancelled".into());
-    d.finished_at = Some(now);
-    state.db.update_deployment(&d).await?;
-    if let Some(log) = log {
-        log.system(format!("Deployment #{} cancelled", d.number));
-    }
-    if let Some(rec) = state.db.service(&d.service_id).await? {
-        state
-            .service_activity(
-                &rec.service,
-                ActivityLevel::Info,
-                format!("Deploy #{} cancelled", d.number),
-                None,
-            )
-            .await;
+    if d.status != DeploymentStatus::Cancelled {
+        return Err(anyhow!("could not finish cancelling deployment #{}", d.number).into());
     }
     Ok(d)
 }
 
-async fn remove_deployment_containers(state: &AppState, server_id: &str, deployment_id: &str) {
-    let Ok((_, docker)) = state.docker_for(server_id).await else {
-        return;
-    };
-    let label = format!("{}={deployment_id}", brand::label("deployment"));
-    let Ok(containers) = docker::list_by_label(&docker, &label).await else {
-        return;
-    };
-    for id in containers.into_iter().filter_map(|c| c.id) {
-        if let Err(e) = docker::remove_container(&docker, &id).await {
-            tracing::warn!("cannot remove container of cancelled deployment: {e:#}");
-        }
-    }
-}
-
-fn remove_build_dir(state: &AppState, deployment_id: &str) {
+async fn remove_build_dir(state: &AppState, deployment_id: &str) {
     let dir = state.dirs.build_dir(deployment_id);
-    if dir.exists()
-        && let Err(e) = std::fs::remove_dir_all(&dir)
+    if let Err(e) = tokio::fs::remove_dir_all(&dir).await
+        && e.kind() != std::io::ErrorKind::NotFound
     {
         tracing::warn!("cannot remove {}: {e}", dir.display());
     }
 }
 
 async fn run(
-    state: Arc<AppState>,
-    deployment: Deployment,
+    mut job: Job,
     plan: Plan,
-    log: Arc<DeployLog>,
     service_lock: Arc<tokio::sync::Mutex<()>>,
+    _registration: Registration,
 ) {
-    let _guard = service_lock.lock_owned().await;
-    let id = deployment.id.clone();
-    let mut job = Job {
-        state: state.clone(),
-        d: deployment,
-        log,
-        current: None,
-        service: None,
-        docker: None,
-        stopped_previous: None,
-    };
+    let guard = interruptible(&job.phase, async { Ok(service_lock.lock_owned().await) }).await;
     let started = Instant::now();
-    let result = job.pipeline(plan).await;
+    let (_guard, result) = match guard {
+        Ok(guard) => (Some(guard), job.pipeline(plan).await),
+        Err(e) => (None, Err(e)),
+    };
+    let result =
+        if !transition(&job.phase, Phase::Finishing) && *job.phase.borrow() == Phase::Cancelling {
+            Err(Cancelled.into())
+        } else {
+            result
+        };
     job.finish(result, started).await;
-    drop(job);
-    state.deploys.take(&id);
 }
 
 /// One deployment in flight: its row, its log and the step being executed.
 struct Job {
     state: Arc<AppState>,
     d: Deployment,
+    phase: watch::Sender<Phase>,
     log: Arc<DeployLog>,
-    current: Option<StepKind>,
     service: Option<Service>,
     docker: Option<Docker>,
     /// Live container stopped before the new one started; restarted if the deploy fails.
     stopped_previous: Option<String>,
+    build_tag: Option<String>,
+    creating_container: bool,
 }
 
 impl Job {
     async fn pipeline(&mut self, plan: Plan) -> Result<()> {
+        self.check_cancelled()?;
         let db = &self.state.db;
         let rec = db
             .service(&self.d.service_id)
@@ -425,7 +441,7 @@ impl Job {
             .server(&svc.server_id)
             .await?
             .context("the server was deleted")?;
-        let docker = self.state.docker.get(&server).await?;
+        let docker = interruptible(&self.phase, self.state.docker.get(&server)).await?;
         self.service = Some(svc.clone());
         self.docker = Some(docker.clone());
         self.log.system(format!(
@@ -488,8 +504,17 @@ impl Job {
         let container = self
             .start(&docker, &svc, &env, &image, reused, previous)
             .await?;
-        if let Err(e) = self.health(&docker, &server, &svc, &env, &container).await {
-            let tail = docker::tail_logs(&docker, &container, 30).await;
+        let phase = self.phase.clone();
+        if let Err(e) = interruptible(
+            &phase,
+            self.health(&docker, &server, &svc, &env, &container),
+        )
+        .await
+        {
+            let tail = interruptible(&phase, async {
+                Ok(docker::tail_logs(&docker, &container, 30).await)
+            })
+            .await?;
             if !tail.is_empty() {
                 self.log.system("Last container output:");
                 for line in tail {
@@ -508,7 +533,7 @@ impl Job {
 
     async fn finish(&mut self, result: Result<()>, started: Instant) {
         let elapsed = format!("{}s", started.elapsed().as_secs());
-        remove_build_dir(&self.state, &self.d.id);
+        remove_build_dir(&self.state, &self.d.id).await;
         match result {
             Ok(()) => {
                 self.log
@@ -525,59 +550,143 @@ impl Job {
                 }
             }
             Err(e) => {
+                let cancelled = e.is::<Cancelled>();
                 let message = format!("{e:#}");
-                if let Some(kind) = self.current.take() {
-                    self.mark(kind, StepStatus::Failed, None).await;
-                }
+                let now = Utc::now();
                 for step in &mut self.d.steps {
-                    if step.status == StepStatus::Pending {
-                        step.status = StepStatus::Skipped;
+                    match step.status {
+                        StepStatus::Running => {
+                            step.status = StepStatus::Failed;
+                            step.finished_at = Some(now);
+                            if cancelled {
+                                step.detail = Some(message.clone());
+                            }
+                        }
+                        StepStatus::Pending => step.status = StepStatus::Skipped,
+                        _ => {}
                     }
                 }
-                if let (Some(docker), Some(id)) = (&self.docker, &self.d.container_id)
-                    && let Err(e) = docker::remove_container(docker, id).await
-                {
-                    tracing::warn!("cannot remove failed container: {e:#}");
-                }
-                if let (Some(docker), Some(previous)) = (&self.docker, self.stopped_previous.take())
-                {
-                    match docker::start_container(docker, &previous).await {
-                        Ok(()) => self.log.system("Restarted the previous container"),
+                if let Some(docker) = &self.docker {
+                    match self.remove_candidate(docker, cancelled).await {
+                        Ok(()) => {
+                            if let Some(previous) = &self.stopped_previous {
+                                match docker::start_container(docker, previous).await {
+                                    Ok(()) => self.log.system("Restarted the previous container"),
+                                    Err(e) => self.log.push(
+                                        LogStream::Stderr,
+                                        format!("Cannot restart the previous container: {e:#}"),
+                                    ),
+                                }
+                            }
+                        }
                         Err(e) => self.log.push(
                             LogStream::Stderr,
-                            format!("Cannot restart the previous container: {e:#}"),
+                            format!("Cannot remove candidate container: {e:#}"),
                         ),
                     }
+                    if cancelled && let Some(tag) = &self.build_tag {
+                        self.remove_build_image(docker, tag).await;
+                    }
                 }
-                self.d.status = DeploymentStatus::Failed;
+                self.d.status = if cancelled {
+                    DeploymentStatus::Cancelled
+                } else {
+                    DeploymentStatus::Failed
+                };
                 self.d.error = Some(message.clone());
                 self.d.finished_at = Some(Utc::now());
                 self.persist().await;
-                self.log
-                    .push(LogStream::Stderr, format!("Deployment failed: {message}"));
+                let (level, activity, detail) = if cancelled {
+                    self.log
+                        .system(format!("Deployment #{} cancelled", self.d.number));
+                    (
+                        ActivityLevel::Info,
+                        format!("Deploy #{} cancelled", self.d.number),
+                        None,
+                    )
+                } else {
+                    self.log
+                        .push(LogStream::Stderr, format!("Deployment failed: {message}"));
+                    (
+                        ActivityLevel::Error,
+                        format!("Deploy #{} failed", self.d.number),
+                        Some(message),
+                    )
+                };
+                if cancelled && self.service.is_none() {
+                    self.service = self
+                        .state
+                        .db
+                        .service(&self.d.service_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|rec| rec.service);
+                }
                 match &self.service {
                     Some(svc) => {
                         self.state
-                            .service_activity(
-                                svc,
-                                ActivityLevel::Error,
-                                format!("Deploy #{} failed", self.d.number),
-                                Some(message),
-                            )
+                            .service_activity(svc, level, activity, detail)
                             .await
                     }
-                    None => {
-                        self.state
-                            .activity(
-                                ActivityLevel::Error,
-                                format!("Deploy #{} failed", self.d.number),
-                                Some(message),
-                            )
-                            .await
-                    }
+                    None => self.state.activity(level, activity, detail).await,
                 }
             }
         }
+    }
+
+    async fn remove_build_image(&self, docker: &Docker, tag: &str) {
+        let options = RemoveImageOptions {
+            noprune: true,
+            ..Default::default()
+        };
+        if let Err(e) = docker.remove_image(tag, Some(options), None).await
+            && !docker::is_not_found(&e)
+        {
+            self.log.push(
+                LogStream::Stderr,
+                format!("Cannot remove build image {tag}: {e}"),
+            );
+        }
+    }
+
+    async fn remove_candidate(&self, docker: &Docker, cancelled: bool) -> Result<()> {
+        let containers = match &self.d.container_id {
+            Some(id) => vec![id.clone()],
+            None if self.creating_container => {
+                let label = format!("{}={}", brand::label("deployment"), self.d.id);
+                docker::list_by_label(docker, &label)
+                    .await?
+                    .into_iter()
+                    .filter_map(|container| container.id)
+                    .collect()
+            }
+            None => return Ok(()),
+        };
+        for id in containers {
+            if !cancelled {
+                docker::remove_container(docker, &id).await?;
+                continue;
+            }
+            let options = RemoveContainerOptions {
+                force: true,
+                v: true,
+                ..Default::default()
+            };
+            if let Err(e) = docker.remove_container(&id, Some(options)).await
+                && !docker::is_not_found(&e)
+            {
+                return Err(e.into());
+            }
+        }
+        Ok(())
+    }
+
+    fn check_cancelled(&self) -> Result<()> {
+        if *self.phase.borrow() == Phase::Cancelling {
+            return Err(Cancelled.into());
+        }
+        Ok(())
     }
 
     // Steps
@@ -586,8 +695,10 @@ impl Job {
         self.begin(StepKind::Clone, Some(format!("{repo}@{branch}")))
             .await;
         let dir = self.state.dirs.build_dir(&self.d.id);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
+        if let Err(e) = tokio::fs::remove_dir_all(&dir).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(e.into());
         }
         let dir_arg = dir.to_string_lossy().into_owned();
         let out = self
@@ -623,24 +734,60 @@ impl Job {
         self.log.system(format!("Checked out {short} {subject}"));
         self.d.commit = Some(sha);
         self.d.commit_message = Some(subject);
-        let _ = std::fs::remove_dir_all(dir.join(".git"));
+        let _ = tokio::fs::remove_dir_all(dir.join(".git")).await;
         self.end(StepKind::Clone, Some(short)).await;
         Ok(dir)
     }
 
-    async fn git(&self, args: &[&str]) -> Result<std::process::Output> {
+    async fn git(&self, args: &[&str]) -> Result<Output> {
+        self.check_cancelled()?;
         let ssh = crate::ssh::paths(&self.state.dirs.ssh_dir()).git_ssh_command();
-        let child = tokio::process::Command::new("git")
+        let mut child = tokio::process::Command::new("git")
             .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_SSH_COMMAND", ssh)
-            .stdin(std::process::Stdio::null())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
             .kill_on_drop(true)
-            .output();
-        let out = tokio::time::timeout(GIT_TIMEOUT, child)
+            .spawn()
+            .context("cannot run git (is it installed?)")?;
+        let group = child
+            .id()
+            .and_then(|id| i32::try_from(id).ok())
+            .and_then(rustix::process::Pid::from_raw)
+            .context("git has no process group ID")?;
+        let mut stdout = child.stdout.take().context("git has no stdout pipe")?;
+        let mut stderr = child.stderr.take().context("git has no stderr pipe")?;
+        let result = interruptible(&self.phase, async {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let status = tokio::time::timeout(GIT_TIMEOUT, async {
+                tokio::try_join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))?;
+                child.wait().await
+            })
             .await
             .map_err(|_| anyhow!("git {} timed out", args[0]))?
-            .context("cannot run git (is it installed?)")?;
+            .context("cannot read git result")?;
+            Ok(Output {
+                status,
+                stdout: out,
+                stderr: err,
+            })
+        })
+        .await;
+        if result.is_err() {
+            use rustix::{io::Errno, process};
+            if let Err(e) = process::kill_process_group(group, process::Signal::KILL)
+                && e != Errno::SRCH
+            {
+                tracing::warn!("cannot terminate git process group: {e}");
+                let _ = child.start_kill();
+            }
+            let _ = child.wait().await;
+        }
+        let out = result?;
         for line in String::from_utf8_lossy(&out.stderr)
             .lines()
             .chain(String::from_utf8_lossy(&out.stdout).lines())
@@ -671,7 +818,10 @@ impl Job {
                 Path::new(context).join(&dockerfile_rel).display()
             );
         }
-        let tar = tokio::task::spawn_blocking(move || tar_dir(&context_dir)).await??;
+        self.check_cancelled()?;
+        let phase = self.phase.clone();
+        let tar = tokio::task::spawn_blocking(move || tar_dir(&context_dir, &phase)).await??;
+        self.check_cancelled()?;
         self.log.system(format!(
             "Sending build context ({:.1} MB)",
             tar.len() as f64 / 1_048_576.0
@@ -687,49 +837,63 @@ impl Job {
             ])),
             ..Default::default()
         };
-        let mut stream = docker.build_image(options, None, Some(bollard::body_full(tar.into())));
-        while let Some(item) = stream.next().await {
-            let info = item.map_err(|e| anyhow!("image build failed: {e}"))?;
-            if let Some(err) = info.error_detail.and_then(|e| e.message) {
-                self.log.push(LogStream::Stderr, err.clone());
-                bail!("image build failed: {err}");
-            }
-            for line in info
-                .stream
-                .iter()
-                .chain(info.status.iter())
-                .flat_map(|s| s.lines())
-            {
-                let line = line.trim_end();
-                if line.is_empty() {
-                    continue;
+        self.build_tag = Some(tag.to_string());
+        let phase = self.phase.clone();
+        interruptible(&phase, async {
+            let mut stream =
+                docker.build_image(options, None, Some(bollard::body_full(tar.into())));
+            while let Some(item) = stream.next().await {
+                let info = item.map_err(|e| anyhow!("image build failed: {e}"))?;
+                if let Some(err) = info.error_detail.and_then(|e| e.message) {
+                    self.log.push(LogStream::Stderr, err.clone());
+                    bail!("image build failed: {err}");
                 }
-                if let Some(progress) = build_progress(line) {
-                    self.detail(StepKind::Build, progress).await;
+                for line in info
+                    .stream
+                    .iter()
+                    .chain(info.status.iter())
+                    .flat_map(|s| s.lines())
+                {
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Some(progress) = build_progress(line) {
+                        self.detail(StepKind::Build, progress).await;
+                    }
+                    self.log.push(LogStream::Stdout, line);
                 }
-                self.log.push(LogStream::Stdout, line);
             }
-        }
-        if !docker::image_exists(docker, tag).await? {
-            bail!("image build finished without producing {tag}");
-        }
+            if !docker::image_exists(docker, tag).await? {
+                bail!("image build finished without producing {tag}");
+            }
+            Ok(())
+        })
+        .await?;
         self.end(StepKind::Build, Some(tag.to_string())).await;
         Ok(())
     }
 
     async fn pull(&mut self, docker: &Docker, image: &str) -> Result<()> {
         self.begin(StepKind::Pull, Some(image.to_string())).await;
-        let log = self.log.clone();
-        match docker::pull_image(docker, image, |line| log.push(LogStream::Stdout, line)).await {
-            Ok(()) => {}
-            Err(e) if docker::image_exists(docker, image).await.unwrap_or(false) => {
-                self.log
-                    .push(LogStream::Stderr, format!("{e:#}; using the cached image"));
+        interruptible(&self.phase, async {
+            match self.pull_image(docker, image).await {
+                Ok(()) => Ok(()),
+                Err(e) if docker::image_exists(docker, image).await.unwrap_or(false) => {
+                    self.log
+                        .push(LogStream::Stderr, format!("{e:#}; using the cached image"));
+                    Ok(())
+                }
+                Err(e) => Err(e),
             }
-            Err(e) => return Err(e),
-        }
+        })
+        .await?;
         self.end(StepKind::Pull, Some(image.to_string())).await;
         Ok(())
+    }
+
+    async fn pull_image(&self, docker: &Docker, image: &str) -> Result<()> {
+        docker::pull_image(docker, image, |line| self.log.push(LogStream::Stdout, line)).await
     }
 
     async fn start(
@@ -741,13 +905,21 @@ impl Job {
         reused: bool,
         previous: Option<String>,
     ) -> Result<String> {
+        self.check_cancelled()?;
         self.begin(StepKind::Start, None).await;
-        if reused && !docker::image_exists(docker, image).await? {
-            if image.starts_with(&format!("{}/", brand::PREFIX)) {
-                bail!("image {image} no longer exists on the server; deploy from source instead");
-            }
-            let log = self.log.clone();
-            docker::pull_image(docker, image, |line| log.push(LogStream::Stdout, line)).await?;
+        if reused {
+            interruptible(&self.phase, async {
+                if !docker::image_exists(docker, image).await? {
+                    if image.starts_with(&format!("{}/", brand::PREFIX)) {
+                        bail!(
+                            "image {image} no longer exists on the server; deploy from source instead"
+                        );
+                    }
+                    self.pull_image(docker, image).await?;
+                }
+                Ok(())
+            })
+            .await?;
         }
         let db = &self.state.db;
         let domains = db.domains(&svc.id).await?;
@@ -803,16 +975,31 @@ impl Job {
             published,
             publish_ip: None,
         };
+        self.check_cancelled()?;
         docker::remove_container(docker, &spec.name).await?;
-        if let Some(previous) = previous {
+        self.check_cancelled()?;
+        if let Some(previous) = previous
+            && interruptible(&self.phase, docker::inspect(docker, &previous))
+                .await?
+                .is_some_and(|c| {
+                    matches!(
+                        RunState::from_inspect(&c),
+                        RunState::Running | RunState::Restarting
+                    )
+                })
+        {
+            self.check_cancelled()?;
             self.log
                 .system("Stopping the previous container: a database cannot share its data volume");
             docker::stop_container(docker, &previous, DATABASE_STOP_SECS).await?;
             self.stopped_previous = Some(previous);
         }
+        self.check_cancelled()?;
+        self.creating_container = true;
         let id = docker::create_container(docker, &spec).await?;
         self.d.container_id = Some(id.clone());
         self.persist().await;
+        self.check_cancelled()?;
         docker::start_container(docker, &id).await?;
         self.log.system(format!("Started container {}", spec.name));
         self.end(StepKind::Start, Some(spec.name)).await;
@@ -895,7 +1082,6 @@ impl Job {
                             Some("skipped (remote)".into()),
                         )
                         .await;
-                        self.current = None;
                         return Ok(());
                     }
                     code => last_error = format!("wget exited with {code}"),
@@ -923,6 +1109,9 @@ impl Job {
         container: &str,
         routed: bool,
     ) -> Result<()> {
+        if !transition(&self.phase, Phase::CuttingOver) {
+            return Err(Cancelled.into());
+        }
         self.begin(StepKind::Switch, None).await;
         if routed {
             let alias = docker::proxy_alias(&svc.id);
@@ -937,7 +1126,6 @@ impl Job {
             step.detail = Some(detail);
             step.finished_at = Some(now);
         }
-        self.current = None;
         self.d.status = DeploymentStatus::Live;
         self.d.finished_at = Some(now);
         self.state.db.switch_live(&self.d).await?;
@@ -965,7 +1153,6 @@ impl Job {
                 Err(e) => errors.push(format!("{e:#}")),
             }
         }
-        remove_build_dir(&self.state, &self.d.id);
         let detail = format!(
             "removed {removed} old container{}",
             if removed == 1 { "" } else { "s" }
@@ -983,7 +1170,6 @@ impl Job {
                 Some(errors.join("; ")),
             )
             .await;
-            self.current = None;
         }
     }
 
@@ -1004,7 +1190,6 @@ impl Job {
             step.started_at = Some(Utc::now());
             step.detail = detail;
         }
-        self.current = Some(kind);
         self.log.system(format!("==> {}", kind.as_str()));
         self.persist().await;
     }
@@ -1018,7 +1203,6 @@ impl Job {
 
     async fn end(&mut self, kind: StepKind, detail: Option<String>) {
         self.mark(kind, StepStatus::Done, detail).await;
-        self.current = None;
     }
 
     async fn mark(&mut self, kind: StepKind, status: StepStatus, detail: Option<String>) {
@@ -1100,11 +1284,32 @@ fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn tar_dir(dir: &Path) -> Result<Vec<u8>> {
-    let mut builder = tar::Builder::new(Vec::new());
+struct BuildContext<'a> {
+    bytes: Vec<u8>,
+    phase: &'a watch::Sender<Phase>,
+}
+
+impl std::io::Write for BuildContext<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if *self.phase.borrow() == Phase::Cancelling {
+            return Err(std::io::Error::other(Cancelled));
+        }
+        self.bytes.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn tar_dir(dir: &Path, phase: &watch::Sender<Phase>) -> Result<Vec<u8>> {
+    let mut builder = tar::Builder::new(BuildContext {
+        bytes: Vec::new(),
+        phase,
+    });
     builder.follow_symlinks(false);
     builder.append_dir_all(".", dir)?;
-    Ok(builder.into_inner()?)
+    Ok(builder.into_inner()?.bytes)
 }
 
 #[cfg(test)]

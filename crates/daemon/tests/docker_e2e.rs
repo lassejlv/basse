@@ -1,6 +1,10 @@
-//! End-to-end flow against a real Docker engine. Binds ports 80/443 for the proxy.
-//! Run with `cargo test -p daemon --test docker_e2e -- --ignored --nocapture`.
+//! End-to-end tests against a real Docker engine.
+//! The ignored scenarios (some bind ports 80/443 for the proxy) run with
+//! `cargo test -p daemon --test docker_e2e -- --ignored --test-threads 1`.
 
+#[cfg(target_os = "linux")]
+#[path = "docker_e2e/cancellation.rs"]
+mod cancellation;
 mod support;
 
 use client::Client;

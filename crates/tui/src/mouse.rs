@@ -29,6 +29,7 @@ pub enum Hit {
     Pane(Pane),
     OpenSettings,
     OpenServers,
+    Header(HeaderLink),
     SidebarServer(usize),
     Filter,
     Search,
@@ -57,6 +58,15 @@ pub enum Hit {
     PickRow(usize),
     /// A row of the list on a full-screen list such as Secrets.
     Item(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderLink {
+    Project,
+    Environment,
+    Service,
+    Deployment,
+    ActiveDeployment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +228,7 @@ pub fn key_for_label(label: &str) -> Option<(KeyCode, KeyModifiers)> {
         "ctrl+s" => (KeyCode::Char('s'), KeyModifiers::CONTROL),
         "ctrl+r" => (KeyCode::Char('r'), KeyModifiers::CONTROL),
         "ctrl+k" => (KeyCode::Char('k'), KeyModifiers::CONTROL),
+        "ctrl+x" => (KeyCode::Char('x'), KeyModifiers::CONTROL),
         "y" => (KeyCode::Char('y'), none),
         _ => {
             let mut chars = label.chars();
@@ -468,6 +479,50 @@ fn click(app: &mut App, hit: Hit, double: bool) {
             press(app, code, mods);
         }
         Hit::Block | Hit::Logs | Hit::List(_) | Hit::PaletteInput => {}
+        Hit::Header(HeaderLink::Project | HeaderLink::Environment) => {
+            let path = if app.screen == Screen::Overview {
+                app.current_env().map(|(p, e)| (&p.project, &e.environment))
+            } else {
+                app.service
+                    .as_ref()
+                    .and_then(|v| app.service_path(&v.id))
+                    .map(|(p, e, _)| (p, e))
+            };
+            if let Some((project, env)) = path {
+                let project = project.id.clone();
+                let environment =
+                    matches!(hit, Hit::Header(HeaderLink::Environment)).then(|| env.id.clone());
+                app.open_scope(&project, environment.as_deref());
+            }
+        }
+        Hit::Header(HeaderLink::Service) => app.open_service_overview(),
+        Hit::Header(HeaderLink::Deployment | HeaderLink::ActiveDeployment) => {
+            if app.screen == Screen::Deploy {
+                if let Some(view) = app.deploy.as_mut() {
+                    view.logs.follow = true;
+                    view.logs.offset = 0;
+                    view.logs.step_anchor = None;
+                }
+            } else if let Some(view) = &app.service {
+                let id = match hit {
+                    Hit::Header(HeaderLink::ActiveDeployment) => {
+                        view.active_deployment().map(|d| d.id.clone())
+                    }
+                    _ => app
+                        .service_path(&view.id)
+                        .and_then(|(_, _, s)| s.live_deployment_id.clone())
+                        .or_else(|| {
+                            view.deployments
+                                .iter()
+                                .find(|d| d.status == common::DeploymentStatus::Live)
+                                .map(|d| d.id.clone())
+                        }),
+                };
+                if let Some(id) = id {
+                    app.open_service_deployment(&id);
+                }
+            }
+        }
         Hit::OpenSettings => {
             keys::finish_text_input(app);
             app.open_settings();
