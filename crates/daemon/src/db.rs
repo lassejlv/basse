@@ -6,6 +6,7 @@ use chrono::Utc;
 use common::metrics::DeployMarker;
 use common::notify::*;
 use common::*;
+use common::lb::{LbConfig, Provider};
 use rand::Rng as _;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -46,16 +47,48 @@ pub struct ServiceRecord {
 }
 
 impl ServiceRecord {
-    /// Each replica's container by index; a compose group's first container stands in as 0.
-    pub fn replica_containers(&self) -> Vec<(u16, String)> {
+    /// Each replica's container and server by index; a compose group's first container stands
+    /// in as 0, on the service's server.
+    pub fn replica_containers(&self) -> Vec<ReplicaRef> {
         if self.replicas.is_empty() {
-            return self.live_container.iter().map(|c| (0, c.clone())).collect();
+            return self
+                .live_container
+                .iter()
+                .map(|c| ReplicaRef {
+                    index: 0,
+                    server_id: self.service.server_id.clone(),
+                    container: c.clone(),
+                })
+                .collect();
         }
         self.replicas
             .iter()
-            .map(|r| (r.index, r.container_id.clone()))
+            .map(|r| ReplicaRef {
+                index: r.index,
+                server_id: r.server_id.clone(),
+                container: r.container_id.clone(),
+            })
             .collect()
     }
+
+    /// The servers the service's replicas run on now, the service's own server first.
+    pub fn replica_servers(&self) -> Vec<Id> {
+        let mut servers = vec![self.service.server_id.clone()];
+        for r in &self.replicas {
+            if !servers.contains(&r.server_id) {
+                servers.push(r.server_id.clone());
+            }
+        }
+        servers
+    }
+}
+
+/// Where one replica's container runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicaRef {
+    pub index: u16,
+    pub server_id: Id,
+    pub container: String,
 }
 
 /// The container serving one replica slot of a service.
@@ -779,7 +812,8 @@ impl Db {
     pub async fn deployment_servers(&self, service_id: &str) -> Result<Vec<Id>> {
         Ok(sqlx::query_scalar(
             "SELECT DISTINCT server_id FROM deployments WHERE service_id = $1
-             UNION SELECT server_id FROM services WHERE id = $1",
+             UNION SELECT server_id FROM services WHERE id = $1
+             UNION SELECT server_id FROM replicas WHERE service_id = $1",
         )
         .bind(service_id)
         .fetch_all(&self.pool)
@@ -1394,6 +1428,121 @@ impl Db {
 
     pub async fn delete_storage(&self, id: &str) -> Result<()> {
         self.execute("DELETE FROM storage_connections WHERE id = $1", id)
+            .await
+    }
+
+    // Providers and managed load balancers
+
+    pub async fn providers(&self) -> Result<Vec<Provider>> {
+        self.fetch(format!("{PROVIDER_SELECT} ORDER BY seq"), &[], provider_from_row)
+            .await
+    }
+
+    pub async fn provider(&self, id: &str) -> Result<Option<Provider>> {
+        self.fetch_one(
+            format!("{PROVIDER_SELECT} WHERE id = $1"),
+            &[id],
+            provider_from_row,
+        )
+        .await
+    }
+
+    pub async fn provider_name_taken(&self, name: &str) -> Result<bool> {
+        self.exists("SELECT 1 FROM providers WHERE name = $1", &[name])
+            .await
+    }
+
+    /// Inserts or updates a provider connection.
+    pub async fn save_provider(&self, p: &Provider) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO providers (id, name, kind, token_secret_id, status, problem, account,
+                    load_balancing, last_checked_at, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (id) DO UPDATE SET name = $2, token_secret_id = $4, status = $5,
+                    problem = $6, account = $7, load_balancing = $8, last_checked_at = $9",
+        )
+        .bind(&p.id)
+        .bind(&p.name)
+        .bind(enum_str(&p.kind))
+        .bind(&p.token_secret_id)
+        .bind(enum_str(&p.status))
+        .bind(&p.problem)
+        .bind(&p.account)
+        .bind(p.load_balancing)
+        .bind(p.last_checked_at)
+        .bind(p.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_provider(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM providers WHERE id = $1", id).await
+    }
+
+    /// Names of the services whose load balancer uses a provider, for itself or for DNS.
+    pub async fn provider_users(&self, id: &str) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT s.name FROM service_lbs l JOIN services s ON s.id = l.service_id
+             WHERE l.provider_id = $1 OR l.config->>'dns_provider_id' = $1 ORDER BY s.name",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn service_lb(&self, service_id: &str) -> Result<Option<crate::lb::LbRecord>> {
+        let row: Option<(Json<LbConfig>, Json<crate::lb::LbStored>)> =
+            sqlx::query_as("SELECT config, state FROM service_lbs WHERE service_id = $1")
+                .bind(service_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(Json(config), Json(stored))| crate::lb::LbRecord { config, stored }))
+    }
+
+    /// Every service with a managed load balancer.
+    pub async fn service_lbs(&self) -> Result<Vec<(Id, crate::lb::LbRecord)>> {
+        let rows: Vec<(Id, Json<LbConfig>, Json<crate::lb::LbStored>)> =
+            sqlx::query_as("SELECT service_id, config, state FROM service_lbs ORDER BY service_id")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, Json(config), Json(stored))| (id, crate::lb::LbRecord { config, stored }))
+            .collect())
+    }
+
+    pub async fn save_service_lb(&self, service_id: &str, lb: &crate::lb::LbRecord) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO service_lbs (service_id, provider_id, config, state, updated_at)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (service_id) DO UPDATE SET provider_id = $2, config = $3, state = $4,
+                    updated_at = $5",
+        )
+        .bind(service_id)
+        .bind(&lb.config.provider_id)
+        .bind(Json(&lb.config))
+        .bind(Json(&lb.stored))
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Stores what a sync found without touching the config, so a sync never undoes a change
+    /// made while it ran.
+    pub async fn save_lb_state(&self, service_id: &str, stored: &crate::lb::LbStored) -> Result<()> {
+        sqlx::query("UPDATE service_lbs SET state = $2, updated_at = $3 WHERE service_id = $1")
+            .bind(service_id)
+            .bind(Json(stored))
+            .bind(Utc::now())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_service_lb(&self, service_id: &str) -> Result<()> {
+        self.execute("DELETE FROM service_lbs WHERE service_id = $1", service_id)
             .await
     }
 
@@ -2134,6 +2283,8 @@ const SECRET_USAGES: &str = "SELECT ssh_key_secret_id, 'server', id, name FROM s
      SELECT credentials_secret_id, 'storage', id, name FROM storage_connections
      UNION ALL
      SELECT secret_id, 'source', id, name FROM git_sources WHERE secret_id IS NOT NULL
+     UNION ALL
+     SELECT token_secret_id, 'provider', id, name FROM providers
      ORDER BY 1, 2, 4";
 
 const SOURCE_SELECT: &str =
@@ -2236,6 +2387,24 @@ fn rule_from_row(row: &PgRow) -> sqlx::Result<NotifyRule> {
         enabled: row.try_get(6)?,
         dedupe_secs: u32::try_from(row.try_get::<i64, _>(7)?).unwrap_or(u32::MAX),
         max_per_hour: u32::try_from(row.try_get::<i64, _>(8)?).unwrap_or(u32::MAX),
+        created_at: row.try_get(9)?,
+    })
+}
+
+const PROVIDER_SELECT: &str = "SELECT id, name, kind, token_secret_id, status, problem, account,
+        load_balancing, last_checked_at, created_at FROM providers";
+
+fn provider_from_row(row: &PgRow) -> sqlx::Result<Provider> {
+    Ok(Provider {
+        id: row.try_get(0)?,
+        name: row.try_get(1)?,
+        kind: col_enum(row, 2)?,
+        token_secret_id: row.try_get(3)?,
+        status: col_enum(row, 4)?,
+        problem: row.try_get(5)?,
+        account: row.try_get(6)?,
+        load_balancing: row.try_get(7)?,
+        last_checked_at: row.try_get(8)?,
         created_at: row.try_get(9)?,
     })
 }

@@ -18,6 +18,7 @@ mod instance;
 mod metrics;
 mod notify;
 mod onboarding;
+mod placement;
 mod preflight;
 mod proxy_pages;
 mod prune;

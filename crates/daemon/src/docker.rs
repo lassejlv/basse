@@ -281,9 +281,55 @@ pub fn route_labels(
     service_port: Option<u16>,
     policy: LbPolicy,
     health_path: Option<&str>,
+    extras: &RouteExtras,
 ) -> HashMap<String, String> {
     let mut labels = HashMap::new();
-    for (i, (site, _)) in routable(domains, service_port).enumerate() {
+    let service_id = domains.first().map(|d| d.service_id.as_str()).unwrap_or("");
+    let routes: Vec<(String, u16)> = routable(domains, service_port).collect();
+    let mut next = routes.len();
+    for (i, (site, port)) in routes.iter().enumerate() {
+        if !extras.health && extras.acme_relay.is_none() {
+            break;
+        }
+        let host = site.strip_prefix("http://");
+        let (block, tls) = match host {
+            Some(_) => (format!("caddy_{i}"), false),
+            None => {
+                let block = format!("caddy_{next}");
+                next += 1;
+                labels.insert(block.clone(), format!("http://{site}"));
+                (block, true)
+            }
+        };
+        let mut handle = 0;
+        if extras.health {
+            let h = format!("{block}.{handle}_handle");
+            labels.insert(h.clone(), lb_health_path());
+            labels.insert(
+                format!("{h}.rewrite"),
+                format!("* {}", path_with_slash(health_path.unwrap_or("/"))),
+            );
+            labels.insert(
+                format!("{h}.reverse_proxy"),
+                format!("{}:{port}", proxy_alias(service_id)),
+            );
+            handle += 1;
+        }
+        if tls {
+            if let Some(issuer) = &extras.acme_relay {
+                let h = format!("{block}.{handle}_handle");
+                labels.insert(h.clone(), "/.well-known/acme-challenge/*".into());
+                labels.insert(format!("{h}.reverse_proxy"), format!("{issuer}:80"));
+                handle += 1;
+            }
+            labels.insert(
+                format!("{block}.{handle}_handle.redir"),
+                "https://{host}{uri} 308".into(),
+            );
+        }
+    }
+    for (i, (site, _)) in routes.iter().enumerate() {
+        let site = site.clone();
         let rp = format!("caddy_{i}.reverse_proxy");
         labels.insert(format!("caddy_{i}"), site);
         labels.insert(format!("{rp}.lb_policy"), policy.as_str().into());
@@ -305,6 +351,32 @@ pub fn route_labels(
         }
     }
     labels
+}
+
+/// What a service's route on one server adds when the service may run on several servers or
+/// sits behind a managed load balancer (see [`crate::replicas::apply_route`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteExtras {
+    /// Answer [`lb_health_path`] on plain http with the service's health path on this server's
+    /// own replicas, for load balancers to probe.
+    pub health: bool,
+    /// Send certificate challenges this server's proxy doesn't know to the proxy at this
+    /// address, the one that obtains the service's certificates.
+    pub acme_relay: Option<String>,
+}
+
+/// The path every server's proxy answers on port 80 for a load-balanced domain: the service's
+/// health path, probed on the replicas of that server alone, or 502 when it has none.
+pub fn lb_health_path() -> String {
+    format!("/.well-known/{}-lb-health", brand::PREFIX)
+}
+
+fn path_with_slash(path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    }
 }
 
 /// Creates, replaces or removes a service's route container so it carries `labels`. The old
@@ -1507,7 +1579,13 @@ mod tests {
     #[test]
     fn the_route_carries_every_option_but_no_upstream() {
         let domains = [domain("a.com", None, true), domain("b.com", None, false)];
-        let route = route_labels(&domains, Some(80), LbPolicy::IpHash, Some("healthz"));
+        let route = route_labels(
+            &domains,
+            Some(80),
+            LbPolicy::IpHash,
+            Some("healthz"),
+            &RouteExtras::default(),
+        );
         assert_eq!(route["caddy_0"], "a.com");
         assert_eq!(route["caddy_1"], "http://b.com");
         assert!(!route.contains_key("caddy_0.reverse_proxy"));
@@ -1518,7 +1596,13 @@ mod tests {
         assert_eq!(route["caddy_0.reverse_proxy.lb_retries"], "3");
         assert!(!route.contains_key("caddy_0.reverse_proxy.lb_try_duration"));
         assert_eq!(route["caddy_0.reverse_proxy.transport.dial_timeout"], "1s");
-        let plain = route_labels(&domains, Some(80), LbPolicy::LeastConn, None);
+        let plain = route_labels(
+            &domains,
+            Some(80),
+            LbPolicy::LeastConn,
+            None,
+            &RouteExtras::default(),
+        );
         assert_eq!(plain["caddy_0.reverse_proxy.lb_policy"], "least_conn");
         assert!(!plain.contains_key("caddy_0.reverse_proxy.health_uri"));
         // Every site a replica names has its options on the route, and nothing else.
@@ -1529,7 +1613,45 @@ mod tests {
         {
             assert_eq!(route.get(k), Some(v));
         }
-        assert!(route_labels(&domains, None, LbPolicy::LeastConn, None).is_empty());
+        assert!(
+            route_labels(
+                &domains,
+                None,
+                LbPolicy::LeastConn,
+                None,
+                &RouteExtras::default()
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn multi_server_routes_answer_health_and_relay_challenges() {
+        let domains = [domain("a.com", None, true), domain("b.com", None, false)];
+        let extras = RouteExtras {
+            health: true,
+            acme_relay: Some("10.0.0.2".into()),
+        };
+        let route = route_labels(&domains, Some(80), LbPolicy::LeastConn, Some("healthz"), &extras);
+        let health = lb_health_path();
+        assert_eq!(route["caddy_2"], "http://a.com");
+        assert_eq!(route["caddy_2.0_handle"], health);
+        assert_eq!(route["caddy_2.0_handle.rewrite"], "* /healthz");
+        assert_eq!(route["caddy_2.0_handle.reverse_proxy"], format!("{}:80", proxy_alias("s")));
+        assert_eq!(route["caddy_2.1_handle"], "/.well-known/acme-challenge/*");
+        assert_eq!(route["caddy_2.1_handle.reverse_proxy"], "10.0.0.2:80");
+        assert_eq!(route["caddy_2.2_handle.redir"], "https://{host}{uri} 308");
+        // A plain-http domain gets the health endpoint in its own block, with no relay or redirect.
+        assert_eq!(route["caddy_1.0_handle"], health);
+        assert!(!route.contains_key("caddy_1.1_handle"));
+        assert!(!route.contains_key("caddy_1.1_handle.redir"));
+        let issuer = RouteExtras {
+            health: true,
+            acme_relay: None,
+        };
+        let route = route_labels(&domains, Some(80), LbPolicy::LeastConn, None, &issuer);
+        assert_eq!(route["caddy_2.0_handle.rewrite"], "* /");
+        assert_eq!(route["caddy_2.1_handle.redir"], "https://{host}{uri} 308");
     }
 
     #[test]
