@@ -59,6 +59,12 @@ pub async fn relocate(
     if rec.stopped {
         conflict!("'{}' is stopped; start it before moving it", svc.name);
     }
+    if svc.scaling.placement.is_multi_server() {
+        conflict!(
+            "'{}' runs on several servers; change its placement instead of moving it",
+            svc.name
+        );
+    }
     if rec.busy.is_some() {
         conflict!(
             "'{}' is deploying; wait for that deployment or cancel it, then move it",

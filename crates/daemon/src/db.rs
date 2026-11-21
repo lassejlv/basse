@@ -3,10 +3,10 @@
 use crate::metrics::{self, Bucket, Sample};
 use anyhow::{Context as _, Result};
 use chrono::Utc;
+use common::lb::{LbConfig, Provider};
 use common::metrics::DeployMarker;
 use common::notify::*;
 use common::*;
-use common::lb::{LbConfig, Provider};
 use rand::Rng as _;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -1434,8 +1434,12 @@ impl Db {
     // Providers and managed load balancers
 
     pub async fn providers(&self) -> Result<Vec<Provider>> {
-        self.fetch(format!("{PROVIDER_SELECT} ORDER BY seq"), &[], provider_from_row)
-            .await
+        self.fetch(
+            format!("{PROVIDER_SELECT} ORDER BY seq"),
+            &[],
+            provider_from_row,
+        )
+        .await
     }
 
     pub async fn provider(&self, id: &str) -> Result<Option<Provider>> {
@@ -1477,7 +1481,8 @@ impl Db {
     }
 
     pub async fn delete_provider(&self, id: &str) -> Result<()> {
-        self.execute("DELETE FROM providers WHERE id = $1", id).await
+        self.execute("DELETE FROM providers WHERE id = $1", id)
+            .await
     }
 
     /// Names of the services whose load balancer uses a provider, for itself or for DNS.
@@ -1531,7 +1536,11 @@ impl Db {
 
     /// Stores what a sync found without touching the config, so a sync never undoes a change
     /// made while it ran.
-    pub async fn save_lb_state(&self, service_id: &str, stored: &crate::lb::LbStored) -> Result<()> {
+    pub async fn save_lb_state(
+        &self,
+        service_id: &str,
+        stored: &crate::lb::LbStored,
+    ) -> Result<()> {
         sqlx::query("UPDATE service_lbs SET state = $2, updated_at = $3 WHERE service_id = $1")
             .bind(service_id)
             .bind(Json(stored))

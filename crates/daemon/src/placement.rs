@@ -45,7 +45,9 @@ pub fn plan(n: u16, slots: &[Slot], strategy: PlacementStrategy, current: &[(u16
         left[pos] -= 1;
         *slot = Some(slots[pos].server_id.clone());
     }
-    out.into_iter().map(|s| s.expect("every index placed")).collect()
+    out.into_iter()
+        .map(|s| s.expect("every index placed"))
+        .collect()
 }
 
 /// How many of `n` replicas each slot gets.
@@ -67,17 +69,6 @@ fn counts(n: u16, slots: &[Slot], strategy: PlacementStrategy) -> Vec<u16> {
         counts[pick] += 1;
     }
     counts
-}
-
-/// The server a new replica goes to when the service grows by one: the first index `plan`
-/// would put somewhere new.
-pub fn next_server(
-    n: u16,
-    slots: &[Slot],
-    strategy: PlacementStrategy,
-    current: &[(u16, Id)],
-) -> Option<Id> {
-    plan(n + 1, slots, strategy, current).pop()
 }
 
 #[cfg(test)]
@@ -160,12 +151,16 @@ mod tests {
         let s = slots(&[("a", 3), ("b", 3), ("c", 1)]);
         let current = vec![(0, "a".into()), (1, "b".into()), (2, "a".into())];
         assert_eq!(
-            next_server(3, &s, PlacementStrategy::Spread, &current).as_deref(),
+            plan(4, &s, PlacementStrategy::Spread, &current)
+                .pop()
+                .as_deref(),
             Some("c")
         );
         let full = slots(&[("a", 2), ("b", 1)]);
         assert_eq!(
-            next_server(3, &full, PlacementStrategy::Spread, &current).as_deref(),
+            plan(4, &full, PlacementStrategy::Spread, &current)
+                .pop()
+                .as_deref(),
             Some("b")
         );
     }

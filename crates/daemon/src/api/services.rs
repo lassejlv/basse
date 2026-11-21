@@ -151,7 +151,19 @@ pub async fn logs(
             rec.service.name
         ))
     };
-    let (_, docker) = state.docker_for(&rec.service.server_id).await?;
+    let replica = q.replica.map(|index| {
+        rec.replica_containers()
+            .into_iter()
+            .find(|r| r.index == index)
+            .ok_or_else(|| {
+                AppError::NotFound(format!("'{}' has no replica #{index}", rec.service.name))
+            })
+    });
+    let replica = replica.transpose()?;
+    let server_id = replica
+        .as_ref()
+        .map_or(rec.service.server_id.as_str(), |r| r.server_id.as_str());
+    let (_, docker) = state.docker_for(server_id).await?;
     let container = match &q.container {
         Some(name) => services::compose_services(&docker, &id)
             .await?
@@ -165,15 +177,8 @@ pub async fn logs(
                     rec.service.name
                 ))
             })?,
-        None => match q.replica {
-            Some(index) => rec
-                .replica_containers()
-                .into_iter()
-                .find(|(i, _)| *i == index)
-                .map(|(_, id)| id)
-                .ok_or_else(|| {
-                    AppError::NotFound(format!("'{}' has no replica #{index}", rec.service.name))
-                })?,
+        None => match replica {
+            Some(r) => r.container,
             None => rec.live_container.clone().ok_or_else(missing)?,
         },
     };
@@ -313,7 +318,7 @@ pub async fn autoscale(
         if !replicas::supports_replicas(&svc.source) {
             bad_request!("databases and compose services run one replica");
         }
-        replicas::check_volumes(&state, &svc).await?;
+        replicas::check_volumes(&state, &svc, body.max).await?;
     }
     svc.scaling.autoscale = body.clone();
     state.db.update_service(&svc).await?;
@@ -337,6 +342,62 @@ pub async fn autoscale(
             );
         }
     }
+    Ok(Json(services::detail(&state, &id).await?))
+}
+
+/// Sets where the service's replicas may run; they move there in the background.
+pub async fn placement(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<Placement>,
+) -> ApiResult<Json<ServiceDetail>> {
+    let rec = services::record(&state, &id).await?;
+    let mut svc = rec.service.clone();
+    let mut body = body;
+    let mut seen = Vec::new();
+    for server_id in &body.servers {
+        let server = state.server(server_id).await?;
+        if seen.contains(&server.id) {
+            bad_request!("server {} is listed twice", server.name);
+        }
+        seen.push(server.id);
+    }
+    if body.servers == [svc.server_id.clone()] {
+        body.servers.clear();
+    }
+    if body.is_multi_server() {
+        if !replicas::supports_replicas(&svc.source) {
+            bad_request!("databases and compose services run on one server");
+        }
+        if svc.scaling.autoscale.enabled {
+            svc.scaling.placement = body.clone();
+            replicas::check_volumes(&state, &svc, svc.scaling.autoscale.max).await?;
+        }
+    }
+    svc.scaling.placement = body;
+    replicas::check_volumes(&state, &svc, svc.replicas).await?;
+    state.db.update_service(&svc).await?;
+    let servers: Vec<String> = svc
+        .scaling
+        .placement
+        .servers_or(&svc.server_id)
+        .iter()
+        .map(|id| id.chars().take(8).collect())
+        .collect();
+    state
+        .service_activity(
+            &svc,
+            ActivityLevel::Info,
+            "Placement changed".into(),
+            Some(format!(
+                "{} · {}",
+                svc.scaling.placement.strategy,
+                servers.join(", ")
+            )),
+        )
+        .await;
+    replicas::spawn_reconcile(&state, &id, "placement".into());
+    crate::lb::reroute(&state, &id);
     Ok(Json(services::detail(&state, &id).await?))
 }
 

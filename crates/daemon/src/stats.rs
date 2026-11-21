@@ -365,10 +365,17 @@ async fn sample_services(state: &AppState) {
     };
     let mut by_server: HashMap<Id, Vec<ServiceRecord>> = HashMap::new();
     for rec in recs {
-        by_server
-            .entry(rec.service.server_id.clone())
-            .or_default()
-            .push(rec);
+        let servers: Vec<Id> = if rec.replicas.is_empty() {
+            vec![rec.service.server_id.clone()]
+        } else {
+            rec.replica_servers()
+                .into_iter()
+                .filter(|s| rec.replicas.iter().any(|r| &r.server_id == s))
+                .collect()
+        };
+        for server_id in servers {
+            by_server.entry(server_id).or_default().push(rec.clone());
+        }
     }
     futures_util::stream::iter(by_server)
         .for_each_concurrent(PARALLEL_SERVERS, |(server_id, recs)| async move {
@@ -407,6 +414,7 @@ async fn sample_server(state: &AppState, server_id: &str, recs: Vec<ServiceRecor
         sample_service(
             state,
             &docker,
+            server_id,
             &rec,
             &live,
             &service_domains,
@@ -418,12 +426,13 @@ async fn sample_server(state: &AppState, server_id: &str, recs: Vec<ServiceRecor
 
 /// The containers of a service by the name metrics keep them under: the compose service, or
 /// the replica (`#0`, `#1`, …) of any other service.
-async fn targets(docker: &Docker, rec: &ServiceRecord) -> Vec<(String, String)> {
+async fn targets(docker: &Docker, rec: &ServiceRecord, server_id: &str) -> Vec<(String, String)> {
     if !metrics::is_compose(&rec.service.source) {
         return rec
             .replica_containers()
             .into_iter()
-            .map(|(index, id)| (replicas::metrics_key(index), id))
+            .filter(|r| r.server_id == server_id)
+            .map(|r| (replicas::metrics_key(r.index), r.container))
             .collect();
     }
     let label = format!(
@@ -467,9 +476,11 @@ fn requests_for(
     Some(sum?.sample(*secs))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn sample_service(
     state: &AppState,
     docker: &Docker,
+    server_id: &str,
     rec: &ServiceRecord,
     live: &str,
     domains: &[Domain],
@@ -479,7 +490,7 @@ async fn sample_service(
     let now = Utc::now();
     let mut watched = Vec::new();
     let mut requests_left = requests;
-    for (name, id) in targets(docker, rec).await {
+    for (name, id) in targets(docker, rec, server_id).await {
         let Ok(Some(inspected)) = docker::inspect(docker, &id).await else {
             continue;
         };
@@ -516,7 +527,13 @@ async fn sample_service(
     if rec.busy.is_some() {
         return;
     }
+    let live_here = rec
+        .replica_containers()
+        .iter()
+        .find(|r| r.container == live)
+        .is_none_or(|r| r.server_id == server_id);
     if watched.is_empty()
+        && live_here
         && let Ok(Some(i)) = docker::inspect(docker, live).await
     {
         watched.push((live.to_string(), i));

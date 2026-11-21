@@ -8,6 +8,7 @@ mod instance;
 mod notify;
 mod onboarding;
 mod projects;
+mod providers;
 mod secrets;
 mod servers;
 mod services;
@@ -77,6 +78,22 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/services/{id}/scale", post(services::scale))
         .route("/services/{id}/autoscale", put(services::autoscale))
         .route("/services/{id}/capacity", get(services::capacity))
+        .route("/services/{id}/placement", put(services::placement))
+        .route(
+            "/services/{id}/lb",
+            get(providers::service_lb)
+                .put(providers::enable)
+                .delete(providers::disable),
+        )
+        .route("/services/{id}/lb/plan", post(providers::plan))
+        .route("/services/{id}/lb/sync", post(providers::sync))
+        .route("/providers", get(providers::list).post(providers::create))
+        .route(
+            "/providers/{id}",
+            get(providers::get).delete(providers::delete),
+        )
+        .route("/providers/{id}/check", post(providers::check_route))
+        .route("/providers/{id}/discover", get(providers::discover))
         .route("/services/{id}/env", put(services::set_env))
         .route("/services/{id}/domains", post(services::add_domain))
         .route("/domains/{id}", delete(services::delete_domain))

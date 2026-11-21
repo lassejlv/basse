@@ -4,6 +4,7 @@ mod api;
 mod autoscale;
 mod backup_store;
 mod build;
+mod certs;
 mod cloudflare;
 mod config;
 mod database;
@@ -15,6 +16,7 @@ mod error;
 mod github;
 mod host;
 mod instance;
+mod lb;
 mod metrics;
 mod notify;
 mod onboarding;
@@ -511,6 +513,8 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
     notify::monitor::spawn(state.clone());
     stats::spawn_sampler(state.clone());
     autoscale::spawn(state.clone());
+    lb::spawn(state.clone());
+    certs::spawn(state.clone());
     database::spawn_scheduler(state.clone());
     instance::spawn_scheduler(state.clone());
     tokio::spawn({

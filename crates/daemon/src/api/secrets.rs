@@ -47,7 +47,7 @@ pub async fn secret_of_kind(state: &AppState, id: &str, kind: SecretKind) -> Api
     Ok(secret)
 }
 
-async fn check_name(state: &AppState, name: &str) -> ApiResult<()> {
+pub(crate) async fn check_name(state: &AppState, name: &str) -> ApiResult<()> {
     validate_name(name).map_err(AppError::BadRequest)?;
     if state.db.secret_name_taken(name).await? {
         conflict!("a secret named '{name}' already exists");
@@ -55,7 +55,11 @@ async fn check_name(state: &AppState, name: &str) -> ApiResult<()> {
     Ok(())
 }
 
-async fn insert(state: &AppState, name: String, value: SecretValue) -> ApiResult<Secret> {
+pub(crate) async fn insert(
+    state: &AppState,
+    name: String,
+    value: SecretValue,
+) -> ApiResult<Secret> {
     let value = secrets::normalize(value);
     let public_part = secrets::validate(&value).map_err(AppError::BadRequest)?;
     let now = Utc::now();

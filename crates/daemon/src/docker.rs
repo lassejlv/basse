@@ -1632,12 +1632,21 @@ mod tests {
             health: true,
             acme_relay: Some("10.0.0.2".into()),
         };
-        let route = route_labels(&domains, Some(80), LbPolicy::LeastConn, Some("healthz"), &extras);
+        let route = route_labels(
+            &domains,
+            Some(80),
+            LbPolicy::LeastConn,
+            Some("healthz"),
+            &extras,
+        );
         let health = lb_health_path();
         assert_eq!(route["caddy_2"], "http://a.com");
         assert_eq!(route["caddy_2.0_handle"], health);
         assert_eq!(route["caddy_2.0_handle.rewrite"], "* /healthz");
-        assert_eq!(route["caddy_2.0_handle.reverse_proxy"], format!("{}:80", proxy_alias("s")));
+        assert_eq!(
+            route["caddy_2.0_handle.reverse_proxy"],
+            format!("{}:80", proxy_alias("s"))
+        );
         assert_eq!(route["caddy_2.1_handle"], "/.well-known/acme-challenge/*");
         assert_eq!(route["caddy_2.1_handle.reverse_proxy"], "10.0.0.2:80");
         assert_eq!(route["caddy_2.2_handle.redir"], "https://{host}{uri} 308");
@@ -1712,6 +1721,7 @@ mod tests {
             Some(80),
             LbPolicy::LeastConn,
             None,
+            &RouteExtras::default(),
         );
         assert_eq!(
             service["caddy_0.reverse_proxy.header_up"],

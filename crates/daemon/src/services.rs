@@ -64,14 +64,14 @@ pub fn compute_state(
 
 /// Fills `state` on every service with one container listing per server.
 pub async fn with_states(state: &AppState, recs: Vec<ServiceRecord>) -> Vec<Service> {
-    let servers: HashSet<&str> = recs
+    let servers: HashSet<String> = recs
         .iter()
         .filter(|r| r.live_container.is_some() && r.busy.is_none())
-        .map(|r| r.service.server_id.as_str())
+        .flat_map(ServiceRecord::replica_servers)
         .collect();
     let listings = join_all(servers.into_iter().map(|server_id| async move {
         let listing = async {
-            let (_, docker) = state.docker_for(server_id).await.ok()?;
+            let (_, docker) = state.docker_for(&server_id).await.ok()?;
             docker::list_managed(&docker).await.ok()
         };
         let containers = tokio::time::timeout(LOOKUP_TIMEOUT, listing)
@@ -83,19 +83,24 @@ pub async fn with_states(state: &AppState, recs: Vec<ServiceRecord>) -> Vec<Serv
                 .filter_map(|c| Some((c.id.clone()?, RunState::from_summary(c))))
                 .collect::<HashMap<_, _>>()
         });
-        (server_id.to_string(), runs)
+        (server_id, runs)
     }))
     .await;
     let listings: HashMap<String, Option<HashMap<String, RunState>>> =
         listings.into_iter().collect();
     recs.into_iter()
         .map(|rec| {
-            let listing = listings.get(&rec.service.server_id);
-            let reachable = !matches!(listing, Some(None));
+            let reachable = !matches!(listings.get(&rec.service.server_id), Some(None));
             let runs: Vec<Option<RunState>> = rec
                 .replica_containers()
                 .iter()
-                .map(|(_, id)| listing?.as_ref()?.get(id).copied())
+                .map(|r| {
+                    listings
+                        .get(&r.server_id)?
+                        .as_ref()?
+                        .get(&r.container)
+                        .copied()
+                })
                 .collect();
             let mut service = rec.service.clone();
             service.state = compute_state(&rec, &runs, reachable);
@@ -128,9 +133,17 @@ pub async fn detail(state: &AppState, id: &str) -> ApiResult<ServiceDetail> {
         let Some(container_id) = &rec.live_container else {
             return Ok((None, Vec::new()));
         };
-        let docker = state.docker.get(&server).await?;
+        let live_server = rec
+            .replicas
+            .iter()
+            .find(|r| r.container_id == *container_id)
+            .map_or(rec.service.server_id.as_str(), |r| r.server_id.as_str());
+        let docker = match state.db.server(live_server).await? {
+            Some(s) if s.id != server.id => state.docker.get(&s).await?,
+            _ => state.docker.get(&server).await?,
+        };
         let live = docker::inspect(&docker, container_id).await?;
-        let replicas = replicas::describe(state, &docker, &rec).await;
+        let replicas = replicas::describe(state, &rec).await;
         anyhow::Ok((live, replicas))
     };
     let (container, run, reachable, replicas) =
@@ -186,6 +199,7 @@ pub async fn detail(state: &AppState, id: &str) -> ApiResult<ServiceDetail> {
         database,
         compose,
         replicas,
+        lb: db.service_lb(id).await?.as_ref().map(crate::lb::to_api),
     })
 }
 
@@ -347,7 +361,7 @@ pub async fn update(state: &AppState, id: &str, body: UpdateService) -> ApiResul
     if let Some(ok) = body.shared_volume_ok {
         s.scaling.shared_volume_ok = ok;
         if !ok && s.replicas > 1 {
-            replicas::check_volumes(state, &s).await?;
+            replicas::check_volumes(state, &s, s.replicas).await?;
         }
     }
     if let Some(name) = body.name {
@@ -383,8 +397,8 @@ pub async fn update(state: &AppState, id: &str, body: UpdateService) -> ApiResul
     state.db.update_service(&s).await?;
     if rec.live_container.is_some() && route_before != (s.scaling.lb_policy, s.health_path.clone())
     {
-        let (_, docker) = state.docker_for(&s.server_id).await?;
-        replicas::apply_route(state, &docker, &s).await?;
+        let rec = record(state, id).await?;
+        replicas::apply_routes(state, &rec).await?;
     }
     Ok(())
 }
@@ -477,21 +491,24 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
     if rec.live_container.is_none() {
         bad_request!("'{}' has not been deployed yet", rec.service.name);
     }
-    let (_, docker) = state.docker_for(&rec.service.server_id).await?;
+    let (_, home) = state.docker_for(&rec.service.server_id).await?;
     let svc = &rec.service;
     let compose =
         matches!(&svc.source, Source::Git { build, .. } if build.method == BuildMethod::Compose);
-    let targets: Vec<String> = if compose {
-        compose_services(&docker, id)
+    let fleet =
+        replicas::Fleet::connect(state, rec.replica_servers().iter().map(String::as_str)).await;
+    let targets: Vec<(bollard::Docker, String)> = if compose {
+        compose_services(&home, id)
             .await?
             .into_iter()
-            .filter_map(|c| c.container.map(|c| c.id))
+            .filter_map(|c| c.container.map(|c| (home.clone(), c.id)))
             .collect()
     } else {
         let mut existing = Vec::new();
-        for (_, id) in rec.replica_containers() {
-            if docker::inspect(&docker, &id).await?.is_some() {
-                existing.push(id);
+        for r in rec.replica_containers() {
+            let (_, docker) = fleet.get(&r.server_id)?;
+            if docker::inspect(docker, &r.container).await?.is_some() {
+                existing.push((docker.clone(), r.container));
             }
         }
         existing
@@ -499,10 +516,10 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
     match action {
         Power::Stop => {
             if !compose {
-                replicas::apply_route(state, &docker, svc).await?;
+                replicas::apply_routes(state, &rec).await?;
             }
             state.db.set_stopped(id, true).await?;
-            for container in &targets {
+            for (docker, container) in &targets {
                 let options = StopContainerOptions {
                     t: Some(10),
                     ..Default::default()
@@ -535,7 +552,7 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
                 };
                 deploy::enqueue(state, &rec, "start", plan).await?;
             }
-            for container in &targets {
+            for (docker, container) in &targets {
                 if matches!(action, Power::Start) {
                     match docker.start_container(container, None).await {
                         Ok(()) => {}
@@ -556,7 +573,7 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
                 }
             }
             if !compose && !targets.is_empty() {
-                replicas::apply_route(state, &docker, svc).await?;
+                replicas::apply_routes(state, &rec).await?;
             }
             let verb = if matches!(action, Power::Start) {
                 "started"
@@ -574,7 +591,10 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
             state.notify_service(svc, Event::new(kind)).await;
         }
     }
-    state.refresh_proxy_pages(&svc.server_id).await;
+    for server_id in rec.replica_servers() {
+        state.refresh_proxy_pages(&server_id).await;
+    }
+    state.lb_kick();
     Ok(())
 }
 

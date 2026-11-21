@@ -58,6 +58,8 @@ pub struct AppState {
     public_ips: Mutex<Option<(Instant, PublicIps)>>,
     /// Repositories each git source can see, by source id, with when they were listed.
     repo_cache: Mutex<HashMap<Id, (Instant, Vec<GitRepo>)>>,
+    /// Managed load balancers: the reconciler's wake-up, lock and provider clients.
+    pub lb: crate::lb::Reconciler,
 }
 
 /// Public IPv4 and IPv6 address.
@@ -148,6 +150,7 @@ impl AppState {
             cloudflare: CloudflareIps::default(),
             public_ips: Mutex::new(None),
             repo_cache: Mutex::default(),
+            lb: crate::lb::Reconciler::default(),
         })
     }
 
@@ -198,6 +201,31 @@ impl AppState {
         );
         *lock(&self.public_ips) = Some((Instant::now(), ips));
         ips
+    }
+
+    /// The public addresses of a server: this machine's for the local server, else its SSH
+    /// host, resolved when it is a name.
+    pub async fn server_ips(&self, server: &Server) -> PublicIps {
+        let Some(host) = server
+            .host
+            .as_deref()
+            .filter(|_| server.kind == common::ServerKind::Ssh)
+        else {
+            return self.public_ips().await;
+        };
+        let ips = match host.parse::<IpAddr>() {
+            Ok(ip) => vec![ip],
+            Err(_) => self.probe.resolve(host).await.unwrap_or_default(),
+        };
+        (
+            ips.iter().copied().find(IpAddr::is_ipv4),
+            ips.iter().copied().find(IpAddr::is_ipv6),
+        )
+    }
+
+    /// Asks the load balancer reconciler for a round now.
+    pub fn lb_kick(&self) {
+        self.lb.kick();
     }
 
     /// `https://<domain>` once the instance domain is verified.

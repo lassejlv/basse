@@ -8,6 +8,7 @@ use crate::db::{ReplicaRow, ServiceRecord};
 use crate::docker::{self, ContainerSpec, RunState};
 use crate::error::{ApiResult, bad_request, conflict};
 use crate::notify::Event;
+use crate::placement::{self, Slot};
 use crate::state::AppState;
 use anyhow::{Context as _, Result, anyhow, bail};
 use bollard::Docker;
@@ -277,6 +278,23 @@ pub async fn apply_route(
     docker::ensure_route(docker, &svc.id, labels).await
 }
 
+/// Brings the service's route in line on every server that runs one of its replicas.
+pub async fn apply_routes(state: &AppState, rec: &ServiceRecord) -> Result<()> {
+    let servers: Vec<Id> = if rec.replicas.is_empty() {
+        vec![rec.service.server_id.clone()]
+    } else {
+        rec.replica_servers()
+            .into_iter()
+            .filter(|s| rec.replicas.iter().any(|r| &r.server_id == s))
+            .collect()
+    };
+    for server_id in servers {
+        let (_, docker) = connect(state, &server_id).await?;
+        apply_route(state, &docker, &rec.service, &server_id).await?;
+    }
+    Ok(())
+}
+
 /// Removes the service's route from a server that runs none of its replicas any more.
 pub async fn remove_route(docker: &Docker, service_id: &str) -> Result<()> {
     docker::ensure_route(docker, service_id, HashMap::new()).await
@@ -365,6 +383,14 @@ impl Fleet {
         fleet
     }
 
+    /// Every reachable server's engine.
+    pub fn dockers(&self) -> HashMap<Id, Docker> {
+        self.servers
+            .iter()
+            .map(|(id, (_, d))| (id.clone(), d.clone()))
+            .collect()
+    }
+
     pub fn docker(&self, id: &str) -> Option<&Docker> {
         self.servers.get(id).map(|(_, d)| d)
     }
@@ -387,7 +413,8 @@ impl Fleet {
     }
 
     pub fn name(&self, id: &str) -> String {
-        self.server(id).map_or_else(|| id.to_string(), |s| s.name.clone())
+        self.server(id)
+            .map_or_else(|| id.to_string(), |s| s.name.clone())
     }
 
     /// Makes sure `image` is on `server_id`: an image the daemon built is copied from a server
@@ -441,7 +468,10 @@ pub async fn describe(state: &AppState, rec: &ServiceRecord) -> Vec<Replica> {
         let fleet = &fleet;
         async move {
             let docker = fleet.docker(&r.server_id)?;
-            docker::inspect(docker, &r.container_id).await.ok().flatten()
+            docker::inspect(docker, &r.container_id)
+                .await
+                .ok()
+                .flatten()
         }
     }))
     .await;
@@ -861,13 +891,12 @@ pub async fn reconcile(state: &Arc<AppState>, service_id: &str, reason: &str) ->
                 .map(|(index, server_id)| {
                     let (fleet, env, live, image) = (&fleet, &env, &live, &image);
                     async move {
-                        let (server, docker) = fleet.get(server_id).map_err(|e| format!("{e:#}"))?;
-                        add_replica(
-                            state, docker, server, svc, env, live, image, *index, routed,
-                        )
-                        .await
-                        .map(|()| *index)
-                        .map_err(|e| format!("replica #{index} on {}: {e:#}", server.name))
+                        let (server, docker) =
+                            fleet.get(server_id).map_err(|e| format!("{e:#}"))?;
+                        add_replica(state, docker, server, svc, env, live, image, *index, routed)
+                            .await
+                            .map(|()| *index)
+                            .map_err(|e| format!("replica #{index} on {}: {e:#}", server.name))
                     }
                 }),
         )
@@ -905,10 +934,11 @@ pub async fn reconcile(state: &Arc<AppState>, service_id: &str, reason: &str) ->
     if let Some(after) = &after {
         for server_id in rec.replica_servers() {
             let still = after.replicas.iter().any(|r| r.server_id == server_id);
-            if !still && let Some(docker) = fleet.docker(&server_id) {
-                if let Err(e) = remove_route(docker, &svc.id).await {
-                    problems.push(format!("{e:#}"));
-                }
+            if !still
+                && let Some(docker) = fleet.docker(&server_id)
+                && let Err(e) = remove_route(docker, &svc.id).await
+            {
+                problems.push(format!("{e:#}"));
             }
         }
     }
@@ -933,7 +963,10 @@ pub async fn reconcile(state: &Arc<AppState>, service_id: &str, reason: &str) ->
             .service_activity(
                 svc,
                 ActivityLevel::Success,
-                format!("Scaled to {now} replica{}{on}", if now == 1 { "" } else { "s" }),
+                format!(
+                    "Scaled to {now} replica{}{on}",
+                    if now == 1 { "" } else { "s" }
+                ),
                 Some(detail),
             )
             .await;
