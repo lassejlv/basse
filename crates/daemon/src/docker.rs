@@ -12,8 +12,9 @@ use bollard::models::{
     PortBinding, RestartPolicy as DockerRestart, RestartPolicyNameEnum, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
-    CreateContainerOptions, CreateImageOptions, ListContainersOptions, ListNetworksOptions,
-    ListVolumesOptions, RemoveContainerOptions, RemoveVolumeOptions, StopContainerOptions,
+    CreateContainerOptions, CreateImageOptions, DownloadFromContainerOptions, ImportImageOptions,
+    ListContainersOptions, ListNetworksOptions, ListVolumesOptions, RemoveContainerOptions,
+    RemoveVolumeOptions, StopContainerOptions, UploadToContainerOptions,
 };
 use bollard::{API_DEFAULT_VERSION, Docker};
 use common::{
@@ -27,7 +28,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 
 /// Reverse proxy image run on every server.
 pub const PROXY_IMAGE: &str = "lucaslorentz/caddy-docker-proxy:2.12-alpine";
-/// Small image for helper containers that copy files into volumes.
+/// Small image for helper containers that copy files into or between volumes.
 pub const HELPER_IMAGE: &str = "busybox:1.37";
 const DOCKER_TIMEOUT_SECS: u64 = 120;
 
@@ -865,12 +866,23 @@ pub async fn volume_mountpoint(docker: &Docker, name: &str) -> Result<String> {
 }
 
 pub async fn ensure_volume(docker: &Docker, name: &str) -> Result<()> {
+    create_volume(
+        docker,
+        name,
+        HashMap::from([(brand::label("managed"), "true".to_string())]),
+    )
+    .await
+}
+
+/// Creates a volume, or does nothing when one of that name exists.
+pub async fn create_volume(
+    docker: &Docker,
+    name: &str,
+    labels: HashMap<String, String>,
+) -> Result<()> {
     let request = VolumeCreateRequest {
         name: Some(name.to_string()),
-        labels: Some(HashMap::from([(
-            brand::label("managed"),
-            "true".to_string(),
-        )])),
+        labels: Some(labels),
         ..Default::default()
     };
     docker
@@ -878,6 +890,142 @@ pub async fn ensure_volume(docker: &Docker, name: &str) -> Result<()> {
         .await
         .map(drop)
         .with_context(|| format!("cannot create volume {name}"))
+}
+
+/// The volume's labels, or `None` when it does not exist.
+pub async fn volume_labels(docker: &Docker, name: &str) -> Result<Option<HashMap<String, String>>> {
+    match docker.inspect_volume(name).await {
+        Ok(v) => Ok(Some(v.labels)),
+        Err(e) if is_not_found(&e) => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("cannot inspect volume {name}")),
+    }
+}
+
+/// Names and labels of the volumes carrying `label`.
+pub async fn volumes_by_label(
+    docker: &Docker,
+    label: &str,
+) -> Result<Vec<(String, HashMap<String, String>)>> {
+    let filters = HashMap::from([("label".to_string(), vec![label.to_string()])]);
+    let listed = docker
+        .list_volumes(Some(ListVolumesOptions {
+            filters: Some(filters),
+        }))
+        .await
+        .context("cannot list volumes")?;
+    Ok(listed
+        .volumes
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| (v.name, v.labels))
+        .collect())
+}
+
+/// Streams the contents of volume `name` on `from` into the volume of the same name on `to`,
+/// which must exist. Each side mounts its volume in a helper container that is created but never
+/// started, and the archive endpoints carry a tar between them, owners and modes included.
+/// Returns the size of the tar.
+pub async fn copy_volume(from: &Docker, to: &Docker, name: &str, helper: &str) -> Result<u64> {
+    const MOUNT: &str = "/volume";
+    let holder = |docker: &Docker| {
+        let docker = docker.clone();
+        async move {
+            let body = ContainerCreateBody {
+                image: Some(HELPER_IMAGE.to_string()),
+                labels: Some(HashMap::from([(
+                    brand::label("managed"),
+                    "true".to_string(),
+                )])),
+                host_config: Some(HostConfig {
+                    binds: Some(vec![format!("{name}:{MOUNT}")]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            remove_container(&docker, helper).await?;
+            docker
+                .create_container(
+                    Some(CreateContainerOptions {
+                        name: Some(helper.to_string()),
+                        ..Default::default()
+                    }),
+                    body,
+                )
+                .await
+                .map(|c| c.id)
+                .with_context(|| format!("cannot create helper container {helper}"))
+        }
+    };
+    let source = holder(from).await?;
+    let copied = async {
+        let target = holder(to).await?;
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let counter = sent.clone();
+        let tar = from
+            .download_from_container(
+                &source,
+                Some(DownloadFromContainerOptions {
+                    path: MOUNT.to_string(),
+                }),
+            )
+            .map(move |chunk| {
+                chunk
+                    .inspect(|b| {
+                        counter.fetch_add(b.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    })
+                    .map_err(std::io::Error::other)
+            });
+        let uploaded = to
+            .upload_to_container(
+                &target,
+                Some(UploadToContainerOptions {
+                    path: "/".to_string(),
+                    ..Default::default()
+                }),
+                bollard::body_try_stream(tar),
+            )
+            .await
+            .with_context(|| format!("cannot copy volume {name}"));
+        let removed = remove_container(to, &target).await;
+        uploaded?;
+        removed?;
+        anyhow::Ok(sent.load(std::sync::atomic::Ordering::Relaxed))
+    }
+    .await;
+    let removed = remove_container(from, &source).await;
+    let size = copied?;
+    removed?;
+    Ok(size)
+}
+
+/// Streams an image from one engine into another, like `docker save | docker load`. Returns the
+/// size of the archive.
+pub async fn copy_image(from: &Docker, to: &Docker, image: &str) -> Result<u64> {
+    let sent = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = sent.clone();
+    let archive = from.export_image(image).map(move |chunk| {
+        chunk.inspect(|b| {
+            counter.fetch_add(b.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        })
+    });
+    let mut loading = to.import_image_stream(
+        ImportImageOptions {
+            quiet: true,
+            ..Default::default()
+        },
+        archive,
+        None,
+    );
+    while let Some(info) = loading.next().await {
+        let info = info.with_context(|| format!("cannot copy image {image}"))?;
+        if let Some(message) = info.error_detail.and_then(|e| e.message) {
+            bail!("cannot load image {image}: {message}");
+        }
+    }
+    if !image_exists(to, image).await? {
+        bail!("copying image {image} finished without the image on the target");
+    }
+    Ok(sent.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 pub async fn remove_volume(docker: &Docker, name: &str) -> Result<()> {

@@ -708,6 +708,7 @@ fn deploy_pipeline_click_jumps_to_a_logged_step_and_wheel_scrolls_output() {
         back: Screen::Service,
         announced: false,
         pipeline_offset: 0,
+        moving_to: None,
     });
     let buf = draw(&app, 120, 24);
     let pipe_y = label(&buf, "Pipeline").y;
@@ -3039,4 +3040,121 @@ async fn a_cut_error_opens_in_full_with_e_or_a_click() {
     app.error("short");
     draw(&app, 120, 30);
     assert!(!app.expand_error(), "an error that fits is not expandable");
+}
+
+#[tokio::test]
+async fn settings_move_opens_the_form_picker_confirm_and_live_view() {
+    let mut app = fixture();
+    app.servers[1].kind = ServerKind::Ssh;
+    app.servers[1].host = Some("203.0.113.7".into());
+    app.open_service("fixture-web", Tab::Settings);
+    let buf = draw(&app, 120, 30);
+    let row = assert_hit(
+        &app,
+        label(&buf, "m  move to another server"),
+        char_key('m'),
+    );
+    assert_hit(&app, label(&buf, "m move"), char_key('m'));
+
+    click(&mut app, row);
+    let Some(Overlay::Form(form)) = &app.overlay else {
+        panic!("move form");
+    };
+    assert!(matches!(&form.kind, FormKind::MoveService { from, .. } if from == "fixture-node"));
+    assert_eq!(
+        form.raw("server"),
+        "fixture-worker",
+        "the other server by default"
+    );
+    assert!(form.on("copy_volumes"), "the service has a volume");
+    let buf = draw(&app, 120, 30);
+    label(&buf, "from fixture-node");
+    label(
+        &buf,
+        "fixture-node keeps serving until the new server passes its health check.",
+    );
+    label(
+        &buf,
+        "Point web.example.test at the new server once it is live.",
+    );
+
+    press(&mut app, KeyCode::Enter);
+    let Some(Overlay::Picker(picker)) = &app.overlay else {
+        panic!("server picker");
+    };
+    assert_eq!(picker.subtitle, "move fixture-web from fixture-node");
+    let current = picker
+        .items
+        .iter()
+        .find(|i| i.name == "fixture-node")
+        .unwrap();
+    assert!(current.disabled);
+    assert_eq!(current.badge, "current");
+    assert_eq!(picker.items[picker.row].name, "fixture-worker");
+    let buf = draw(&app, 120, 30);
+    label(&buf, "fixture-web runs here");
+
+    press(&mut app, KeyCode::Enter);
+    assert!(matches!(&app.overlay, Some(Overlay::Form(_))));
+    press(&mut app, KeyCode::Char(' '));
+    assert!(matches!(&app.overlay, Some(Overlay::Form(f)) if !f.on("copy_volumes")));
+    app.submit_form(false);
+    let Some(Overlay::Confirm(confirm)) = &app.overlay else {
+        panic!("move confirmation");
+    };
+    assert_eq!(confirm.verb, "move");
+    assert!(!confirm.danger);
+    assert_eq!(
+        confirm.message,
+        "Move fixture-web to fixture-worker? fixture-node keeps serving until fixture-worker passes its health check."
+    );
+    assert!(matches!(
+        &confirm.action,
+        ConfirmAction::MoveService { service_id, server_id, to, copy_volumes: false }
+            if service_id == "fixture-web" && server_id == "fixture-worker" && to == "fixture-worker"
+    ));
+    let buf = draw(&app, 120, 30);
+    label(&buf, "y move");
+
+    let mut moving = deployment();
+    moving.trigger = "move".into();
+    moving.steps = [StepKind::Transfer, StepKind::Start, StepKind::Health]
+        .into_iter()
+        .map(|kind| Step {
+            kind,
+            status: StepStatus::Pending,
+            detail: None,
+            started_at: None,
+            finished_at: None,
+        })
+        .collect();
+    moving.steps[0].status = StepStatus::Done;
+    moving.steps[0].detail = Some("image + volumes".into());
+    app.overlay = None;
+    app.apply(crate::app::Msg::MoveStarted(
+        Box::new(moving),
+        "fixture-worker".into(),
+    ));
+    assert_eq!(app.screen, Screen::Deploy);
+    let buf = draw(&app, 120, 30);
+    for text in [
+        "moving #27",
+        "→ fixture-worker",
+        "transfer",
+        "image + volumes",
+        "Move output",
+        "fixture-node serves until fixture-wor…",
+        "c cancel move",
+    ] {
+        label(&buf, text);
+    }
+}
+
+#[tokio::test]
+async fn move_needs_another_server() {
+    let mut app = fixture();
+    app.servers.truncate(1);
+    app.open_service("fixture-web", Tab::Settings);
+    press(&mut app, KeyCode::Char('m'));
+    assert!(app.overlay.is_none());
 }

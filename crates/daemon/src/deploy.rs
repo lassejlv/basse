@@ -25,6 +25,10 @@ use tokio::sync::{broadcast, watch};
 
 mod methods;
 mod mounts;
+mod transfer;
+
+use transfer::Moving;
+pub use transfer::relocate;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const STABLE_FOR: Duration = Duration::from_secs(5);
@@ -43,6 +47,28 @@ pub enum Plan {
     Rollback(Box<Deployment>),
     /// Recreate the live container with fresh configuration (domains, env).
     Reconfigure,
+    /// Run the service on another server, then remove it from the one it is on.
+    Move(Box<Move>),
+}
+
+/// Where a move goes and what it brings along.
+pub struct Move {
+    pub to: Server,
+    pub copy_volumes: bool,
+    /// Deploy from source on the target instead of carrying the live image over: compose
+    /// builds, and services with nothing live.
+    pub from_source: bool,
+}
+
+impl Plan {
+    /// Whether the image comes from the service's source rather than an earlier deployment.
+    fn builds_from_source(&self) -> bool {
+        match self {
+            Plan::Source => true,
+            Plan::Move(m) => m.from_source,
+            Plan::Rollback(_) | Plan::Reconfigure => false,
+        }
+    }
 }
 
 /// Running deployments and the per-service locks that serialize them.
@@ -199,37 +225,34 @@ pub async fn enqueue(
     plan: Plan,
 ) -> ApiResult<Deployment> {
     let service = &rec.service;
-    let server = state.server(&service.server_id).await?;
-    let kinds: &[StepKind] = match (&plan, &service.source) {
-        (Plan::Source, Source::Git { .. }) => &[
-            StepKind::Clone,
-            StepKind::Build,
-            StepKind::Start,
-            StepKind::Health,
-            StepKind::Switch,
-            StepKind::Cleanup,
-        ],
-        (Plan::Source, _) => &[
-            StepKind::Pull,
-            StepKind::Start,
-            StepKind::Health,
-            StepKind::Switch,
-            StepKind::Cleanup,
-        ],
-        _ => &[
-            StepKind::Start,
-            StepKind::Health,
-            StepKind::Switch,
-            StepKind::Cleanup,
-        ],
+    let server = match &plan {
+        Plan::Move(m) => m.to.clone(),
+        _ => state.server(&service.server_id).await?,
     };
-    let (image, commit, commit_message) = match &plan {
-        Plan::Rollback(target) => (
-            target.image.clone(),
-            target.commit.clone(),
-            target.commit_message.clone(),
-        ),
-        _ => (None, None, None),
+    let mut kinds: Vec<StepKind> = match (plan.builds_from_source(), &service.source) {
+        (true, Source::Git { .. }) => vec![StepKind::Clone, StepKind::Build],
+        (true, _) => vec![StepKind::Pull],
+        (false, _) => Vec::new(),
+    };
+    if let Plan::Move(m) = &plan
+        && (!m.from_source || m.copy_volumes)
+    {
+        kinds.push(StepKind::Transfer);
+    }
+    kinds.extend([
+        StepKind::Start,
+        StepKind::Health,
+        StepKind::Switch,
+        StepKind::Cleanup,
+    ]);
+    let carried = match &plan {
+        Plan::Rollback(target) => Some((**target).clone()),
+        Plan::Move(m) if !m.from_source => state.db.live_deployment(&service.id).await?,
+        _ => None,
+    };
+    let (image, commit, commit_message) = match carried {
+        Some(d) => (d.image, d.commit, d.commit_message),
+        None => (None, None, None),
     };
     let mut d = Deployment {
         id: new_id(),
@@ -295,6 +318,7 @@ pub async fn enqueue(
             stopped_previous: None,
             build_tag: None,
             creating_container: false,
+            moving: None,
         },
         plan,
         state.deploys.lock_for(&service.id),
@@ -435,6 +459,8 @@ struct Job {
     stopped_previous: Option<String>,
     build_tag: Option<String>,
     creating_container: bool,
+    /// The old server of a move, and what the move did there and on the target.
+    moving: Option<Moving>,
 }
 
 impl Job {
@@ -447,21 +473,35 @@ impl Job {
             .context("the service was deleted")?;
         // Two database servers must never run on one data volume, so databases are replaced
         // by stopping the live container first instead of overlapping old and new.
-        let previous = rec
-            .live_container
-            .filter(|_| matches!(rec.service.source, Source::Database { .. }));
+        let previous = rec.live_container.filter(|_| {
+            matches!(rec.service.source, Source::Database { .. }) && !matches!(plan, Plan::Move(_))
+        });
         let mut svc = rec.service;
         let env = db
             .environment(&svc.environment_id)
             .await?
             .context("the environment was deleted")?;
-        let server = db
+        let current = db
             .server(&svc.server_id)
             .await?
             .context("the server was deleted")?;
+        let server = match &plan {
+            Plan::Move(m) => m.to.clone(),
+            _ => current.clone(),
+        };
         let docker = interruptible(&self.phase, self.state.docker.get(&server)).await?;
         self.service = Some(svc.clone());
         self.docker = Some(docker.clone());
+        if let Plan::Move(m) = &plan {
+            let from = interruptible(&self.phase, self.state.docker.get(&current))
+                .await
+                .with_context(|| format!("cannot reach {}, the server it is on", current.name))?;
+            self.log.system(format!(
+                "Moving {} from server {} to {}",
+                svc.name, current.name, server.name
+            ));
+            self.moving = Some(Moving::new(current, from, m.to.id.clone(), m.copy_volumes));
+        }
         self.log.system(format!(
             "Deploying {} to server {}",
             svc.source.label(),
@@ -488,7 +528,7 @@ impl Job {
 
         let image = match (&plan, &svc.source) {
             (
-                Plan::Source,
+                _,
                 Source::Git {
                     repo,
                     branch,
@@ -496,7 +536,7 @@ impl Job {
                     root,
                     ..
                 },
-            ) => {
+            ) if plan.builds_from_source() => {
                 self.set_status(DeploymentStatus::Building).await;
                 let root = root.clone();
                 let dir = self
@@ -528,13 +568,13 @@ impl Job {
                 }
                 tag
             }
-            (Plan::Source, Source::Image { image }) => {
+            (_, Source::Image { image }) if plan.builds_from_source() => {
                 self.set_status(DeploymentStatus::Building).await;
                 let image = docker::normalize_image(image);
                 self.pull(&docker, &image).await?;
                 image
             }
-            (Plan::Source, Source::Database { kind, version }) => {
+            (_, Source::Database { kind, version }) if plan.builds_from_source() => {
                 self.set_status(DeploymentStatus::Building).await;
                 let image = format!("{}:{version}", kind.image());
                 self.pull(&docker, &image).await?;
@@ -544,16 +584,17 @@ impl Job {
                 .image
                 .clone()
                 .context("rollback target has no image")?,
-            (Plan::Reconfigure, _) => db
+            (_, _) => db
                 .live_deployment(&svc.id)
                 .await?
                 .and_then(|d| d.image)
-                .context("the service has no live deployment to reconfigure")?,
+                .context("the service has no live deployment to reuse")?,
         };
         self.d.image = Some(image.clone());
+        self.transfer(&docker, &svc, Some(&image)).await?;
         self.set_status(DeploymentStatus::Starting).await;
 
-        let reused = !matches!(plan, Plan::Source);
+        let reused = !plan.builds_from_source();
         let container = self
             .start(&docker, &svc, &env, &image, reused, previous)
             .await?;
@@ -581,6 +622,7 @@ impl Job {
                 .is_empty();
         self.switch(&docker, &svc, &container, routed).await?;
         self.cleanup(&svc, &container).await;
+        self.finish_move(&svc).await;
         Ok(())
     }
 
@@ -665,6 +707,7 @@ impl Job {
                         self.remove_build_image(docker, tag).await;
                     }
                 }
+                self.undo_move().await;
                 self.d.status = if cancelled {
                     DeploymentStatus::Cancelled
                 } else {
@@ -1264,7 +1307,7 @@ impl Job {
         }
         self.d.status = DeploymentStatus::Live;
         self.d.finished_at = Some(now);
-        self.state.db.switch_live(&self.d).await?;
+        self.state.db.switch_live(&self.d, self.moved_to()).await?;
         self.log.system("Traffic switched to the new container");
         Ok(())
     }

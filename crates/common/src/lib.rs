@@ -545,6 +545,8 @@ pub enum StepKind {
     Clone,
     Build,
     Pull,
+    /// A move copies the image and volumes from the old server to the new one.
+    Transfer,
     Start,
     Health,
     Switch,
@@ -557,6 +559,7 @@ impl StepKind {
             Self::Clone => "clone",
             Self::Build => "build",
             Self::Pull => "pull",
+            Self::Transfer => "transfer",
             Self::Start => "start",
             Self::Health => "health",
             Self::Switch => "switch",

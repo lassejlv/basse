@@ -342,6 +342,7 @@ impl Job {
         self.end(StepKind::Build, Some(format!("{} services", names.len())))
             .await;
 
+        self.transfer(docker, svc, None).await?;
         self.set_status(DeploymentStatus::Starting).await;
         self.begin(StepKind::Start, Some(project.clone())).await;
         self.run_logged(
@@ -373,7 +374,7 @@ impl Job {
         }
         self.d.status = DeploymentStatus::Live;
         self.d.finished_at = Some(now);
-        self.state.db.switch_live(&self.d).await?;
+        self.state.db.switch_live(&self.d, self.moved_to()).await?;
 
         self.begin(StepKind::Cleanup, None).await;
         let mut removed = 0;
@@ -396,6 +397,7 @@ impl Job {
             )),
         )
         .await;
+        self.finish_move(svc).await;
         Ok(())
     }
 
