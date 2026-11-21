@@ -1563,8 +1563,35 @@ fn domain_fixture(verified: bool) -> App {
         records: vec![record("A", "203.0.113.10"), record("AAAA", "2001:db8::10")],
         checks,
         checked_at: None,
+        cloudflare: None,
     });
     app
+}
+
+#[test]
+fn domain_guide_shows_cloudflare_and_the_flexible_mode() {
+    use common::CloudflareProxy;
+    for verified in [false, true] {
+        let mut app = domain_fixture(verified);
+        if let Some(d) = app.domain.data.as_mut() {
+            d.cloudflare = Some(CloudflareProxy {
+                records: vec!["AAAA".into()],
+                direct: vec!["A".into()],
+                flexible: !verified,
+            });
+        }
+        let buf = draw(&app, 160, 40);
+        label(&buf, "AAAA through Cloudflare");
+        label(&buf, "A points straight here");
+        label(&buf, "from CF-Connecting-IP");
+        if verified {
+            label(&buf, "Full (strict)");
+        } else {
+            label(&buf, "✕ Flexible");
+            label(&buf, "Cloudflare proxies AAAA. Keep these values");
+            assert_hit(&app, label(&buf, "AAAA"), Hit::Record(1));
+        }
+    }
 }
 
 #[test]
@@ -2236,6 +2263,117 @@ fn channel_wizard_steps_register_only_their_controls() {
     );
     click(&mut app, back);
     assert!(matches!(&app.overlay, Some(Overlay::Form(_))));
+}
+
+fn daemon_info(version: &str) -> common::DaemonInfo {
+    common::DaemonInfo {
+        version: version.into(),
+        hostname: "fixture-host".into(),
+        public_ip: None,
+        cpu_percent: 0.0,
+        mem_used: 0,
+        mem_total: 0,
+        disk_used: 0,
+        disk_total: 0,
+        cpu_history: Vec::new(),
+        proxy: ProxyStatus::Running,
+        ssh_public_key: None,
+        url: None,
+    }
+}
+
+fn top_line(app: &App) -> String {
+    let buf = draw(app, 200, 24);
+    (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect()
+}
+
+#[test]
+fn top_bar_shows_the_version_skew_until_the_cli_is_replaced() {
+    let mut app = fixture();
+    let ours = env!("CARGO_PKG_VERSION");
+    app.info = Some(daemon_info(ours));
+    assert!(top_line(&app).contains(&format!("{} {ours}", common::brand::DAEMON_BIN)));
+    assert!(!top_line(&app).contains('≠'));
+
+    app.info = Some(daemon_info("99.0.0"));
+    let hint = common::version_skew(ours, "99.0.0").expect("versions differ");
+    assert!(top_line(&app).contains(&hint), "{}", top_line(&app));
+
+    app.cli_updated = Some("99.0.0".into());
+    assert!(!top_line(&app).contains('≠'));
+}
+
+#[test]
+fn settings_update_covers_the_cli_and_the_daemon() {
+    let mut app = fixture();
+    app.screen = Screen::Settings;
+    let ours = env!("CARGO_PKG_VERSION");
+    app.settings.settings = Some(InstanceSettings {
+        version: ours.into(),
+        hostname: "fixture-host".into(),
+        public_ip: None,
+        public_ip_override: None,
+        listen: "127.0.0.1:7700".into(),
+        data_dir: "/fixture".into(),
+        data_dir_size: 0,
+        manage_proxy: true,
+        proxy: ProxyStatus::Running,
+        proxy_image: "example:1".into(),
+        docker_version: None,
+        ssh_public_key: None,
+        reclaimable: None,
+        supervised: true,
+        domain: None,
+        domain_verified: false,
+    });
+    let update = |app: &mut App, daemon_behind: bool| {
+        app.overlay = None;
+        app.settings.release = Some(common::VersionCheck {
+            current: ours.into(),
+            latest: Some("v99.0.0".into()),
+            update_available: daemon_behind,
+        });
+        crate::keys::handle(app, crossterm::event::KeyEvent::from(KeyCode::Char('u')));
+        match &app.overlay {
+            Some(Overlay::Confirm(Confirm {
+                action: ConfirmAction::Update { cli, server, .. },
+                message,
+                ..
+            })) => (*cli, *server, message.clone()),
+            _ => panic!("u did not ask to update"),
+        }
+    };
+
+    let (cli, server, message) = update(&mut app, true);
+    assert!(cli && server, "{message}");
+    assert!(
+        message.contains(common::brand::CLI_BIN) && message.contains(common::brand::DAEMON_BIN)
+    );
+
+    let (cli, server, _) = update(&mut app, false);
+    assert!(cli && !server);
+
+    app.cli_updated = Some("99.0.0".into());
+    let (cli, server, _) = update(&mut app, true);
+    assert!(!cli && server);
+
+    app.overlay = None;
+    app.settings.release = Some(common::VersionCheck {
+        current: ours.into(),
+        latest: Some(format!("v{ours}")),
+        update_available: false,
+    });
+    app.cli_updated = None;
+    crate::keys::handle(
+        &mut app,
+        crossterm::event::KeyEvent::from(KeyCode::Char('u')),
+    );
+    assert!(app.overlay.is_none());
+    assert!(
+        app.toast
+            .as_ref()
+            .is_some_and(|t| t.text.contains("up to date"))
+    );
 }
 
 fn onboarding(

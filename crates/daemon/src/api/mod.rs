@@ -31,7 +31,7 @@ use serde::de::DeserializeOwned;
 use std::convert::Infallible;
 use std::sync::Arc;
 
-pub use servers::{check_server, ensure_local_proxy};
+pub use servers::{check_server, ensure_local_proxy, sync_proxy};
 pub use settings::latest_version;
 pub use storage::run_storage_test;
 
@@ -176,6 +176,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/github/{id}/setup", get(github::setup))
         .route("/github/{id}/webhook", post(github::webhook))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/.well-known/acme-challenge/{token}", get(domain::verify))
         .fallback(|| async { AppError::NotFound("no such route".into()) })
         .with_state(state)
 }

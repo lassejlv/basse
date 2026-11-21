@@ -46,10 +46,10 @@
 //! | POST | `/settings/proxy/restart` | | `Server` (reinstalls the proxy on the local server) |
 //! | POST | `/settings/prune` | | `PruneResult` (old build images, dangling images, build cache) |
 //! | GET | `/settings/version` | | `VersionCheck` (latest release, cached for an hour) |
-//! | POST | `/settings/update` | `UpdateRequest` | `UpdateResult` (replaces the binaries, then the daemon exits to restart) |
+//! | POST | `/settings/update` | `UpdateRequest` | `UpdateResult` (`updated: false` when that release is already installed; otherwise replaces the binaries, then the daemon exits to restart) |
 //! | GET | `/settings/domain` | | `InstanceDomain` (the DNS records to create and the last check) |
 //! | PUT | `/settings/domain` | `SetInstanceDomain` | `InstanceDomain` (routes the domain to the API through the proxy, then checks it) |
-//! | POST | `/settings/domain/check` | | `InstanceDomain` (DNS, ports 80 and 443, certificate, API) |
+//! | POST | `/settings/domain/check` | | `InstanceDomain` (DNS, ports 80 and 443, certificate, API; detects Cloudflare's proxy) |
 //! | DELETE | `/settings/domain` | | `InstanceDomain` (the API is served on IP:port only again) |
 //!
 //! Git sources. Credentials are stored as secrets and never returned. GitHub App sources need a
@@ -76,6 +76,13 @@
 //! | GET | `/github/{id}/callback?code=&state=` | the setup state; exchanges the code for the app's credentials, then redirects to the install page |
 //! | GET | `/github/{id}/setup?installation_id=` | the installation must belong to the app, asked with the app's JWT |
 //! | POST | `/github/{id}/webhook` | `X-Hub-Signature-256` with the app's webhook secret; a push to a tracked branch deploys |
+//!
+//! The instance domain check fetches its own one-time token through the proxy, over http and
+//! https, to prove that traffic for the domain reaches this server whatever sits in between.
+//!
+//! | Method | Path | Proof |
+//! |---|---|---|
+//! | GET | `/.well-known/acme-challenge/<prefix>-verify-{nonce}` | the nonce of a running check; answers `<nonce> <scheme>`, the scheme the proxy received it on |
 //!
 //! Git services build with `Source::Git.build`: a Dockerfile (with `target` and the service's
 //! env as build args), a compose file deployed as one group (`ServiceDetail.compose` lists its
@@ -289,7 +296,7 @@ pub struct CreateDomain {
     pub compose_service: Option<String>,
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
@@ -396,7 +403,8 @@ pub struct RotatedToken {
 pub struct UpdateRequest {
     /// Release tag such as `v0.2.0`; defaults to the latest release.
     pub version: Option<String>,
-    /// Update even when no supervisor restarts the daemon, or when the version is not newer.
+    /// Reinstall even when the version is not newer, and update even when no supervisor restarts
+    /// the daemon. Without it, a release that is not newer answers `updated: false`.
     #[serde(default)]
     pub force: bool,
 }

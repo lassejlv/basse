@@ -71,24 +71,30 @@ enum Cmd {
     ///
     /// The live and previous image of each service are kept so rollbacks keep working.
     Prune,
-    /// Update the daemon of the current context to the latest release and wait for it to restart.
+    /// Update this CLI, then the daemon of the current context, to the latest release.
+    ///
+    /// Each side that already runs that release is left alone. Without a logged-in context only
+    /// this CLI is updated.
     Update {
-        /// Release tag to install, e.g. v0.2.0 [default: the latest release].
+        /// Release tag to install, e.g. v0.4.1 [default: the latest release].
         #[arg(long)]
         tag: Option<String>,
-        /// Install even when the version is not newer, or when systemd does not supervise the daemon.
+        /// Reinstall even when the version is not newer, and update a daemon systemd does not supervise.
         #[arg(long)]
         force: bool,
-        /// Update this CLI instead, like "upgrade".
-        #[arg(long = "self")]
-        this_cli: bool,
+        /// Only update this CLI binary.
+        #[arg(long, alias = "self")]
+        cli: bool,
+        /// Only update the daemon of the current context.
+        #[arg(long)]
+        server: bool,
     },
-    /// Update this CLI binary to the latest release.
+    /// Update this CLI binary, like "update --cli".
     Upgrade {
-        /// Release tag to install, e.g. v0.2.0 [default: the latest release].
+        /// Release tag to install, e.g. v0.4.1 [default: the latest release].
         #[arg(long)]
         tag: Option<String>,
-        /// Install even when the version is not newer.
+        /// Reinstall even when the version is not newer.
         #[arg(long)]
         force: bool,
     },
@@ -670,33 +676,72 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Cmd::Login { url, token, name }) => return login(&mut config, url, token, name).await,
         Some(Cmd::Context(cmd)) => return context(&mut config, cmd),
         Some(Cmd::Logout { context, all }) => return instance::logout(&mut config, context, all),
-        Some(Cmd::Upgrade { tag, force })
-        | Some(Cmd::Update {
+        Some(Cmd::Upgrade { tag, force }) => {
+            let steps = instance::Steps::CLI;
+            return instance::update(&config, cli.context.as_deref(), steps, tag, force, json)
+                .await;
+        }
+        Some(Cmd::Update {
             tag,
             force,
-            this_cli: true,
-        }) => return instance::upgrade_cli(tag, force).await,
+            cli: only_cli,
+            server,
+        }) => {
+            let steps = instance::Steps::from_flags(only_cli, server);
+            return instance::update(&config, cli.context.as_deref(), steps, tag, force, json)
+                .await;
+        }
         _ => {}
     }
     let (name, ctx) = config.resolve(cli.context.as_deref())?;
     let c = Client::from_context(&ctx)?;
-    if let Some(Cmd::Instance(InstanceCmd::Domain(cmd))) = cli.command {
-        return sources::domain(&mut config, &name, &c, cmd, json).await;
+    let command = cli.command.unwrap_or(Cmd::Tui);
+    let daemon = shows_skew_hint(&command, json).then(|| {
+        let c = c.clone();
+        tokio::spawn(async move { c.info().await })
+    });
+    let result = match command {
+        Cmd::Instance(InstanceCmd::Domain(cmd)) => {
+            sources::domain(&mut config, &name, &c, cmd, json).await
+        }
+        command => dispatch(c, name, command, json).await,
+    };
+    if let Some(daemon) = daemon {
+        skew_hint(daemon).await;
     }
-    match cli.command.unwrap_or(Cmd::Tui) {
+    result
+}
+
+/// Human commands end with a hint when this CLI and the daemon run different versions. JSON
+/// output stays clean, and the TUI shows the hint in its own top bar.
+fn shows_skew_hint(command: &Cmd, json: bool) -> bool {
+    !json && !matches!(command, Cmd::Tui)
+}
+
+/// Prints the version-skew hint on stderr, so piped output stays clean. The daemon's info was
+/// requested alongside the command, so this rarely waits.
+async fn skew_hint(daemon: tokio::task::JoinHandle<Result<DaemonInfo>>) {
+    let Ok(Ok(Ok(info))) = tokio::time::timeout(std::time::Duration::from_secs(1), daemon).await
+    else {
+        return;
+    };
+    if let Some(hint) = version_skew(env!("CARGO_PKG_VERSION"), &info.version) {
+        eprintln!("{}", muted(hint));
+    }
+}
+
+async fn dispatch(c: Client, name: String, command: Cmd, json: bool) -> Result<()> {
+    match command {
         Cmd::Tui => tui::run(c, name).await,
         Cmd::Login { .. }
         | Cmd::Context(_)
         | Cmd::Logout { .. }
         | Cmd::Upgrade { .. }
-        | Cmd::Update { this_cli: true, .. } => unreachable!("handled above"),
+        | Cmd::Update { .. } => unreachable!("handled above"),
         Cmd::Settings { cmd } => instance::settings(&c, cmd, json).await,
         Cmd::Token(TokenCmd::Rotate) => instance::rotate_token(&c, &name, json).await,
         Cmd::Proxy(ProxyCmd::Restart) => instance::restart_proxy(&c, json).await,
         Cmd::Prune => instance::prune(&c, json).await,
-        Cmd::Update { tag, force, .. } => {
-            instance::update_daemon(&c, &name, tag, force, json).await
-        }
         Cmd::Status => status(&c, &name, json).await,
         Cmd::Setup { status } => {
             use std::io::IsTerminal;
@@ -2820,6 +2865,52 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    fn parse(args: &[&str]) -> Option<Cmd> {
+        let argv = std::iter::once(brand::CLI_BIN).chain(args.iter().copied());
+        Cli::try_parse_from(argv).unwrap().command
+    }
+
+    #[test]
+    fn update_flags_pick_the_sides() {
+        let steps = |args: &[&str]| match parse(args) {
+            Some(Cmd::Update { cli, server, .. }) => instance::Steps::from_flags(cli, server),
+            Some(Cmd::Upgrade { .. }) => instance::Steps::CLI,
+            _ => panic!("{args:?} is not an update"),
+        };
+        let both = instance::Steps {
+            cli: true,
+            server: true,
+        };
+        let server = instance::Steps {
+            cli: false,
+            server: true,
+        };
+        assert_eq!(steps(&["update"]), both);
+        assert_eq!(steps(&["update", "--cli", "--server"]), both);
+        assert_eq!(steps(&["update", "--cli"]), instance::Steps::CLI);
+        assert_eq!(steps(&["update", "--self"]), instance::Steps::CLI);
+        assert_eq!(steps(&["upgrade", "--tag", "v0.4.1"]), instance::Steps::CLI);
+        assert_eq!(steps(&["update", "--server", "--force"]), server);
+
+        let mut cmd = Cli::command();
+        let help = cmd
+            .find_subcommand_mut("update")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--cli") && help.contains("--server"));
+        assert!(!help.contains("--self"), "--self stays a hidden alias");
+    }
+
+    #[test]
+    fn skew_hint_is_only_for_human_commands() {
+        let status = parse(&["status"]).unwrap();
+        assert!(shows_skew_hint(&status, false));
+        assert!(!shows_skew_hint(&status, true));
+        assert!(!shows_skew_hint(&parse(&[]).unwrap_or(Cmd::Tui), false));
+        assert!(!shows_skew_hint(&parse(&["tui"]).unwrap(), false));
     }
 
     #[test]

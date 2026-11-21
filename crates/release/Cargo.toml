@@ -15,5 +15,8 @@ hex = "0.4"
 tar = "0.4"
 flate2 = "1"
 
+[dev-dependencies]
+tokio.workspace = true
+
 [lints]
 workspace = true

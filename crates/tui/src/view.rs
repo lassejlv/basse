@@ -201,10 +201,12 @@ fn top_bar(frame: &mut Frame, area: Rect, app: &App) {
             .public_ip
             .clone()
             .unwrap_or_else(|| info.hostname.clone());
-        left.push(Span::styled(
-            format!("{host} · {} {}  ", brand::DAEMON_BIN, info.version),
-            theme::muted(),
-        ));
+        let daemon = match app.cli_updated.as_deref() == Some(info.version.as_str()) {
+            true => None,
+            false => version_skew(env!("CARGO_PKG_VERSION"), &info.version),
+        }
+        .unwrap_or_else(|| format!("{} {}", brand::DAEMON_BIN, info.version));
+        left.push(Span::styled(format!("{host} · {daemon}  "), theme::muted()));
     }
     left.push(match (&app.connection_error, &app.info) {
         _ if app.updating.is_some() => Span::styled(
@@ -3267,6 +3269,7 @@ fn confirm(frame: &mut Frame, area: Rect, c: &Confirm, tick: usize) {
     if let Some((since, label)) = c.busy {
         let wait = match c.action {
             ConfirmAction::RestoreBackup(..) => "the database is busy until this finishes",
+            ConfirmAction::Update { server: false, .. } => "replacing this binary",
             _ => "waiting for the daemon",
         };
         frame.render_widget(Paragraph::new(wait).style(theme::muted()), keys);
@@ -3768,7 +3771,7 @@ fn instance_panel(frame: &mut Frame, area: Rect, app: &App, s: &InstanceSettings
         rows[0],
         "version",
         version,
-        update.as_ref().map(|_| ("u", "update")),
+        (update.is_some() || app.cli_update().is_some()).then_some(("u", "update")),
     );
     setting_row(
         frame,
@@ -3798,16 +3801,20 @@ fn instance_panel(frame: &mut Frame, area: Rect, app: &App, s: &InstanceSettings
         Some(("i", "edit")),
     );
     if let Some(row) = rows.get(3) {
-        setting_row(
-            frame,
-            *row,
-            "from a shell",
-            vec![Span::styled(
-                format!("{} update", brand::CLI_BIN),
-                theme::text(),
-            )],
-            None,
-        );
+        let mut cli = vec![Span::styled(env!("CARGO_PKG_VERSION"), theme::text())];
+        match (&app.cli_updated, app.cli_update(), &app.settings.release) {
+            (Some(to), _, _) => cli.push(Span::styled(
+                format!("  {to} installed · restart {} to use it", brand::CLI_BIN),
+                theme::muted(),
+            )),
+            (None, Some(latest), _) => cli.push(Span::styled(
+                format!("  update available {latest}"),
+                theme::accent(),
+            )),
+            (None, None, Some(_)) => cli.push(Span::styled("  up to date", theme::muted())),
+            _ => {}
+        }
+        setting_row(frame, *row, "cli", cli, None);
     }
     if let (Some(row), Some(o)) = (rows.get(4), &app.setup.data) {
         setting_row(
@@ -5443,22 +5450,95 @@ pub(crate) fn domain(frame: &mut Frame, area: Rect, app: &App) {
     match &view.input {
         Some(input) => domain_input(frame, body, app, d, input),
         None if d.verified => {
-            let [login, checks] = Layout::vertical([Constraint::Length(5), Constraint::Fill(1)])
+            let [login, rest] = Layout::vertical([Constraint::Length(5), Constraint::Fill(1)])
                 .spacing(1)
                 .areas(body);
             domain_login(frame, login, d);
+            let checks = cloudflare_panel(frame, rest, d);
             domain_checks(frame, checks, app, d, "Checks", false);
         }
         None => {
             let rows = d.records.len().max(1) as u16;
-            let [dns, checks] =
-                Layout::vertical([Constraint::Length(rows + 8), Constraint::Fill(1)])
-                    .spacing(1)
-                    .areas(body);
+            let [dns, rest] = Layout::vertical([Constraint::Length(rows + 8), Constraint::Fill(1)])
+                .spacing(1)
+                .areas(body);
             dns_panel(frame, dns, d, &d.records, "1  Point DNS at this server");
+            let checks = cloudflare_panel(frame, rest, d);
             domain_checks(frame, checks, app, d, "2  Checks", true);
         }
     }
+}
+
+/// "A", "A and AAAA".
+fn record_types(types: &[String]) -> String {
+    types.join(" and ")
+}
+
+/// How the domain goes through Cloudflare's proxy, at the top of `area` when it does; returns
+/// the space left below.
+fn cloudflare_panel(frame: &mut Frame, area: Rect, d: &InstanceDomain) -> Rect {
+    let Some(cf) = &d.cloudflare else {
+        return area;
+    };
+    let [panel_area, rest] = Layout::vertical([Constraint::Length(5), Constraint::Fill(1)])
+        .spacing(1)
+        .areas(area);
+    let block = panel(title("Cloudflare", false), None, false);
+    let inner = inside(&block, panel_area);
+    frame.render_widget(block, panel_area);
+    let rows = lines_of(inner, 3);
+    let proxy = if cf.direct.is_empty() {
+        vec![Span::styled(
+            format!("on for {}", record_types(&cf.records)),
+            theme::text(),
+        )]
+    } else {
+        vec![
+            Span::styled(
+                format!("{} through Cloudflare", record_types(&cf.records)),
+                theme::text(),
+            ),
+            Span::styled(
+                format!(
+                    "  {} {} straight here",
+                    record_types(&cf.direct),
+                    if cf.direct.len() == 1 {
+                        "points"
+                    } else {
+                        "point"
+                    }
+                ),
+                theme::muted(),
+            ),
+        ]
+    };
+    setting_row(frame, rows[0], "proxy", proxy, None);
+    let ssl = if cf.flexible {
+        vec![
+            Span::styled("✕ Flexible", theme::fg(theme::ERR)),
+            Span::styled(
+                "  set Full (strict): Flexible loops redirects",
+                theme::muted(),
+            ),
+        ]
+    } else {
+        vec![
+            Span::styled("Full (strict)", theme::text()),
+            Span::styled("  Flexible loops redirects", theme::muted()),
+        ]
+    };
+    setting_row(frame, rows[1], "ssl/tls", ssl, None);
+    setting_row(
+        frame,
+        rows[2],
+        "visitor ip",
+        vec![
+            Span::styled("from CF-Connecting-IP", theme::text()),
+            Span::styled("  trusted only from Cloudflare's ranges", theme::muted()),
+        ],
+        None,
+    );
+    rest
 }
 
 fn domain_input(frame: &mut Frame, area: Rect, app: &App, d: &InstanceDomain, input: &str) {
@@ -5602,11 +5682,14 @@ fn dns_panel(
     }
     next();
     if let Some(r) = next() {
-        frame.render_widget(
-            Paragraph::new("Create them at your DNS provider. A click copies a value.")
-                .style(theme::muted()),
-            r,
-        );
+        let note = match &d.cloudflare {
+            Some(cf) => format!(
+                "Cloudflare proxies {}. Keep these values; the orange cloud can stay on.",
+                record_types(&cf.records)
+            ),
+            None => "Create them at your DNS provider. A click copies a value.".into(),
+        };
+        frame.render_widget(Paragraph::new(note).style(theme::muted()), r);
     }
 }
 

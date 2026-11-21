@@ -14,6 +14,19 @@ async fn auth_is_required_and_errors_are_json() {
         return;
     };
     let http = reqwest::Client::new();
+
+    // The domain check's token route needs no bearer token, and only knows running checks.
+    let res = http
+        .get(format!(
+            "{}/.well-known/acme-challenge/{}-verify-0123abcd",
+            daemon.url,
+            common::brand::PREFIX
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
     let url = format!("{}{API_PREFIX}/projects", daemon.url);
 
     let res = http.get(&url).send().await.unwrap();
@@ -538,6 +551,27 @@ fn serve_refuses_an_uninitialized_data_dir() {
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("is not initialized"));
+}
+
+#[tokio::test]
+async fn updating_to_a_release_that_is_not_newer_is_up_to_date() {
+    let Some(daemon) = Daemon::start().await else {
+        return;
+    };
+    let c = daemon.client();
+    let current = c.info().await.unwrap().version;
+    for version in [current.clone(), format!("v{current}"), "0.0.1".into()] {
+        let result = c
+            .update(&UpdateRequest {
+                version: Some(version),
+                force: false,
+            })
+            .await
+            .unwrap();
+        assert!(!result.updated);
+        assert_eq!((&result.from, &result.to), (&current, &current));
+    }
+    assert_eq!(c.info().await.unwrap().version, current);
 }
 
 #[tokio::test]

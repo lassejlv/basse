@@ -117,7 +117,16 @@ jobs:
           sudo systemctl restart "$DAEMON_BIN"
           until curl -fsS http://127.0.0.1:7700/healthz; do sleep 1; done
           before=$(systemctl show -p MainPID --value "$DAEMON_BIN")
-          $CLI_BIN update --tag "$tag" --force
+          $CLI_BIN update --server --tag "$tag" | tee up-to-date.txt
+          grep "up to date" up-to-date.txt
+          test "$(systemctl show -p MainPID --value "$DAEMON_BIN")" = "$before"
+          release="${ENV_PREFIX}_RELEASE_URL=http://127.0.0.1:8899"
+          sudo install -d -m 755 /opt/readonly
+          sudo cp "$(command -v "$CLI_BIN")" "/opt/readonly/$CLI_BIN"
+          if env "$release" "/opt/readonly/$CLI_BIN" update --cli --tag "$tag" --force 2> denied.txt; then exit 1; fi
+          grep "sudo $CLI_BIN update --cli" denied.txt
+          sudo env "$release" "$(command -v "$CLI_BIN")" update --cli --tag "$tag" --force | grep "→"
+          $CLI_BIN update --server --tag "$tag" --force
           for _ in $(seq 30); do
             after=$(systemctl show -p MainPID --value "$DAEMON_BIN")
             [ "$after" != "$before" ] && [ "$after" != 0 ] && break

@@ -3247,6 +3247,7 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "tar",
+ "tokio",
 ]
 
 [[package]]
@@ -4697,6 +4698,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "ratatui",
+ "release",
  "tokio",
 ]
 

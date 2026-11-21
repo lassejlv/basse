@@ -56,8 +56,12 @@ pub enum Msg {
     Release(VersionCheck),
     /// The token was rotated and, unless the context came from the environment, saved.
     TokenRotated(Result<(String, bool), String>),
-    /// The daemon accepted an update and is restarting into `to`.
-    Updating(UpdateResult),
+    /// An update finished: this CLI binary was replaced, and the daemon accepted its update and
+    /// is restarting. `None` for a side that was not asked to update.
+    Updated {
+        cli: Option<Result<UpdateResult, String>>,
+        server: Option<Result<UpdateResult, String>>,
+    },
     Backups(Id, Vec<Backup>),
     Schedule(Id, BackupSchedule),
     /// A backup was started or polled.
@@ -440,6 +444,8 @@ pub enum ConfirmAction {
     Prune,
     Update {
         force: bool,
+        cli: bool,
+        server: bool,
     },
     Rollback(Id),
     CancelDeploy(Id),
@@ -851,6 +857,8 @@ pub struct App {
     pub setup: crate::setup::SetupView,
     /// Version the daemon is restarting into after an update.
     pub updating: Option<String>,
+    /// Version this CLI binary was replaced with. The running TUI stays the old one until restarted.
+    pub cli_updated: Option<String>,
     /// No new requests while the token is being rotated: the old one is about to stop working.
     rotating: bool,
     pub overlay: Option<Overlay>,
@@ -893,6 +901,7 @@ impl App {
             domain: DomainView::default(),
             setup: crate::setup::SetupView::default(),
             updating: None,
+            cli_updated: None,
             rotating: false,
             overlay: None,
             toast: None,
@@ -1197,7 +1206,11 @@ impl App {
             Msg::Info(Ok(info)) => {
                 if self.updating.as_deref() == Some(info.version.as_str()) {
                     self.updating = None;
-                    self.toast(format!("{} updated to {}", brand::DAEMON_BIN, info.version));
+                    let mut text = format!("{} updated to {}", brand::DAEMON_BIN, info.version);
+                    if let Some(to) = &self.cli_updated {
+                        text.push_str(&format!(" · restart {} to use {to}", brand::CLI_BIN));
+                    }
+                    self.toast(text);
                     self.load_settings();
                     self.load_release();
                 }
@@ -1391,12 +1404,41 @@ impl App {
                 }));
                 self.refresh();
             }
-            Msg::Updating(r) => {
+            Msg::Updated { cli, server } => {
                 if matches!(self.overlay, Some(Overlay::Confirm(_))) {
                     self.overlay = None;
                 }
-                self.progress(format!("installed {} · restarting", r.to));
-                self.updating = Some(r.to);
+                let mut done = Vec::new();
+                let mut failed = Vec::new();
+                match cli {
+                    Some(Ok(r)) if r.updated => {
+                        done.push(format!(
+                            "{} {} → {} · restart it to use it",
+                            brand::CLI_BIN,
+                            r.from,
+                            r.to
+                        ));
+                        self.cli_updated = Some(r.to);
+                    }
+                    Some(Ok(r)) => {
+                        done.push(format!("{} {} is up to date", brand::CLI_BIN, r.from))
+                    }
+                    Some(Err(e)) => failed.push(format!("{}: {e}", brand::CLI_BIN)),
+                    None => {}
+                }
+                match server {
+                    Some(Ok(r)) if r.updated => self.updating = Some(r.to),
+                    Some(Ok(r)) => {
+                        done.push(format!("{} {} is up to date", brand::DAEMON_BIN, r.from))
+                    }
+                    Some(Err(e)) => failed.push(format!("{}: {e}", brand::DAEMON_BIN)),
+                    None => {}
+                }
+                match (&self.updating, failed.is_empty()) {
+                    (_, false) => self.error(failed.join(" · ")),
+                    (Some(to), true) => self.progress(format!("installed {to} · restarting")),
+                    (None, true) => self.toast(done.join(" · ")),
+                }
             }
             Msg::Backups(id, backups) => {
                 if let Some(view) = self.service.as_mut().filter(|v| v.id == id)
@@ -2366,17 +2408,28 @@ impl App {
                 });
                 self.settings.loaded_at = None;
             }
-            ConfirmAction::Update { force } => {
+            ConfirmAction::Update { force, cli, server } => {
                 let version = self
                     .settings
                     .release
                     .as_ref()
                     .and_then(|r| r.latest.clone());
                 self.spawn(move |c| async move {
-                    match c.update(&UpdateRequest { version, force }).await {
-                        Ok(r) => Msg::Updating(r),
-                        Err(e) => Msg::ConfirmDone(Err(format!("{e:#}"))),
-                    }
+                    let cli = match (cli, &version) {
+                        (true, Some(tag)) => {
+                            Some(update_cli(tag).await.map_err(|e| format!("{e:#}")))
+                        }
+                        _ => None,
+                    };
+                    let server = match server {
+                        true => Some(
+                            c.update(&UpdateRequest { version, force })
+                                .await
+                                .map_err(|e| format!("{e:#}")),
+                        ),
+                        false => None,
+                    };
+                    Msg::Updated { cli, server }
                 });
             }
             ConfirmAction::Rollback(id) => self.spawn(|c| async move {
@@ -2580,6 +2633,22 @@ impl App {
         self.load_settings();
         self.load_release();
         self.refresh();
+    }
+
+    /// The latest release when the daemon runs an older one.
+    pub fn daemon_update(&self) -> Option<String> {
+        self.settings
+            .release
+            .as_ref()
+            .filter(|r| r.update_available)
+            .and_then(|r| r.latest.clone())
+    }
+
+    /// The latest release when this CLI binary is older and was not replaced yet.
+    pub fn cli_update(&self) -> Option<String> {
+        let latest = self.settings.release.as_ref()?.latest.clone()?;
+        (self.cli_updated.is_none() && release::is_newer(&latest, env!("CARGO_PKG_VERSION")))
+            .then_some(latest)
     }
 
     fn load_release(&self) {
@@ -5013,6 +5082,11 @@ impl App {
 const DEFAULT_GITHUB: &str = "https://github.com";
 
 /// What a finished set or check of the instance domain says.
+/// Replaces this CLI binary with the release `tag`.
+async fn update_cli(tag: &str) -> anyhow::Result<UpdateResult> {
+    release::update_cli(&release::Releases::new()?, tag, false).await
+}
+
 fn domain_toast(d: &InstanceDomain) -> Option<String> {
     let domain = d.domain.clone()?;
     if d.verified {

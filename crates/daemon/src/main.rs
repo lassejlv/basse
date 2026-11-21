@@ -3,6 +3,7 @@
 mod api;
 mod backup_store;
 mod build;
+mod cloudflare;
 mod config;
 mod database;
 mod db;
@@ -517,6 +518,10 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
                     && server.proxy != ProxyStatus::Running
                 {
                     api::ensure_local_proxy(&state, server).await;
+                } else if server.proxy == ProxyStatus::Running
+                    && let Err(e) = api::sync_proxy(&state, server).await
+                {
+                    tracing::warn!("cannot update the proxy: {e:#}");
                 }
             }
         }

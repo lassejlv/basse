@@ -500,6 +500,54 @@ pub(crate) fn check_line(check: &DomainCheck) {
     }
 }
 
+fn print_cloudflare(cf: &CloudflareProxy) {
+    let row = |key: &str, value: String, note: &str| {
+        let note = if note.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", muted(note))
+        };
+        println!("  {}{value}{note}", muted(format!("{key:<12}")));
+    };
+    println!();
+    println!("Cloudflare");
+    if cf.direct.is_empty() {
+        row("proxy", format!("on for {}", cf.records.join(" and ")), "");
+    } else {
+        row(
+            "proxy",
+            format!("{} through Cloudflare", cf.records.join(" and ")),
+            &format!(
+                "{} {} straight here",
+                cf.direct.join(" and "),
+                if cf.direct.len() == 1 {
+                    "points"
+                } else {
+                    "point"
+                }
+            ),
+        );
+    }
+    if cf.flexible {
+        row(
+            "ssl/tls",
+            paint("✕ Flexible", Tone::Err),
+            "set Full (strict): Flexible loops redirects",
+        );
+    } else {
+        row(
+            "ssl/tls",
+            "Full (strict)".into(),
+            "Flexible loops redirects",
+        );
+    }
+    row(
+        "visitor ip",
+        "from CF-Connecting-IP".into(),
+        "trusted only from Cloudflare's ranges",
+    );
+}
+
 pub(crate) fn print_domain(d: &InstanceDomain) {
     let Some(domain) = &d.domain else {
         println!("No instance domain is set. The API is served on IP:port only.");
@@ -536,7 +584,12 @@ pub(crate) fn print_domain(d: &InstanceDomain) {
             })
             .collect(),
     );
-    if d.records.len() > 1 {
+    if let Some(cf) = &d.cloudflare {
+        output::note(format!(
+            "   Cloudflare proxies {}. Keep these values; the orange cloud can stay on.",
+            cf.records.join(" and ")
+        ));
+    } else if d.records.len() > 1 {
         output::note("   Create both at your DNS provider. Skip AAAA if you don't use IPv6.");
     }
     println!();
@@ -554,6 +607,9 @@ pub(crate) fn print_domain(d: &InstanceDomain) {
     }
     for check in &d.checks {
         check_line(check);
+    }
+    if let Some(cf) = &d.cloudflare {
+        print_cloudflare(cf);
     }
     if let Some(url) = &d.url {
         println!();

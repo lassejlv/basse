@@ -1230,31 +1230,52 @@ fn settings(app: &mut App, key: KeyEvent) {
     };
     match key.code {
         KeyCode::Char('u') => {
-            let latest = app
-                .settings
-                .release
-                .as_ref()
-                .filter(|r| r.update_available)
-                .and_then(|r| r.latest.clone());
-            let Some(latest) = latest else {
-                return app.toast(format!("{} {} is up to date", brand::DAEMON_BIN, s.version));
+            let (cli, daemon) = (app.cli_update(), app.daemon_update());
+            let Some(latest) = daemon.clone().or(cli.clone()) else {
+                return app.toast(format!(
+                    "{} {} and {} {} are up to date",
+                    brand::CLI_BIN,
+                    env!("CARGO_PKG_VERSION"),
+                    brand::DAEMON_BIN,
+                    s.version
+                ));
+            };
+            let from = match daemon {
+                Some(_) => s.version.clone(),
+                None => env!("CARGO_PKG_VERSION").to_string(),
             };
             let restart = if s.supervised {
                 "The daemon restarts and this screen reconnects."
             } else {
                 "systemd does not supervise the daemon, so it restarts itself in place."
             };
-            ask_to(
-                app,
-                &format!("Update · {} → {latest}", s.version),
-                format!(
+            let body = match (cli.is_some(), daemon.is_some()) {
+                (true, true) => format!(
+                    "Update {} here and {} on {} to {latest}? {restart} Running apps are not touched.",
+                    brand::CLI_BIN,
+                    brand::DAEMON_BIN,
+                    app.context
+                ),
+                (false, _) => format!(
                     "Update {} on {} to {latest}? {restart} Running apps are not touched.",
                     brand::DAEMON_BIN,
                     app.context
                 ),
+                (true, false) => format!(
+                    "Update {} here to {latest}? Restart {} afterwards to use it.",
+                    brand::CLI_BIN,
+                    brand::CLI_BIN
+                ),
+            };
+            ask_to(
+                app,
+                &format!("Update · {from} → {latest}"),
+                body,
                 false,
                 ConfirmAction::Update {
                     force: !s.supervised,
+                    cli: cli.is_some(),
+                    server: daemon.is_some(),
                 },
                 "update",
             );
