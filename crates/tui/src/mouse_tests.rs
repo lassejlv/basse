@@ -123,6 +123,7 @@ fn fixture() -> App {
                 host: "web.example.test".into(),
                 port: None,
                 tls: true,
+                compose_service: None,
                 created_at: Timestamp::default(),
             }],
             volumes: vec![Volume {
@@ -133,6 +134,7 @@ fn fixture() -> App {
                 created_at: Timestamp::default(),
             }],
             container: None,
+            compose: Vec::new(),
             database: None,
         },
     );
@@ -543,6 +545,7 @@ fn service_tab_labels_and_list_rows_match_their_targets() {
         row: 0,
         reveal: false,
         database: true,
+        container: None,
     });
     app.backups.insert(
         "fixture-web".into(),
@@ -1771,7 +1774,7 @@ async fn github_pickers_page_search_and_fill_the_new_service_form() {
     assert_eq!(form.raw("gh_repo"), "fixture-org/ledger");
     assert_eq!(form.raw("gh_branch"), "develop");
     assert_eq!(form.get("name"), "ledger");
-    assert_eq!(form.fields[form.focus].key, "dockerfile");
+    assert_eq!(form.fields[form.focus].key, "build");
     assert!(form.on("auto_deploy"));
     assert_eq!(
         form.fields
@@ -1780,4 +1783,138 @@ async fn github_pickers_page_search_and_fill_the_new_service_form() {
             .map(|f| f.hint.as_str()),
         Some("every push to develop")
     );
+}
+
+fn compose_fixture() -> App {
+    let mut app = fixture();
+    let detail = app.details.get_mut("fixture-web").expect("fixture detail");
+    detail.service.source = Source::Git {
+        repo: "fixture-org/shop".into(),
+        branch: "main".into(),
+        dockerfile: "Dockerfile".into(),
+        context: ".".into(),
+        source_id: None,
+        auto_deploy: false,
+        build: common::Build {
+            method: common::BuildMethod::Compose,
+            target: None,
+            compose_file: Some("compose.yaml".into()),
+        },
+    };
+    let container = |state: &str, exit: Option<i64>| common::ContainerInfo {
+        id: "fixture-container".into(),
+        name: "fixture-container".into(),
+        image: "example:1".into(),
+        state: state.into(),
+        started_at: None,
+        restart_count: 0,
+        exit_code: exit,
+        ports: Vec::new(),
+        networks: Vec::new(),
+    };
+    detail.compose = vec![
+        common::ComposeService {
+            name: "frontend".into(),
+            container: Some(container("running", None)),
+        },
+        common::ComposeService {
+            name: "queue".into(),
+            container: Some(container("running", None)),
+        },
+        common::ComposeService {
+            name: "migrate".into(),
+            container: Some(container("exited", Some(0))),
+        },
+    ];
+    app
+}
+
+#[tokio::test]
+async fn compose_containers_follow_logs_and_domains_ask_for_the_service() {
+    let mut app = compose_fixture();
+    app.open_service("fixture-web", Tab::Overview);
+    let buf = draw(&app, 160, 40);
+    label(&buf, "compose  compose.yaml · 3 services");
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("frontend", Hit::Container(0)),
+            ("queue", Hit::Container(1)),
+            ("migrate", Hit::Container(2)),
+        ],
+    );
+    label(&buf, "exited 0");
+    let queue = label(&buf, "queue");
+    click(&mut app, Position::new(queue.x, queue.y));
+    let view = app.service.as_ref().expect("service view");
+    assert_eq!(view.tab, Tab::Logs);
+    assert_eq!(view.log_container(), Some("queue"));
+
+    let buf = draw(&app, 160, 40);
+    label(&buf, "Logs · queue");
+    let y = buf.area.bottom() - 1;
+    let next = assert_hit(
+        &app,
+        label_on(&buf, y, "c container").expect("container hint"),
+        char_key('c'),
+    );
+    click(&mut app, next);
+    assert_eq!(
+        app.service.as_ref().and_then(|v| v.log_container()),
+        Some("migrate")
+    );
+
+    app.set_tab(Tab::Domains);
+    app.form_domain();
+    let buf = draw(&app, 160, 40);
+    label(&buf, "fixture-web · compose");
+    label(&buf, "in the compose file");
+    let queue = label(&buf, "queue");
+    assert!(matches!(
+        mouse::hit_at(&app.mouse, queue.x + 1, queue.y),
+        Some(Hit::FormChoice(1, 1))
+    ));
+    click(&mut app, Position::new(queue.x + 1, queue.y));
+    let Some(Overlay::Form(form)) = &app.overlay else {
+        panic!("add domain form");
+    };
+    assert_eq!(
+        form.choice_label("compose_service").as_deref(),
+        Some("queue")
+    );
+}
+
+#[tokio::test]
+async fn detected_build_picks_the_method_and_fills_its_file() {
+    let mut app = sources_fixture();
+    app.screen = Screen::Overview;
+    app.form_new_service();
+    if let Some(Overlay::Form(form)) = &mut app.overlay {
+        for (key, value) in [("gh_repo", "fixture-org/shop"), ("gh_branch", "main")] {
+            form.field_mut(key).expect("pick field").value = value.into();
+        }
+    }
+    app.apply(crate::app::Msg::Detected {
+        source: "fixture-gh".into(),
+        repo: "fixture-org/shop".into(),
+        branch: "main".into(),
+        result: Ok(common::BuildDetection {
+            method: common::BuildMethod::Compose,
+            file: Some("docker-compose.yml".into()),
+        }),
+    });
+    let buf = draw(&app, 160, 40);
+    label(&buf, "✓ docker-compose.yml");
+    let Some(Overlay::Form(form)) = &app.overlay else {
+        panic!("new service form");
+    };
+    assert_eq!(form.choice_label("build").as_deref(), Some("Compose"));
+    assert_eq!(form.get("compose_file"), "docker-compose.yml");
+    assert_eq!(form.get("dockerfile"), "", "hidden for compose");
+    let chips = label(&buf, "Railpack");
+    assert!(matches!(
+        mouse::hit_at(&app.mouse, chips.x, chips.y),
+        Some(Hit::FormChoice(_, 3))
+    ));
 }

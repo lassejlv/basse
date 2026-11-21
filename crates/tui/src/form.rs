@@ -276,6 +276,15 @@ impl Form {
         self.field(key).map_or(0, |f| f.choice)
     }
 
+    /// The chosen option of a visible choice field.
+    pub fn choice_label(&self, key: &str) -> Option<String> {
+        let f = self.field(key).filter(|f| f.visible)?;
+        match &f.kind {
+            FieldKind::Choice(options) => options.get(f.choice).cloned(),
+            _ => None,
+        }
+    }
+
     pub fn on(&self, key: &str) -> bool {
         self.field(key).is_some_and(|f| f.on)
     }
@@ -346,6 +355,11 @@ impl Form {
             }
             return;
         }
+        if matches!(self.kind, FormKind::EditService { .. }) {
+            let has_build = self.field("build").is_some();
+            self.build_fields(has_build);
+            return;
+        }
         if !matches!(self.kind, FormKind::NewService { .. }) {
             return;
         }
@@ -357,13 +371,14 @@ impl Form {
             f.visible = match f.key {
                 "git_source" | "gh_repo" | "gh_branch" | "auto_deploy" => source == 0,
                 "repo" | "branch" => source == 1,
-                "dockerfile" => source <= 1,
+                "build" | "dockerfile" | "context" | "target" | "compose_file" => source <= 1,
                 "image" => source == 2,
                 "engine" | "version" => source == 3,
                 "port" | "domain" => source != 3,
                 _ => true,
             };
         }
+        self.build_fields(source <= 1);
         let token = self.field("git_source").is_some_and(|f| {
             f.placeholder
                 .starts_with(common::GitSourceKind::GithubToken.label())
@@ -383,6 +398,31 @@ impl Form {
             name.placeholder = match source {
                 3 => db.image().to_string(),
                 _ => "derived from the source".to_string(),
+            };
+        }
+    }
+
+    /// Show the fields of the chosen build method. The build chips' placeholder is a fixed hint,
+    /// e.g. what the repository was detected as; otherwise the hint describes the method.
+    fn build_fields(&mut self, git: bool) {
+        let method =
+            common::BuildMethod::ALL[self.choice("build").min(common::BuildMethod::ALL.len() - 1)];
+        for f in &mut self.fields {
+            match f.key {
+                "build" => f.visible = git,
+                "dockerfile" | "context" | "target" => {
+                    f.visible = git && method == common::BuildMethod::Dockerfile
+                }
+                "compose_file" => f.visible = git && method == common::BuildMethod::Compose,
+                _ => {}
+            }
+        }
+        if let Some(build) = self.field_mut("build") {
+            build.hint = match method {
+                _ if !build.placeholder.is_empty() => build.placeholder.clone(),
+                common::BuildMethod::Auto => "picks on first deploy".into(),
+                common::BuildMethod::Railpack => "detects the language".into(),
+                common::BuildMethod::Dockerfile | common::BuildMethod::Compose => String::new(),
             };
         }
     }
@@ -576,7 +616,7 @@ impl Form {
         let mut y = inner.y;
         for (i, field) in visible.into_iter().skip(start).take(capacity) {
             let focused = i == self.focus;
-            let hint_w = if matches!(field.kind, FieldKind::Choice(_)) {
+            let hint_w = if matches!(field.kind, FieldKind::Choice(_)) && field.hint.is_empty() {
                 0
             } else {
                 hint_w
@@ -847,7 +887,20 @@ mod tests {
                 Field::pick("gh_branch", "branch", "", ""),
                 Field::text("repo", "repository"),
                 Field::text("branch", "branch"),
+                Field::choice(
+                    "build",
+                    "build",
+                    vec![
+                        "auto".into(),
+                        "Dockerfile".into(),
+                        "Compose".into(),
+                        "Railpack".into(),
+                    ],
+                ),
                 Field::text("dockerfile", "dockerfile"),
+                Field::text("context", "context"),
+                Field::text("target", "target"),
+                Field::text("compose_file", "compose file"),
                 Field::text("image", "image"),
                 Field::choice("engine", "engine", vec!["postgres".into()]),
                 Field::text("version", "version"),
@@ -1066,21 +1119,51 @@ abc
     }
 
     #[test]
+    fn build_method_shows_its_own_fields_and_hint() {
+        let mut form = service_form();
+        let visible = |f: &Form| -> Vec<&str> {
+            ["build", "dockerfile", "context", "target", "compose_file"]
+                .into_iter()
+                .filter(|k| f.fields.iter().any(|x| x.key == *k && x.visible))
+                .collect()
+        };
+        let hint = |f: &Form| {
+            f.fields
+                .iter()
+                .find(|x| x.key == "build")
+                .unwrap()
+                .hint
+                .clone()
+        };
+        assert_eq!(visible(&form), ["build"]);
+        assert_eq!(hint(&form), "picks on first deploy");
+        form.focus = form.fields.iter().position(|f| f.key == "build").unwrap();
+        form.handle_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(visible(&form), ["build", "dockerfile", "context", "target"]);
+        form.handle_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(visible(&form), ["build", "compose_file"]);
+        form.handle_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(visible(&form), ["build"]);
+        assert_eq!(hint(&form), "detects the language");
+        form.field_mut("build").unwrap().placeholder = "detected: Dockerfile".into();
+        form.refresh();
+        assert_eq!(hint(&form), "detected: Dockerfile");
+        form.focus = 0;
+        form.handle_key(KeyEvent::from(KeyCode::Right));
+        form.handle_key(KeyEvent::from(KeyCode::Right));
+        assert!(visible(&form).is_empty(), "images have no build");
+    }
+
+    #[test]
     fn source_choice_controls_visible_fields() {
         let mut form = service_form();
         let visible = |f: &Form, key: &str| f.fields.iter().any(|x| x.key == key && x.visible);
-        for key in [
-            "git_source",
-            "gh_repo",
-            "gh_branch",
-            "auto_deploy",
-            "dockerfile",
-        ] {
+        for key in ["git_source", "gh_repo", "gh_branch", "auto_deploy", "build"] {
             assert!(visible(&form, key), "{key} shows for GitHub");
         }
         assert!(!visible(&form, "repo"));
         form.handle_key(KeyEvent::from(KeyCode::Right));
-        assert!(visible(&form, "repo") && visible(&form, "dockerfile"));
+        assert!(visible(&form, "repo") && visible(&form, "build"));
         assert!(!visible(&form, "git_source") && !visible(&form, "auto_deploy"));
         assert!(
             form.fields

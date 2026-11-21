@@ -104,6 +104,24 @@ impl DockerPool {
         Some(docker)
     }
 
+    /// Environment that points the `docker` CLI at the same engine as [`Self::get`]: the SSH
+    /// tunnel's socket for remote servers, the default socket for the local one. Call it after
+    /// `get`, which opens the tunnel.
+    pub fn cli_env(&self, server: &Server) -> Vec<(String, String)> {
+        match server.kind {
+            ServerKind::Local => Vec::new(),
+            ServerKind::Ssh => lock(&self.tunnels)
+                .get(&server.id)
+                .map(|t| {
+                    vec![(
+                        "DOCKER_HOST".to_string(),
+                        format!("unix://{}", t.socket.display()),
+                    )]
+                })
+                .unwrap_or_default(),
+        }
+    }
+
     /// Drops the cached client and closes its tunnel, e.g. after the server was deleted or a
     /// check failed.
     pub fn forget(&self, server_id: &str) {
@@ -741,6 +759,36 @@ pub async fn remove_network(docker: &Docker, name: &str) -> Result<()> {
     }
 }
 
+/// Removes the networks a compose project created and, with `volumes`, its named volumes.
+/// Its containers must be gone already.
+pub async fn remove_compose_leftovers(docker: &Docker, project: &str, volumes: bool) -> Result<()> {
+    let filters = HashMap::from([(
+        "label".to_string(),
+        vec![format!("com.docker.compose.project={project}")],
+    )]);
+    let networks = docker
+        .list_networks(Some(ListNetworksOptions {
+            filters: Some(filters.clone()),
+        }))
+        .await
+        .context("cannot list networks")?;
+    for name in networks.into_iter().filter_map(|n| n.name) {
+        remove_network(docker, &name).await?;
+    }
+    if volumes {
+        let listed = docker
+            .list_volumes(Some(ListVolumesOptions {
+                filters: Some(filters),
+            }))
+            .await
+            .context("cannot list volumes")?;
+        for v in listed.volumes.unwrap_or_default() {
+            remove_volume(docker, &v.name).await?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn ensure_volume(docker: &Docker, name: &str) -> Result<()> {
     let request = VolumeCreateRequest {
         name: Some(name.to_string()),
@@ -979,6 +1027,7 @@ mod tests {
             host: host.into(),
             port,
             tls,
+            compose_service: None,
             created_at: Utc::now(),
         }
     }

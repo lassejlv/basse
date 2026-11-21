@@ -204,6 +204,7 @@ async fn docker_end_to_end() {
             host: WHOAMI_HOST.into(),
             port: None,
             tls: false,
+            compose_service: None,
         },
     )
     .await
@@ -239,7 +240,7 @@ async fn docker_end_to_end() {
     );
 
     println!("== service logs");
-    let lines = collect_logs(api.service_logs(&sid, 50, false).await.unwrap()).await;
+    let lines = collect_logs(api.service_logs(&sid, 50, false, None).await.unwrap()).await;
     assert!(
         lines
             .iter()
@@ -247,7 +248,7 @@ async fn docker_end_to_end() {
         "{lines:?}"
     );
     assert!(lines.iter().all(|l| l.ts.is_some()));
-    let mut follow = api.service_logs(&sid, 5, true).await.unwrap();
+    let mut follow = api.service_logs(&sid, 5, true, None).await.unwrap();
     let first_line = tokio::time::timeout(Duration::from_secs(5), follow.next())
         .await
         .unwrap()
@@ -338,6 +339,7 @@ async fn docker_end_to_end() {
                 context: ".".into(),
                 source_id: None,
                 auto_deploy: true,
+                build: Build::default(),
             },
             port: Some(8080),
             command: None,
@@ -705,7 +707,12 @@ async fn ssh_server_end_to_end() {
     assert_eq!(health.detail.as_deref(), Some("GET / -> ok"));
     let detail = wait_state(&api, &svc.service.id, ServiceState::Running).await;
     assert_eq!(detail.server.id, server.id);
-    let lines = collect_logs(api.service_logs(&svc.service.id, 10, false).await.unwrap()).await;
+    let lines = collect_logs(
+        api.service_logs(&svc.service.id, 10, false, None)
+            .await
+            .unwrap(),
+    )
+    .await;
     println!("remote logs: {lines:?}");
 
     // Backups, restores and rotation exec through the SSH-tunnelled Docker connection.

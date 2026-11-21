@@ -220,6 +220,7 @@ async fn projects_environments_and_services_crud() {
                 host: "admin.example.com".into(),
                 port: Some(8080),
                 tls: false,
+                compose_service: None,
             },
         )
         .await

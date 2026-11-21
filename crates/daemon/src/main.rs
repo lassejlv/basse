@@ -2,6 +2,7 @@
 
 mod api;
 mod backup_store;
+mod build;
 mod config;
 mod database;
 mod db;

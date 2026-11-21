@@ -163,6 +163,23 @@ basse service create shop/production --source acme --repo acme/api --branch main
 
 You can have as many sources as you like, for example your personal account plus two organizations. The app's private key, webhook secret and client credentials are stored as a `github_app` secret, encrypted like every other secret, and are never returned by the API. Clones use an installation token that lives for an hour and reaches git through its environment, never a file or the command line. A push to a service's branch deploys it (turn that off with `--no-auto-deploy`); webhook deliveries are checked against the app's webhook secret. Preview deployments for pull requests are not built yet.
 
+### Build methods
+
+Git services build one of three ways, picked with `--build` (default `auto`) and changed later with `basse service build <service> --method …`; a change applies on the next deploy.
+
+| Method | What happens | Options |
+|---|---|---|
+| `dockerfile` | `docker build` of the Dockerfile; the service's env vars are passed as build args | `--dockerfile`, `--build-context`, `--target <stage>` |
+| `compose` | `docker compose up` of the compose file as one group: every compose service gets its own status and logs (`basse logs <service> --container web`), named volumes survive redeploys, and the service's env vars are available for `${VAR}` interpolation | `--compose-file`; domains take `--compose-service web` |
+| `railpack` | [Railpack](https://railpack.com) detects the language and builds with BuildKit, no Dockerfile needed; the daemon downloads Railpack the first time and checks its checksum | |
+| `auto` | a Dockerfile wins, then a compose file (`compose.yaml`, `docker-compose.yml`, …), else Railpack; the result is saved on the service at the first deploy | |
+
+```sh
+basse service create shop/production --source acme --repo acme/api --build compose
+basse domain add stack shop.example.com --compose-service web
+basse service build api --method dockerfile --target prod
+```
+
 Without a source, `--repo` still takes any clone URL: public repositories clone anonymously, and `git@github.com:` URLs use the daemon's SSH key, which you can add to a repository as a deploy key (`basse server key` prints it).
 
 ## Secrets

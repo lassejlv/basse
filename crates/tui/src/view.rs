@@ -287,15 +287,25 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                 Tab::Logs if searching => {
                     vec![("type", "to search"), ("⏎", "find"), ("esc", "cancel")]
                 }
-                Tab::Logs => vec![
-                    ("tab", "next tab"),
-                    ("f", "follow"),
-                    ("/", "search"),
-                    ("t", "timestamps"),
-                    ("w", "wrap"),
-                    ("e", "errors only"),
-                    ("d", "deploy"),
-                ],
+                Tab::Logs => {
+                    let compose = app
+                        .service
+                        .as_ref()
+                        .is_some_and(|v| !v.compose().is_empty());
+                    let mut keys = vec![("tab", "next tab")];
+                    if compose {
+                        keys.push(("c", "container"));
+                    }
+                    keys.extend([
+                        ("f", "follow"),
+                        ("/", "search"),
+                        ("t", "timestamps"),
+                        ("w", "wrap"),
+                        ("e", "errors only"),
+                        ("d", "deploy"),
+                    ]);
+                    keys
+                }
                 Tab::Deployments => {
                     let mut keys = vec![
                         ("tab", "next tab"),
@@ -969,6 +979,9 @@ fn service_lines<'a>(
         }
     };
     lines.push(kv("source", source, w));
+    if let Some(build) = build_summary(&service.source, detail) {
+        lines.push(kv("build", build, w));
+    }
     let Some(d) = detail else {
         lines.push(Line::styled("loading…", theme::muted()));
         return lines;
@@ -1055,6 +1068,48 @@ fn service_lines<'a>(
     lines
 }
 
+/// "dockerfile  docker/Dockerfile · target web", how a git service is built.
+fn build_summary(source: &Source, detail: Option<&ServiceDetail>) -> Option<Vec<Span<'static>>> {
+    let Source::Git {
+        dockerfile,
+        context,
+        build,
+        ..
+    } = source
+    else {
+        return None;
+    };
+    let mut note = match build.method {
+        BuildMethod::Auto => "picks on first deploy".to_string(),
+        BuildMethod::Dockerfile => {
+            let mut parts = vec![dockerfile.clone()];
+            if context != "." {
+                parts.push(format!("context {context}"));
+            }
+            if let Some(target) = &build.target {
+                parts.push(format!("target {target}"));
+            }
+            parts.join(" · ")
+        }
+        BuildMethod::Compose => build
+            .compose_file
+            .clone()
+            .unwrap_or_else(|| "compose file found on its own".into()),
+        BuildMethod::Railpack => "detects the language".to_string(),
+    };
+    let services = detail.map_or(0, |d| d.compose.len());
+    if build.method == BuildMethod::Compose && services > 0 {
+        note.push_str(&format!(
+            " · {services} service{}",
+            if services == 1 { "" } else { "s" }
+        ));
+    }
+    Some(vec![
+        Span::styled(build.method.as_str(), theme::text()),
+        Span::styled(format!("  {note}"), theme::muted()),
+    ])
+}
+
 /// Routes and the health check of an app service.
 fn route_lines<'a>(lines: &mut Vec<Line<'a>>, d: &ServiceDetail, service: &Service, w: usize) {
     if d.domains.is_empty() {
@@ -1072,10 +1127,13 @@ fn route_lines<'a>(lines: &mut Vec<Line<'a>>, d: &ServiceDetail, service: &Servi
     }
     for (i, dom) in d.domains.iter().enumerate() {
         let scheme = if dom.tls { "https" } else { "http" };
-        let port = dom
-            .port
-            .or(service.port)
-            .map_or(String::new(), |p| format!("  → :{p}"));
+        let port = dom.port.or(service.port).map(|p| format!(":{p}"));
+        let port = match (&dom.compose_service, port) {
+            (Some(s), Some(p)) => format!("  → {s}{p}"),
+            (Some(s), None) => format!("  → {s}"),
+            (None, Some(p)) => format!("  → {p}"),
+            (None, None) => String::new(),
+        };
         lines.push(kv(
             if i == 0 { "route" } else { "" },
             vec![
@@ -1405,11 +1463,101 @@ fn with_rail(area: Rect) -> (Rect, Rect) {
 const CONTAINER_H: u16 = 9;
 
 fn rail(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
-    let [c_area, d_area] = Layout::vertical([Constraint::Length(CONTAINER_H), Constraint::Fill(1)])
+    let compose = view.compose();
+    let height = if compose.is_empty() {
+        CONTAINER_H
+    } else {
+        (compose.len() as u16 + 2).clamp(4, CONTAINER_H + 4)
+    };
+    let [c_area, d_area] = Layout::vertical([Constraint::Length(height), Constraint::Fill(1)])
         .spacing(1)
         .areas(area);
-    container_panel(frame, c_area, view);
+    if compose.is_empty() {
+        container_panel(frame, c_area, view);
+    } else {
+        containers_panel(frame, c_area, view);
+    }
     deployments_panel(frame, d_area, app, view);
+}
+
+/// The containers of a compose build; a click follows one's logs.
+fn containers_panel(frame: &mut Frame, area: Rect, view: &ServiceView) {
+    let logs = view.tab == Tab::Logs;
+    let file = match view.detail.as_ref().map(|d| &d.service.source) {
+        Some(Source::Git { build, .. }) => build.compose_file.clone(),
+        _ => None,
+    };
+    let block = panel(
+        title("Containers", logs),
+        file.map(|f| Line::styled(f, theme::muted())),
+        logs,
+    );
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    mouse::hit(inner, Hit::List(List::Containers));
+    let picked = view.log_container();
+    for (i, s) in view
+        .compose()
+        .iter()
+        .enumerate()
+        .take(inner.height as usize)
+    {
+        let row = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
+        let selected = logs && picked == Some(s.name.as_str());
+        let (glyph, state, when) = match &s.container {
+            Some(c) if c.state == "running" => (
+                Span::styled("●", theme::fg(theme::OK)),
+                Span::styled("running", theme::text()),
+                c.started_at
+                    .map(|t| format!("up {}", util::ago(t).trim_end_matches(" ago")))
+                    .unwrap_or_default(),
+            ),
+            Some(c) => (
+                Span::styled(
+                    "○",
+                    if c.exit_code.is_some_and(|e| e != 0) {
+                        theme::fg(theme::ERR)
+                    } else {
+                        theme::muted()
+                    },
+                ),
+                Span::styled(
+                    match c.exit_code {
+                        Some(e) => format!("{} {e}", c.state),
+                        None => c.state.clone(),
+                    },
+                    theme::muted(),
+                ),
+                String::new(),
+            ),
+            None => (
+                Span::styled("○", theme::muted()),
+                Span::styled("not created", theme::muted()),
+                String::new(),
+            ),
+        };
+        let line = Line::from(vec![
+            glyph,
+            Span::raw(" "),
+            Span::styled(
+                format!("{:<12}", truncate(&s.name, 11)),
+                if selected {
+                    theme::accent()
+                } else {
+                    theme::text()
+                },
+            ),
+            Span::styled(format!("{:<14}", state.content), state.style),
+            Span::styled(when, theme::muted()),
+        ])
+        .style(if selected {
+            theme::selected()
+        } else {
+            Style::new()
+        });
+        frame.render_widget(Paragraph::new(line), row);
+        mouse::hit(row, Hit::Container(i));
+    }
 }
 
 fn container_panel(frame: &mut Frame, c_area: Rect, view: &ServiceView) {
@@ -2063,11 +2211,13 @@ fn logs_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         ),
         theme::muted(),
     ));
-    let block = panel(
-        vec![Span::styled("Logs", theme::text()), state],
-        Some(Line::from(right)),
-        true,
-    );
+    let mut heading = vec![Span::styled("Logs", theme::text())];
+    if let Some(c) = view.log_container() {
+        heading.push(Span::styled(" · ", theme::muted()));
+        heading.push(Span::styled(c.to_string(), theme::text()));
+    }
+    heading.push(state);
+    let block = panel(heading, Some(Line::from(right)), true);
     let inner = inside(&block, main);
     frame.render_widget(block, main);
     mouse::hit(main, Hit::Logs);
@@ -2324,13 +2474,14 @@ fn domains_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
         .detail
         .as_ref()
         .map_or((&[][..], None), |d| (d.domains.as_slice(), d.service.port));
+    let compose = !view.compose().is_empty();
     let rows = doms
         .iter()
         .enumerate()
         .map(|(i, d)| {
             let selected = i == view.row;
             let target = d.port.or(port).map_or("—".into(), |p| format!(":{p}"));
-            Row::new(vec![
+            let mut cells = vec![
                 Cell::from(Span::styled(
                     d.host.clone(),
                     if selected {
@@ -2349,24 +2500,50 @@ fn domains_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
                 )),
                 Cell::from(target),
                 Cell::from(Span::styled(util::ago(d.created_at), theme::muted())),
-            ])
-            .style(if selected {
+            ];
+            if compose {
+                cells.insert(
+                    1,
+                    Cell::from(Span::styled(
+                        d.compose_service.clone().unwrap_or_else(|| "—".into()),
+                        theme::text(),
+                    )),
+                );
+            }
+            Row::new(cells).style(if selected {
                 theme::selected()
             } else {
                 Style::new()
             })
         })
         .collect();
+    let (header, widths) = if compose {
+        (
+            Row::new(["HOST", "SERVICE", "PROTOCOL", "TARGET", "ADDED"]),
+            vec![
+                Constraint::Fill(1),
+                Constraint::Length(14),
+                Constraint::Length(18),
+                Constraint::Length(8),
+                Constraint::Length(10),
+            ],
+        )
+    } else {
+        (
+            Row::new(["HOST", "PROTOCOL", "TARGET", "ADDED"]),
+            vec![
+                Constraint::Fill(1),
+                Constraint::Length(18),
+                Constraint::Length(8),
+                Constraint::Length(10),
+            ],
+        )
+    };
     ListPanel {
         heading: "Domains",
         note: "routed by the proxy",
-        header: Row::new(["HOST", "PROTOCOL", "TARGET", "ADDED"]),
-        widths: vec![
-            Constraint::Fill(1),
-            Constraint::Length(18),
-            Constraint::Length(8),
-            Constraint::Length(10),
-        ],
+        header,
+        widths,
         empty: ("a", "add a domain, then point its A record at this server"),
     }
     .render(frame, area, rows, view.row);
@@ -2443,10 +2620,9 @@ fn settings_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         Source::Git {
             repo,
             branch,
-            dockerfile,
-            context,
             source_id,
             auto_deploy,
+            ..
         } => {
             if let Some(id) = source_id {
                 let name = app
@@ -2470,13 +2646,9 @@ fn settings_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
                     w,
                 ));
             }
-            lines.push(kv(
-                "dockerfile",
-                val(format!("{context}/{dockerfile}")
-                    .trim_start_matches("./")
-                    .to_string()),
-                w,
-            ));
+            if let Some(build) = build_summary(&s.source, Some(d)) {
+                lines.push(kv("build", build, w));
+            }
         }
         Source::Image { image } => lines.push(kv("image", val(image.clone()), w)),
         Source::Database { kind, version } => {

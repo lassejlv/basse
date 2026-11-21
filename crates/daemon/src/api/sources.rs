@@ -338,6 +338,31 @@ pub async fn repos(
 }
 
 #[derive(Deserialize)]
+pub struct DetectQuery {
+    repo: String,
+    branch: String,
+}
+
+/// The build method a branch would get, from the files at its root.
+pub async fn detect(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<DetectQuery>,
+) -> ApiResult<Json<BuildDetection>> {
+    github::validate_full_name(&query.repo).map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let source = ready(&state, &id).await?;
+    let token = sources::access_token(&state, &source).await?;
+    let files = Github::new(&source.api_url)?
+        .root_files(&token, &query.repo, &query.branch)
+        .await?;
+    Ok(Json(crate::build::detect(
+        |f| files.iter().any(|n| n == f),
+        "Dockerfile",
+        None,
+    )))
+}
+
+#[derive(Deserialize)]
 pub struct BranchesQuery {
     repo: String,
 }
