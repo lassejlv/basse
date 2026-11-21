@@ -138,6 +138,7 @@ fn fixture() -> App {
             }],
             container: None,
             compose: Vec::new(),
+            error_pages: common::ErrorPages::default(),
             database: None,
         },
     );

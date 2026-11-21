@@ -2,6 +2,7 @@
 
 mod app;
 mod database;
+mod error_pages;
 mod form;
 mod keys;
 mod metrics;

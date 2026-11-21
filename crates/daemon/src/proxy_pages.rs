@@ -8,10 +8,15 @@
 //! domain whose service has no container to answer: stopped, never deployed, or deploying for the
 //! first time. Those routes keep the domain's certificate managed while no container carries
 //! its labels.
+//!
+//! Every route imports the same snippet, and the snippet tells services apart by host: a
+//! service with branded pages off gets Caddy's own empty response, and a service's custom page
+//! wins over the instance default, which wins over the built-in page. So a change applies as
+//! soon as the proxy rereads the file, without touching any container.
 
 use anyhow::Result;
 use base64::Engine as _;
-use common::brand;
+use common::{ErrorPageKind, brand};
 use std::fmt::Write as _;
 
 const TEMPLATE: &str = include_str!("../pages/page.html");
@@ -165,13 +170,82 @@ fn render(page: &Page) -> String {
         .replace("%%LINE%%", page.line)
 }
 
+/// A custom page replacing a built-in one: for a service's hosts, or the instance default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomPage {
+    /// The service it belongs to; `None` for the instance default.
+    pub service_id: Option<String>,
+    /// The service's domains; empty for the instance default.
+    pub hosts: Vec<String>,
+    pub kind: ErrorPageKind,
+    pub html: String,
+}
+
+/// Everything the base Caddyfile and the pages of one proxy are made from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProxyPages {
+    pub held: Vec<HeldHost>,
+    /// Domains of services with branded pages off: their errors pass through as Caddy sends
+    /// them, an empty body with the status.
+    pub raw: Vec<String>,
+    pub custom: Vec<CustomPage>,
+}
+
+fn builtin(kind: ErrorPageKind) -> &'static Page {
+    match kind {
+        ErrorPageKind::NotFound => &NOTHING_HERE,
+        ErrorPageKind::NoServer => &NO_SERVER,
+        ErrorPageKind::Starting => &STARTING,
+        ErrorPageKind::Timeout => &TIMED_OUT,
+        ErrorPageKind::Error => &WENT_WRONG,
+    }
+}
+
+impl CustomPage {
+    /// Path under the pages directory.
+    fn file(&self) -> String {
+        format!(
+            "custom/{}/{}.html",
+            self.service_id.as_deref().unwrap_or("instance"),
+            builtin(self.kind).file
+        )
+    }
+}
+
+/// The status a page answers with and the `Retry-After` it sends.
+fn status(kind: ErrorPageKind) -> (&'static str, Option<u32>) {
+    match kind {
+        ErrorPageKind::NotFound => ("404", None),
+        ErrorPageKind::NoServer => ("503", Some(DOWN_RETRY)),
+        ErrorPageKind::Starting => ("503", Some(STARTING_RETRY)),
+        ErrorPageKind::Timeout => ("504", None),
+        ErrorPageKind::Error => ("{err.status_code}", None),
+    }
+}
+
+/// The error statuses a page is for, as a CEL expression. `Starting` matches by host instead.
+fn condition(kind: ErrorPageKind) -> Option<&'static str> {
+    match kind {
+        ErrorPageKind::NotFound => Some("{err.status_code} == 404"),
+        ErrorPageKind::NoServer => Some("{err.status_code} in [502, 503]"),
+        ErrorPageKind::Timeout => Some("{err.status_code} == 504"),
+        ErrorPageKind::Error => Some("!({err.status_code} in [404, 502, 503, 504])"),
+        ErrorPageKind::Starting => None,
+    }
+}
+
 /// One branch of the error handling: the page for browsers, a JSON body for everyone else.
-fn handle(out: &mut String, matcher: &str, page: &Page, status: &str, retry: Option<u32>) {
+/// Built-in pages are templates; custom pages are served as they are.
+fn handle(out: &mut String, matcher: &str, kind: ErrorPageKind, custom: Option<&CustomPage>) {
+    let page = builtin(kind);
+    let (status, retry) = status(kind);
     let _ = writeln!(
         out,
         "\t\thandle {matcher}{}{{",
         if matcher.is_empty() { "" } else { " " }
     );
+    out.push_str("\t\t\theader Cache-Control no-store\n");
+    out.push_str("\t\t\theader @json Content-Type application/json\n");
     if let Some(secs) = retry {
         let _ = writeln!(out, "\t\t\theader Retry-After {secs}");
     }
@@ -180,7 +254,15 @@ fn handle(out: &mut String, matcher: &str, page: &Page, status: &str, retry: Opt
         "\t\t\trespond @json `{{\"error\":\"{}\"}}` {status}",
         page.json
     );
-    let _ = writeln!(out, "\t\t\trewrite * /{}.html", page.file);
+    match custom {
+        Some(c) => {
+            let _ = writeln!(out, "\t\t\trewrite * /{}", c.file());
+        }
+        None => {
+            out.push_str("\t\t\ttemplates\n");
+            let _ = writeln!(out, "\t\t\trewrite * /{}.html", page.file);
+        }
+    }
     let _ = writeln!(
         out,
         "\t\t\tfile_server {{\n\t\t\t\tstatus {status}\n\t\t\t}}"
@@ -188,39 +270,98 @@ fn handle(out: &mut String, matcher: &str, page: &Page, status: &str, retry: Opt
     let _ = writeln!(out, "\t\t}}");
 }
 
-/// The base Caddyfile the proxy extends with the routes of running containers.
-pub fn caddyfile(held: &[HeldHost]) -> String {
+/// A named matcher on some hosts and, optionally, a CEL expression.
+fn matcher(out: &mut String, name: &str, hosts: &[&str], expression: Option<&str>) {
+    match expression {
+        None => {
+            let _ = writeln!(out, "\t\t@{name} host {}", hosts.join(" "));
+        }
+        Some(expr) => {
+            let _ = writeln!(
+                out,
+                "\t\t@{name} {{\n\t\t\thost {}\n\t\t\texpression `{expr}`\n\t\t}}",
+                hosts.join(" ")
+            );
+        }
+    }
+}
+
+/// The base Caddyfile the proxy extends with the routes of running containers. The error
+/// handling tries, in order: hosts with branded pages off, starting hosts, each service's
+/// custom pages, then the instance defaults and built-in pages.
+pub fn caddyfile(pages: &ProxyPages) -> String {
     let snippet = snippet();
     let mut out = String::new();
     let _ = writeln!(out, "({snippet}) {{\n\thandle_errors {{");
     let _ = writeln!(out, "\t\troot * {}/pages", dir());
-    out.push_str(
-        "\t\ttemplates\n\t\theader Cache-Control no-store\n\t\t@json not header Accept *text/html*\n\t\theader @json Content-Type application/json\n",
-    );
-    let starting: Vec<&str> = held
+    out.push_str("\t\t@json not header Accept *text/html*\n");
+    if !pages.raw.is_empty() {
+        let raw: Vec<&str> = pages.raw.iter().map(String::as_str).collect();
+        matcher(&mut out, "raw", &raw, None);
+        out.push_str("\t\thandle @raw {\n\t\t\trespond \"\" {err.status_code}\n\t\t}\n");
+    }
+    let starting: Vec<&str> = pages
+        .held
         .iter()
         .filter(|h| h.hold == Hold::Starting)
         .map(|h| h.host.as_str())
         .collect();
-    if !starting.is_empty() {
-        let _ = writeln!(out, "\t\t@starting host {}", starting.join(" "));
-        handle(
-            &mut out,
-            "@starting",
-            &STARTING,
-            "503",
-            Some(STARTING_RETRY),
-        );
+    let instance = |kind| {
+        pages
+            .custom
+            .iter()
+            .find(|c| c.service_id.is_none() && c.kind == kind)
+    };
+    let services = pages.custom.iter().filter(|c| c.service_id.is_some());
+    for (i, c) in services.clone().enumerate() {
+        if c.kind != ErrorPageKind::Starting {
+            continue;
+        }
+        let hosts: Vec<&str> = c
+            .hosts
+            .iter()
+            .map(String::as_str)
+            .filter(|h| starting.contains(h))
+            .collect();
+        if !hosts.is_empty() {
+            let name = format!("custom_{i}");
+            matcher(&mut out, &name, &hosts, None);
+            handle(&mut out, &format!("@{name}"), c.kind, Some(c));
+        }
     }
-    out.push_str("\t\t@missing expression {err.status_code} == 404\n");
-    handle(&mut out, "@missing", &NOTHING_HERE, "404", None);
-    out.push_str("\t\t@down expression {err.status_code} in [502, 503]\n");
-    handle(&mut out, "@down", &NO_SERVER, "503", Some(DOWN_RETRY));
-    out.push_str("\t\t@timeout expression {err.status_code} == 504\n");
-    handle(&mut out, "@timeout", &TIMED_OUT, "504", None);
-    handle(&mut out, "", &WENT_WRONG, "{err.status_code}", None);
+    if !starting.is_empty() {
+        matcher(&mut out, "starting", &starting, None);
+        let kind = ErrorPageKind::Starting;
+        handle(&mut out, "@starting", kind, instance(kind));
+    }
+    for (i, c) in services.enumerate() {
+        let Some(expr) = condition(c.kind) else {
+            continue;
+        };
+        if c.hosts.is_empty() {
+            continue;
+        }
+        let name = format!("custom_{i}");
+        let hosts: Vec<&str> = c.hosts.iter().map(String::as_str).collect();
+        matcher(&mut out, &name, &hosts, Some(expr));
+        handle(&mut out, &format!("@{name}"), c.kind, Some(c));
+    }
+    for (name, kind) in [
+        ("missing", ErrorPageKind::NotFound),
+        ("down", ErrorPageKind::NoServer),
+        ("timeout", ErrorPageKind::Timeout),
+    ] {
+        let _ = writeln!(
+            out,
+            "\t\t@{name} expression `{}`",
+            condition(kind).unwrap_or_default()
+        );
+        handle(&mut out, &format!("@{name}"), kind, instance(kind));
+    }
+    let kind = ErrorPageKind::Error;
+    handle(&mut out, "", kind, instance(kind));
     out.push_str("\t}\n}\n");
-    for h in held {
+    for h in &pages.held {
         let site = if h.tls {
             h.host.clone()
         } else {
@@ -233,7 +374,7 @@ pub fn caddyfile(held: &[HeldHost]) -> String {
 }
 
 /// A tar archive of the base Caddyfile and the pages, to extract at `/srv` in the proxy.
-pub fn archive(held: &[HeldHost]) -> Result<Vec<u8>> {
+pub fn archive(pages: &ProxyPages) -> Result<Vec<u8>> {
     let mut tar = tar::Builder::new(Vec::new());
     let mut add = |path: String, data: &[u8], dir: bool| {
         let mut header = tar::Header::new_gnu();
@@ -247,19 +388,28 @@ pub fn archive(held: &[HeldHost]) -> Result<Vec<u8>> {
         header.set_cksum();
         tar.append_data(&mut header, path, data)
     };
-    add(format!("{}/", brand::PREFIX), &[], true)?;
-    add(format!("{}/pages/", brand::PREFIX), &[], true)?;
-    add(
-        format!("{}/Caddyfile", brand::PREFIX),
-        caddyfile(held).as_bytes(),
-        false,
-    )?;
+    let p = brand::PREFIX;
+    add(format!("{p}/"), &[], true)?;
+    add(format!("{p}/pages/"), &[], true)?;
+    add(format!("{p}/Caddyfile"), caddyfile(pages).as_bytes(), false)?;
     for page in PAGES {
         add(
-            format!("{}/pages/{}.html", brand::PREFIX, page.file),
+            format!("{p}/pages/{}.html", page.file),
             render(page).as_bytes(),
             false,
         )?;
+    }
+    if !pages.custom.is_empty() {
+        add(format!("{p}/pages/custom/"), &[], true)?;
+    }
+    let mut owners = Vec::new();
+    for c in &pages.custom {
+        let owner = c.service_id.as_deref().unwrap_or("instance");
+        if !owners.contains(&owner) {
+            owners.push(owner);
+            add(format!("{p}/pages/custom/{owner}/"), &[], true)?;
+        }
+        add(format!("{p}/pages/{}", c.file()), c.html.as_bytes(), false)?;
     }
     Ok(tar.into_inner()?)
 }
@@ -273,6 +423,15 @@ mod tests {
             host: host.into(),
             tls,
             hold,
+        }
+    }
+
+    fn custom(service: Option<&str>, hosts: &[&str], kind: ErrorPageKind) -> CustomPage {
+        CustomPage {
+            service_id: service.map(Into::into),
+            hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            kind,
+            html: format!("<p>{kind}</p>"),
         }
     }
 
@@ -291,6 +450,7 @@ mod tests {
             assert!(html.contains(&brand::NAME.to_lowercase()));
             assert!(html.contains("{{html .Host}}"));
             assert!(html.contains("http.request.uuid"));
+            assert_eq!(common::check_error_page(&html), Ok(Vec::new()));
         }
         assert!(render(&STARTING).contains("http-equiv=\"refresh\""));
         assert!(!render(&NO_SERVER).contains("http-equiv"));
@@ -299,10 +459,13 @@ mod tests {
 
     #[test]
     fn the_caddyfile_holds_domains_without_a_container() {
-        let file = caddyfile(&[
-            held("new.example.com", true, Hold::Starting),
-            held("off.localhost", false, Hold::Down),
-        ]);
+        let file = caddyfile(&ProxyPages {
+            held: vec![
+                held("new.example.com", true, Hold::Starting),
+                held("off.localhost", false, Hold::Down),
+            ],
+            ..Default::default()
+        });
         let snippet = snippet();
         assert!(file.starts_with(&format!("({snippet}) {{")));
         assert!(file.contains("@starting host new.example.com\n"));
@@ -315,12 +478,69 @@ mod tests {
         assert!(file.contains(&format!(
             "\nhttp:// {{\n\timport {snippet}\n\terror 404\n}}"
         )));
-        assert!(!caddyfile(&[]).contains("@starting"));
+        let empty = caddyfile(&ProxyPages::default());
+        assert!(!empty.contains("@starting") && !empty.contains("@raw"));
+        assert_eq!(empty.matches("\t\t\ttemplates\n").count(), 4);
+    }
+
+    #[test]
+    fn unbranded_hosts_get_the_raw_response_first() {
+        let file = caddyfile(&ProxyPages {
+            held: vec![held("new.example.com", true, Hold::Starting)],
+            raw: vec!["raw.example.com".into(), "raw2.example.com".into()],
+            ..Default::default()
+        });
+        let raw = file
+            .find("\t\t@raw host raw.example.com raw2.example.com\n\t\thandle @raw {\n\t\t\trespond \"\" {err.status_code}\n\t\t}")
+            .expect("raw branch");
+        assert!(raw < file.find("@starting").unwrap());
+    }
+
+    #[test]
+    fn custom_pages_win_over_the_instance_default_and_the_built_in_page() {
+        let file = caddyfile(&ProxyPages {
+            held: vec![
+                held("app.example.com", true, Hold::Starting),
+                held("other.example.com", true, Hold::Starting),
+            ],
+            custom: vec![
+                custom(
+                    Some("svc1"),
+                    &["app.example.com", "www.example.com"],
+                    ErrorPageKind::Starting,
+                ),
+                custom(Some("svc1"), &["app.example.com"], ErrorPageKind::Error),
+                custom(Some("svc2"), &["api.example.com"], ErrorPageKind::NoServer),
+                custom(None, &[], ErrorPageKind::NotFound),
+            ],
+            ..Default::default()
+        });
+        let at = |needle: &str| file.find(needle).unwrap_or_else(|| panic!("{needle}"));
+        let svc_starting = at("@custom_0 host app.example.com\n");
+        assert!(svc_starting < at("@starting host app.example.com other.example.com"));
+        assert!(file.contains("rewrite * /custom/svc1/starting.html"));
+        assert!(file.contains(
+            "@custom_2 {\n\t\t\thost api.example.com\n\t\t\texpression `{err.status_code} in [502, 503]`"
+        ));
+        assert!(file.contains("expression `!({err.status_code} in [404, 502, 503, 504])`"));
+        assert!(at("rewrite * /custom/svc2/no-server.html") < at("@missing"));
+        let missing = &file[at("handle @missing {")..at("@down")];
+        assert!(missing.contains("rewrite * /custom/instance/nothing-here.html"));
+        assert!(!missing.contains("templates"));
+        assert!(file[at("handle @down {")..].contains("templates"));
     }
 
     #[test]
     fn the_archive_unpacks_under_the_prefix() {
-        let bytes = archive(&[]).unwrap();
+        let pages = ProxyPages {
+            custom: vec![
+                custom(Some("svc1"), &["a.example.com"], ErrorPageKind::NoServer),
+                custom(Some("svc1"), &["a.example.com"], ErrorPageKind::Timeout),
+                custom(None, &[], ErrorPageKind::NotFound),
+            ],
+            ..Default::default()
+        };
+        let bytes = archive(&pages).unwrap();
         let mut names: Vec<String> = tar::Archive::new(bytes.as_slice())
             .entries()
             .unwrap()
@@ -330,6 +550,15 @@ mod tests {
         let p = brand::PREFIX;
         assert!(names.contains(&format!("{p}/Caddyfile")));
         assert!(names.contains(&format!("{p}/pages/no-server.html")));
-        assert_eq!(names.iter().filter(|n| n.ends_with(".html")).count(), 5);
+        assert!(names.contains(&format!("{p}/pages/custom/svc1/timed-out.html")));
+        assert!(names.contains(&format!("{p}/pages/custom/instance/nothing-here.html")));
+        assert_eq!(names.iter().filter(|n| n.ends_with(".html")).count(), 8);
+        assert_eq!(
+            names
+                .iter()
+                .filter(|n| n.trim_end_matches('/').ends_with("custom/svc1"))
+                .count(),
+            1
+        );
     }
 }

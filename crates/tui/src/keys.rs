@@ -366,11 +366,19 @@ fn overlay(app: &mut App, key: KeyEvent) {
     match app.overlay.as_mut() {
         Some(Overlay::ServerDetail(_)) => crate::problem::server_detail_keys(app, key),
         Some(Overlay::ErrorDetail(_)) => crate::problem::error_detail_keys(app, key),
+        Some(Overlay::ErrorPages(_)) => crate::error_pages::keys(app, key),
         Some(Overlay::Form(form)) => match form.handle_key(key) {
             FormAction::None => {}
             FormAction::Cancel => {
+                let back = match &form.kind {
+                    FormKind::ErrorPage { service_id, kind } => Some((service_id.clone(), *kind)),
+                    _ => None,
+                };
                 app.cancel_form();
                 app.overlay = None;
+                if let Some((id, kind)) = back {
+                    app.open_error_pages(id, kind);
+                }
             }
             FormAction::Pick(field) => app.pick_for_form(field),
             FormAction::Load { path, into } => app.load_into_form(&path, into),
@@ -1091,6 +1099,9 @@ fn service(app: &mut App, key: KeyEvent) {
         (Tab::Settings, KeyCode::Enter | KeyCode::Char('e')) => app.form_edit_service(),
         (Tab::Settings, KeyCode::Char('X')) => ask_delete_service(app, &s),
         (Tab::Settings, KeyCode::Char('m')) => app.form_move_service(),
+        (Tab::Settings, KeyCode::Char('p')) => {
+            app.open_error_pages(Some(s.id.clone()), common::ErrorPageKind::NotFound)
+        }
         _ => {}
     }
 }
@@ -1350,6 +1361,7 @@ fn settings(app: &mut App, key: KeyEvent) {
             );
         }
         KeyCode::Char('r') => app.restart_proxy(),
+        KeyCode::Char('p') => app.open_error_pages(None, common::ErrorPageKind::NotFound),
         KeyCode::Char('t') => ask(
             app,
             "Rotate API token",

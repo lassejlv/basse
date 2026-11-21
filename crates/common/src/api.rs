@@ -55,6 +55,21 @@
 //! | POST | `/settings/domain/check` | | `InstanceDomain` (DNS, ports 80 and 443, certificate, API; detects Cloudflare's proxy) |
 //! | DELETE | `/settings/domain` | | `InstanceDomain` (the API is served on IP:port only again) |
 //!
+//! Error pages are what the proxy serves when it cannot answer for an app itself (see
+//! [`crate::ErrorPageKind`]); an app's own errors pass through untouched. A service's custom
+//! page wins over the instance default, which wins over the built-in page. Every change is
+//! written to the proxies at once. `kind` is `404`, `503`, `starting`, `504` or `5xx`.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | PUT | `/services/{id}/error-pages/{kind}` | `SetErrorPage` | `CustomErrorPage` (400 for an empty or too large page, or a repo page on a service without a repository; `warnings` lists external resources) |
+//! | DELETE | `/services/{id}/error-pages/{kind}` | | 204 (the instance default or built-in page is served again) |
+//! | GET | `/settings/error-pages` | | `ErrorPages` (the instance defaults) |
+//! | PUT | `/settings/error-pages/{kind}` | `SetErrorPage` | `CustomErrorPage` (uploads only) |
+//! | DELETE | `/settings/error-pages/{kind}` | | 204 |
+//!
+//! `PATCH /services/{id}` with `branded_error_pages: false` turns a service's pages off.
+//!
 //! Git sources. Credentials are stored as secrets and never returned. GitHub App sources need a
 //! verified instance domain, because GitHub calls back to it.
 //!
@@ -290,6 +305,25 @@ pub struct UpdateService {
     pub restart: Option<RestartPolicy>,
     pub health_path: Option<String>,
     pub server_id: Option<Id>,
+    /// `false` lets the proxy's own error responses through instead of the branded pages.
+    /// Applies at once, without a deploy.
+    pub branded_error_pages: Option<bool>,
+}
+
+/// A custom error page for a service or the instance. The page must be one HTML file of at
+/// most [`crate::MAX_ERROR_PAGE_BYTES`]; it is served as is, without templating.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SetErrorPage {
+    /// The page itself; `name` is the file it came from, for display.
+    Upload {
+        html: String,
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// A file in the service's repository, relative to its root directory. Read on every deploy
+    /// from source, starting with the next one. Only for git services.
+    Repo { path: String },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

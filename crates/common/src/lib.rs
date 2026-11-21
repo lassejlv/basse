@@ -827,6 +827,210 @@ pub struct ServiceDetail {
     /// Each service of a compose build with its container; empty for other build methods.
     #[serde(default)]
     pub compose: Vec<ComposeService>,
+    /// Whether the proxy serves branded pages for this service, and the pages it replaces.
+    #[serde(default)]
+    pub error_pages: ErrorPages,
+}
+
+/// One of the pages the proxy serves when it cannot answer for an app itself. Errors an app
+/// returns itself always pass through untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ErrorPageKind {
+    /// 404: no app is set up for the host.
+    #[serde(rename = "404")]
+    NotFound,
+    /// 503 (also for a 502): no container answers for the domain.
+    #[serde(rename = "503")]
+    NoServer,
+    /// 503 while a domain's first container is still starting.
+    #[serde(rename = "starting")]
+    Starting,
+    /// 504: the app took too long to answer.
+    #[serde(rename = "504")]
+    Timeout,
+    /// Any other error the proxy raises.
+    #[serde(rename = "5xx")]
+    Error,
+}
+
+impl ErrorPageKind {
+    pub const ALL: [Self; 5] = [
+        Self::NotFound,
+        Self::NoServer,
+        Self::Starting,
+        Self::Timeout,
+        Self::Error,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "404",
+            Self::NoServer => "503",
+            Self::Starting => "starting",
+            Self::Timeout => "504",
+            Self::Error => "5xx",
+        }
+    }
+
+    /// The status column of lists: `503` for both 503 pages.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Starting => "503",
+            other => other.as_str(),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotFound => "nothing here",
+            Self::NoServer => "no server",
+            Self::Starting => "starting",
+            Self::Timeout => "timed out",
+            Self::Error => "went wrong",
+        }
+    }
+}
+
+impl fmt::Display for ErrorPageKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ErrorPageKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "404" | "not-found" => Ok(Self::NotFound),
+            "503" | "502" | "no-server" => Ok(Self::NoServer),
+            "starting" | "503-starting" => Ok(Self::Starting),
+            "504" | "timeout" => Ok(Self::Timeout),
+            "5xx" | "500" | "error" => Ok(Self::Error),
+            _ => Err(format!(
+                "unknown error page '{s}', expected one of 404, 503, starting, 504, 5xx"
+            )),
+        }
+    }
+}
+
+/// Largest custom error page the proxy serves.
+pub const MAX_ERROR_PAGE_BYTES: usize = 256 * 1024;
+
+/// Where a custom error page comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ErrorPageSource {
+    /// Uploaded through the API; `name` is the file it came from, for display.
+    Upload {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// A file in the service's repository, relative to its root directory, read on every
+    /// deploy from source.
+    Repo { path: String },
+}
+
+/// A page that replaces one of the built-in error pages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomErrorPage {
+    pub kind: ErrorPageKind,
+    pub source: ErrorPageSource,
+    /// Bytes of the HTML the proxy serves. `None` while a repo page has not been read yet or
+    /// could not be read; the instance default or built-in page is served meanwhile.
+    pub size: Option<u64>,
+    /// External resources the page loads, or why a repo page could not be read.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    pub updated_at: Timestamp,
+}
+
+/// The error pages of a service, or the instance-wide defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorPages {
+    /// With `false`, the proxy's own responses (an empty 502, 503 or 504) pass through and no
+    /// page is served. Always `true` for the instance defaults.
+    pub branded: bool,
+    /// In [`ErrorPageKind::ALL`] order.
+    pub custom: Vec<CustomErrorPage>,
+}
+
+impl Default for ErrorPages {
+    fn default() -> Self {
+        Self {
+            branded: true,
+            custom: Vec::new(),
+        }
+    }
+}
+
+impl ErrorPages {
+    pub fn page(&self, kind: ErrorPageKind) -> Option<&CustomErrorPage> {
+        self.custom.iter().find(|p| p.kind == kind)
+    }
+}
+
+/// Checks a custom error page: it must not be empty or larger than [`MAX_ERROR_PAGE_BYTES`].
+/// Returns warnings, such as the external hosts it loads resources from.
+pub fn check_error_page(html: &str) -> Result<Vec<String>, String> {
+    if html.trim().is_empty() {
+        return Err("the page is empty".into());
+    }
+    if html.len() > MAX_ERROR_PAGE_BYTES {
+        return Err(format!(
+            "the page is {} KB; error pages can be at most {} KB",
+            html.len().div_ceil(1024),
+            MAX_ERROR_PAGE_BYTES / 1024
+        ));
+    }
+    let hosts = external_hosts(html);
+    if hosts.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(vec![format!(
+        "loads resources from {}; error pages should be self-contained, because those hosts may be unreachable when the page is shown",
+        hosts.join(", ")
+    )])
+}
+
+/// Hosts a page loads resources from: absolute or protocol-relative URLs in `src`, `srcset`,
+/// `href` (except on links), `poster`, `data`, CSS `url()` and `@import`.
+fn external_hosts(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut hosts: Vec<String> = Vec::new();
+    for (at, _) in lower.match_indices("//") {
+        let before = &lower[..at];
+        let before = before
+            .strip_suffix("https:")
+            .or_else(|| before.strip_suffix("http:"))
+            .unwrap_or(before);
+        let lead = before.trim_end_matches(['"', '\'', ' ', '\t', '\n', '\r']);
+        let Some(attr) = [
+            "src=", "srcset=", "href=", "poster=", "data=", "url(", "@import",
+        ]
+        .into_iter()
+        .find(|p| lead.ends_with(p)) else {
+            continue;
+        };
+        if attr == "href=" {
+            let tag = lead.rfind('<').map_or("", |i| &lead[i + 1..]);
+            let name: String = tag
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            if name == "a" || name == "area" {
+                continue;
+            }
+        }
+        let host: String = lower[at + 2..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            .collect();
+        if !host.is_empty() && !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    hosts
 }
 
 /// How to reach a one-click database. Only set on [`ServiceDetail`] for database services.
@@ -1581,5 +1785,42 @@ mod tests {
         assert_eq!(pg.data_path("19"), "/var/lib/postgresql");
         assert_eq!(pg.data_path("latest"), "/var/lib/postgresql");
         assert_eq!(DatabaseKind::Redis.data_path("8-alpine"), "/data");
+    }
+
+    #[test]
+    fn error_pages_warn_about_external_resources_only() {
+        let ok = r#"<html><head><style>body{background:url(data:image/png;base64,AA)}</style></head>
+            <body><a href="https://example.com/status">status</a></body></html>"#;
+        assert_eq!(check_error_page(ok), Ok(Vec::new()));
+        let external = r#"<link href="https://fonts.googleapis.com/css2?family=Inter" rel="stylesheet">
+            <img src='//cdn.example.com/logo.png'><style>@import "http://cdn.example.com/x.css";
+            .a{background:url( https://img.example.org/bg.jpg )}</style>"#;
+        let warnings = check_error_page(external).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("fonts.googleapis.com, cdn.example.com, img.example.org"),
+            "{}",
+            warnings[0]
+        );
+        assert!(check_error_page("  ").is_err());
+        let big = "x".repeat(MAX_ERROR_PAGE_BYTES + 1);
+        assert!(
+            check_error_page(&big)
+                .unwrap_err()
+                .contains("at most 256 KB")
+        );
+        assert!(check_error_page(&big[1..]).is_ok());
+    }
+
+    #[test]
+    fn error_page_kinds_parse_from_codes() {
+        for kind in ErrorPageKind::ALL {
+            assert_eq!(kind.as_str().parse::<ErrorPageKind>(), Ok(kind));
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{}\"", kind.as_str()));
+        }
+        assert_eq!("502".parse(), Ok(ErrorPageKind::NoServer));
+        assert_eq!("500".parse(), Ok(ErrorPageKind::Error));
+        assert!("418".parse::<ErrorPageKind>().is_err());
     }
 }

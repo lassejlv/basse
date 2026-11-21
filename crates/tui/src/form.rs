@@ -245,6 +245,11 @@ pub enum FormKind {
         channel_id: Option<Id>,
         created: bool,
     },
+    /// A custom error page of a service, or of the instance for `None`.
+    ErrorPage {
+        service_id: Option<Id>,
+        kind: common::ErrorPageKind,
+    },
     /// Starts the GitHub App manifest flow.
     CreateGithubApp,
     ConnectGithubApp,

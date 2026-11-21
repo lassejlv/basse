@@ -982,6 +982,7 @@ mod tests {
                     container: None,
                     database: None,
                     compose: Vec::new(),
+                    error_pages: ErrorPages::default(),
                 })
             }
             ("GET", "/services/s1/deployments") => ok(vec![deployment(DeploymentStatus::Building)]),

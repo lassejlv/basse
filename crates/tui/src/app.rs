@@ -135,6 +135,10 @@ pub enum Msg {
         root: String,
         result: Result<BuildDetection, String>,
     },
+    /// The instance-wide default error pages.
+    InstanceErrorPages(ErrorPages),
+    /// A custom error page was reset or branded pages toggled, for a service or the instance.
+    ErrorPagesChanged(Option<Id>, Result<String, String>),
     /// The folders under `path` for the root directory picker.
     Dirs {
         path: String,
@@ -156,6 +160,8 @@ pub enum Then {
     GithubSetup(Box<GithubAppSetup>),
     /// Show a server whose check failed, with what to do about it.
     ServerDetail(Box<Server>),
+    /// Back to the error pages dialog, on the page that was just set.
+    ErrorPages(Option<Id>, ErrorPageKind),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -698,6 +704,8 @@ pub enum Overlay {
     ServerDetail(crate::problem::ServerDetail),
     /// The full text of an error the key bar cut short.
     ErrorDetail(crate::problem::ErrorDetail),
+    /// Branded and custom error pages of a service or the instance.
+    ErrorPages(crate::error_pages::ErrorPagesDialog),
 }
 
 /// A GitHub App being created with the manifest flow.
@@ -766,6 +774,8 @@ pub struct SettingsView {
     pub backup_row: usize,
     pub schedule: Option<InstanceBackupSchedule>,
     pub settings: Option<InstanceSettings>,
+    /// The instance-wide default error pages.
+    pub error_pages: Option<ErrorPages>,
     pub release: Option<VersionCheck>,
     pub contexts: Config,
     pub row: usize,
@@ -1418,6 +1428,7 @@ impl App {
                     Then::ShowKey(s) => self.show_key(&s),
                     Then::InstanceSchedule(s) => self.settings.schedule = Some(s),
                     Then::ServerDetail(s) => self.open_server_detail(*s),
+                    Then::ErrorPages(id, kind) => self.open_error_pages(id, kind),
                     Then::GithubSetup(setup) => {
                         let GithubAppSetup { source, setup_url } = *setup;
                         self.upsert_source(source.clone());
@@ -1477,6 +1488,8 @@ impl App {
                 self.setup.test = Some(result);
                 self.load_notify();
             }
+            Msg::InstanceErrorPages(p) => self.settings.error_pages = Some(p),
+            Msg::ErrorPagesChanged(id, done) => self.error_pages_changed(id, done),
             Msg::Settings(s) => {
                 self.settings.settings = Some(*s);
                 self.settings.loaded_at = Some(Instant::now());
@@ -2892,6 +2905,7 @@ impl App {
 
     pub(crate) fn load_settings(&mut self) {
         self.load_instance_backups();
+        self.load_instance_error_pages();
         self.spawn(|c| async move {
             match c.instance_backup_schedule().await {
                 Ok(s) => Msg::InstanceSchedule(s),
@@ -5581,6 +5595,7 @@ impl App {
             FormKind::DownloadBackup { .. } => return self.submit_download(),
             FormKind::NotifyKind => return self.notify_kind_chosen(),
             FormKind::NotifyChannel { .. } => return self.submit_notify_channel(),
+            FormKind::ErrorPage { .. } => return self.submit_error_page(),
             _ => {}
         }
         match build_request(form, alt) {
@@ -6397,6 +6412,7 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                     restart: Some(policies[form.choice("restart")]),
                     health_path: Some(form.get("health")),
                     server_id: None,
+                    branded_error_pages: None,
                 },
                 deploy: alt,
             }
@@ -6616,7 +6632,8 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
         | FormKind::MoveService { .. }
         | FormKind::DownloadBackup { .. }
         | FormKind::NotifyKind
-        | FormKind::NotifyChannel { .. } => {
+        | FormKind::NotifyChannel { .. }
+        | FormKind::ErrorPage { .. } => {
             return Err("internal: this form submits separately".into());
         }
     })

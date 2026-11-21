@@ -556,6 +556,9 @@ impl Job {
                     .clone_repo(&repo.clone(), &branch.clone(), source_id.clone().as_deref())
                     .await?;
                 let dir = root_dir(&dir, &root)?;
+                for line in crate::error_pages::load_from_repo(&self.state, &svc.id, &dir).await? {
+                    self.log.system(line);
+                }
                 if !root.is_empty() {
                     self.log.system(format!("Building in {root}"));
                 }

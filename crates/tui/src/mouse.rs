@@ -56,6 +56,8 @@ pub enum Hit {
     PaletteInput,
     List(List),
     PickRow(usize),
+    /// A page in the error pages dialog.
+    ErrorPageRow(usize),
     /// A row of the list on a full-screen list such as Secrets.
     Item(usize),
     /// A tab of the Notifications screen.
@@ -354,6 +356,7 @@ pub fn paint_hover(buf: &mut Buffer, mouse: &MouseState) {
             | Hit::Context(_)
             | Hit::PaletteRow(_)
             | Hit::PickRow(_)
+            | Hit::ErrorPageRow(_)
             | Hit::Item(_)
             | Hit::Record(_)
             | Hit::Container(_)
@@ -687,6 +690,14 @@ fn click(app: &mut App, hit: Hit, double: bool) {
                 if form.fields[i].kind == crate::form::FieldKind::Pick && form.focus == i {
                     press(app, KeyCode::Enter, KeyModifiers::NONE);
                 }
+            }
+        }
+        Hit::ErrorPageRow(i) => {
+            if let Some(Overlay::ErrorPages(d)) = app.overlay.as_mut() {
+                d.row = i;
+            }
+            if double {
+                press(app, KeyCode::Enter, KeyModifiers::NONE);
             }
         }
         Hit::PickRow(i) => {
