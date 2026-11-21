@@ -415,6 +415,49 @@ impl Github {
     }
 }
 
+#[derive(Deserialize)]
+struct ContentEntry {
+    name: String,
+    #[serde(rename = "type", default)]
+    kind: String,
+}
+
+impl Github {
+    /// Names of the files at the root of a branch.
+    pub async fn root_files(
+        &self,
+        token: &str,
+        full_name: &str,
+        branch: &str,
+    ) -> Result<Vec<String>> {
+        validate_full_name(full_name)?;
+        let branch = url_encode(branch);
+        let entries: Vec<ContentEntry> = self
+            .get(
+                &format!("/repos/{full_name}/contents?ref={branch}"),
+                Auth::Token(token),
+            )
+            .await?;
+        Ok(entries
+            .into_iter()
+            .filter(|e| e.kind == "file")
+            .map(|e| e.name)
+            .collect())
+    }
+}
+
+/// Percent-encodes everything but unreserved characters, for a query value.
+fn url_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 /// `owner/name` with characters GitHub allows, so it can go into a URL path.
 pub fn validate_full_name(full_name: &str) -> Result<()> {
     let ok_part = |p: &str| {

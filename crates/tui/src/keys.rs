@@ -640,6 +640,9 @@ fn service(app: &mut App, key: KeyEvent) {
         (Tab::Volumes, Some(d)) => d.volumes.len(),
         _ => 0,
     };
+    if tab == Tab::Logs && key.code == KeyCode::Char('c') && !view.compose().is_empty() {
+        return app.next_container();
+    }
     if tab == Tab::Logs {
         let logs = &mut view.logs;
         let handled = match key.code {

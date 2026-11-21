@@ -60,6 +60,8 @@ pub enum Hit {
     Item(usize),
     /// A DNS record on the domain guide; a click copies its value.
     Record(usize),
+    /// A container of a compose service; a click follows its logs.
+    Container(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +87,7 @@ pub enum List {
     Secrets,
     Storage,
     Sources,
+    Containers,
     InstanceBackups,
 }
 
@@ -330,6 +333,7 @@ pub fn paint_hover(buf: &mut Buffer, mouse: &MouseState) {
             | Hit::PickRow(_)
             | Hit::Item(_)
             | Hit::Record(_)
+            | Hit::Container(_)
     );
     let rect = rect.intersection(buf.area);
     for y in rect.top()..rect.bottom() {
@@ -682,6 +686,10 @@ fn click(app: &mut App, hit: Hit, double: bool) {
             }
             _ => {}
         },
+        Hit::Container(i) => {
+            keys::finish_text_input(app);
+            app.pick_container(i);
+        }
         Hit::Record(i) => {
             if let Some(r) = app
                 .domain

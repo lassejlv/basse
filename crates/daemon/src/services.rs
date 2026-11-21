@@ -127,6 +127,20 @@ pub async fn detail(state: &AppState, id: &str) -> ApiResult<ServiceDetail> {
     service.state = compute_state(&rec, run, reachable);
     let env = db.env(id).await?;
     let database = database::info(&service, &server, &env, db.public_port(id).await?);
+    let compose = match &service.source {
+        Source::Git { build, .. } if build.method == BuildMethod::Compose && reachable => {
+            let lookup = async {
+                let docker = state.docker.get(&server).await?;
+                compose_services(&docker, &service.id).await
+            };
+            tokio::time::timeout(LOOKUP_TIMEOUT, lookup)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
     Ok(ServiceDetail {
         service,
         project,
@@ -137,6 +151,7 @@ pub async fn detail(state: &AppState, id: &str) -> ApiResult<ServiceDetail> {
         volumes: db.volumes(id).await?,
         container,
         database,
+        compose,
     })
 }
 
@@ -220,6 +235,7 @@ pub async fn create(state: &AppState, body: CreateService) -> ApiResult<ServiceR
             host,
             port: None,
             tls: true,
+            compose_service: None,
             created_at: Utc::now(),
         });
     }
@@ -314,6 +330,10 @@ pub async fn delete(
         if let Err(e) = docker::remove_service_containers(&docker, &svc.id, None).await {
             tracing::warn!("cannot remove containers of {}: {e:#}", svc.name);
         }
+        let project = crate::build::compose_project(&svc.id);
+        if let Err(e) = docker::remove_compose_leftovers(&docker, &project, purge_volumes).await {
+            tracing::warn!("cannot remove the compose project of {}: {e:#}", svc.name);
+        }
         if purge_volumes {
             for v in &volumes {
                 if let Err(e) =
@@ -374,17 +394,29 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
         bad_request!("'{}' has not been deployed yet", rec.service.name);
     };
     let (_, docker) = state.docker_for(&rec.service.server_id).await?;
-    let exists = docker::inspect(&docker, &container).await?.is_some();
     let svc = &rec.service;
+    let compose =
+        matches!(&svc.source, Source::Git { build, .. } if build.method == BuildMethod::Compose);
+    let targets: Vec<String> = if compose {
+        compose_services(&docker, id)
+            .await?
+            .into_iter()
+            .filter_map(|c| c.container.map(|c| c.id))
+            .collect()
+    } else if docker::inspect(&docker, &container).await?.is_some() {
+        vec![container]
+    } else {
+        Vec::new()
+    };
     match action {
         Power::Stop => {
             state.db.set_stopped(id, true).await?;
-            if exists {
+            for container in &targets {
                 let options = StopContainerOptions {
                     t: Some(10),
                     ..Default::default()
                 };
-                match docker.stop_container(&container, Some(options)).await {
+                match docker.stop_container(container, Some(options)).await {
                     Ok(()) => {}
                     Err(e) if docker::status_code(&e) == Some(304) => {}
                     Err(e) => {
@@ -400,24 +432,34 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
         }
         Power::Start | Power::Restart => {
             state.db.set_stopped(id, false).await?;
-            if !exists {
+            if targets.is_empty() {
                 let rec = record(state, id).await?;
-                deploy::enqueue(state, &rec, "start", deploy::Plan::Reconfigure).await?;
-            } else if matches!(action, Power::Start) {
-                match docker.start_container(&container, None).await {
-                    Ok(()) => {}
-                    Err(e) if docker::status_code(&e) == Some(304) => {}
-                    Err(e) => {
-                        return Err(anyhow::Error::from(e)
-                            .context("cannot start the container")
-                            .into());
+                let plan = if compose {
+                    deploy::Plan::Source
+                } else {
+                    deploy::Plan::Reconfigure
+                };
+                deploy::enqueue(state, &rec, "start", plan).await?;
+            }
+            for container in &targets {
+                if matches!(action, Power::Start) {
+                    match docker.start_container(container, None).await {
+                        Ok(()) => {}
+                        Err(e) if docker::status_code(&e) == Some(304) => {}
+                        Err(e) => {
+                            return Err(anyhow::Error::from(e)
+                                .context("cannot start the container")
+                                .into());
+                        }
                     }
+                } else {
+                    docker
+                        .restart_container(container, None)
+                        .await
+                        .map_err(|e| {
+                            anyhow::Error::from(e).context("cannot restart the container")
+                        })?;
                 }
-            } else {
-                docker
-                    .restart_container(&container, None)
-                    .await
-                    .map_err(|e| anyhow::Error::from(e).context("cannot restart the container"))?;
             }
             let verb = if matches!(action, Power::Start) {
                 "started"
@@ -433,6 +475,56 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
 }
 
 // Validation
+
+/// The containers of a service's compose project, one per compose service, by name.
+pub async fn compose_services(
+    docker: &bollard::Docker,
+    service_id: &str,
+) -> anyhow::Result<Vec<ComposeService>> {
+    let label = format!(
+        "com.docker.compose.project={}",
+        crate::build::compose_project(service_id)
+    );
+    let mut out: Vec<ComposeService> = Vec::new();
+    for c in docker::list_by_label(docker, &label).await? {
+        let name = c
+            .labels
+            .as_ref()
+            .and_then(|l| l.get("com.docker.compose.service"))
+            .cloned()
+            .unwrap_or_default();
+        let Some(id) = &c.id else { continue };
+        let container = docker::inspect(docker, id)
+            .await?
+            .map(|i| docker::container_info(&i));
+        out.push(ComposeService { name, container });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// Trims build settings and keeps the compose file inside the repository.
+fn validate_build(build: Build) -> ApiResult<Build> {
+    let target = non_empty(build.target);
+    if let Some(t) = &target
+        && !t
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        bad_request!("invalid build target '{t}'");
+    }
+    let compose_file = non_empty(build.compose_file);
+    if let Some(f) = &compose_file
+        && (f.starts_with('/') || f.split('/').any(|c| c == ".."))
+    {
+        bad_request!("path '{f}' must stay inside the repository");
+    }
+    Ok(Build {
+        method: build.method,
+        target,
+        compose_file,
+    })
+}
 
 /// A git source that names a source must name one that can clone.
 async fn check_git_source(state: &AppState, source: &Source) -> ApiResult<()> {
@@ -482,7 +574,9 @@ fn validate_source(source: Source) -> ApiResult<Source> {
             context,
             source_id,
             auto_deploy,
+            build,
         } => {
+            let build = validate_build(build)?;
             let repo = repo.trim().to_string();
             let source_id = non_empty(source_id);
             if source_id.is_some() {
@@ -510,6 +604,7 @@ fn validate_source(source: Source) -> ApiResult<Source> {
                 context,
                 source_id,
                 auto_deploy,
+                build,
             }
         }
         Source::Database { kind, version } => {

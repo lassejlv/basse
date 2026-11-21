@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::{broadcast, watch};
 
+mod methods;
+
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const STABLE_FOR: Duration = Duration::from_secs(5);
 const GIT_TIMEOUT: Duration = Duration::from_secs(600);
@@ -298,6 +300,11 @@ pub async fn reconfigure(
     if rec.stopped || (rec.service.live_deployment_id.is_none() && rec.busy.is_none()) {
         return Ok(None);
     }
+    if let Source::Git { build, .. } = &rec.service.source
+        && build.method == BuildMethod::Compose
+    {
+        return enqueue(state, rec, "config", Plan::Source).await.map(Some);
+    }
     enqueue(state, rec, "config", Plan::Reconfigure)
         .await
         .map(Some)
@@ -432,7 +439,7 @@ impl Job {
         let previous = rec
             .live_container
             .filter(|_| matches!(rec.service.source, Source::Database { .. }));
-        let svc = rec.service;
+        let mut svc = rec.service;
         let env = db
             .environment(&svc.environment_id)
             .await?
@@ -464,17 +471,34 @@ impl Job {
                 Source::Git {
                     repo,
                     branch,
-                    dockerfile,
-                    context,
                     source_id,
                     ..
                 },
             ) => {
                 self.set_status(DeploymentStatus::Building).await;
-                let dir = self.clone_repo(repo, branch, source_id.as_deref()).await?;
-                let tag = docker::build_tag(&svc.id, self.d.number);
-                self.build(&docker, &svc, &dir, context, dockerfile, &tag)
+                let dir = self
+                    .clone_repo(&repo.clone(), &branch.clone(), source_id.clone().as_deref())
                     .await?;
+                let build = self.resolve_build(&mut svc, &dir).await?;
+                self.service = Some(svc.clone());
+                let Source::Git { context, .. } = &svc.source else {
+                    unreachable!("checked above");
+                };
+                let tag = docker::build_tag(&svc.id, self.d.number);
+                match build.method {
+                    BuildMethod::Compose => {
+                        return self
+                            .deploy_compose(&docker, &server, &svc, &dir, &build)
+                            .await;
+                    }
+                    BuildMethod::Railpack => {
+                        self.build_railpack(&server, &svc, &dir, context, &tag)
+                            .await?
+                    }
+                    BuildMethod::Dockerfile | BuildMethod::Auto => {
+                        self.build(&docker, &svc, &dir, &build, &tag).await?
+                    }
+                }
                 tag
             }
             (Plan::Source, Source::Image { image }) => {
@@ -831,11 +855,26 @@ impl Job {
         docker: &Docker,
         svc: &Service,
         repo_dir: &Path,
-        context: &str,
-        dockerfile: &str,
+        build: &Build,
         tag: &str,
     ) -> Result<()> {
+        let Source::Git {
+            dockerfile,
+            context,
+            ..
+        } = &svc.source
+        else {
+            bail!("not a git service");
+        };
         self.begin(StepKind::Build, None).await;
+        let build_args: HashMap<String, String> = self
+            .state
+            .db
+            .env(&svc.id)
+            .await?
+            .into_iter()
+            .map(|v| (v.key, v.value))
+            .collect();
         let context_dir = safe_join(repo_dir, context)?;
         let dockerfile_rel = clean_relative(dockerfile)?;
         if !context_dir.join(&dockerfile_rel).is_file() {
@@ -855,6 +894,8 @@ impl Job {
         let options = BuildImageOptions {
             dockerfile: dockerfile_rel.to_string_lossy().into_owned(),
             t: Some(tag.to_string()),
+            target: build.target.clone().unwrap_or_default(),
+            buildargs: (!build_args.is_empty()).then_some(build_args),
             rm: true,
             forcerm: true,
             labels: Some(HashMap::from([

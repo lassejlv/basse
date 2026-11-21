@@ -197,6 +197,9 @@ pub enum Source {
         /// Deploy when the tracked branch is pushed. Needs a GitHub App source.
         #[serde(default = "default_true")]
         auto_deploy: bool,
+        /// How the image is built. Services from before build methods use their Dockerfile.
+        #[serde(default)]
+        build: Build,
     },
     /// A one-click database; the daemon fills in image, credentials and a data volume.
     Database { kind: DatabaseKind, version: String },
@@ -221,6 +224,86 @@ impl Source {
             Self::Database { kind, version } => format!("{}:{version}", kind.image()),
         }
     }
+}
+
+/// How a git service's image is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildMethod {
+    /// Chosen on the first deploy from what the repository has: a Dockerfile, else a compose
+    /// file, else Railpack. The choice is saved on the service.
+    Auto,
+    /// `docker build` with the service's Dockerfile and context.
+    #[default]
+    Dockerfile,
+    /// `docker compose up` of a compose file, deployed as one group of containers.
+    Compose,
+    /// Railpack detects the language and builds the image with BuildKit; no Dockerfile needed.
+    Railpack,
+}
+
+impl BuildMethod {
+    pub const ALL: [Self; 4] = [Self::Auto, Self::Dockerfile, Self::Compose, Self::Railpack];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Dockerfile => "dockerfile",
+            Self::Compose => "compose",
+            Self::Railpack => "railpack",
+        }
+    }
+}
+
+impl fmt::Display for BuildMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for BuildMethod {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.to_ascii_lowercase();
+        Self::ALL
+            .into_iter()
+            .find(|m| m.as_str() == s || (s == "docker-compose" && *m == Self::Compose))
+            .ok_or_else(|| {
+                format!("unknown build method '{s}', expected one of auto, dockerfile, compose, railpack")
+            })
+    }
+}
+
+/// Build settings of a git service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Build {
+    #[serde(default)]
+    pub method: BuildMethod,
+    /// Dockerfile stage to build (`--target`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Compose file relative to the repository root; `None` looks for `compose.yaml`,
+    /// `compose.yml`, `docker-compose.yaml` and `docker-compose.yml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_file: Option<String>,
+}
+
+/// What `GET /sources/{id}/detect` found at a branch's root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildDetection {
+    /// Never `Auto`.
+    pub method: BuildMethod,
+    /// The Dockerfile or compose file that decided it; `None` for Railpack.
+    pub file: Option<String>,
+}
+
+/// One container of a compose service group.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComposeService {
+    /// The name in the compose file.
+    pub name: String,
+    pub container: Option<ContainerInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -325,6 +408,9 @@ pub struct Domain {
     pub port: Option<u16>,
     /// Serve HTTPS with an automatic certificate. When false the route is plain HTTP.
     pub tls: bool,
+    /// For compose services: the service in the compose file the domain routes to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_service: Option<String>,
     pub created_at: Timestamp,
 }
 
@@ -633,6 +719,9 @@ pub struct ServiceDetail {
     /// Connection details; only for database services.
     #[serde(default)]
     pub database: Option<DatabaseInfo>,
+    /// Each service of a compose build with its container; empty for other build methods.
+    #[serde(default)]
+    pub compose: Vec<ComposeService>,
 }
 
 /// How to reach a one-click database. Only set on [`ServiceDetail`] for database services.
@@ -1247,11 +1336,34 @@ mod tests {
             context: ".".into(),
             source_id: None,
             auto_deploy: true,
+            build: Build::default(),
         };
         let json = serde_json::to_string(&src).unwrap();
         assert!(json.contains(r#""type":"git""#));
         assert_eq!(serde_json::from_str::<Source>(&json).unwrap(), src);
         assert_eq!(src.label(), "acme/api@main");
+    }
+
+    #[test]
+    fn git_sources_from_before_build_methods_keep_their_dockerfile() {
+        let old = r#"{"type":"git","repo":"https://github.com/acme/api","branch":"main","dockerfile":"Dockerfile","context":"."}"#;
+        let Source::Git {
+            build,
+            auto_deploy,
+            source_id,
+            ..
+        } = serde_json::from_str(old).unwrap()
+        else {
+            panic!("not git");
+        };
+        assert_eq!(build.method, BuildMethod::Dockerfile);
+        assert!(auto_deploy);
+        assert_eq!(source_id, None);
+        assert_eq!(
+            "docker-compose".parse::<BuildMethod>().unwrap(),
+            BuildMethod::Compose
+        );
+        assert!("make".parse::<BuildMethod>().is_err());
     }
 
     #[test]

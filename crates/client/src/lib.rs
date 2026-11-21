@@ -376,9 +376,19 @@ impl Client {
         self.post_empty(&format!("/services/{id}/start")).await
     }
 
-    pub async fn service_logs(&self, id: &str, tail: usize, follow: bool) -> Result<LogStreamBox> {
-        self.stream(&format!("/services/{id}/logs?tail={tail}&follow={follow}"))
-            .await
+    /// Container logs; `container` picks one service of a compose build.
+    pub async fn service_logs(
+        &self,
+        id: &str,
+        tail: usize,
+        follow: bool,
+        container: Option<&str>,
+    ) -> Result<LogStreamBox> {
+        let mut path = format!("/services/{id}/logs?tail={tail}&follow={follow}");
+        if let Some(c) = container {
+            path.push_str(&format!("&container={c}"));
+        }
+        self.stream(&path).await
     }
 
     pub async fn service_stats(&self, id: &str) -> Result<ServiceStats> {
@@ -508,6 +518,14 @@ impl Client {
                 ("page", page.to_string()),
                 ("per_page", per_page.to_string()),
             ]);
+        Self::json(rb).await
+    }
+
+    /// The build method a branch would get: Dockerfile, else compose file, else Railpack.
+    pub async fn detect_build(&self, id: &str, repo: &str, branch: &str) -> Result<BuildDetection> {
+        let rb = self
+            .req(Method::GET, &format!("/sources/{id}/detect"))
+            .query(&[("repo", repo), ("branch", branch)]);
         Self::json(rb).await
     }
 

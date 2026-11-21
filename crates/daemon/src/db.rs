@@ -462,7 +462,9 @@ impl Db {
 
     async fn domain_query(&self, tail: &str, bind: &str) -> Result<Vec<Domain>> {
         self.fetch(
-            format!("SELECT id, service_id, host, port, tls, created_at FROM domains {tail}"),
+            format!(
+                "SELECT id, service_id, host, port, tls, created_at, compose_service FROM domains {tail}"
+            ),
             &[bind],
             |row| {
                 Ok(Domain {
@@ -472,6 +474,7 @@ impl Db {
                     port: col_port(row, 3)?,
                     tls: row.try_get(4)?,
                     created_at: row.try_get(5)?,
+                    compose_service: row.try_get(6)?,
                 })
             },
         )
@@ -1677,7 +1680,8 @@ async fn insert_environment(tx: &mut Tx, e: &Environment) -> sqlx::Result<()> {
 
 async fn insert_domain(tx: &mut Tx, d: &Domain) -> sqlx::Result<()> {
     sqlx::query(
-        "INSERT INTO domains (id, service_id, host, port, tls, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO domains (id, service_id, host, port, tls, created_at, compose_service)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(&d.id)
     .bind(&d.service_id)
@@ -1685,6 +1689,7 @@ async fn insert_domain(tx: &mut Tx, d: &Domain) -> sqlx::Result<()> {
     .bind(d.port.map(i32::from))
     .bind(d.tls)
     .bind(d.created_at)
+    .bind(&d.compose_service)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -1884,6 +1889,7 @@ pub mod tests {
             host: host.into(),
             port: None,
             tls: true,
+            compose_service: None,
             created_at: now,
         });
         let env_vars = [

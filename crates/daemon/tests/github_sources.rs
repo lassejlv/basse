@@ -196,6 +196,27 @@ async fn repo(
         .into_response()
 }
 
+async fn contents(
+    Path((_owner, name)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if !token_ok(&headers) {
+        return unauthorized();
+    }
+    let files: &[&str] = match (name.as_str(), q.get("ref").map(String::as_str)) {
+        ("api", Some("main")) => &["Dockerfile", "compose.yaml", "README.md"],
+        ("web", Some("feat/x")) => &["docker-compose.yml", "package.json"],
+        _ => &["package.json"],
+    };
+    let mut entries: Vec<Value> = files
+        .iter()
+        .map(|f| json!({"name": f, "type": "file"}))
+        .collect();
+    entries.push(json!({"name": "Dockerfile", "type": "dir"}));
+    Json(entries).into_response()
+}
+
 async fn branches(
     Path((_owner, _name)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
@@ -225,6 +246,7 @@ async fn mock_github() -> String {
         .route("/user/repos", get(user_repos))
         .route("/repos/{owner}/{name}", get(repo))
         .route("/repos/{owner}/{name}/branches", get(branches))
+        .route("/repos/{owner}/{name}/contents", get(contents))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -460,6 +482,24 @@ async fn manifest_flow_install_repos_and_push_deploys() {
     assert_eq!(branches.len(), 3);
     assert!(api.source_branches(&id, "../etc").await.is_err());
 
+    // Build method detection reads the branch's root.
+    let d = api.detect_build(&id, "acme/api", "main").await.unwrap();
+    assert_eq!(
+        (d.method, d.file.as_deref()),
+        (BuildMethod::Dockerfile, Some("Dockerfile"))
+    );
+    let d = api.detect_build(&id, "acme/web", "feat/x").await.unwrap();
+    assert_eq!(
+        (d.method, d.file.as_deref()),
+        (BuildMethod::Compose, Some("docker-compose.yml"))
+    );
+    let d = api.detect_build(&id, "acme/web", "main").await.unwrap();
+    assert_eq!(
+        (d.method, d.file),
+        (BuildMethod::Railpack, None),
+        "a directory named Dockerfile is not one"
+    );
+
     // A service on the source; the source cannot go while it is used.
     let project = api
         .create_project(&CreateProject {
@@ -479,6 +519,7 @@ async fn manifest_flow_install_repos_and_push_deploys() {
         context: ".".into(),
         source_id: Some(id.clone()),
         auto_deploy,
+        build: Build::default(),
     };
     let service = |name: &str, source: Source| CreateService {
         environment_id: env.id.clone(),

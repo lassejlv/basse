@@ -94,6 +94,13 @@ pub enum Msg {
         repo: String,
         result: Result<Vec<GitBranch>, String>,
     },
+    /// What the picked repository and branch build with.
+    Detected {
+        source: Id,
+        repo: String,
+        branch: String,
+        result: Result<BuildDetection, String>,
+    },
 }
 
 /// Where to go after a form succeeds.
@@ -346,9 +353,25 @@ pub struct ServiceView {
     pub reveal: bool,
     /// A database service: shows the Database and Backups tabs.
     pub database: bool,
+    /// The compose service whose logs the Logs tab shows.
+    pub container: Option<String>,
 }
 
 impl ServiceView {
+    /// The services of a compose build; empty for other build methods.
+    pub fn compose(&self) -> &[ComposeService] {
+        self.detail.as_ref().map_or(&[], |d| d.compose.as_slice())
+    }
+
+    /// The compose service the Logs tab follows: the one picked, else the first.
+    pub fn log_container(&self) -> Option<&str> {
+        let compose = self.compose();
+        self.container
+            .as_deref()
+            .filter(|c| compose.iter().any(|s| s.name == *c))
+            .or(compose.first().map(|s| s.name.as_str()))
+    }
+
     pub fn tabs(&self) -> Vec<Tab> {
         Tab::of(self.database)
     }
@@ -1585,6 +1608,48 @@ impl App {
                     Err(e) => git.error = Some(e),
                 }
             }
+            Msg::Detected {
+                source,
+                repo,
+                branch,
+                result,
+            } => {
+                let Some(Overlay::Form(form)) = &mut self.overlay else {
+                    return;
+                };
+                if !matches!(form.kind, FormKind::NewService { .. })
+                    || form.raw("git_source") != source
+                    || form.raw("gh_repo") != repo
+                    || form.raw("gh_branch") != branch
+                {
+                    return;
+                }
+                let Ok(found) = result else {
+                    return;
+                };
+                let auto = form.choice("build") == 0;
+                if let Some(build) = form.field_mut("build") {
+                    build.placeholder = detected_note(&found);
+                    if auto {
+                        build.choice = BuildMethod::ALL
+                            .iter()
+                            .position(|m| *m == found.method)
+                            .unwrap_or(0);
+                    }
+                }
+                let key = match found.method {
+                    BuildMethod::Compose => Some("compose_file"),
+                    BuildMethod::Dockerfile => Some("dockerfile"),
+                    _ => None,
+                };
+                if auto
+                    && let (Some(key), Some(file)) = (key, found.file)
+                    && let Some(f) = form.field_mut(key)
+                {
+                    f.value = file;
+                }
+                form.refresh();
+            }
             Msg::StorageTested(id, result) => {
                 self.storage.testing.remove(&id);
                 let name = self.storage.name(&id).unwrap_or("storage").to_string();
@@ -1826,6 +1891,7 @@ impl App {
             database: matches!(tab, Tab::Database | Tab::Backups)
                 || self.details.get(id).is_some_and(|d| d.database.is_some())
                 || self.all_services().any(|s| s.id == id && is_database(s)),
+            container: None,
         });
         self.load_detail(id);
         self.load_deployments(id);
@@ -1886,8 +1952,12 @@ impl App {
         }
         view.logs = LogBuffer::new();
         let id = view.id.clone();
+        let container = view.log_container().map(str::to_string);
         let handle = tokio::spawn(async move {
-            match client.service_logs(&id, 500, true).await {
+            match client
+                .service_logs(&id, 500, true, container.as_deref())
+                .await
+            {
                 Ok(mut stream) => {
                     while let Some(item) = stream.next().await {
                         match item {
@@ -1914,6 +1984,38 @@ impl App {
 
     pub fn restart_service_logs(&mut self) {
         self.start_service_logs();
+    }
+
+    /// Follow the logs of compose service `i` on the Logs tab.
+    pub fn pick_container(&mut self, i: usize) {
+        let Some(view) = self.service.as_mut() else {
+            return;
+        };
+        let Some(name) = view.compose().get(i).map(|s| s.name.clone()) else {
+            return;
+        };
+        view.container = Some(name);
+        if view.tab == Tab::Logs {
+            self.start_service_logs();
+        } else {
+            self.set_tab(Tab::Logs);
+        }
+    }
+
+    /// "c" on the Logs tab of a compose service: the next container.
+    pub fn next_container(&mut self) {
+        let Some(view) = self.service.as_ref() else {
+            return;
+        };
+        let compose = view.compose();
+        if compose.is_empty() {
+            return;
+        }
+        let at = view
+            .log_container()
+            .and_then(|c| compose.iter().position(|s| s.name == c))
+            .unwrap_or(0);
+        self.pick_container((at + 1) % compose.len());
     }
 
     pub fn open_deploy(&mut self, deployment: Deployment) {
@@ -3556,12 +3658,28 @@ impl App {
             }
             _ => {
                 set(&mut form, key, &value, &item.name, &item.badge);
+                if let Some(build) = form.field_mut("build") {
+                    build.placeholder.clear();
+                }
                 form.refresh();
                 if let Some(i) = form.fields.iter().position(|f| f.key == key) {
                     form.focus = i;
                     form.move_focus(1);
                 }
+                let (source, repo) = (form.raw("git_source"), form.raw("gh_repo"));
                 self.overlay = Some(Overlay::Form(*form));
+                self.spawn(move |c| async move {
+                    let result = c
+                        .detect_build(&source, &repo, &value)
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+                    Msg::Detected {
+                        source,
+                        repo,
+                        branch: value,
+                        result,
+                    }
+                });
             }
         }
     }
@@ -3829,9 +3947,9 @@ impl App {
                 .placeholder("https://github.com/acme/api")
                 .hint("https or ssh url"),
             Field::text("branch", "branch").value("main"),
-            Field::text("dockerfile", "dockerfile")
-                .value("Dockerfile")
-                .hint("path in the repo"),
+        ];
+        fields.extend(build_fields(None, ""));
+        fields.extend([
             Field::text("image", "image").placeholder("ghcr.io/acme/web:latest"),
             Field::choice("engine", "engine", engines),
             Field::text("version", "version").hint("empty = newest"),
@@ -3843,7 +3961,7 @@ impl App {
                 .placeholder("app.example.com")
                 .hint("optional · https"),
             Field::toggle("auto_deploy", "auto-deploy", true),
-        ];
+        ]);
         if servers.len() > 1 {
             fields.push(Field::choice("server", "server", servers));
         }
@@ -3884,14 +4002,13 @@ impl App {
             Source::Git {
                 repo,
                 branch,
-                dockerfile,
                 source_id,
                 auto_deploy,
                 ..
             } => {
                 fields.push(Field::text("repo", "repository").value(repo.clone()));
                 fields.push(Field::text("branch", "branch").value(branch.clone()));
-                fields.push(Field::text("dockerfile", "dockerfile").value(dockerfile.clone()));
+                fields.extend(build_fields(Some(&s.source), "applies on next deploy"));
                 if source_id.is_some() {
                     fields.push(
                         Field::toggle("auto_deploy", "auto-deploy", *auto_deploy)
@@ -3939,27 +4056,39 @@ impl App {
     pub fn form_domain(&mut self) {
         let Some(view) = &self.service else { return };
         let port = view.detail.as_ref().and_then(|d| d.service.port);
+        let compose: Vec<String> = view.compose().iter().map(|s| s.name.clone()).collect();
+        let mut fields = vec![
+            Field::text("host", "host")
+                .placeholder("shop.example.com")
+                .hint("point an A record here"),
+        ];
+        if !compose.is_empty() {
+            fields.push(
+                Field::choice("compose_service", "service", compose).hint("in the compose file"),
+            );
+        }
+        fields.extend([
+            Field::text("port", "port")
+                .placeholder(port.map_or("service port".into(), |p| p.to_string()))
+                .hint("container port"),
+            Field::toggle("tls", "https", true).hint("automatic certificate"),
+        ]);
+        let subtitle = match (&view.detail, view.compose().is_empty()) {
+            (Some(d), false) => format!("{} · compose", d.service.name),
+            _ => self
+                .info
+                .as_ref()
+                .and_then(|i| i.public_ip.clone())
+                .unwrap_or_default(),
+        };
         let form = Form::new(
             FormKind::AddDomain {
                 service_id: view.id.clone(),
             },
             "Add domain",
-            vec![
-                Field::text("host", "host")
-                    .placeholder("shop.example.com")
-                    .hint("point an A record here"),
-                Field::text("port", "port")
-                    .placeholder(port.map_or("service port".into(), |p| p.to_string()))
-                    .hint("container port"),
-                Field::toggle("tls", "https", true).hint("automatic certificate"),
-            ],
+            fields,
         )
-        .subtitle(
-            self.info
-                .as_ref()
-                .and_then(|i| i.public_ip.clone())
-                .unwrap_or_default(),
-        )
+        .subtitle(subtitle)
         .submit("add", None);
         self.overlay = Some(Overlay::Form(form));
     }
@@ -4745,6 +4874,88 @@ fn port(text: &str, required: bool) -> Result<Option<u16>, String> {
         .ok_or_else(|| format!("'{text}' is not a valid port"))
 }
 
+/// Chip labels of the build methods, in `BuildMethod::ALL` order.
+const BUILD_LABELS: [&str; 4] = ["auto", "Dockerfile", "Compose", "Railpack"];
+
+/// The build method chips and the fields each method needs, filled from a git source when
+/// editing. `note` is a fixed hint on the chips, e.g. what the repository was detected as.
+fn build_fields(git: Option<&Source>, note: &str) -> Vec<Field> {
+    let (dockerfile, context, build) = match git {
+        Some(Source::Git {
+            dockerfile,
+            context,
+            build,
+            ..
+        }) => (dockerfile.clone(), context.clone(), build.clone()),
+        _ => (
+            "Dockerfile".into(),
+            ".".into(),
+            Build {
+                method: BuildMethod::Auto,
+                ..Build::default()
+            },
+        ),
+    };
+    let mut method = Field::choice(
+        "build",
+        "build",
+        BUILD_LABELS.iter().map(|l| l.to_string()).collect(),
+    )
+    .selected(
+        BuildMethod::ALL
+            .iter()
+            .position(|m| *m == build.method)
+            .unwrap_or(0),
+    );
+    method.placeholder = note.into();
+    vec![
+        method,
+        Field::text("dockerfile", "dockerfile")
+            .value(dockerfile)
+            .hint("path in the repo"),
+        Field::text("context", "context")
+            .value(context)
+            .hint("folder sent to build"),
+        Field::text("target", "target")
+            .value(build.target.unwrap_or_default())
+            .placeholder("stage to build")
+            .hint("optional"),
+        Field::text("compose_file", "compose file")
+            .value(build.compose_file.unwrap_or_default())
+            .placeholder("found on its own")
+            .hint("one group"),
+    ]
+}
+
+/// The Dockerfile, build context and build settings typed in the build fields.
+fn build_parts(form: &Form) -> (String, String, Build) {
+    let typed = |key: &str| Some(form.get(key)).filter(|v| !v.is_empty());
+    let method = BuildMethod::ALL[form.choice("build").min(BuildMethod::ALL.len() - 1)];
+    (
+        typed("dockerfile").unwrap_or("Dockerfile".into()),
+        typed("context").unwrap_or(".".into()),
+        Build {
+            method,
+            target: typed("target"),
+            compose_file: typed("compose_file"),
+        },
+    )
+}
+
+/// "✓ compose.yaml", what decided the build at the repository's root; short enough for a hint.
+fn detected_note(d: &BuildDetection) -> String {
+    let what = match (d.method, &d.file) {
+        (BuildMethod::Railpack, _) => "Railpack".to_string(),
+        (_, Some(file)) => file.clone(),
+        (method, None) => BUILD_LABELS[BuildMethod::ALL
+            .iter()
+            .position(|m| *m == method)
+            .unwrap_or(0)]
+        .to_string(),
+    };
+    format!("✓ {what}")
+}
+
 /// Derive a service name from a repo url or image reference: `acme/api.git` gives `api`.
 pub fn derive_name(source: &str) -> String {
     let path = source.trim_end_matches('/').trim_end_matches(".git");
@@ -4797,20 +5008,17 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                     if repo.is_empty() {
                         return Err("pick a repository (⏎ on repository)".into());
                     }
-                    let dockerfile = form.get("dockerfile");
+                    let (dockerfile, context, build) = build_parts(form);
                     Source::Git {
                         repo,
                         branch: Some(form.get("gh_branch"))
                             .filter(|b| !b.is_empty())
                             .unwrap_or("main".into()),
-                        dockerfile: if dockerfile.is_empty() {
-                            "Dockerfile".into()
-                        } else {
-                            dockerfile
-                        },
-                        context: ".".into(),
+                        dockerfile,
+                        context,
                         source_id: Some(source_id),
                         auto_deploy: form.on("auto_deploy"),
+                        build,
                     }
                 }
                 1 => {
@@ -4823,13 +5031,15 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                             .filter(|v| !v.is_empty())
                             .unwrap_or(default.into())
                     };
+                    let (dockerfile, context, build) = build_parts(form);
                     Source::Git {
                         repo,
                         branch: or("branch", "main"),
-                        dockerfile: or("dockerfile", "Dockerfile"),
-                        context: ".".into(),
+                        dockerfile,
+                        context,
                         source_id: None,
                         auto_deploy: false,
+                        build,
                     }
                 }
                 2 => {
@@ -4883,13 +5093,15 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
             source_id,
         } => {
             let source = if !form.get("repo").is_empty() {
+                let (dockerfile, context, build) = build_parts(form);
                 Some(Source::Git {
                     repo: form.get("repo"),
                     branch: form.get("branch"),
-                    dockerfile: form.get("dockerfile"),
-                    context: ".".into(),
+                    dockerfile,
+                    context,
                     source_id: source_id.clone(),
                     auto_deploy: source_id.is_none() || form.on("auto_deploy"),
+                    build,
                 })
             } else if !form.get("image").is_empty() {
                 Some(Source::Image {
@@ -4927,6 +5139,7 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                     host: host.to_string(),
                     port: port(&form.get("port"), false)?,
                     tls: form.on("tls"),
+                    compose_service: form.choice_label("compose_service"),
                 },
             )
         }
@@ -5133,6 +5346,64 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_service_sends_the_build_method_and_its_fields() {
+        let mut form = Form::new(
+            FormKind::NewService {
+                environment_id: "e".into(),
+            },
+            "New service",
+            [
+                vec![
+                    Field::choice("source", "source", vec!["GitHub".into(), "Git URL".into()])
+                        .selected(1),
+                    Field::text("repo", "repository").value("https://github.com/acme/api"),
+                    Field::text("branch", "branch").value("main"),
+                ],
+                build_fields(None, ""),
+                vec![Field::text("name", "name"), Field::text("port", "port")],
+            ]
+            .concat(),
+        );
+        form.field_mut("build").unwrap().choice = 1;
+        form.field_mut("target").unwrap().value = "runtime".into();
+        form.refresh();
+        let Ok(Request::Service(body)) = build_request(&form, false) else {
+            panic!("a create request");
+        };
+        let Source::Git {
+            dockerfile,
+            context,
+            build,
+            ..
+        } = &body.source
+        else {
+            panic!("a git source");
+        };
+        assert_eq!((dockerfile.as_str(), context.as_str()), ("Dockerfile", "."));
+        assert_eq!(build.method, BuildMethod::Dockerfile);
+        assert_eq!(build.target.as_deref(), Some("runtime"));
+        assert_eq!(build.compose_file, None);
+
+        form.field_mut("build").unwrap().choice = 2;
+        form.refresh();
+        let Ok(Request::Service(body)) = build_request(&form, false) else {
+            panic!("a create request");
+        };
+        let Source::Git { build, .. } = &body.source else {
+            panic!("a git source");
+        };
+        assert_eq!(build.method, BuildMethod::Compose);
+        assert_eq!(build.target, None, "hidden fields are not sent");
+        assert_eq!(
+            detected_note(&BuildDetection {
+                method: BuildMethod::Railpack,
+                file: None
+            }),
+            "✓ Railpack"
+        );
+    }
 
     #[test]
     fn names_derive_from_sources() {

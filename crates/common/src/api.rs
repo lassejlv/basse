@@ -28,7 +28,7 @@
 //! | POST | `/services/{id}/restart` | | `ServiceDetail` |
 //! | POST | `/services/{id}/stop` | | `ServiceDetail` |
 //! | POST | `/services/{id}/start` | | `ServiceDetail` |
-//! | GET | `/services/{id}/logs?tail=200&follow=true` | | NDJSON `LogLine` stream |
+//! | GET | `/services/{id}/logs?tail=200&follow=true&container=web` | | NDJSON `LogLine` stream; `container` picks a compose service |
 //! | GET | `/services/{id}/stats` | | `ServiceStats` |
 //! | PUT | `/services/{id}/env` | `Vec<EnvVar>` | `Vec<EnvVar>` (replaces all; applies on next deploy) |
 //! | POST | `/services/{id}/domains` | `CreateDomain` | `Domain` (applied to the live container at once) |
@@ -66,6 +66,7 @@
 //! | DELETE | `/sources/{id}` | | 204, or 409 while a service uses it |
 //! | GET | `/sources/{id}/repos?q=&page=1&per_page=30` | | `RepoPage` (`q` matches `owner/name`) |
 //! | GET | `/sources/{id}/branches?repo=owner/name` | | `Vec<GitBranch>`, default branch first |
+//! | GET | `/sources/{id}/detect?repo=owner/name&branch=main` | | `BuildDetection` (Dockerfile, else compose file, else Railpack) |
 //!
 //! GitHub calls these without a bearer token; each checks its own proof instead.
 //!
@@ -75,6 +76,11 @@
 //! | GET | `/github/{id}/callback?code=&state=` | the setup state; exchanges the code for the app's credentials, then redirects to the install page |
 //! | GET | `/github/{id}/setup?installation_id=` | the installation must belong to the app, asked with the app's JWT |
 //! | POST | `/github/{id}/webhook` | `X-Hub-Signature-256` with the app's webhook secret; a push to a tracked branch deploys |
+//!
+//! Git services build with `Source::Git.build`: a Dockerfile (with `target` and the service's
+//! env as build args), a compose file deployed as one group (`ServiceDetail.compose` lists its
+//! containers; domains name a `compose_service`), or Railpack. Changing the method with
+//! `PATCH /services/{id}` applies on the next deploy.
 //!
 //! Database services (`Source::Database`) also have these routes; other services get 400.
 //! `ServiceDetail.database` carries their `DatabaseInfo`.
@@ -248,6 +254,9 @@ pub struct CreateDomain {
     pub port: Option<u16>,
     #[serde(default = "default_true")]
     pub tls: bool,
+    /// Required for compose builds: the service in the compose file to route to.
+    #[serde(default)]
+    pub compose_service: Option<String>,
 }
 
 fn default_true() -> bool {

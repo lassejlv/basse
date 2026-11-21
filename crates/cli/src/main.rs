@@ -118,6 +118,9 @@ enum Cmd {
         follow: bool,
         #[arg(long, short = 'n', default_value_t = 200)]
         tail: usize,
+        /// For compose builds: the compose service to show.
+        #[arg(long)]
+        container: Option<String>,
     },
     /// Restart a service's container.
     Restart { service: String },
@@ -407,6 +410,24 @@ enum ServiceCmd {
         service: String,
     },
     Create(Box<CreateArgs>),
+    /// Show or change how a git service is built; applies on the next deploy.
+    Build {
+        service: String,
+        /// auto, dockerfile, compose or railpack.
+        #[arg(long)]
+        method: Option<BuildMethod>,
+        /// Dockerfile stage to build; "" clears it.
+        #[arg(long)]
+        target: Option<String>,
+        /// Compose file in the repository; "" goes back to the default names.
+        #[arg(long)]
+        compose_file: Option<String>,
+        #[arg(long)]
+        dockerfile: Option<String>,
+        /// Build context directory inside the repository.
+        #[arg(long = "build-context")]
+        build_context: Option<String>,
+    },
     Delete {
         service: String,
         /// Also delete the service's volumes and their data.
@@ -435,6 +456,16 @@ struct CreateArgs {
     /// Don't deploy when the branch is pushed (GitHub App sources deploy on push by default).
     #[arg(long, requires = "source")]
     no_auto_deploy: bool,
+    /// How to build: auto (Dockerfile, else compose file, else Railpack), dockerfile, compose
+    /// or railpack.
+    #[arg(long, default_value = "auto", requires = "repo")]
+    build: BuildMethod,
+    /// Dockerfile stage to build.
+    #[arg(long, requires = "repo")]
+    target: Option<String>,
+    /// Compose file in the repository, for --build compose.
+    #[arg(long, requires = "repo")]
+    compose_file: Option<String>,
     #[arg(long, default_value = "main", requires = "repo")]
     branch: String,
     #[arg(long, default_value = "Dockerfile", requires = "repo")]
@@ -485,6 +516,9 @@ enum DomainCmd {
         /// Serve plain HTTP without a certificate.
         #[arg(long)]
         http: bool,
+        /// For compose builds: the compose service to route to.
+        #[arg(long)]
+        compose_service: Option<String>,
     },
     Remove {
         service: String,
@@ -669,9 +703,12 @@ async fn run(cli: Cli) -> Result<()> {
             service,
             follow,
             tail,
+            container,
         } => {
             let (_, _, s) = find(&c, &service).await?;
-            let mut stream = c.service_logs(&s.id, tail, follow).await?;
+            let mut stream = c
+                .service_logs(&s.id, tail, follow, container.as_deref())
+                .await?;
             while let Some(line) = stream.next().await {
                 print_log(&line?, true);
             }
@@ -1874,6 +1911,9 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
                 paint(state.0, state.1)
             );
             println!("{}{}", k("source"), d.service.source.label());
+            if let Source::Git { build, .. } = &d.service.source {
+                println!("{}{}", k("build"), build_label(&d.service.source, build));
+            }
             println!("{}{}", k("server"), d.server.name);
             println!(
                 "{}{}",
@@ -1882,11 +1922,22 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
             );
             for dom in &d.domains {
                 println!(
-                    "{}{}://{}",
+                    "{}{}://{}{}",
                     k("domain"),
                     if dom.tls { "https" } else { "http" },
-                    dom.host
+                    dom.host,
+                    dom.compose_service
+                        .as_deref()
+                        .map(|s| muted(format!(" → {s}")))
+                        .unwrap_or_default()
                 );
+            }
+            for cs in &d.compose {
+                let state = cs
+                    .container
+                    .as_ref()
+                    .map_or("not created", |c| c.state.as_str());
+                println!("{}{} {}", k("compose"), cs.name, muted(state));
             }
             for v in &d.volumes {
                 println!("{}{} → {}", k("volume"), v.name, v.mount_path);
@@ -1903,6 +1954,72 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
             }
         }
         ServiceCmd::Create(args) => create_service(c, *args).await?,
+        ServiceCmd::Build {
+            service,
+            method,
+            target,
+            compose_file,
+            dockerfile,
+            build_context,
+        } => {
+            let (_, _, s) = find(c, &service).await?;
+            let mut source = s.source.clone();
+            let Source::Git {
+                build,
+                dockerfile: df,
+                context,
+                ..
+            } = &mut source
+            else {
+                bail!("{} is not built from git", s.name);
+            };
+            let changed = method.is_some()
+                || target.is_some()
+                || compose_file.is_some()
+                || dockerfile.is_some()
+                || build_context.is_some();
+            if let Some(m) = method {
+                build.method = m;
+            }
+            if let Some(t) = target {
+                build.target = Some(t).filter(|t| !t.is_empty());
+            }
+            if let Some(f) = compose_file {
+                build.compose_file = Some(f).filter(|f| !f.is_empty());
+            }
+            if let Some(d) = dockerfile {
+                *df = d;
+            }
+            if let Some(ctx) = build_context {
+                *context = ctx;
+            }
+            let d = if changed {
+                let d = c
+                    .update_service(
+                        &s.id,
+                        &UpdateService {
+                            source: Some(source),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                output::ok(format!("{} builds with {}; deploy to apply", s.name, {
+                    let Source::Git { build, .. } = &d.service.source else {
+                        unreachable!()
+                    };
+                    build.method
+                }));
+                d
+            } else {
+                c.service(&s.id).await?
+            };
+            if json {
+                return output::json(&d.service.source);
+            }
+            if let Source::Git { build, .. } = &d.service.source {
+                println!("{}", build_label(&d.service.source, build));
+            }
+        }
         ServiceCmd::Delete {
             service,
             volumes,
@@ -1916,6 +2033,43 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `dockerfile (Dockerfile, target prod)`, `compose (compose.yaml)`, `railpack`.
+fn build_label(source: &Source, build: &Build) -> String {
+    let Source::Git {
+        dockerfile,
+        context,
+        ..
+    } = source
+    else {
+        return String::new();
+    };
+    let detail = match build.method {
+        BuildMethod::Dockerfile => {
+            let mut parts = vec![if context == "." {
+                dockerfile.clone()
+            } else {
+                format!("{context}/{dockerfile}")
+            }];
+            if let Some(t) = &build.target {
+                parts.push(format!("target {t}"));
+            }
+            Some(parts.join(", "))
+        }
+        BuildMethod::Compose => Some(
+            build
+                .compose_file
+                .clone()
+                .unwrap_or_else(|| "compose.yaml or docker-compose.yml".into()),
+        ),
+        BuildMethod::Auto => Some("detected on the next deploy".into()),
+        BuildMethod::Railpack => None,
+    };
+    match detail {
+        Some(d) => format!("{} {}", build.method, muted(format!("({d})"))),
+        None => build.method.to_string(),
+    }
 }
 
 async fn create_service(c: &Client, args: CreateArgs) -> Result<()> {
@@ -1934,6 +2088,11 @@ async fn create_service(c: &Client, args: CreateArgs) -> Result<()> {
             context: args.build_context,
             source_id,
             auto_deploy: !args.no_auto_deploy,
+            build: Build {
+                method: args.build,
+                target: args.target,
+                compose_file: args.compose_file,
+            },
         },
         (None, None, Some(db)) => {
             let (kind, version) = db
@@ -2056,6 +2215,7 @@ async fn domain(c: &Client, cmd: DomainCmd, json: bool) -> Result<()> {
             host,
             port,
             http,
+            compose_service,
         } => {
             let (_, _, s) = find(c, &service).await?;
             let d = c
@@ -2065,6 +2225,7 @@ async fn domain(c: &Client, cmd: DomainCmd, json: bool) -> Result<()> {
                         host,
                         port,
                         tls: !http,
+                        compose_service,
                     },
                 )
                 .await?;
