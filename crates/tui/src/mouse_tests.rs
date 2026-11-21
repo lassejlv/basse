@@ -1097,3 +1097,144 @@ async fn pick_field_click_opens_the_picker_and_a_refused_delete_only_offers_clos
     click(&mut app, close);
     assert!(app.overlay.is_none());
 }
+
+fn instance_backup(
+    id: &str,
+    status: BackupStatus,
+    storage_id: Option<&str>,
+) -> common::InstanceBackup {
+    common::InstanceBackup {
+        id: id.into(),
+        created_at: Timestamp::default(),
+        status,
+        trigger: BackupTrigger::Manual,
+        file_name: format!("instance-{id}.tar.gz.enc"),
+        size_bytes: if status == BackupStatus::Done {
+            4096
+        } else {
+            0
+        },
+        storage: Default::default(),
+        storage_id: storage_id.map(Into::into),
+        error: (status == BackupStatus::Failed).then(|| "fixture upload failed".into()),
+        finished_at: None,
+    }
+}
+
+#[test]
+fn instance_backups_panel_rows_schedule_and_focus_follow_clicks() {
+    let mut app = secrets_fixture();
+    app.screen = Screen::Settings;
+    app.settings.settings = Some(InstanceSettings {
+        version: "1.0.0".into(),
+        hostname: "fixture-host".into(),
+        public_ip: None,
+        public_ip_override: None,
+        listen: "127.0.0.1:7700".into(),
+        data_dir: "/fixture".into(),
+        data_dir_size: 0,
+        manage_proxy: true,
+        proxy: ProxyStatus::Running,
+        proxy_image: "example:1".into(),
+        docker_version: None,
+        ssh_public_key: None,
+        reclaimable: None,
+        supervised: false,
+    });
+    app.settings.contexts.contexts.insert(
+        "fixture-primary".into(),
+        Context {
+            url: "https://fixture-primary.test".into(),
+            token: "test".into(),
+        },
+    );
+    app.settings.backups = vec![
+        instance_backup("one", BackupStatus::Done, Some("fixture-store")),
+        instance_backup("two", BackupStatus::Failed, None),
+    ];
+    app.settings.schedule = Some(common::InstanceBackupSchedule {
+        enabled: true,
+        has_passphrase: true,
+        storage_id: Some("fixture-store".into()),
+        ..Default::default()
+    });
+    let buf = draw(&app, 160, 40);
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("instance-one.tar.gz.enc", Hit::Item(0)),
+            ("fixture upload failed", Hit::Item(1)),
+        ],
+    );
+    assert_hit(
+        &app,
+        label(&buf, "TRIGGER"),
+        Hit::List(List::InstanceBackups),
+    );
+    assert_hit(&app, label(&buf, "daily 02:00 UTC"), char_key('e'));
+    assert_hit(&app, label(&buf, "e edit"), char_key('e'));
+    let y = buf.area.bottom() - 1;
+    for (text, hit) in [
+        ("tab contexts", key(KeyCode::Tab)),
+        ("b back up now", char_key('b')),
+        ("e schedule", char_key('e')),
+        ("D download", char_key('D')),
+        ("x delete", char_key('x')),
+        ("s secrets", char_key('s')),
+        ("o storage", char_key('o')),
+    ] {
+        let rect = label_on(&buf, y, text).unwrap_or_else(|| panic!("key bar {text:?}"));
+        assert_hit(&app, rect, hit);
+    }
+    let row = label(&buf, "fixture upload failed");
+    click(&mut app, Position::new(row.x, row.y));
+    assert_eq!(app.settings.backup_row, 1);
+    let context = label(&buf, "fixture-primary");
+    click(&mut app, Position::new(context.x, context.y));
+    assert_eq!(app.settings.focus, crate::app::SettingsFocus::Contexts);
+    let buf = draw(&app, 160, 40);
+    let y = buf.area.bottom() - 1;
+    assert_hit(
+        &app,
+        label_on(&buf, y, "tab backups").expect("contexts key bar"),
+        key(KeyCode::Tab),
+    );
+    click(&mut app, Position::new(row.x, row.y));
+    assert_eq!(app.settings.focus, crate::app::SettingsFocus::Backups);
+}
+
+#[test]
+fn instance_backup_dialog_masks_the_passphrase_and_registers_its_controls() {
+    let mut app = secrets_fixture();
+    app.screen = Screen::Settings;
+    app.form_instance_backup();
+    if let Some(Overlay::Form(form)) = &mut app.overlay {
+        form.paste("correct horse battery");
+    }
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Back up instance", |hit| {
+        matches!(
+            hit,
+            Hit::FormField(_) | Hit::List(List::Form) | Hit::Key(..)
+        )
+    });
+    assert!(
+        (buf.area.top()..buf.area.bottom()).all(|y| label_on(&buf, y, "correct horse").is_none())
+    );
+    label(&buf, "•••••••••••••••••••••");
+    label(&buf, "✓ 21 characters");
+    assert_hit(&app, label(&buf, "⏎ back up"), key(KeyCode::Enter));
+    label(
+        &buf,
+        &format!(
+            "{} restore <file|s3://bucket/key> --passphrase-file <file>",
+            common::brand::DAEMON_BIN
+        ),
+    );
+    let store = label(&buf, "local");
+    assert!(matches!(
+        mouse::hit_at(&app.mouse, store.x, store.y),
+        Some(Hit::FormField(0))
+    ));
+}

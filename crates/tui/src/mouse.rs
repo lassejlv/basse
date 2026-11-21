@@ -72,6 +72,7 @@ pub enum List {
     Picker,
     Secrets,
     Storage,
+    InstanceBackups,
 }
 
 thread_local! {
@@ -560,6 +561,7 @@ fn click(app: &mut App, hit: Hit, double: bool) {
             }
         }
         Hit::Context(i) => {
+            app.settings.focus = SettingsFocus::Contexts;
             app.settings.row = i;
             if double {
                 press(app, KeyCode::Enter, KeyModifiers::NONE);
@@ -607,6 +609,7 @@ fn click(app: &mut App, hit: Hit, double: bool) {
                     press(app, KeyCode::Enter, KeyModifiers::NONE);
                 }
             }
+            Screen::Settings => app.select_instance_backup(i),
             _ => {}
         },
         Hit::FormChoice(i, choice) => {
@@ -668,7 +671,12 @@ fn scroll(app: &mut App, hit: Option<Hit>, dir: isize) {
                     .min(view.deployments.len().saturating_sub(1));
             }
         }
-        Some(Hit::List(_)) => {
+        Some(Hit::List(list)) => {
+            match list {
+                List::InstanceBackups => app.settings.focus = SettingsFocus::Backups,
+                List::Contexts => app.settings.focus = SettingsFocus::Contexts,
+                _ => {}
+            }
             let code = if dir < 0 { KeyCode::Up } else { KeyCode::Down };
             press(app, code, KeyModifiers::NONE);
         }

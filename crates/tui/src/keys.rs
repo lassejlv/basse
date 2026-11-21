@@ -262,6 +262,10 @@ pub fn run_command(app: &mut App, cmd: Command) {
         Command::Settings => app.open_settings(),
         Command::Secrets => app.open_secrets(),
         Command::Storage => app.open_storage(),
+        Command::BackUpInstance => {
+            app.open_settings();
+            app.form_instance_backup();
+        }
         Command::AddServer => app.form_server(),
         Command::SetupProxy => match app.local_server().cloned() {
             Some(s) => app.setup_proxy(&s),
@@ -875,7 +879,43 @@ fn servers(app: &mut App, key: KeyEvent) {
 fn settings(app: &mut App, key: KeyEvent) {
     let names = app.settings.context_names();
     let selected = names.get(app.settings.row).cloned();
+    if app.settings.focus == SettingsFocus::Backups {
+        let row = app.settings.backup_row;
+        match key.code {
+            KeyCode::Up => return app.select_instance_backup(row.saturating_sub(1)),
+            KeyCode::Down => return app.select_instance_backup(row + 1),
+            KeyCode::Enter => return,
+            KeyCode::Char('D') => return app.form_instance_download(),
+            KeyCode::Char('x') | KeyCode::Delete => {
+                let Some(b) = app.settings.selected_backup().cloned() else {
+                    return;
+                };
+                let when = crate::database::created(b.created_at, chrono::Utc::now());
+                return ask_to(
+                    app,
+                    "Delete instance backup",
+                    format!(
+                        "Delete {} ({when})? The archive is removed from its store.",
+                        b.file_name
+                    ),
+                    true,
+                    ConfirmAction::DeleteInstanceBackup(b.id),
+                    "delete",
+                );
+            }
+            _ => {}
+        }
+    }
     match key.code {
+        KeyCode::Tab | KeyCode::BackTab => {
+            app.settings.focus = match app.settings.focus {
+                SettingsFocus::Backups => SettingsFocus::Contexts,
+                SettingsFocus::Contexts => SettingsFocus::Backups,
+            };
+            return;
+        }
+        KeyCode::Char('b') => return app.form_instance_backup(),
+        KeyCode::Char('e') => return app.form_instance_schedule(),
         KeyCode::Esc => return app.close_settings(),
         KeyCode::Up => {
             app.settings.row = app.settings.row.saturating_sub(1);

@@ -68,6 +68,8 @@ pub enum Msg {
     Storages(Vec<StorageConnection>),
     /// A storage test finished.
     StorageTested(Id, Result<StorageTest, String>),
+    InstanceBackups(Vec<InstanceBackup>),
+    InstanceSchedule(InstanceBackupSchedule),
 }
 
 /// Where to go after a form succeeds.
@@ -79,6 +81,7 @@ pub enum Then {
     OpenDeploy(Box<Deployment>),
     /// Show the public key of a key the daemon just generated.
     ShowKey(Box<Secret>),
+    InstanceSchedule(InstanceBackupSchedule),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,6 +364,7 @@ pub enum ConfirmAction {
     DeleteBackup(Id),
     DeleteSecret(Id),
     DeleteStorage(Id),
+    DeleteInstanceBackup(Id),
 }
 
 impl ConfirmAction {
@@ -417,6 +421,7 @@ pub enum Command {
     Settings,
     Secrets,
     Storage,
+    BackUpInstance,
     AddServer,
     SetupProxy,
     Refresh,
@@ -425,7 +430,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 17] = [
+    pub const ALL: [Command; 18] = [
         Command::Deploy,
         Command::Restart,
         Command::Stop,
@@ -438,6 +443,7 @@ impl Command {
         Command::Settings,
         Command::Secrets,
         Command::Storage,
+        Command::BackUpInstance,
         Command::AddServer,
         Command::SetupProxy,
         Command::Refresh,
@@ -459,6 +465,7 @@ impl Command {
             Command::Settings => "settings",
             Command::Secrets => "secrets",
             Command::Storage => "storage",
+            Command::BackUpInstance => "back up this instance",
             Command::AddServer => "add server",
             Command::SetupProxy => "set up proxy on this server",
             Command::Refresh => "refresh",
@@ -478,7 +485,11 @@ impl Command {
             Command::NewEnvironment => "E",
             Command::Servers => "S",
             Command::Settings => ",",
-            Command::Secrets | Command::Storage | Command::AddServer | Command::SetupProxy => "",
+            Command::Secrets
+            | Command::Storage
+            | Command::BackUpInstance
+            | Command::AddServer
+            | Command::SetupProxy => "",
             Command::Refresh => "ctrl+r",
             Command::Help => "?",
             Command::Quit => "q",
@@ -533,9 +544,23 @@ impl Sender {
     }
 }
 
-/// The Settings screen: the instance, its release, and the contexts saved on this machine.
+/// Which list on the Settings screen the arrows and ⏎ act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsFocus {
+    #[default]
+    Backups,
+    Contexts,
+}
+
+/// The Settings screen: the instance, its backups, its release, and the contexts saved on this
+/// machine.
 #[derive(Default)]
 pub struct SettingsView {
+    pub focus: SettingsFocus,
+    /// Instance backups, newest first.
+    pub backups: Vec<InstanceBackup>,
+    pub backup_row: usize,
+    pub schedule: Option<InstanceBackupSchedule>,
     pub settings: Option<InstanceSettings>,
     pub release: Option<VersionCheck>,
     pub contexts: Config,
@@ -548,6 +573,10 @@ pub struct SettingsView {
 impl SettingsView {
     pub fn context_names(&self) -> Vec<String> {
         self.contexts.contexts.keys().cloned().collect()
+    }
+
+    pub fn selected_backup(&self) -> Option<&InstanceBackup> {
+        self.backups.get(self.backup_row)
     }
 }
 
@@ -762,6 +791,15 @@ impl App {
         }
         if self.tick.is_multiple_of(8) {
             self.poll_running_backups();
+            if self.screen == Screen::Settings
+                && self
+                    .settings
+                    .backups
+                    .iter()
+                    .any(|b| b.status == BackupStatus::Running)
+            {
+                self.load_instance_backups();
+            }
         }
     }
 
@@ -817,6 +855,9 @@ impl App {
             || self.service.as_ref().is_some_and(|v| v.database)
         {
             self.load_storages();
+        }
+        if self.screen == Screen::Settings {
+            self.load_instance_backups();
         }
         let ids: Vec<Id> = match self.screen {
             Screen::Overview => self.env_services().iter().map(|s| s.id.clone()).collect(),
@@ -1031,6 +1072,7 @@ impl App {
                     Then::OpenService(id, tab) => self.open_service(&id, tab),
                     Then::OpenDeploy(d) => self.open_deploy(*d),
                     Then::ShowKey(s) => self.show_key(&s),
+                    Then::InstanceSchedule(s) => self.settings.schedule = Some(s),
                 }
             }
             Msg::FormError(e) => {
@@ -1206,6 +1248,37 @@ impl App {
                     .min(view.list.len().saturating_sub(1));
                 self.refill_picker();
             }
+            Msg::InstanceBackups(list) => {
+                let finished: Vec<InstanceBackup> =
+                    list.iter()
+                        .filter(|b| {
+                            b.status != BackupStatus::Running
+                                && self.settings.backups.iter().any(|old| {
+                                    old.id == b.id && old.status == BackupStatus::Running
+                                })
+                        })
+                        .cloned()
+                        .collect();
+                self.settings.backups = list;
+                self.settings.backup_row = self
+                    .settings
+                    .backup_row
+                    .min(self.settings.backups.len().saturating_sub(1));
+                for b in finished {
+                    match b.status {
+                        BackupStatus::Done => self.toast(format!(
+                            "instance backup done · {} · {}",
+                            crate::util::bytes(b.size_bytes),
+                            b.file_name
+                        )),
+                        _ => self.error(format!(
+                            "instance backup failed: {}",
+                            b.error.as_deref().unwrap_or("see the daemon log")
+                        )),
+                    }
+                }
+            }
+            Msg::InstanceSchedule(s) => self.settings.schedule = Some(s),
             Msg::StorageTested(id, result) => {
                 self.storage.testing.remove(&id);
                 let name = self.storage.name(&id).unwrap_or("storage").to_string();
@@ -1577,6 +1650,7 @@ impl App {
             | ConfirmAction::RestoreBackup(..)
             | ConfirmAction::DeleteSecret(_)
             | ConfirmAction::DeleteStorage(_) => "",
+            ConfirmAction::DeleteInstanceBackup(_) => "instance backup deleted",
         }
         .to_string();
         match action {
@@ -1681,6 +1755,9 @@ impl App {
                     .map(|_| "secret deleted".to_string());
                 Msg::ConfirmDone(result.map_err(|e| format!("{e:#}")))
             }),
+            ConfirmAction::DeleteInstanceBackup(id) => {
+                self.act(ok, |c| async move { c.delete_instance_backup(&id).await })
+            }
             ConfirmAction::DeleteStorage(id) => self.spawn(|c| async move {
                 let result = c
                     .delete_storage(&id)
@@ -1840,7 +1917,23 @@ impl App {
         self.refresh();
     }
 
+    fn load_instance_backups(&self) {
+        self.spawn(|c| async move {
+            match c.instance_backups().await {
+                Ok(b) => Msg::InstanceBackups(b),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
+    }
+
     fn load_settings(&mut self) {
+        self.load_instance_backups();
+        self.spawn(|c| async move {
+            match c.instance_backup_schedule().await {
+                Ok(s) => Msg::InstanceSchedule(s),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
         self.settings.loaded_at = Some(Instant::now());
         self.spawn(|c| async move {
             match c.settings().await {
@@ -1930,6 +2023,11 @@ impl App {
         self.rotating = false;
         self.settings.settings = None;
         self.settings.release = None;
+        self.settings.backups.clear();
+        self.settings.backup_row = 0;
+        self.settings.schedule = None;
+        self.secrets = SecretsView::default();
+        self.storage = StorageView::default();
         self.settings.back = Some(Screen::Overview);
         self.open_settings();
         self.toast(format!("connected to {name}"));
@@ -2312,6 +2410,107 @@ impl App {
             "The connection is tested after it is saved.".into(),
         ])
         .submit(if edit { "save & test" } else { "add & test" }, None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    // Instance backups
+
+    pub fn select_instance_backup(&mut self, row: usize) {
+        self.settings.focus = SettingsFocus::Backups;
+        self.settings.backup_row = row.min(self.settings.backups.len().saturating_sub(1));
+    }
+
+    /// "b" in Settings: where the archive goes and the passphrase that encrypts it.
+    pub fn form_instance_backup(&mut self) {
+        let scheduled = self
+            .settings
+            .schedule
+            .as_ref()
+            .and_then(|s| s.storage_id.clone());
+        let form = Form::new(
+            FormKind::InstanceBackup,
+            "Back up instance",
+            vec![
+                self.store_field(scheduled.as_deref()),
+                Field::text("passphrase", "passphrase")
+                    .masked()
+                    .hint(format!("{MIN_PASSPHRASE_LEN}+ characters")),
+                Field::text("repeat", "repeat").masked(),
+            ],
+        )
+        .subtitle(self.context.clone())
+        .note(vec![
+            "Archives the store, config.toml, master.key and the SSH directory, encrypted with"
+                .into(),
+            "this passphrase. It is never stored: without it the archive cannot be restored."
+                .into(),
+            restore_hint(),
+        ])
+        .submit("back up", None)
+        .focus_on("passphrase");
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    pub fn form_instance_schedule(&mut self) {
+        let s = self.settings.schedule.clone().unwrap_or_default();
+        let form = Form::new(
+            FormKind::InstanceSchedule {
+                has_passphrase: s.has_passphrase,
+            },
+            "Instance backup schedule",
+            vec![
+                Field::toggle("enabled", "daily", s.enabled).hint("off keeps old archives"),
+                Field::text("hour", "hour (UTC)").value(s.hour_utc.to_string()),
+                Field::text("keep", "keep")
+                    .value(s.keep.to_string())
+                    .hint("per store"),
+                self.store_field(s.storage_id.as_deref()),
+                Field::text("passphrase", "passphrase")
+                    .masked()
+                    .placeholder(if s.has_passphrase {
+                        "stored · empty keeps it"
+                    } else {
+                        "needed for scheduled runs"
+                    })
+                    .hint(format!("{MIN_PASSPHRASE_LEN}+ characters")),
+                Field::text("repeat", "repeat").masked(),
+            ],
+        )
+        .subtitle(self.context.clone())
+        .note(vec![
+            "Scheduled runs need the passphrase, so the daemon stores it sealed with its".into(),
+            "master key. A new one replaces it; it is never shown again.".into(),
+        ])
+        .submit("save", None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    pub fn form_instance_download(&mut self) {
+        let Some(b) = self.settings.selected_backup().cloned() else {
+            return self.error("no instance backup selected · b to take one");
+        };
+        if b.status != BackupStatus::Done {
+            return self.error(match b.status {
+                BackupStatus::Running => "that backup is still running",
+                _ => "that backup failed and has no file",
+            });
+        }
+        let form = Form::new(
+            FormKind::DownloadBackup {
+                backup_id: b.id.clone(),
+                file_name: b.file_name.clone(),
+                instance: true,
+            },
+            "Download instance backup",
+            vec![
+                Field::text("path", "save to")
+                    .value(format!("./{}", b.file_name))
+                    .hint(format!("{} · encrypted", crate::util::bytes(b.size_bytes))),
+            ],
+        )
+        .subtitle(b.file_name.clone())
+        .note(vec![restore_hint()])
+        .submit("download", None);
         self.overlay = Some(Overlay::Form(form));
     }
 
@@ -2863,6 +3062,7 @@ impl App {
             FormKind::DownloadBackup {
                 backup_id: backup.id.clone(),
                 file_name: backup.file_name.clone(),
+                instance: false,
             },
             "Download backup",
             vec![
@@ -2883,6 +3083,7 @@ impl App {
         let FormKind::DownloadBackup {
             backup_id,
             file_name,
+            instance,
         } = form.kind.clone()
         else {
             return;
@@ -2903,13 +3104,27 @@ impl App {
             .values()
             .flatten()
             .find(|b| b.id == backup_id)
-            .map_or(0, |b| b.size_bytes);
+            .map(|b| b.size_bytes)
+            .or_else(|| {
+                self.settings
+                    .backups
+                    .iter()
+                    .find(|b| b.id == backup_id)
+                    .map(|b| b.size_bytes)
+            })
+            .unwrap_or(0);
         self.overlay = None;
         self.progress(format!("downloading {file_name}"));
         let client = self.client.clone();
         let tx = self.sender();
         tokio::spawn(async move {
-            let msg = match download(&client, &backup_id, &target, total, &file_name, &tx).await {
+            let file = Download {
+                id: &backup_id,
+                name: &file_name,
+                instance,
+                total,
+            };
+            let msg = match download(&client, file, &target, &tx).await {
                 Ok(n) => Msg::Toast(format!(
                     "saved {} · {}",
                     target.display(),
@@ -3005,6 +3220,14 @@ impl App {
     }
 }
 
+/// How an instance backup comes back on a new machine.
+pub fn restore_hint() -> String {
+    format!(
+        "Restore with: {} restore <file|s3://bucket/key> --passphrase-file <file>",
+        brand::DAEMON_BIN
+    )
+}
+
 /// The secret part of a value: what "copy value" copies.
 pub fn secret_text(value: &SecretValue) -> String {
     match value {
@@ -3034,18 +3257,34 @@ pub fn is_database(s: &Service) -> bool {
 }
 
 /// Stream a backup to `<target>.part`, reporting progress, then move it into place.
+/// A backup file to download: a database backup, or an instance backup when `instance`.
+struct Download<'a> {
+    id: &'a str,
+    name: &'a str,
+    instance: bool,
+    total: u64,
+}
+
 async fn download(
     client: &Client,
-    id: &str,
+    file: Download<'_>,
     target: &std::path::Path,
-    total: u64,
-    name: &str,
     tx: &Sender,
 ) -> anyhow::Result<u64> {
     use tokio::io::AsyncWriteExt;
+    let Download {
+        id,
+        name,
+        instance,
+        total,
+    } = file;
     let part = PathBuf::from(format!("{}.part", target.display()));
     let result = async {
-        let mut stream = client.download_backup(id).await?;
+        let mut stream = if instance {
+            client.download_instance_backup(id).await?
+        } else {
+            client.download_backup(id).await?
+        };
         let mut file = tokio::fs::File::create(&part).await?;
         let mut written = 0u64;
         let mut last = Instant::now();
@@ -3100,6 +3339,8 @@ enum Request {
     GenerateKey(String),
     UpdateSecret(Id, UpdateSecret),
     Storage(Option<Id>, CreateStorage),
+    InstanceBackup(CreateInstanceBackup),
+    InstanceSchedule(UpdateInstanceBackupSchedule),
 }
 
 impl Request {
@@ -3237,6 +3478,25 @@ impl Request {
                 };
                 (format!("{} saved · {test}", s.name), Then::Stay)
             }
+            Request::InstanceBackup(body) => {
+                let b = c.create_instance_backup(&body).await?;
+                (
+                    format!("backing up the instance · {}", b.file_name),
+                    Then::Stay,
+                )
+            }
+            Request::InstanceSchedule(body) => {
+                let s = c.set_instance_backup_schedule(&body).await?;
+                let toast = if s.enabled {
+                    format!(
+                        "instance backups daily at {:02}:00 UTC · keep {}",
+                        s.hour_utc, s.keep
+                    )
+                } else {
+                    "instance backup schedule off".to_string()
+                };
+                (toast, Then::InstanceSchedule(s))
+            }
             Request::Schedule(id, body) => {
                 let s = c.set_backup_schedule(&id, &body).await?;
                 (
@@ -3246,6 +3506,23 @@ impl Request {
             }
         })
     }
+}
+
+/// The passphrase typed twice, or `None` when both fields are empty.
+fn passphrase(form: &Form) -> Result<Option<String>, String> {
+    let (p, repeat) = (form.raw("passphrase"), form.raw("repeat"));
+    if p.is_empty() && repeat.is_empty() {
+        return Ok(None);
+    }
+    if p.chars().count() < MIN_PASSPHRASE_LEN {
+        return Err(format!(
+            "the passphrase needs at least {MIN_PASSPHRASE_LEN} characters"
+        ));
+    }
+    if p != repeat {
+        return Err("the passphrases do not match".into());
+    }
+    Ok(Some(p))
 }
 
 /// The value fields of a secret form. A private key that is not pasted is read from the path typed.
@@ -3529,6 +3806,29 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
             })
         }
         FormKind::GenerateKey => Request::GenerateKey(named("name")?),
+        FormKind::InstanceBackup => Request::InstanceBackup(CreateInstanceBackup {
+            storage_id: Some(form.get("store")).filter(|s| !s.is_empty()),
+            passphrase: passphrase(form)?.ok_or("enter a passphrase")?,
+        }),
+        FormKind::InstanceSchedule { has_passphrase } => {
+            let s = crate::database::parse_schedule(
+                form.on("enabled"),
+                &form.get("hour"),
+                &form.get("keep"),
+                Some(form.get("store")).filter(|s| !s.is_empty()),
+            )?;
+            let passphrase = passphrase(form)?;
+            if s.enabled && passphrase.is_none() && !has_passphrase {
+                return Err("scheduled runs need a passphrase".into());
+            }
+            Request::InstanceSchedule(UpdateInstanceBackupSchedule {
+                enabled: s.enabled,
+                hour_utc: s.hour_utc,
+                keep: s.keep,
+                storage_id: s.storage_id,
+                passphrase,
+            })
+        }
         FormKind::AddStorage | FormKind::EditStorage { .. } => {
             let endpoint = form.get("endpoint");
             if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
@@ -3621,6 +3921,38 @@ abc
                 .contains("not a private key")
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn instance_backup_passphrases_are_checked_before_sending() {
+        let form = |p: &str, repeat: &str| {
+            let mut f = Form::new(
+                FormKind::InstanceBackup,
+                "Back up instance",
+                vec![
+                    Field::pick("store", "store", "", "local"),
+                    Field::text("passphrase", "passphrase").masked(),
+                    Field::text("repeat", "repeat").masked(),
+                ],
+            );
+            f.focus = 1;
+            f.paste(p);
+            f.focus = 2;
+            f.paste(repeat);
+            f
+        };
+        let err = |f: &Form| build_request(f, false).err().unwrap_or_default();
+        assert!(err(&form("short", "short")).contains("at least 12"));
+        assert!(err(&form("long enough phrase", "long enough phrasE")).contains("do not match"));
+        assert_eq!(err(&form("", "")), "enter a passphrase");
+        assert!(matches!(
+            build_request(&form("long enough phrase", "long enough phrase"), false),
+            Ok(Request::InstanceBackup(CreateInstanceBackup {
+                storage_id: None,
+                ..
+            }))
+        ));
+        assert_eq!(form("abc", "").fields[1].hint, "3 of 12 characters");
     }
 
     #[test]

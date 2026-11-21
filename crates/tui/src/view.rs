@@ -343,7 +343,18 @@ fn keys_for(app: &App) -> (Keys, Keys) {
         Screen::Settings if app.settings.settings.is_none() => {
             vec![("↑↓", "context"), ("⏎", "switch"), ("x", "remove")]
         }
+        Screen::Settings if app.settings.focus == SettingsFocus::Backups => vec![
+            ("tab", "contexts"),
+            ("↑↓", "move"),
+            ("b", "back up now"),
+            ("e", "schedule"),
+            ("D", "download"),
+            ("x", "delete"),
+            ("s", "secrets"),
+            ("o", "storage"),
+        ],
         Screen::Settings => vec![
+            ("tab", "backups"),
             ("↑↓", "context"),
             ("⏎", "switch"),
             ("x", "remove"),
@@ -3136,9 +3147,15 @@ fn settings(frame: &mut Frame, area: Rect, app: &App) {
         };
         frame.render_widget(Paragraph::new(status).style(theme::muted()), inner);
     }
-    let [contexts, servers] = Layout::horizontal([Constraint::Fill(2), Constraint::Fill(1)])
+    let [left, servers] = Layout::horizontal([Constraint::Fill(2), Constraint::Fill(1)])
         .spacing(1)
         .areas(row3);
+    let contexts_h = (app.settings.contexts.contexts.len() as u16 + 3).clamp(5, 9);
+    let [backups, contexts] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(contexts_h)])
+            .spacing(1)
+            .areas(left);
+    instance_backups_panel(frame, backups, app);
     contexts_panel(frame, contexts, app);
     let [secrets, storage, servers] = Layout::vertical([Constraint::Fill(1); 3])
         .spacing(1)
@@ -3469,7 +3486,8 @@ fn maintenance_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
 }
 
 fn contexts_panel(frame: &mut Frame, area: Rect, app: &App) {
-    let block = panel(title("Contexts", true), None, true);
+    let focused = app.settings.focus == SettingsFocus::Contexts;
+    let block = panel(title("Contexts", focused), None, focused);
     let inner = inside(&block, area);
     frame.render_widget(block, area);
     mouse::hit(area, Hit::List(List::Contexts));
@@ -4100,6 +4118,176 @@ fn storage_detail(frame: &mut Frame, area: Rect, app: &App) {
             *r,
             "created",
             text(database::created(s.created_at, chrono::Utc::now())),
+            None,
+        );
+    }
+}
+
+// Instance backups
+
+fn instance_backups_panel(frame: &mut Frame, area: Rect, app: &App) {
+    let view = &app.settings;
+    let focused = view.focus == SettingsFocus::Backups;
+    let total: u64 = view.backups.iter().map(|b| b.size_bytes).sum();
+    let note = format!(
+        "{} archive{} · {}",
+        view.backups.len(),
+        if view.backups.len() == 1 { "" } else { "s" },
+        util::bytes(total)
+    );
+    let block = panel(
+        title("Instance backups", focused),
+        Some(Line::styled(note, theme::muted())),
+        focused,
+    );
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    mouse::hit(inner, Hit::List(List::InstanceBackups));
+    let [list, _, footer] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(u16::from(inner.height > 4)),
+        Constraint::Length(2.min(inner.height.saturating_sub(1))),
+    ])
+    .areas(inner);
+    let store_name = |id: &Option<Id>| match id {
+        None => "local".to_string(),
+        Some(id) => app.storage.name(id).unwrap_or("s3").to_string(),
+    };
+    if view.backups.is_empty() {
+        frame.render_widget(
+            Paragraph::new("no instance backups yet").style(theme::muted()),
+            list,
+        );
+        hint_at(frame, list, 24, 0, "b", "back up now");
+    } else {
+        let now = chrono::Utc::now();
+        let rows: Vec<Row> = view
+            .backups
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let selected = i == view.backup_row;
+                let (glyph, age, file) = match b.status {
+                    BackupStatus::Running => (
+                        Span::styled(util::spinner(app.tick), theme::fg(theme::INFO)),
+                        util::duration((now - b.created_at).num_seconds()),
+                        Span::styled("backing up…", theme::fg(theme::INFO)),
+                    ),
+                    BackupStatus::Done => (
+                        Span::styled("●", theme::fg(theme::OK)),
+                        util::ago(b.created_at),
+                        Span::styled(b.file_name.clone(), theme::text()),
+                    ),
+                    BackupStatus::Failed => (
+                        Span::styled("✕", theme::fg(theme::ERR)),
+                        util::ago(b.created_at),
+                        Span::styled(
+                            b.error.clone().unwrap_or_else(|| "failed".into()),
+                            theme::fg(theme::ERR),
+                        ),
+                    ),
+                };
+                let size = if b.status == BackupStatus::Done {
+                    Span::styled(util::bytes(b.size_bytes), theme::text())
+                } else {
+                    Span::styled("—", theme::muted())
+                };
+                Row::new(vec![
+                    Cell::from(glyph),
+                    Cell::from(Line::from(vec![
+                        Span::styled(
+                            database::created(b.created_at, now),
+                            if selected && focused {
+                                theme::accent()
+                            } else {
+                                theme::text()
+                            },
+                        ),
+                        Span::styled(format!("  {age}"), theme::muted()),
+                    ])),
+                    Cell::from(Span::styled(b.trigger.as_str(), theme::muted())),
+                    Cell::from(size),
+                    Cell::from(Span::styled(
+                        store_name(&b.storage_id),
+                        if b.storage_id.is_some() {
+                            theme::text()
+                        } else {
+                            theme::muted()
+                        },
+                    )),
+                    Cell::from(file),
+                ])
+                .style(if selected {
+                    theme::selected()
+                } else {
+                    Style::new()
+                })
+            })
+            .collect();
+        let offset = scroll_offset(view.backup_row, list.height.saturating_sub(1) as usize);
+        row_hits(list, rows.len(), offset, Hit::Item);
+        frame.render_widget(
+            Table::new(
+                rows.into_iter().skip(offset),
+                [
+                    Constraint::Length(2),
+                    Constraint::Length(22),
+                    Constraint::Length(8),
+                    Constraint::Length(6),
+                    Constraint::Length(14),
+                    Constraint::Fill(1),
+                ],
+            )
+            .header(
+                Row::new(["", "CREATED", "TRIGGER", "SIZE", "WHERE", "FILE"]).style(theme::muted()),
+            )
+            .column_spacing(2),
+            list,
+        );
+    }
+    let lines = lines_of(footer, footer.height);
+    let schedule = match &view.schedule {
+        Some(s) if s.enabled => vec![
+            Span::styled(format!("daily {:02}:00 UTC", s.hour_utc), theme::text()),
+            Span::styled(
+                format!(
+                    "  keep {} · to {} · {}",
+                    s.keep,
+                    store_name(&s.storage_id),
+                    if s.has_passphrase {
+                        "passphrase stored"
+                    } else {
+                        "no passphrase stored"
+                    }
+                ),
+                theme::muted(),
+            ),
+        ],
+        Some(_) => vec![Span::styled("off", theme::muted())],
+        None => vec![Span::styled(
+            format!("{} loading", util::spinner(app.tick)),
+            theme::muted(),
+        )],
+    };
+    if let Some(line) = lines.first() {
+        let value = setting_row(frame, *line, "schedule", schedule, Some(("e", "edit")));
+        mouse::key_target(value, "e");
+    }
+    if let Some(line) = lines.get(1) {
+        setting_row(
+            frame,
+            *line,
+            "restore",
+            vec![
+                Span::styled(
+                    format!(
+                        "{} restore <file|s3://bucket/key> --passphrase-file <file>",
+                        brand::DAEMON_BIN
+                    ),
+                    theme::text(),
+                ),
+                Span::styled("  on a new machine", theme::muted()),
+            ],
             None,
         );
     }

@@ -148,6 +148,8 @@ pub enum FormKind {
     DownloadBackup {
         backup_id: Id,
         file_name: String,
+        /// An instance backup rather than a database backup.
+        instance: bool,
     },
     AddSecret,
     GenerateKey,
@@ -161,6 +163,10 @@ pub enum FormKind {
     AddStorage,
     EditStorage {
         storage_id: Id,
+    },
+    InstanceBackup,
+    InstanceSchedule {
+        has_passphrase: bool,
     },
 }
 
@@ -286,6 +292,32 @@ impl Form {
             let hint = crate::database::hour_hint(&self.raw("hour"));
             if let Some(hour) = self.field_mut("hour") {
                 hour.hint = hint;
+            }
+            return;
+        }
+        if matches!(
+            self.kind,
+            FormKind::InstanceBackup | FormKind::InstanceSchedule { .. }
+        ) {
+            let (p, repeat) = (self.raw("passphrase"), self.raw("repeat"));
+            let n = p.chars().count();
+            let min = common::api::MIN_PASSPHRASE_LEN;
+            if let Some(f) = self.field_mut("passphrase") {
+                f.hint = match n {
+                    0 => format!("{min}+ characters"),
+                    n if n < min => format!("{n} of {min} characters"),
+                    n => format!("✓ {n} characters"),
+                };
+            }
+            if let Some(f) = self.field_mut("repeat") {
+                f.hint = match () {
+                    _ if repeat.is_empty() => String::new(),
+                    _ if repeat == p => "✓ matches".into(),
+                    _ => "must match".into(),
+                };
+            }
+            if let Some(hour) = self.field_mut("hour") {
+                hour.hint = crate::database::hour_hint(&hour.value);
             }
             return;
         }
