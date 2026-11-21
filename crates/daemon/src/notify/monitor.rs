@@ -8,7 +8,8 @@ use crate::db::TlsRecord;
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
 use common::notify::NotifyEvent;
-use common::{Domain, brand};
+use common::{Domain, ServerKind, brand};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -220,14 +221,44 @@ async fn fetch_cert(client: &reqwest::Client, host: &str) -> Result<Option<Cert>
         .and_then(parse_cert))
 }
 
-async fn probe(host: &str) -> Probe {
+/// Where to reach the proxy that serves `domain` when it sits behind Cloudflare, whose edge
+/// shows Cloudflare's own certificate: the domain's server, on this machine or over the network.
+async fn origin(state: &AppState, domain: &Domain) -> Option<IpAddr> {
+    let ranges = state.cloudflare.get(&state.http).await;
+    let proxied = state
+        .probe
+        .resolve(&domain.host)
+        .await
+        .is_ok_and(|ips| ips.iter().any(|ip| ranges.contains(*ip)));
+    if !proxied {
+        return None;
+    }
+    let service = state.db.service(&domain.service_id).await.ok()??;
+    let server = state.db.server(&service.service.server_id).await.ok()??;
+    match server.kind {
+        ServerKind::Local => Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        ServerKind::Ssh => state
+            .probe
+            .resolve(server.host.as_deref()?)
+            .await
+            .ok()?
+            .first()
+            .copied(),
+    }
+}
+
+async fn probe(host: &str, origin: Option<IpAddr>) -> Probe {
     let client = |strict: bool| {
-        reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .tls_info(true)
             .danger_accept_invalid_certs(!strict)
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(10))
-            .build()
+            .timeout(Duration::from_secs(10));
+        match origin {
+            Some(ip) => builder.resolve(host, SocketAddr::new(ip, 0)),
+            None => builder,
+        }
+        .build()
     };
     let (Ok(strict), Ok(lax)) = (client(true), client(false)) else {
         return Probe::Unreachable;
@@ -249,7 +280,7 @@ async fn check_certificates(state: &AppState, all: bool) {
         if !all && record.is_some() {
             continue;
         }
-        let probe = probe(&domain.host).await;
+        let probe = probe(&domain.host, origin(state, &domain).await).await;
         if let Some(record) = certificate_events(state, &domain, record, probe).await
             && let Err(e) = state.db.save_tls_certificate(&record).await
         {

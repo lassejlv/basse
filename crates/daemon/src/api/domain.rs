@@ -4,12 +4,13 @@ use super::{Json, servers};
 use crate::domain;
 use crate::error::{ApiResult, AppError, bad_request, conflict};
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use chrono::Utc;
 use common::api::SetInstanceDomain;
 use common::*;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub async fn get(State(state): State<Arc<AppState>>) -> Json<InstanceDomain> {
     Json(status(&state).await)
@@ -18,13 +19,10 @@ pub async fn get(State(state): State<Arc<AppState>>) -> Json<InstanceDomain> {
 async fn status(state: &AppState) -> InstanceDomain {
     let config = state.config();
     let (v4, v6) = state.public_ips().await;
-    let last = state
-        .domain_checks
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
+    let last = lock(&state.domain_checks)
         .clone()
         .filter(|(d, _, _)| config.domain.as_deref() == Some(d.as_str()))
-        .map(|(_, checks, at)| (checks, at));
+        .map(|(_, report, at)| (report, at));
     domain::status(
         config.domain.as_deref(),
         config.domain_verified_at,
@@ -106,7 +104,12 @@ async fn run_check(state: &AppState) -> ApiResult<InstanceDomain> {
     };
     let (v4, v6) = state.public_ips().await;
     let public: Vec<IpAddr> = [v4, v6].into_iter().flatten().collect();
-    let checks = domain::run_checks(state.probe.as_ref(), &name, &public).await;
+    let ranges = state.cloudflare.get(&state.http).await;
+    let nonce = domain::new_nonce();
+    lock(&state.verify_nonces).push(nonce.clone());
+    let report = domain::run_checks(state.probe.as_ref(), &name, &public, &ranges, &nonce).await;
+    lock(&state.verify_nonces).retain(|n| *n != nonce);
+    let checks = report.checks.clone();
     let ok = domain::all_passed(&checks);
     let (_, was) = state.update_config(|c| {
         let was = c.domain_verified_at.is_some();
@@ -115,10 +118,12 @@ async fn run_check(state: &AppState) -> ApiResult<InstanceDomain> {
         }
         Ok(was)
     })?;
-    *state
-        .domain_checks
-        .lock()
-        .unwrap_or_else(|p| p.into_inner()) = Some((name.clone(), checks.clone(), Utc::now()));
+    *lock(&state.domain_checks) = Some((name.clone(), report, Utc::now()));
+    if let Some(local) = state.db.local_server().await?
+        && let Err(e) = servers::sync_proxy(state, local).await
+    {
+        tracing::warn!("cannot update the proxy after the domain check: {e:#}");
+    }
     match (was, ok) {
         (false, true) => {
             state
@@ -145,4 +150,22 @@ async fn run_check(state: &AppState) -> ApiResult<InstanceDomain> {
         _ => {}
     }
     Ok(status(state).await)
+}
+
+/// Answers a running check's token through the proxy, with the scheme the proxy received the
+/// request on. Unauthenticated: the token itself is the proof.
+pub async fn verify(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<String> {
+    let scheme = headers
+        .get(domain::scheme_header())
+        .and_then(|v| v.to_str().ok());
+    domain::verify_answer(&token, &lock(&state.verify_nonces), scheme)
+        .ok_or_else(|| AppError::NotFound("no such token".into()))
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
 }

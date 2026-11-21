@@ -49,7 +49,7 @@
 //! | POST | `/settings/update` | `UpdateRequest` | `UpdateResult` (replaces the binaries, then the daemon exits to restart) |
 //! | GET | `/settings/domain` | | `InstanceDomain` (the DNS records to create and the last check) |
 //! | PUT | `/settings/domain` | `SetInstanceDomain` | `InstanceDomain` (routes the domain to the API through the proxy, then checks it) |
-//! | POST | `/settings/domain/check` | | `InstanceDomain` (DNS, ports 80 and 443, certificate, API) |
+//! | POST | `/settings/domain/check` | | `InstanceDomain` (DNS, ports 80 and 443, certificate, API; detects Cloudflare's proxy) |
 //! | DELETE | `/settings/domain` | | `InstanceDomain` (the API is served on IP:port only again) |
 //!
 //! Git sources. Credentials are stored as secrets and never returned. GitHub App sources need a
@@ -76,6 +76,13 @@
 //! | GET | `/github/{id}/callback?code=&state=` | the setup state; exchanges the code for the app's credentials, then redirects to the install page |
 //! | GET | `/github/{id}/setup?installation_id=` | the installation must belong to the app, asked with the app's JWT |
 //! | POST | `/github/{id}/webhook` | `X-Hub-Signature-256` with the app's webhook secret; a push to a tracked branch deploys |
+//!
+//! The instance domain check fetches its own one-time token through the proxy, over http and
+//! https, to prove that traffic for the domain reaches this server whatever sits in between.
+//!
+//! | Method | Path | Proof |
+//! |---|---|---|
+//! | GET | `/.well-known/acme-challenge/<prefix>-verify-{nonce}` | the nonce of a running check; answers `<nonce> <scheme>`, the scheme the proxy received it on |
 //!
 //! Git services build with `Source::Git.build`: a Dockerfile (with `target` and the service's
 //! env as build args), a compose file deployed as one group (`ServiceDetail.compose` lists its

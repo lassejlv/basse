@@ -1233,6 +1233,22 @@ pub struct InstanceDomain {
     /// Results of the last check, in order; empty before the first one.
     pub checks: Vec<DomainCheck>,
     pub checked_at: Option<Timestamp>,
+    /// Set when the last check found the domain behind Cloudflare's proxy (orange cloud).
+    #[serde(default)]
+    pub cloudflare: Option<CloudflareProxy>,
+}
+
+/// How the instance domain goes through Cloudflare's proxy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudflareProxy {
+    /// Record types that resolve to Cloudflare's edge, `A` and/or `AAAA`.
+    pub records: Vec<String>,
+    /// Record types that point straight at this server instead, as when only AAAA is proxied.
+    #[serde(default)]
+    pub direct: Vec<String>,
+    /// Cloudflare forwarded an https request to this server over plain http: the zone's
+    /// SSL/TLS mode is Flexible, which loops redirects. It should be Full (strict).
+    pub flexible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

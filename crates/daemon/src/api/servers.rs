@@ -201,7 +201,8 @@ pub async fn proxy(
 /// Installs or reinstalls the proxy on a server and records the outcome.
 pub async fn install_proxy(state: &AppState, server: Server) -> ApiResult<Server> {
     let docker = state.docker.get(&server).await?;
-    if let Err(e) = docker::install_proxy(&docker, state.instance_route(&server).as_ref()).await {
+    let config = state.proxy_config(&server).await;
+    if let Err(e) = docker::install_proxy(&docker, &config).await {
         state
             .activity(
                 ActivityLevel::Error,
@@ -232,7 +233,7 @@ pub async fn ensure_local_proxy(state: &AppState, server: Server) {
         );
         let result = async {
             let docker = state.docker.get(&server).await?;
-            docker::install_proxy(&docker, state.instance_route(&server).as_ref()).await
+            docker::install_proxy(&docker, &state.proxy_config(&server).await).await
         }
         .await;
         let e = match result {
@@ -262,6 +263,21 @@ pub async fn ensure_local_proxy(state: &AppState, server: Server) {
         }
         tokio::time::sleep(Duration::from_secs(u64::from(attempt) * 10)).await;
     }
+}
+
+/// Recreates a running proxy whose configuration is out of date: after an upgrade that changed
+/// it, or when the instance domain moved behind Cloudflare's proxy or out from behind it.
+pub async fn sync_proxy(state: &AppState, server: Server) -> ApiResult<()> {
+    let docker = state.docker.get(&server).await?;
+    let Some(now) = docker::proxy_labels_now(&docker).await? else {
+        return Ok(());
+    };
+    if now == docker::proxy_container_labels(&state.proxy_config(&server).await) {
+        return Ok(());
+    }
+    tracing::info!("the proxy on {} is out of date; recreating it", server.name);
+    install_proxy(state, server).await?;
+    Ok(())
 }
 
 /// Pings Docker on the server and stores status, engine version and proxy status.

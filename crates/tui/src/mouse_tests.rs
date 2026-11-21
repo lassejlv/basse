@@ -1563,8 +1563,35 @@ fn domain_fixture(verified: bool) -> App {
         records: vec![record("A", "203.0.113.10"), record("AAAA", "2001:db8::10")],
         checks,
         checked_at: None,
+        cloudflare: None,
     });
     app
+}
+
+#[test]
+fn domain_guide_shows_cloudflare_and_the_flexible_mode() {
+    use common::CloudflareProxy;
+    for verified in [false, true] {
+        let mut app = domain_fixture(verified);
+        if let Some(d) = app.domain.data.as_mut() {
+            d.cloudflare = Some(CloudflareProxy {
+                records: vec!["AAAA".into()],
+                direct: vec!["A".into()],
+                flexible: !verified,
+            });
+        }
+        let buf = draw(&app, 160, 40);
+        label(&buf, "AAAA through Cloudflare");
+        label(&buf, "A points straight here");
+        label(&buf, "from CF-Connecting-IP");
+        if verified {
+            label(&buf, "Full (strict)");
+        } else {
+            label(&buf, "✕ Flexible");
+            label(&buf, "Cloudflare proxies AAAA. Keep these values");
+            assert_hit(&app, label(&buf, "AAAA"), Hit::Record(1));
+        }
+    }
 }
 
 #[test]
