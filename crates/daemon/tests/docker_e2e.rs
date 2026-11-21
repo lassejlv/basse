@@ -136,7 +136,9 @@ fn local_repo(root: &Path) -> String {
 #[tokio::test]
 #[ignore = "needs Docker and free ports 80/443"]
 async fn docker_end_to_end() {
-    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let daemon = Daemon::start_on_host()
+        .await
+        .expect("these tests need Docker");
     let api = daemon.client();
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -681,7 +683,9 @@ impl Drop for Sshd {
 #[tokio::test]
 #[ignore = "needs Docker and an sshd binary"]
 async fn ssh_server_end_to_end() {
-    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let daemon = Daemon::start_on_host()
+        .await
+        .expect("these tests need Docker");
     let api = daemon.client();
     let sshd = Sshd::start(&daemon.dir.path().join("ssh/id_ed25519.pub"));
     let user = String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout).unwrap();
@@ -1119,7 +1123,9 @@ async fn database_project(api: &Client, name: &str) -> (Project, Environment) {
 #[tokio::test]
 #[ignore = "needs Docker and the postgres:18-alpine image"]
 async fn postgres_backup_restore_rotate_expose() {
-    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let daemon = Daemon::start_on_host()
+        .await
+        .expect("these tests need Docker");
     let api = daemon.client();
     let (project, env) = database_project(&api, "pg").await;
     let detail = exercise_database(&api, &env.id, None, DatabaseKind::Postgres).await;
@@ -1191,7 +1197,9 @@ async fn postgres_backup_restore_rotate_expose() {
 #[tokio::test]
 #[ignore = "needs Docker and the mysql, mariadb, redis and mongo images"]
 async fn other_databases_backup_restore_rotate() {
-    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let daemon = Daemon::start_on_host()
+        .await
+        .expect("these tests need Docker");
     let api = daemon.client();
     let (project, env) = database_project(&api, "dbs").await;
     for kind in [
@@ -1219,7 +1227,9 @@ async fn other_databases_backup_restore_rotate() {
 #[tokio::test]
 #[ignore = "needs Docker and an sshd binary"]
 async fn ssh_server_with_a_secret_key() {
-    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let daemon = Daemon::start_on_host()
+        .await
+        .expect("these tests need Docker");
     let api = daemon.client();
     let key = api.generate_ssh_key("edge-key").await.unwrap();
     let public = daemon.dir.path().join("edge-key.pub");

@@ -159,7 +159,9 @@ fn remote_sh(remote: &RemoteHost, container: &str, script: &str) -> String {
 #[tokio::test]
 #[ignore = "needs Docker with privileged containers"]
 async fn move_service() {
-    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let daemon = Daemon::start_on_host()
+        .await
+        .expect("these tests need Docker");
     let api = daemon.client();
     let remote = RemoteHost::start(&daemon.dir.path().join("ssh/id_ed25519.pub"));
     let far = api
