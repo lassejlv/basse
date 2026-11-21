@@ -2,9 +2,7 @@ use super::{collect_logs, docker_ok, git, strings, wait_finished};
 use crate::support::Daemon;
 use client::{Client, LogStreamBox};
 use common::api::{CreateProject, CreateService, UpdateService};
-use common::{
-    API_PREFIX, Deployment, DeploymentStatus, RestartPolicy, Source, StepKind, StepStatus, brand,
-};
+use common::{Deployment, DeploymentStatus, RestartPolicy, Source, StepKind, StepStatus, brand};
 use futures_util::StreamExt as _;
 use std::time::Duration;
 use std::{io::ErrorKind, net::Ipv4Addr};
@@ -130,8 +128,10 @@ async fn cancelling_during_health_removes_the_candidate_and_preserves_the_live_d
     app.assert_cancelled(&candidate.id, logs).await;
 }
 
+/// Rolling deploys keep the old replicas until the new set is committed, so a cancel after the
+/// candidate joined the proxy and the old container started draining still puts it back.
 #[tokio::test]
-async fn cancellation_is_rejected_after_traffic_cutover_begins() {
+async fn cancelling_mid_roll_puts_the_old_container_back() {
     let Some(daemon) = Daemon::start_on_host().await else {
         return;
     };
@@ -140,30 +140,24 @@ async fn cancellation_is_rejected_after_traffic_cutover_begins() {
     let candidate = app.api.deploy(&app.service_id, "api").await.unwrap();
     let mut logs = app.api.deployment_logs(&candidate.id, true).await.unwrap();
     wait_for_log(&mut logs, "Attached to the proxy as").await;
+    wait_for_log(&mut logs, "Draining 1 old container").await;
     app.assert_in_step(&candidate.id, StepKind::Switch).await;
 
-    let response = reqwest::Client::new()
-        .post(format!(
-            "{0}{API_PREFIX}/deployments/{1}/cancel",
-            daemon.url, candidate.id
-        ))
-        .bearer_auth(&daemon.token)
-        .timeout(CANCEL_TIMEOUT)
-        .send()
-        .await
-        .expect("send cancel request during cutover");
-    assert_eq!(
-        response.status(),
-        reqwest::StatusCode::CONFLICT,
-        "cancel was not rejected after attaching the candidate: {}",
-        response.text().await.unwrap()
-    );
-    let finished = wait_finished(&app.api, &candidate.id, SETUP_TIMEOUT).await;
-    assert_eq!(finished.status, DeploymentStatus::Live, "{finished:?}");
-    let service = app.api.service(&app.service_id).await.unwrap().service;
-    assert_eq!(
-        service.live_deployment_id.as_deref(),
-        Some(finished.id.as_str())
+    cancel(&app.api, &candidate.id).await;
+    app.assert_cancelled(&candidate.id, logs).await;
+    let previous = app.previous.container_id.as_deref().unwrap();
+    let networks = docker_ok(&strings(&[
+        "inspect",
+        "--format",
+        "{{range $name, $_ := .NetworkSettings.Networks}}{{$name}} {{end}}",
+        previous,
+    ]))
+    .expect("inspect the previous container");
+    assert!(
+        networks
+            .split_whitespace()
+            .any(|n| n == brand::PROXY_NETWORK),
+        "the previous container is not behind the proxy again: {networks}"
     );
 }
 

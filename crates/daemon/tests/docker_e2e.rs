@@ -5,6 +5,8 @@
 #[cfg(target_os = "linux")]
 #[path = "docker_e2e/cancellation.rs"]
 mod cancellation;
+#[path = "docker_e2e/replicas.rs"]
+mod replicas;
 mod support;
 
 use client::Client;

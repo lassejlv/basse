@@ -267,7 +267,10 @@ pub fn upstream_labels(domains: &[Domain], service_port: Option<u16>) -> HashMap
 ///
 /// Health checks and retries: an active probe of `health_path` when the service has one, a
 /// replica that fails a request is skipped for 30 seconds, and a request whose replica cannot
-/// be reached is retried on another for up to 5 seconds.
+/// be reached is retried at once on up to three others. Retries are counted, not timed: with
+/// `lb_try_duration` Caddy waits between tries and gives up when the configuration reloads,
+/// which is exactly what happens when a replica dies. A killed replica's address stops
+/// answering instead of refusing, so dials give up after a second.
 pub fn route_labels(
     domains: &[Domain],
     service_port: Option<u16>,
@@ -279,8 +282,9 @@ pub fn route_labels(
         let rp = format!("caddy_{i}.reverse_proxy");
         labels.insert(format!("caddy_{i}"), site);
         labels.insert(format!("{rp}.lb_policy"), policy.as_str().into());
-        labels.insert(format!("{rp}.lb_try_duration"), "5s".into());
-        labels.insert(format!("{rp}.lb_try_interval"), "250ms".into());
+        labels.insert(format!("{rp}.lb_retries"), "3".into());
+        labels.insert(format!("{rp}.transport"), "http".into());
+        labels.insert(format!("{rp}.transport.dial_timeout"), "1s".into());
         labels.insert(format!("{rp}.fail_duration"), "30s".into());
         labels.insert(format!("{rp}.header_up"), REAL_IP_HEADER.into());
         if let Some(path) = health_path {
@@ -547,7 +551,13 @@ pub async fn disconnect_from_proxy(docker: &Docker, id: &str) -> Result<()> {
         .await
     {
         Ok(()) => Ok(()),
-        Err(e) if is_not_found(&e) || matches!(status_code(&e), Some(403 | 409)) => Ok(()),
+        Err(e)
+            if is_not_found(&e)
+                || matches!(status_code(&e), Some(403 | 409))
+                || e.to_string().contains("is not connected") =>
+        {
+            Ok(())
+        }
         Err(e) => {
             Err(e).with_context(|| format!("cannot detach {} from the proxy network", short_id(id)))
         }
@@ -1335,7 +1345,9 @@ mod tests {
         assert_eq!(route["caddy_0.reverse_proxy.lb_policy"], "ip_hash");
         assert_eq!(route["caddy_1.reverse_proxy.health_uri"], "/healthz");
         assert_eq!(route["caddy_0.reverse_proxy.fail_duration"], "30s");
-        assert_eq!(route["caddy_0.reverse_proxy.lb_try_duration"], "5s");
+        assert_eq!(route["caddy_0.reverse_proxy.lb_retries"], "3");
+        assert!(!route.contains_key("caddy_0.reverse_proxy.lb_try_duration"));
+        assert_eq!(route["caddy_0.reverse_proxy.transport.dial_timeout"], "1s");
         let plain = route_labels(&domains, Some(80), LbPolicy::LeastConn, None);
         assert_eq!(plain["caddy_0.reverse_proxy.lb_policy"], "least_conn");
         assert!(!plain.contains_key("caddy_0.reverse_proxy.health_uri"));
