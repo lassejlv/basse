@@ -1774,7 +1774,7 @@ async fn github_pickers_page_search_and_fill_the_new_service_form() {
     assert_eq!(form.raw("gh_repo"), "fixture-org/ledger");
     assert_eq!(form.raw("gh_branch"), "develop");
     assert_eq!(form.get("name"), "ledger");
-    assert_eq!(form.fields[form.focus].key, "build");
+    assert_eq!(form.fields[form.focus].key, "gh_root");
     assert!(form.on("auto_deploy"));
     assert_eq!(
         form.fields
@@ -1901,6 +1901,7 @@ async fn detected_build_picks_the_method_and_fills_its_file() {
         source: "fixture-gh".into(),
         repo: "fixture-org/shop".into(),
         branch: "main".into(),
+        root: String::new(),
         result: Ok(common::BuildDetection {
             method: common::BuildMethod::Compose,
             file: Some("docker-compose.yml".into()),
@@ -2345,4 +2346,98 @@ fn one_server_hides_the_field_and_says_where_it_goes() {
         (buf.area.top()..buf.area.bottom()).all(|y| label_on(&buf, y, "local · ").is_none()),
         "no server field with a single server"
     );
+}
+
+#[tokio::test]
+async fn root_dir_picker_walks_folders_and_fills_the_form() {
+    let mut app = sources_fixture();
+    app.screen = Screen::Overview;
+    app.form_new_service();
+    if let Some(Overlay::Form(form)) = &mut app.overlay {
+        for (key, value) in [("gh_repo", "fixture-org/mono"), ("gh_branch", "main")] {
+            form.field_mut(key).expect("pick field").value = value.into();
+        }
+    }
+    let buf = draw(&app, 160, 40);
+    let Some(Overlay::Form(form)) = &app.overlay else {
+        panic!("new service form");
+    };
+    let root = form.fields.iter().position(|f| f.key == "gh_root").unwrap();
+    assert!(
+        !form
+            .fields
+            .iter()
+            .any(|f| f.key == "watch_paths" && f.visible),
+        "watch paths only show with a root"
+    );
+    let field = assert_hit(
+        &app,
+        label(&buf, "folder in the repo"),
+        Hit::FormField(root),
+    );
+    click(&mut app, field);
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Picker(p)) if p.title == "Root directory"),
+        "a click on the root dir field opens the folder picker"
+    );
+    let dirs = |app: &mut App, path: &str, names: &[&str]| {
+        app.apply(crate::app::Msg::Dirs {
+            path: path.into(),
+            result: Ok(names.iter().map(|n| n.to_string()).collect()),
+        })
+    };
+    dirs(&mut app, "", &["apps", "docs"]);
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Root directory", |hit| {
+        matches!(
+            hit,
+            Hit::PickRow(0..=2) | Hit::List(List::Picker) | Hit::Key(..)
+        )
+    });
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("use /", Hit::PickRow(0)),
+            ("apps/", Hit::PickRow(1)),
+            ("docs/", Hit::PickRow(2)),
+        ],
+    );
+    label(&buf, "fixture-org/mono@main · /");
+    let apps = label(&buf, "apps/");
+    click(&mut app, Position::new(apps.x, apps.y));
+    let buf = draw(&app, 160, 40);
+    let open = assert_hit(&app, label(&buf, "⏎ open"), key(KeyCode::Enter));
+    click(&mut app, open);
+    dirs(&mut app, "", &["stale"]);
+    dirs(&mut app, "apps", &["api", "web"]);
+    let buf = draw(&app, 160, 40);
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("use apps/", Hit::PickRow(0)),
+            ("../", Hit::PickRow(1)),
+            ("api/", Hit::PickRow(2)),
+            ("web/", Hit::PickRow(3)),
+        ],
+    );
+    label(&buf, "up to the repository root");
+    let api = label(&buf, "api/");
+    click(&mut app, Position::new(api.x, api.y));
+    click(&mut app, Position::new(api.x, api.y));
+    dirs(&mut app, "apps/api", &[]);
+    let buf = draw(&app, 160, 40);
+    let accept = assert_hit(&app, label(&buf, "⏎ use apps/api/"), key(KeyCode::Enter));
+    click(&mut app, accept);
+
+    let Some(Overlay::Form(form)) = &app.overlay else {
+        panic!("the form comes back with the folder");
+    };
+    assert_eq!(form.raw("gh_root"), "apps/api");
+    let watch = form.fields.iter().find(|f| f.key == "watch_paths").unwrap();
+    assert!(watch.visible && watch.on);
+    assert_eq!(watch.hint, "pushes to apps/api");
+    let buf = draw(&app, 160, 40);
+    label(&buf, "apps/api");
 }

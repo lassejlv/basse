@@ -35,6 +35,8 @@ pub enum PickKind {
     Branch,
     /// The server a new service or database runs on.
     Server,
+    /// A folder of a repository, for a service's root directory; ⏎ opens a folder.
+    Dir,
 }
 
 /// State of the repository and branch pickers: the search line and the page.
@@ -130,6 +132,44 @@ pub fn repo_item(r: &GitRepo) -> PickItem {
     item
 }
 
+/// The root directory picker's rows at `path` (empty is the repository root): use this
+/// folder, go up, then each folder under it.
+pub fn dir_items(path: &str, dirs: &[String]) -> Vec<PickItem> {
+    let shown = |p: &str| {
+        if p.is_empty() {
+            "/".to_string()
+        } else {
+            format!("{p}/")
+        }
+    };
+    let mut use_it = PickItem::new(
+        Some(path.to_string()),
+        format!("use {}", shown(path)),
+        "build this folder",
+    );
+    use_it.generate = true;
+    use_it.glyph = Some(("✓", theme::fg(theme::OK)));
+    let mut items = vec![use_it];
+    if !path.is_empty() {
+        let parent = path.rsplit_once('/').map_or("", |(p, _)| p);
+        let up = if parent.is_empty() {
+            "up to the repository root".to_string()
+        } else {
+            format!("up to {parent}/")
+        };
+        items.push(PickItem::new(Some(parent.to_string()), "../", up));
+    }
+    items.extend(dirs.iter().map(|d| {
+        let full = if path.is_empty() {
+            d.clone()
+        } else {
+            format!("{path}/{d}")
+        };
+        PickItem::new(Some(full), format!("{d}/"), "")
+    }));
+    items
+}
+
 /// "ssh-ed25519 AAAAC3Nz…q9Lk" and the key's comment.
 pub fn short_key(key: &str) -> (String, String) {
     let mut parts = key.split_whitespace();
@@ -208,7 +248,11 @@ impl Picker {
         let selected = self.items.get(self.row).map(|i| (i.id.clone(), i.generate));
         let mut items = Vec::new();
         match self.kind {
-            PickKind::GitSource | PickKind::Repo | PickKind::Branch | PickKind::Server => return,
+            PickKind::GitSource
+            | PickKind::Repo
+            | PickKind::Branch
+            | PickKind::Server
+            | PickKind::Dir => return,
             PickKind::SshKey => {
                 let (key, comment) = daemon_key.map(short_key).unwrap_or_default();
                 let mut own = PickItem::new(
@@ -492,6 +536,10 @@ impl Picker {
             Some(i) if i.generate && self.kind == PickKind::GitSource => {
                 " ⏎ open sources ".to_string()
             }
+            Some(i) if self.kind == PickKind::Dir && i.generate => {
+                format!(" ⏎ {} ", truncate(&i.name, 30))
+            }
+            Some(_) if self.kind == PickKind::Dir => " ⏎ open ".to_string(),
             Some(i) if i.generate => " ⏎ generate ".to_string(),
             Some(i) if matches!(self.target, PickFor::BackupNow { .. }) => {
                 format!(" ⏎ back up to {} ", truncate(&i.name, 30))
