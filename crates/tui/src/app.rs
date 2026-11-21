@@ -35,6 +35,8 @@ pub enum Msg {
     Stats(Id, ServiceStats),
     Deployments(Id, Vec<Deployment>),
     Deployment(Box<Deployment>),
+    OpenLinkedDeployment(Id, Result<Box<Deployment>, String>),
+    DeploymentCancelled(Result<Box<Deployment>, String>),
     ServiceLog(Id, LogLine),
     ServiceLogEnd(Id, Option<String>),
     DeployLog(Id, LogLine),
@@ -354,6 +356,22 @@ impl ServiceView {
     pub fn info(&self) -> Option<&DatabaseInfo> {
         self.detail.as_ref()?.database.as_ref()
     }
+
+    pub fn active_deployment(&self) -> Option<&Deployment> {
+        self.deployments
+            .iter()
+            .find(|d| {
+                matches!(
+                    d.status,
+                    DeploymentStatus::Building | DeploymentStatus::Starting
+                )
+            })
+            .or_else(|| {
+                self.deployments
+                    .iter()
+                    .find(|d| d.status == DeploymentStatus::Queued)
+            })
+    }
 }
 
 pub struct DeployView {
@@ -403,6 +421,7 @@ impl ConfirmAction {
             ConfirmAction::PublicPort(..) => Some("applying"),
             ConfirmAction::RotatePassword(_) => Some("rotating"),
             ConfirmAction::RestoreBackup(..) => Some("restoring"),
+            ConfirmAction::CancelDeploy(_) => Some("cancelling"),
             ConfirmAction::RotateToken => Some("rotating"),
             ConfirmAction::Prune => Some("pruning"),
             ConfirmAction::Update { .. } => Some("downloading"),
@@ -1170,6 +1189,36 @@ impl App {
                     self.refresh();
                 }
             }
+            Msg::OpenLinkedDeployment(service_id, result) => {
+                if self.screen == Screen::Service
+                    && self.overlay.is_none()
+                    && self
+                        .service
+                        .as_ref()
+                        .is_some_and(|view| view.id == service_id)
+                {
+                    match result {
+                        Ok(deployment) => self.open_deploy(*deployment),
+                        Err(e) => self.error(e),
+                    }
+                }
+            }
+            Msg::DeploymentCancelled(result) => {
+                let result = result.map(|d| {
+                    let number = d.number;
+                    if let Some(service) = self.service.as_mut().filter(|v| v.id == d.service_id)
+                        && let Some(row) = service.deployments.iter_mut().find(|row| row.id == d.id)
+                    {
+                        *row = (*d).clone();
+                    }
+                    if let Some(view) = self.deploy.as_mut().filter(|v| v.deployment.id == d.id) {
+                        view.deployment = *d;
+                        view.announced = true;
+                    }
+                    format!("deployment #{number} cancelled")
+                });
+                self.apply(Msg::ConfirmDone(result));
+            }
             Msg::ServiceLog(id, line) => {
                 if let Some(view) = self.service.as_mut().filter(|v| v.id == id) {
                     view.logs.push(line);
@@ -1652,6 +1701,62 @@ impl App {
             .flat_map(|e| &e.services)
     }
 
+    pub fn service_path(&self, id: &str) -> Option<(&Project, &Environment, &Service)> {
+        if let Some(detail) = self
+            .service
+            .as_ref()
+            .filter(|view| view.id == id)
+            .and_then(|view| view.detail.as_ref())
+            .or_else(|| self.details.get(id))
+        {
+            return Some((&detail.project, &detail.environment, &detail.service));
+        }
+        for p in &self.tree.as_ref()?.projects {
+            for env in &p.environments {
+                if let Some(service) = env.services.iter().find(|s| s.id == id) {
+                    return Some((&p.project, &env.environment, service));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn open_scope(&mut self, project: &str, environment: Option<&str>) {
+        let Some((pi, p)) = self.tree.as_ref().and_then(|tree| {
+            tree.projects
+                .iter()
+                .enumerate()
+                .find(|(_, p)| p.project.id == project)
+        }) else {
+            return self.error("project is not in the overview");
+        };
+        let item = match environment {
+            Some(id) => {
+                let Some(ei) = p.environments.iter().position(|e| e.environment.id == id) else {
+                    return self.error("environment is not in the overview");
+                };
+                SideItem::Environment(pi, ei)
+            }
+            None => SideItem::Project(pi),
+        };
+        self.overview.collapsed.remove(project);
+        self.overview.side = self
+            .side_items()
+            .iter()
+            .position(|x| *x == item)
+            .unwrap_or(0);
+        self.overview.row = 0;
+        self.overview.pane = if environment.is_some() {
+            Pane::Services
+        } else {
+            Pane::Sidebar
+        };
+        self.overview.filter.clear();
+        self.overview.filtering = false;
+        self.leave_deploy();
+        self.close_service();
+    }
+
     fn clamp_overview(&mut self) {
         let n = self.side_items().len();
         self.overview.side = self.overview.side.min(n.saturating_sub(1));
@@ -1738,6 +1843,29 @@ impl App {
         if tab == Tab::Logs && view.log_task.is_none() {
             self.start_service_logs();
         }
+    }
+
+    pub fn open_service_overview(&mut self) {
+        self.leave_deploy();
+        self.screen = Screen::Service;
+        self.set_tab(Tab::Overview);
+    }
+
+    pub fn open_service_deployment(&mut self, id: &str) {
+        let Some(view) = &self.service else { return };
+        if let Some(deployment) = view.deployments.iter().find(|d| d.id == id) {
+            return self.open_deploy(deployment.clone());
+        }
+        let (id, service_id) = (id.to_string(), view.id.clone());
+        self.spawn(|c| async move {
+            Msg::OpenLinkedDeployment(
+                service_id,
+                c.deployment(&id)
+                    .await
+                    .map(Box::new)
+                    .map_err(|e| format!("{e:#}")),
+            )
+        });
     }
 
     pub fn close_service(&mut self) {
@@ -1835,11 +1963,7 @@ impl App {
 
     pub fn close_deploy(&mut self) {
         let back = self.deploy.as_ref().map_or(Screen::Overview, |v| v.back);
-        if let Some(view) = self.deploy.take()
-            && let Some(h) = view.task
-        {
-            h.abort();
-        }
+        self.leave_deploy();
         self.screen = match back {
             Screen::Service if self.service.is_some() => Screen::Service,
             Screen::Servers => Screen::Servers,
@@ -1849,6 +1973,14 @@ impl App {
             }
         };
         self.refresh();
+    }
+
+    fn leave_deploy(&mut self) {
+        if let Some(view) = self.deploy.take()
+            && let Some(task) = view.task
+        {
+            task.abort();
+        }
     }
 
     fn stop_streams(&mut self) {
@@ -1899,7 +2031,7 @@ impl App {
             | ConfirmAction::Prune
             | ConfirmAction::Update { .. } => "",
             ConfirmAction::Rollback(_) => "",
-            ConfirmAction::CancelDeploy(_) => "deployment cancelled",
+            ConfirmAction::CancelDeploy(_) => "",
             ConfirmAction::Stop(_) => "service stopped",
             ConfirmAction::DeleteBackup(_) => "backup deleted",
             ConfirmAction::PublicPort(..)
@@ -1982,9 +2114,13 @@ impl App {
                     Err(e) => Msg::Error(format!("{e:#}")),
                 }
             }),
-            ConfirmAction::CancelDeploy(id) => {
-                self.act(ok, |c| async move { c.cancel_deployment(&id).await })
-            }
+            ConfirmAction::CancelDeploy(id) => self.spawn(move |c| async move {
+                Msg::DeploymentCancelled(match c.cancel_deployment(&id).await {
+                    Ok(d) if d.status == DeploymentStatus::Cancelled => Ok(Box::new(d)),
+                    Ok(d) => Err(format!("deployment #{} is {}", d.number, d.status.as_str())),
+                    Err(e) => Err(format!("{e:#}")),
+                })
+            }),
             ConfirmAction::Stop(id) => self.act(ok, |c| async move { c.stop(&id).await }),
             ConfirmAction::DeleteBackup(id) => {
                 self.act(ok, |c| async move { c.delete_backup(&id).await })

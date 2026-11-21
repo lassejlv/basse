@@ -436,6 +436,16 @@ pub struct Deployment {
     pub finished_at: Option<Timestamp>,
 }
 
+impl Deployment {
+    pub fn can_cancel(&self) -> bool {
+        !self.status.is_finished()
+            && !self.steps.iter().any(|step| {
+                step.kind == StepKind::Switch
+                    && matches!(step.status, StepStatus::Running | StepStatus::Done)
+            })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityLevel {

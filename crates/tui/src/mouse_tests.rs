@@ -19,7 +19,7 @@ use crate::app::{
     ServiceView, Tab,
 };
 use crate::form::{Field, Form, FormKind};
-use crate::mouse::{self, Hit, List};
+use crate::mouse::{self, HeaderLink, Hit, List};
 use crate::{theme, view};
 
 fn server(name: &str) -> Server {
@@ -255,6 +255,145 @@ fn key(code: KeyCode) -> Hit {
 
 fn char_key(c: char) -> Hit {
     key(KeyCode::Char(c))
+}
+
+#[tokio::test]
+async fn header_breadcrumbs_open_the_project_environment_service_and_live_run() {
+    let mut app = fixture();
+    let mut live = deployment();
+    live.id = "fixture-live".into();
+    live.status = DeploymentStatus::Live;
+    live.number = 8;
+    let mut stage = app.tree.as_ref().unwrap().projects[0].environments[0].clone();
+    stage.environment.id = "fixture-stage".into();
+    stage.environment.name = "staging".into();
+    app.tree.as_mut().unwrap().projects[0]
+        .environments
+        .push(stage.clone());
+    let detail = app.details.get_mut("fixture-web").unwrap();
+    detail.environment = stage.environment;
+    detail.service.live_deployment_id = Some(live.id.clone());
+
+    app.open_service("fixture-web", Tab::Overview);
+    app.service.as_mut().unwrap().deployments = vec![live.clone(), deployment()];
+    let buf = draw(&app, 120, 24);
+    let header_y = label(&buf, "fixture-project / staging / fixture-web").y;
+    for (text, link) in [
+        ("fixture-project", HeaderLink::Project),
+        ("staging", HeaderLink::Environment),
+        ("fixture-web", HeaderLink::Service),
+        ("live #8", HeaderLink::Deployment),
+        ("building #27", HeaderLink::ActiveDeployment),
+    ] {
+        let rect = label_on(&buf, header_y, text)
+            .unwrap_or_else(|| panic!("missing header segment {text}"));
+        assert_hit(&app, rect, Hit::Header(link));
+    }
+    let live_link = label_on(&buf, header_y, "live #8").unwrap().as_position();
+    click(&mut app, live_link);
+    assert_eq!(app.screen, Screen::Deploy);
+    assert_eq!(app.deploy.as_ref().unwrap().deployment.id, live.id);
+
+    let buf = draw(&app, 120, 24);
+    for (text, link) in [
+        ("fixture-project", HeaderLink::Project),
+        ("staging", HeaderLink::Environment),
+        ("live #8", HeaderLink::Deployment),
+    ] {
+        assert_hit(
+            &app,
+            label_on(&buf, header_y, text).unwrap(),
+            Hit::Header(link),
+        );
+    }
+    let service_link = assert_hit(
+        &app,
+        label_on(&buf, header_y, "fixture-web").unwrap(),
+        Hit::Header(HeaderLink::Service),
+    );
+    click(&mut app, service_link);
+    assert_eq!(app.screen, Screen::Service);
+    assert_eq!(app.service.as_ref().unwrap().tab, Tab::Overview);
+    assert!(app.deploy.is_none());
+
+    let buf = draw(&app, 120, 24);
+    let env_link = label_on(&buf, header_y, "staging").unwrap().as_position();
+    click(&mut app, env_link);
+    assert_eq!(app.screen, Screen::Overview);
+    assert_eq!(app.current_env().unwrap().1.environment.id, "fixture-stage");
+    assert_eq!(app.overview.pane, crate::app::Pane::Services);
+    let overview = draw(&app, 120, 24);
+    let crumb_y = label(&overview, "fixture-project / staging").y;
+    assert_hit(
+        &app,
+        label_on(&overview, crumb_y, "fixture-project").unwrap(),
+        Hit::Header(HeaderLink::Project),
+    );
+    assert_hit(
+        &app,
+        label_on(&overview, crumb_y, "staging").unwrap(),
+        Hit::Header(HeaderLink::Environment),
+    );
+
+    app.open_service("fixture-web", Tab::Overview);
+    let buf = draw(&app, 120, 24);
+    let project_link = label_on(&buf, header_y, "fixture-project")
+        .unwrap()
+        .as_position();
+    click(&mut app, project_link);
+    assert_eq!(app.screen, Screen::Overview);
+    assert_eq!(app.current_project().unwrap().project.id, "fixture-project");
+    assert_eq!(app.overview.pane, crate::app::Pane::Sidebar);
+}
+
+#[tokio::test]
+async fn cancel_controls_target_the_running_deployment_and_hide_after_cutover() {
+    let mut app = fixture();
+    let mut live = deployment();
+    live.id = "fixture-live".into();
+    live.status = DeploymentStatus::Live;
+    let running = deployment();
+    app.open_service("fixture-web", Tab::Deployments);
+    let mut queued = running.clone();
+    queued.id = "newer-queued".into();
+    queued.number += 1;
+    queued.status = DeploymentStatus::Queued;
+    let service = app.service.as_mut().unwrap();
+    service.deployments = vec![queued, live, running.clone()];
+    service.row = 1;
+    let buf = draw(&app, 120, 24);
+    let cancel = assert_hit(
+        &app,
+        label(&buf, "ctrl+x cancel deploy"),
+        Hit::Key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+    );
+    click(&mut app, cancel);
+    assert!(matches!(
+        &app.overlay,
+        Some(Overlay::Confirm(c)) if matches!(&c.action, ConfirmAction::CancelDeploy(id) if *id == running.id)
+    ));
+    let buf = draw(&app, 120, 24);
+    let keep = assert_hit(&app, label(&buf, "esc keep"), key(KeyCode::Esc));
+    click(&mut app, keep);
+    assert!(app.overlay.is_none());
+
+    app.open_deploy(running);
+    let buf = draw(&app, 120, 24);
+    let cancel = assert_hit(&app, label(&buf, "c cancel deploy"), char_key('c'));
+    click(&mut app, cancel);
+    let buf = draw(&app, 120, 24);
+    assert_hit(&app, label(&buf, "y cancel deploy"), char_key('y'));
+    let keep = assert_hit(&app, label(&buf, "esc keep"), key(KeyCode::Esc));
+    click(&mut app, keep);
+    app.deploy.as_mut().unwrap().deployment.steps.push(Step {
+        kind: StepKind::Switch,
+        status: StepStatus::Running,
+        detail: None,
+        started_at: None,
+        finished_at: None,
+    });
+    let buf = draw(&app, 120, 24);
+    assert!(label_on(&buf, buf.area.bottom() - 1, "c cancel deploy").is_none());
 }
 
 const OVERVIEW_HINTS: [(&str, KeyCode); 7] = [
