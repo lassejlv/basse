@@ -69,6 +69,8 @@ async fn settings(state: &AppState) -> ApiResult<InstanceSettings> {
             .map(|k| k.trim().to_string()),
         reclaimable,
         supervised: update::supervised(),
+        domain_verified: config.domain.is_some() && config.domain_verified_at.is_some(),
+        domain: config.domain.clone(),
     })
 }
 

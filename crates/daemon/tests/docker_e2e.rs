@@ -332,6 +332,8 @@ async fn docker_end_to_end() {
                 branch: "main".into(),
                 dockerfile: "Dockerfile".into(),
                 context: ".".into(),
+                source_id: None,
+                auto_deploy: true,
             },
             port: Some(8080),
             command: None,

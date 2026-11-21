@@ -450,10 +450,12 @@ impl Job {
                     branch,
                     dockerfile,
                     context,
+                    source_id,
+                    ..
                 },
             ) => {
                 self.set_status(DeploymentStatus::Building).await;
-                let dir = self.clone_repo(repo, branch).await?;
+                let dir = self.clone_repo(repo, branch, source_id.as_deref()).await?;
                 let tag = docker::build_tag(&svc.id, self.d.number);
                 self.build(&docker, &svc, &dir, context, dockerfile, &tag)
                     .await?;
@@ -582,26 +584,43 @@ impl Job {
 
     // Steps
 
-    async fn clone_repo(&mut self, repo: &str, branch: &str) -> Result<PathBuf> {
+    async fn clone_repo(
+        &mut self,
+        repo: &str,
+        branch: &str,
+        source_id: Option<&str>,
+    ) -> Result<PathBuf> {
         self.begin(StepKind::Clone, Some(format!("{repo}@{branch}")))
             .await;
         let dir = self.state.dirs.build_dir(&self.d.id);
         if dir.exists() {
             std::fs::remove_dir_all(&dir)?;
         }
+        let (url, auth) = match source_id {
+            Some(id) => {
+                let (url, token) = crate::sources::clone_access(&self.state, id, repo).await?;
+                self.log
+                    .system("Cloning with a short-lived token from the git source");
+                (url, crate::github::git_auth_env(&token))
+            }
+            None => (repo.to_string(), Vec::new()),
+        };
         let dir_arg = dir.to_string_lossy().into_owned();
         let out = self
-            .git(&[
-                "clone",
-                "--depth",
-                "1",
-                "--single-branch",
-                "--branch",
-                branch,
-                "--",
-                repo,
-                &dir_arg,
-            ])
+            .git_with(
+                &[
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--single-branch",
+                    "--branch",
+                    branch,
+                    "--",
+                    &url,
+                    &dir_arg,
+                ],
+                auth,
+            )
             .await?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -629,9 +648,19 @@ impl Job {
     }
 
     async fn git(&self, args: &[&str]) -> Result<std::process::Output> {
+        self.git_with(args, Vec::new()).await
+    }
+
+    /// Runs git with extra environment, such as the token header of [`github::git_auth_env`].
+    async fn git_with(
+        &self,
+        args: &[&str],
+        env: Vec<(String, String)>,
+    ) -> Result<std::process::Output> {
         let ssh = crate::ssh::paths(&self.state.dirs.ssh_dir()).git_ssh_command();
         let child = tokio::process::Command::new("git")
             .args(args)
+            .envs(env)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_SSH_COMMAND", ssh)
             .stdin(std::process::Stdio::null())
@@ -802,6 +831,7 @@ impl Job {
             networks,
             published,
             publish_ip: None,
+            extra_hosts: Vec::new(),
         };
         docker::remove_container(docker, &spec.name).await?;
         if let Some(previous) = previous {

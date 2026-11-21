@@ -501,6 +501,8 @@ fn server_and_settings_rows_exclude_table_headers() {
         ssh_public_key: None,
         reclaimable: None,
         supervised: false,
+        domain: None,
+        domain_verified: false,
     });
     for name in ["fixture-primary", "fixture-stage"] {
         app.settings.contexts.contexts.insert(
@@ -1016,6 +1018,8 @@ fn storage_rows_detail_and_settings_links_have_targets() {
         ssh_public_key: None,
         reclaimable: None,
         supervised: false,
+        domain: None,
+        domain_verified: false,
     });
     let buf = draw(&app, 160, 40);
     assert_hit(&app, label(&buf, "s open secrets"), char_key('s'));
@@ -1140,6 +1144,8 @@ fn instance_backups_panel_rows_schedule_and_focus_follow_clicks() {
         ssh_public_key: None,
         reclaimable: None,
         supervised: false,
+        domain: None,
+        domain_verified: false,
     });
     app.settings.contexts.contexts.insert(
         "fixture-primary".into(),
@@ -1237,4 +1243,402 @@ fn instance_backup_dialog_masks_the_passphrase_and_registers_its_controls() {
         mouse::hit_at(&app.mouse, store.x, store.y),
         Some(Hit::FormField(0))
     ));
+}
+
+fn git_source(name: &str, status: common::GitSourceStatus) -> common::GitSource {
+    common::GitSource {
+        id: name.into(),
+        name: name.into(),
+        kind: common::GitSourceKind::GithubApp,
+        html_url: "https://github.com".into(),
+        api_url: "https://api.github.com".into(),
+        owner: Some("fixture-org".into()),
+        owner_kind: Some(common::GitOwnerKind::Organization),
+        app_id: Some(4242),
+        app_slug: Some(format!("{name}-app")),
+        installation_id: (status == common::GitSourceStatus::Ready).then_some(77),
+        status,
+        status_detail: None,
+        install_url: Some(format!(
+            "https://github.com/apps/{name}-app/installations/new"
+        )),
+        webhook_url: Some(format!("https://deploy.example.test/github/{name}/webhook")),
+        secret_id: None,
+        last_checked_at: None,
+        created_at: Timestamp::default(),
+        used_by: Vec::new(),
+    }
+}
+
+fn sources_fixture() -> App {
+    let mut app = fixture();
+    app.screen = Screen::Sources;
+    app.sources.loaded = true;
+    app.sources.list = vec![
+        git_source("fixture-gh", common::GitSourceStatus::Ready),
+        git_source("fixture-wait", common::GitSourceStatus::NeedsInstall),
+    ];
+    app
+}
+
+#[test]
+fn sources_rows_detail_and_key_bar_have_targets() {
+    let mut app = sources_fixture();
+    let buf = draw(&app, 160, 40);
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("installation 77", Hit::Item(0)),
+            ("not installed", Hit::Item(1)),
+        ],
+    );
+    assert_hit(&app, label(&buf, "USED BY"), Hit::List(List::Sources));
+    assert_hit(&app, label(&buf, "c check"), char_key('c'));
+    let y = buf.area.bottom() - 1;
+    for (text, hit) in [
+        ("n new GitHub App", char_key('n')),
+        ("a connect app", char_key('a')),
+        ("t add token", char_key('t')),
+        ("x delete", char_key('x')),
+    ] {
+        let rect = label_on(&buf, y, text).unwrap_or_else(|| panic!("key bar {text:?}"));
+        assert_hit(&app, rect, hit);
+    }
+    assert!(label_on(&buf, y, "⏎ finish setup").is_none());
+
+    let row = label(&buf, "not installed");
+    click(&mut app, Position::new(row.x, row.y));
+    assert_eq!(app.sources.row, 1);
+    let buf = draw(&app, 160, 40);
+    let finish = label_on(&buf, y, "⏎ finish setup").expect("finish setup hint");
+    click(&mut app, Position::new(finish.x, finish.y));
+    assert!(matches!(app.overlay, Some(Overlay::GithubSetup(_))));
+
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "New GitHub App", |hit| {
+        matches!(hit, Hit::Key(..))
+    });
+    label(
+        &buf,
+        "https://github.com/apps/fixture-wait-app/installations/new",
+    );
+    assert_hit(&app, label(&buf, "c copy url"), char_key('c'));
+    assert_hit(&app, label(&buf, "o open browser"), char_key('o'));
+    label(&buf, "waiting for GitHub");
+    let close = assert_hit(&app, label(&buf, "esc close"), key(KeyCode::Esc));
+    click(&mut app, close);
+    assert!(app.overlay.is_none());
+}
+
+#[test]
+fn empty_sources_offer_the_three_ways_in_and_an_unverified_domain_blocks_the_app() {
+    let mut app = sources_fixture();
+    app.sources.list.clear();
+    app.settings.settings = Some(InstanceSettings {
+        version: "1.0.0".into(),
+        hostname: "fixture-host".into(),
+        public_ip: None,
+        public_ip_override: None,
+        listen: "127.0.0.1:7700".into(),
+        data_dir: "/fixture".into(),
+        data_dir_size: 0,
+        manage_proxy: true,
+        proxy: ProxyStatus::Running,
+        proxy_image: "example:1".into(),
+        docker_version: None,
+        ssh_public_key: None,
+        reclaimable: None,
+        supervised: false,
+        domain: Some("deploy.example.test".into()),
+        domain_verified: false,
+    });
+    let buf = draw(&app, 160, 40);
+    label(&buf, "No git sources yet.");
+    for (text, c) in [
+        ("n   create a GitHub App", 'n'),
+        ("a   connect an existing GitHub App", 'a'),
+        ("t   add a personal access token", 't'),
+    ] {
+        assert_hit(&app, label(&buf, text), char_key(c));
+    }
+    let create = label(&buf, "n   create a GitHub App");
+    click(&mut app, Position::new(create.x, create.y));
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::DomainNeeded("New GitHub App"))
+    ));
+
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "New GitHub App", |hit| {
+        matches!(hit, Hit::Key(..))
+    });
+    label(&buf, "deploy.example.test");
+    assert_hit(
+        &app,
+        label(&buf, "⏎ open Settings › Domain"),
+        key(KeyCode::Enter),
+    );
+    let token = assert_hit(&app, label(&buf, "t add a token instead"), char_key('t'));
+    click(&mut app, token);
+    assert!(matches!(&app.overlay, Some(Overlay::Form(f)) if f.title == "Add token"));
+}
+
+fn domain_fixture(verified: bool) -> App {
+    use common::{CheckStatus, DnsRecord, DomainCheck, DomainCheckKind, InstanceDomain};
+    let mut app = fixture();
+    app.screen = Screen::Domain;
+    let record = |kind: &str, value: &str| DnsRecord {
+        kind: kind.into(),
+        name: "deploy.example.test".into(),
+        value: value.into(),
+    };
+    let checks = DomainCheckKind::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(i, kind)| DomainCheck {
+            kind,
+            status: match (verified, i) {
+                (true, _) => CheckStatus::Pass,
+                (false, 0) => CheckStatus::Fail,
+                (false, _) => CheckStatus::Skipped,
+            },
+            detail: if i == 0 && !verified {
+                "resolves to 198.51.100.9".into()
+            } else {
+                "fixture detail".into()
+            },
+            hint: (i == 0 && !verified).then(|| "Point the A record at 203.0.113.10.".into()),
+        })
+        .collect();
+    app.domain.data = Some(InstanceDomain {
+        domain: Some("deploy.example.test".into()),
+        url: verified.then(|| "https://deploy.example.test".into()),
+        verified,
+        verified_at: None,
+        public_ipv4: Some("203.0.113.10".into()),
+        public_ipv6: Some("2001:db8::10".into()),
+        records: vec![record("A", "203.0.113.10"), record("AAAA", "2001:db8::10")],
+        checks,
+        checked_at: None,
+    });
+    app
+}
+
+#[test]
+fn domain_guide_records_copy_and_keys_switch_to_the_input() {
+    let mut app = domain_fixture(false);
+    let buf = draw(&app, 160, 40);
+    let header = label(&buf, "TYPE").y;
+    let a = Rect::new(label(&buf, "TYPE").x, header + 1, 4, 1);
+    assert_hit(&app, a, Hit::Record(0));
+    let aaaa = assert_hit(&app, label(&buf, "AAAA"), Hit::Record(1));
+    label(&buf, "Point the A record at 203.0.113.10.");
+    label(&buf, "resolves to 198.51.100.9");
+    click(&mut app, aaaa);
+    assert!(
+        app.toast
+            .as_ref()
+            .is_some_and(|t| t.text == "copied the AAAA record value")
+    );
+    let y = buf.area.bottom() - 1;
+    assert!(label_on(&buf, y, "c copy url").is_none());
+    for (text, c) in [
+        ("r check again", 'r'),
+        ("e edit domain", 'e'),
+        ("x remove domain", 'x'),
+    ] {
+        assert_hit(&app, label_on(&buf, y, text).expect(text), char_key(c));
+    }
+    let edit = label_on(&buf, y, "e edit domain").expect("edit hint");
+    click(&mut app, Position::new(edit.x, edit.y));
+    assert_eq!(app.domain.input.as_deref(), Some("deploy.example.test"));
+
+    app.toast = None;
+    let buf = draw(&app, 160, 40);
+    label(&buf, "› domain");
+    let save = assert_hit(
+        &app,
+        label_on(&buf, y, "⏎ save & check").expect("save hint"),
+        key(KeyCode::Enter),
+    );
+    let back = assert_hit(
+        &app,
+        label_on(&buf, y, "esc back").expect("back hint"),
+        key(KeyCode::Esc),
+    );
+    assert!(save.x < back.x);
+    click(&mut app, back);
+    assert_eq!(
+        app.domain.input, None,
+        "esc leaves the input, not the guide"
+    );
+    assert_eq!(app.screen, Screen::Domain);
+
+    let app = domain_fixture(true);
+    let buf = draw(&app, 160, 40);
+    label(&buf, "https://deploy.example.test");
+    assert_hit(&app, label(&buf, "c copy"), char_key('c'));
+    assert_hit(
+        &app,
+        label_on(&buf, y, "c copy url").expect("copy url hint"),
+        char_key('c'),
+    );
+}
+
+#[tokio::test]
+async fn settings_link_to_the_domain_guide_and_sources() {
+    let mut app = sources_fixture();
+    app.screen = Screen::Settings;
+    app.settings.settings = Some(InstanceSettings {
+        version: "1.0.0".into(),
+        hostname: "fixture-host".into(),
+        public_ip: None,
+        public_ip_override: None,
+        listen: "127.0.0.1:7700".into(),
+        data_dir: "/fixture".into(),
+        data_dir_size: 0,
+        manage_proxy: true,
+        proxy: ProxyStatus::Running,
+        proxy_image: "example:1".into(),
+        docker_version: None,
+        ssh_public_key: None,
+        reclaimable: None,
+        supervised: false,
+        domain: Some("deploy.example.test".into()),
+        domain_verified: true,
+    });
+    let buf = draw(&app, 160, 40);
+    assert_hit(&app, label(&buf, "deploy.example.test"), char_key('d'));
+    assert_hit(&app, label(&buf, "d guide"), char_key('d'));
+    label(&buf, "1 ready · 1 need attention");
+    let sources = assert_hit(&app, label(&buf, "g open sources"), char_key('g'));
+    click(&mut app, sources);
+    assert_eq!(app.screen, Screen::Sources);
+}
+
+fn repo(name: &str) -> common::GitRepo {
+    common::GitRepo {
+        full_name: format!("fixture-org/{name}"),
+        private: name != "docs",
+        default_branch: "main".into(),
+        description: None,
+        pushed_at: None,
+    }
+}
+
+#[tokio::test]
+async fn github_pickers_page_search_and_fill_the_new_service_form() {
+    let mut app = sources_fixture();
+    app.screen = Screen::Overview;
+    app.form_new_service();
+    assert!(matches!(
+        &app.overlay,
+        Some(Overlay::Form(f)) if f.fields[f.focus].key == "gh_repo" && f.raw("git_source") == "fixture-gh"
+    ));
+    crate::keys::handle(&mut app, crossterm::event::KeyEvent::from(KeyCode::Enter));
+    let names = ["api", "web", "ledger", "docs", "worker"];
+    app.apply(crate::app::Msg::Repos {
+        source: "fixture-gh".into(),
+        query: String::new(),
+        page: 1,
+        result: Ok(common::RepoPage {
+            repos: names.iter().map(|n| repo(n)).collect(),
+            page: 1,
+            per_page: 10,
+            total: 23,
+        }),
+    });
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Repository", |hit| {
+        matches!(
+            hit,
+            Hit::PickRow(0..=4) | Hit::List(List::Picker) | Hit::Key(..)
+        )
+    });
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("fixture-org/api", Hit::PickRow(0)),
+            ("fixture-org/ledger", Hit::PickRow(2)),
+        ],
+    );
+    label(&buf, "page 1 of 3 · 23 repositories · newest push first");
+    let page = label(&buf, "←→ page");
+    assert_hit(&app, Rect { width: 1, ..page }, key(KeyCode::Left));
+    let next = assert_hit(
+        &app,
+        Rect {
+            x: page.x + 1,
+            width: page.width - 1,
+            ..page
+        },
+        key(KeyCode::Right),
+    );
+    assert_hit(&app, label(&buf, "esc back"), key(KeyCode::Esc));
+    assert_hit(
+        &app,
+        label(&buf, "⏎ use fixture-org/api"),
+        key(KeyCode::Enter),
+    );
+    click(&mut app, next);
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Picker(p)) if p.git.as_ref().is_some_and(|g| g.page == 2 && g.loading))
+    );
+
+    crate::keys::handle(
+        &mut app,
+        crossterm::event::KeyEvent::from(KeyCode::Char('l')),
+    );
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Picker(p)) if p.git.as_ref().is_some_and(|g| g.search == "l" && g.page == 1 && g.typed_at.is_some()))
+    );
+
+    let ledger = label(&buf, "fixture-org/ledger");
+    click(&mut app, Position::new(ledger.x, ledger.y));
+    click(&mut app, Position::new(ledger.x, ledger.y));
+    assert!(matches!(&app.overlay, Some(Overlay::Picker(p)) if p.title == "Branch"));
+    app.apply(crate::app::Msg::Branches {
+        source: "fixture-gh".into(),
+        repo: "fixture-org/ledger".into(),
+        result: Ok(vec![
+            common::GitBranch {
+                name: "develop".into(),
+                default: false,
+            },
+            common::GitBranch {
+                name: "main".into(),
+                default: true,
+            },
+        ]),
+    });
+    let buf = draw(&app, 160, 40);
+    assert_rows(
+        &app,
+        &buf,
+        &[("main", Hit::PickRow(0)), ("develop", Hit::PickRow(1))],
+    );
+    label(&buf, "default");
+    label(&buf, "2 branches");
+    let develop = label(&buf, "develop");
+    click(&mut app, Position::new(develop.x, develop.y));
+    let buf = draw(&app, 160, 40);
+    let accept = assert_hit(&app, label(&buf, "⏎ use develop"), key(KeyCode::Enter));
+    click(&mut app, accept);
+    let Some(Overlay::Form(form)) = &app.overlay else {
+        panic!("the form comes back after the branch");
+    };
+    assert_eq!(form.raw("gh_repo"), "fixture-org/ledger");
+    assert_eq!(form.raw("gh_branch"), "develop");
+    assert_eq!(form.get("name"), "ledger");
+    assert_eq!(form.fields[form.focus].key, "dockerfile");
+    assert!(form.on("auto_deploy"));
+    assert_eq!(
+        form.fields
+            .iter()
+            .find(|f| f.key == "auto_deploy")
+            .map(|f| f.hint.as_str()),
+        Some("every push to develop")
+    );
 }

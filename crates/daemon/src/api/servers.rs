@@ -199,7 +199,7 @@ pub async fn proxy(
 /// Installs or reinstalls the proxy on a server and records the outcome.
 pub async fn install_proxy(state: &AppState, server: Server) -> ApiResult<Server> {
     let docker = state.docker.get(&server).await?;
-    if let Err(e) = docker::install_proxy(&docker).await {
+    if let Err(e) = docker::install_proxy(&docker, state.instance_route(&server).as_ref()).await {
         state
             .activity(
                 ActivityLevel::Error,
@@ -230,7 +230,7 @@ pub async fn ensure_local_proxy(state: &AppState, server: Server) {
         );
         let result = async {
             let docker = state.docker.get(&server).await?;
-            docker::install_proxy(&docker).await
+            docker::install_proxy(&docker, state.instance_route(&server).as_ref()).await
         }
         .await;
         let e = match result {

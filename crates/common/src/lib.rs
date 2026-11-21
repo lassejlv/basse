@@ -190,6 +190,13 @@ pub enum Source {
         dockerfile: String,
         /// Build context directory relative to the repository root.
         context: String,
+        /// The [`GitSource`] that authenticates the clone, with `repo` as `owner/name`. `None`
+        /// clones `repo` as a URL, anonymously or with the daemon's SSH key as a deploy key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_id: Option<Id>,
+        /// Deploy when the tracked branch is pushed. Needs a GitHub App source.
+        #[serde(default = "default_true")]
+        auto_deploy: bool,
     },
     /// A one-click database; the daemon fills in image, credentials and a data volume.
     Database { kind: DatabaseKind, version: String },
@@ -482,6 +489,9 @@ pub struct DaemonInfo {
     pub proxy: ProxyStatus,
     /// Public key remote servers must trust for SSH connections.
     pub ssh_public_key: Option<String>,
+    /// `https://<instance domain>` once the domain is verified; clients prefer it.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// Everything an operator can see and change about the daemon itself.
@@ -506,6 +516,11 @@ pub struct InstanceSettings {
     pub reclaimable: Option<Reclaimable>,
     /// Whether systemd supervises the daemon, so a self-update can restart it.
     pub supervised: bool,
+    /// Domain the API is served on; see `GET /settings/domain` for the guide.
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub domain_verified: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -747,16 +762,24 @@ pub enum SecretKind {
     S3Credentials,
     /// An opaque value.
     Generic,
+    /// The credentials of a GitHub App. Managed by its git source and never revealed.
+    GithubApp,
 }
 
 impl SecretKind {
-    pub const ALL: [Self; 3] = [Self::SshKey, Self::S3Credentials, Self::Generic];
+    pub const ALL: [Self; 4] = [
+        Self::SshKey,
+        Self::S3Credentials,
+        Self::Generic,
+        Self::GithubApp,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SshKey => "ssh_key",
             Self::S3Credentials => "s3_credentials",
             Self::Generic => "generic",
+            Self::GithubApp => "github_app",
         }
     }
 
@@ -766,6 +789,7 @@ impl SecretKind {
             Self::SshKey => "ssh key",
             Self::S3Credentials => "s3 credentials",
             Self::Generic => "generic",
+            Self::GithubApp => "github app",
         }
     }
 }
@@ -784,6 +808,7 @@ impl std::str::FromStr for SecretKind {
             "ssh_key" | "ssh" => Ok(Self::SshKey),
             "s3_credentials" | "s3" => Ok(Self::S3Credentials),
             "generic" => Ok(Self::Generic),
+            "github_app" => Ok(Self::GithubApp),
             _ => Err(format!(
                 "unknown secret kind '{s}', expected one of ssh-key, s3, generic"
             )),
@@ -807,6 +832,17 @@ pub enum SecretValue {
     Generic {
         value: String,
     },
+    GithubApp {
+        app_id: u64,
+        /// The app's PEM private key, used to sign the JWTs that mint installation tokens.
+        private_key: String,
+        #[serde(default)]
+        webhook_secret: Option<String>,
+        #[serde(default)]
+        client_id: Option<String>,
+        #[serde(default)]
+        client_secret: Option<String>,
+    },
 }
 
 impl SecretValue {
@@ -815,6 +851,7 @@ impl SecretValue {
             Self::SshKey { .. } => SecretKind::SshKey,
             Self::S3Credentials { .. } => SecretKind::S3Credentials,
             Self::Generic { .. } => SecretKind::Generic,
+            Self::GithubApp { .. } => SecretKind::GithubApp,
         }
     }
 }
@@ -846,6 +883,8 @@ pub struct Secret {
 pub enum UsageKind {
     Server,
     Storage,
+    Service,
+    Source,
 }
 
 /// One thing that uses a secret.
@@ -861,6 +900,8 @@ impl fmt::Display for Usage {
         let kind = match self.kind {
             UsageKind::Server => "server",
             UsageKind::Storage => "storage",
+            UsageKind::Service => "service",
+            UsageKind::Source => "source",
         };
         write!(f, "{kind} {}", self.name)
     }
@@ -951,10 +992,218 @@ impl Default for InstanceBackupSchedule {
     }
 }
 
+/// How a git source authenticates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitSourceKind {
+    /// A GitHub App, created through the manifest flow or connected by its id and key. Clones
+    /// use short-lived installation tokens, and pushes arrive as webhooks.
+    GithubApp,
+    /// A personal access token. No webhooks.
+    GithubToken,
+}
+
+impl GitSourceKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::GithubApp => "github app",
+            Self::GithubToken => "token",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitSourceStatus {
+    /// The manifest flow started; the app does not exist on GitHub yet.
+    Pending,
+    /// The app exists but is not installed on an account yet.
+    NeedsInstall,
+    Ready,
+    /// The last check failed; `status_detail` says why.
+    Error,
+}
+
+impl GitSourceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::NeedsInstall => "needs install",
+            Self::Ready => "ready",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitOwnerKind {
+    User,
+    Organization,
+}
+
+/// Where services clone from. Credentials live in a secret and never leave the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitSource {
+    pub id: Id,
+    pub name: String,
+    pub kind: GitSourceKind,
+    /// GitHub's web URL, `https://github.com` or a GitHub Enterprise host.
+    pub html_url: String,
+    /// GitHub's REST API, `https://api.github.com` or `<enterprise>/api/v3`.
+    pub api_url: String,
+    /// Account or organization the app is installed on, or the token's user.
+    pub owner: Option<String>,
+    pub owner_kind: Option<GitOwnerKind>,
+    pub app_id: Option<u64>,
+    pub app_slug: Option<String>,
+    pub installation_id: Option<u64>,
+    pub status: GitSourceStatus,
+    /// What to do next, or the error of the last check.
+    pub status_detail: Option<String>,
+    /// Where to install the app or change which repositories it sees.
+    pub install_url: Option<String>,
+    /// Where GitHub delivers push events.
+    pub webhook_url: Option<String>,
+    /// The secret holding the credentials.
+    pub secret_id: Option<Id>,
+    pub last_checked_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+    /// Services that clone from this source; it cannot be deleted while this is not empty.
+    #[serde(default)]
+    pub used_by: Vec<Usage>,
+}
+
+/// A repository a source can clone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitRepo {
+    /// `owner/name`.
+    pub full_name: String,
+    pub private: bool,
+    pub default_branch: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub pushed_at: Option<Timestamp>,
+}
+
+/// One page of `GET /sources/{id}/repos`, most recently pushed first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoPage {
+    pub repos: Vec<GitRepo>,
+    /// 1-based.
+    pub page: u32,
+    pub per_page: u32,
+    /// Repositories matching the query across all pages.
+    pub total: u32,
+}
+
+impl RepoPage {
+    pub fn pages(&self) -> u32 {
+        self.total.div_ceil(self.per_page.max(1)).max(1)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitBranch {
+    pub name: String,
+    /// The repository's default branch.
+    pub default: bool,
+}
+
+/// Response of `POST /sources/github`: open `setup_url` in a browser to create the app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubAppSetup {
+    pub source: GitSource,
+    pub setup_url: String,
+}
+
+/// The domain the daemon's own API is served on, with automatic HTTPS, and the guide to set
+/// it up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InstanceDomain {
+    pub domain: Option<String>,
+    /// `https://<domain>`, once every check passed.
+    pub url: Option<String>,
+    pub verified: bool,
+    pub verified_at: Option<Timestamp>,
+    pub public_ipv4: Option<String>,
+    pub public_ipv6: Option<String>,
+    /// The DNS records to create at the domain's DNS provider.
+    pub records: Vec<DnsRecord>,
+    /// Results of the last check, in order; empty before the first one.
+    pub checks: Vec<DomainCheck>,
+    pub checked_at: Option<Timestamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsRecord {
+    /// `A` or `AAAA`.
+    pub kind: String,
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DomainCheckKind {
+    /// The domain resolves to this server's public address.
+    Dns,
+    /// Port 80 accepts connections (certificate challenges and redirects).
+    Http,
+    /// Port 443 accepts connections.
+    Https,
+    /// A certificate valid for the domain is served.
+    Certificate,
+    /// The API answers through the domain.
+    Api,
+}
+
+impl DomainCheckKind {
+    pub const ALL: [Self; 5] = [
+        Self::Dns,
+        Self::Http,
+        Self::Https,
+        Self::Certificate,
+        Self::Api,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dns => "DNS points to this server",
+            Self::Http => "Port 80 reachable",
+            Self::Https => "Port 443 reachable",
+            Self::Certificate => "Certificate issued",
+            Self::Api => "API reachable over HTTPS",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckStatus {
+    Pass,
+    Fail,
+    /// Not run because an earlier check failed.
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainCheck {
+    pub kind: DomainCheckKind,
+    pub status: CheckStatus,
+    pub detail: String,
+    /// What to change when the check failed.
+    pub hint: Option<String>,
+}
+
 /// Error body returned by every failing API call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {
     pub error: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Lowercase letters, digits and dashes, starting with a letter, at most 48 characters.
@@ -986,6 +1235,8 @@ mod tests {
             branch: "main".into(),
             dockerfile: "Dockerfile".into(),
             context: ".".into(),
+            source_id: None,
+            auto_deploy: true,
         };
         let json = serde_json::to_string(&src).unwrap();
         assert!(json.contains(r#""type":"git""#));

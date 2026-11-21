@@ -57,6 +57,8 @@ pub enum Hit {
     PickRow(usize),
     /// A row of the list on a full-screen list such as Secrets.
     Item(usize),
+    /// A DNS record on the domain guide; a click copies its value.
+    Record(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +74,7 @@ pub enum List {
     Picker,
     Secrets,
     Storage,
+    Sources,
     InstanceBackups,
 }
 
@@ -149,13 +152,18 @@ pub fn span_target(area: Rect, offset: usize, width: usize, target: Hit) {
 }
 
 pub fn key_target(rect: Rect, label: &str) {
-    if label == "↑↓" {
-        span_target(rect, 0, 1, Hit::Key(KeyCode::Up, KeyModifiers::NONE));
+    let pair = match label {
+        "↑↓" => Some((KeyCode::Up, KeyCode::Down)),
+        "←→" => Some((KeyCode::Left, KeyCode::Right)),
+        _ => None,
+    };
+    if let Some((first, second)) = pair {
+        span_target(rect, 0, 1, Hit::Key(first, KeyModifiers::NONE));
         span_target(
             rect,
             1,
             rect.width.saturating_sub(1) as usize,
-            Hit::Key(KeyCode::Down, KeyModifiers::NONE),
+            Hit::Key(second, KeyModifiers::NONE),
         );
     } else if let Some((code, mods)) = key_for_label(label) {
         hit(rect, Hit::Key(code, mods));
@@ -184,7 +192,7 @@ pub fn hints(frame: &mut Frame, area: Rect, hints: &[(&str, &str)], align: Align
         let line = Line::from(vec![
             Span::styled(
                 *key,
-                if key_for_label(key).is_some() || *key == "↑↓" {
+                if key_for_label(key).is_some() || matches!(*key, "↑↓" | "←→") {
                     theme::accent()
                 } else {
                     theme::muted()
@@ -310,6 +318,7 @@ pub fn paint_hover(buf: &mut Buffer, mouse: &MouseState) {
             | Hit::PaletteRow(_)
             | Hit::PickRow(_)
             | Hit::Item(_)
+            | Hit::Record(_)
     );
     let rect = rect.intersection(buf.area);
     for y in rect.top()..rect.bottom() {
@@ -610,8 +619,25 @@ fn click(app: &mut App, hit: Hit, double: bool) {
                 }
             }
             Screen::Settings => app.select_instance_backup(i),
+            Screen::Sources => {
+                app.select_source(i);
+                if double {
+                    press(app, KeyCode::Enter, KeyModifiers::NONE);
+                }
+            }
             _ => {}
         },
+        Hit::Record(i) => {
+            if let Some(r) = app
+                .domain
+                .data
+                .as_ref()
+                .and_then(|d| d.records.get(i))
+                .cloned()
+            {
+                app.copy(&r.value, &format!("the {} record value", r.kind));
+            }
+        }
         Hit::FormChoice(i, choice) => {
             if let Some(Overlay::Form(form)) = app.overlay.as_mut() {
                 form.click(i, Some(choice));
@@ -715,6 +741,26 @@ mod tests {
         buf.set_string(0, 1, "world", ratatui::style::Style::new());
         assert_eq!(selected_text(&buf, &sel((1, 0), (3, 1))), "ell\norl");
         assert_eq!(selected_text(&buf, &sel((0, 0), (7, 0))), "hello");
+    }
+
+    #[test]
+    fn paired_arrow_hints_split_into_two_targets() {
+        reset();
+        key_target(Rect::new(4, 0, 7, 1), "←→");
+        let hits = HITS.with_borrow(Clone::clone);
+        assert_eq!(
+            hits,
+            [
+                (
+                    Rect::new(4, 0, 1, 1),
+                    Hit::Key(KeyCode::Left, KeyModifiers::NONE)
+                ),
+                (
+                    Rect::new(5, 0, 6, 1),
+                    Hit::Key(KeyCode::Right, KeyModifiers::NONE)
+                ),
+            ]
+        );
     }
 
     #[test]
