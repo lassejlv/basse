@@ -5646,7 +5646,7 @@ fn build_fields(git: Option<&Source>, note: &str) -> Vec<Field> {
         method,
         Field::text("dockerfile", "dockerfile")
             .value(dockerfile)
-            .hint("path in the repo"),
+            .hint("in the context"),
         Field::text("context", "context")
             .value(context)
             .hint("folder sent to build"),

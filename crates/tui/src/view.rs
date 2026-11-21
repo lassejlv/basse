@@ -2687,6 +2687,8 @@ fn settings_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
             branch,
             source_id,
             auto_deploy,
+            root,
+            watch_paths,
             ..
         } => {
             if let Some(id) = source_id {
@@ -2700,6 +2702,11 @@ fn settings_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
             }
             lines.push(kv("repository", val(repo.clone()), w));
             lines.push(kv("branch", val(branch.clone()), w));
+            lines.push(kv(
+                "root dir",
+                opt(&Some(root.clone()), "/ · repository root"),
+                w,
+            ));
             if source_id.is_some() {
                 lines.push(kv(
                     "auto-deploy",
@@ -2710,6 +2717,20 @@ fn settings_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
                     },
                     w,
                 ));
+                if !root.is_empty() {
+                    lines.push(kv(
+                        "watch paths",
+                        if *watch_paths {
+                            vec![
+                                Span::styled("● on", theme::fg(theme::OK)),
+                                Span::styled(format!("  pushes to {root}"), theme::muted()),
+                            ]
+                        } else {
+                            vec![Span::styled("○ off · every push", theme::muted())]
+                        },
+                        w,
+                    ));
+                }
             }
             if let Some(build) = build_summary(&s.source, Some(d)) {
                 lines.push(kv("build", build, w));
