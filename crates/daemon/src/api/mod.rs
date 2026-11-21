@@ -67,6 +67,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .delete(services::delete),
         )
         .route("/services/{id}/deploy", post(services::deploy))
+        .route("/services/{id}/move", post(services::relocate))
         .route("/services/{id}/restart", post(services::restart))
         .route("/services/{id}/stop", post(services::stop))
         .route("/services/{id}/start", post(services::start))

@@ -7,6 +7,7 @@
 pub mod mailpit;
 pub mod minio;
 pub mod pg;
+pub mod remote;
 
 use client::Client;
 use std::net::TcpListener;

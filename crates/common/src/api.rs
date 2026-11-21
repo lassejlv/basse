@@ -26,6 +26,7 @@
 //! | PATCH | `/services/{id}` | `UpdateService` | `ServiceDetail` |
 //! | DELETE | `/services/{id}` | | 204 (removes containers; volumes kept unless `?volumes=true`) |
 //! | POST | `/services/{id}/deploy` | `DeployRequest` | `Deployment` (returns at once, runs in background) |
+//! | POST | `/services/{id}/move` | `MoveService` | `Deployment` (returns at once; a deployment with trigger `move` that runs on the target server; 409 while stopped or deploying) |
 //! | POST | `/services/{id}/restart` | | `ServiceDetail` |
 //! | POST | `/services/{id}/stop` | | `ServiceDetail` |
 //! | POST | `/services/{id}/start` | | `ServiceDetail` |
@@ -295,6 +296,22 @@ pub struct UpdateService {
 pub struct DeployRequest {
     /// `cli`, `tui` or `webhook`; defaults to `api`.
     pub trigger: Option<String>,
+}
+
+/// Runs a service on another server. The move deploys the live image there, or deploys from
+/// source when nothing is live or the service is a compose build, and health-checks it. Only
+/// then does the service switch servers: the target's proxy takes its domains and the old
+/// containers are removed. Until then the old server keeps serving, and a failed move removes
+/// what it created on the target and restarts anything it stopped. Domains keep pointing at
+/// whatever their DNS says, so they need new records when the servers have different addresses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveService {
+    pub server_id: Id,
+    /// Copy the service's named volumes to the target. The old containers are stopped while
+    /// the volumes stream across, so nothing writes to them mid-copy. Databases always copy
+    /// their data, whatever this says; other volumes start out empty on the target without it.
+    #[serde(default)]
+    pub copy_volumes: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
