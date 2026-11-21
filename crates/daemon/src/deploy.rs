@@ -245,13 +245,14 @@ pub async fn enqueue(
         StepKind::Switch,
         StepKind::Cleanup,
     ]);
-    let (image, commit, commit_message) = match &plan {
-        Plan::Rollback(target) => (
-            target.image.clone(),
-            target.commit.clone(),
-            target.commit_message.clone(),
-        ),
-        _ => (None, None, None),
+    let carried = match &plan {
+        Plan::Rollback(target) => Some((**target).clone()),
+        Plan::Move(m) if !m.from_source => state.db.live_deployment(&service.id).await?,
+        _ => None,
+    };
+    let (image, commit, commit_message) = match carried {
+        Some(d) => (d.image, d.commit, d.commit_message),
+        None => (None, None, None),
     };
     let mut d = Deployment {
         id: new_id(),
