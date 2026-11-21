@@ -9,6 +9,7 @@ use std::fmt;
 pub mod api;
 pub mod brand;
 pub mod notify;
+pub mod onboarding;
 
 /// Default TCP port the daemon's API listens on.
 pub const DEFAULT_PORT: u16 = 7700;

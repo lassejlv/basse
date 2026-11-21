@@ -326,7 +326,7 @@ fn read_secret_file(path: Option<&PathBuf>, what: &str) -> Result<String> {
 }
 
 /// Opens a URL in the default browser when this machine has one; failures are ignored.
-fn open_browser(url: &str) {
+pub(crate) fn open_browser(url: &str) {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {
@@ -441,7 +441,7 @@ async fn github(c: &Client, cmd: GithubCmd, json: bool) -> Result<()> {
 }
 
 /// Follows a new source through app creation and installation, printing each step once.
-async fn wait_for_install(c: &Client, source: &GitSource) -> Result<GitSource> {
+pub(crate) async fn wait_for_install(c: &Client, source: &GitSource) -> Result<GitSource> {
     const TIMEOUT: Duration = Duration::from_secs(30 * 60);
     let started = Instant::now();
     let mut last = source.status;
@@ -482,7 +482,7 @@ async fn wait_for_install(c: &Client, source: &GitSource) -> Result<GitSource> {
     }
 }
 
-fn check_line(check: &DomainCheck) {
+pub(crate) fn check_line(check: &DomainCheck) {
     let (glyph, tone, word) = match check.status {
         CheckStatus::Pass => ("●", Tone::Ok, "ok"),
         CheckStatus::Fail => ("✕", Tone::Err, "failed"),
@@ -548,7 +548,7 @@ fn print_cloudflare(cf: &CloudflareProxy) {
     );
 }
 
-fn print_domain(d: &InstanceDomain) {
+pub(crate) fn print_domain(d: &InstanceDomain) {
     let Some(domain) = &d.domain else {
         println!("No instance domain is set. The API is served on IP:port only.");
         println!(

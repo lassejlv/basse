@@ -15,6 +15,7 @@ mod github;
 mod host;
 mod instance;
 mod notify;
+mod onboarding;
 mod prune;
 mod restore;
 mod secrets;
@@ -336,6 +337,7 @@ async fn open_store(dirs: &DataDir, config: &mut Config) -> Result<Db> {
         record_import(&db, &sqlite, &imported).await?;
     }
     ensure_local_server(&db).await?;
+    onboarding::init(&db).await?;
     Ok(db)
 }
 

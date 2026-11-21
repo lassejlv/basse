@@ -43,6 +43,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Notifications => crate::notify::render(frame, body, app),
         Screen::Sources => sources(frame, body, app),
         Screen::Domain => domain(frame, body, app),
+        Screen::Setup => crate::setup::render(frame, body, app),
     }
     key_bar(frame, keys, app);
     if app.overlay.is_some() {
@@ -186,6 +187,15 @@ fn top_bar(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(app.context.clone(), theme::text()),
         Span::raw("  "),
     ];
+    if app.screen == Screen::Setup {
+        left.splice(
+            2..2,
+            [
+                Span::styled("setup", theme::text()),
+                Span::styled("  ›  ", theme::muted()),
+            ],
+        );
+    }
     if let Some(info) = &app.info {
         let host = info
             .public_ip
@@ -219,8 +229,9 @@ fn top_bar(frame: &mut Frame, area: Rect, app: &App) {
             theme::muted(),
         ),
     });
-    let context_offset = left[0].width() + left[1].width();
-    let context_width = left[2].width();
+    let context = if app.screen == Screen::Setup { 4 } else { 2 };
+    let context_offset: usize = left[..context].iter().map(Span::width).sum();
+    let context_width = left[context].width();
 
     let Some(info) = &app.info else {
         mouse::span_target(area, context_offset, context_width, Hit::OpenSettings);
@@ -431,6 +442,7 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("s", "secrets"),
             ("o", "storage"),
             ("n", "notifications"),
+            ("O", "setup"),
         ],
         Screen::Settings => vec![
             ("tab", "backups"),
@@ -549,6 +561,7 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             }
             keys
         }
+        Screen::Setup => crate::setup::key_hints(app).0,
         Screen::Domain if app.domain.input.is_some() => {
             vec![("type", "domain"), ("⏎", "save & check")]
         }
@@ -568,6 +581,7 @@ fn keys_for(app: &App) -> (Keys, Keys) {
     let right = match app.screen {
         Screen::Overview if app.overview.filtering => vec![],
         Screen::Overview => right,
+        Screen::Setup => crate::setup::key_hints(app).1,
         Screen::Deploy | Screen::Servers => vec![(":", "command"), ("?", "help"), ("q", "quit")],
         Screen::Service if app.service.as_ref().is_some_and(|v| v.logs.searching) => vec![],
         Screen::Domain if app.domain.input.is_some() => vec![("esc", "back")],
@@ -637,7 +651,16 @@ fn overview(frame: &mut Frame, area: Rect, app: &App) {
         .areas(area);
     sidebar(frame, side, app);
     if app.tree.as_ref().is_some_and(|t| t.projects.is_empty()) {
-        return empty_state(frame, main);
+        let checklist_h = crate::setup::checklist_height(app);
+        let [empty, checklist] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(checklist_h)])
+                .spacing(u16::from(checklist_h > 0))
+                .areas(main);
+        empty_state(frame, empty);
+        if checklist_h > 0 {
+            crate::setup::checklist(frame, checklist, app);
+        }
+        return;
     }
     let services = app.env_services();
     let table_h = (services.len() as u16 + 4).max(6).min(main.height / 2);
@@ -664,7 +687,16 @@ fn overview(frame: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
+    let checklist_h = crate::setup::checklist_height(app);
+    if checklist_h == 0 {
+        return activity_panel(frame, activity, app);
+    }
+    let [activity, checklist] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(checklist_h)])
+            .spacing(1)
+            .areas(activity);
     activity_panel(frame, activity, app);
+    crate::setup::checklist(frame, checklist, app);
 }
 
 fn empty_state(frame: &mut Frame, area: Rect) {
@@ -2763,7 +2795,7 @@ fn settings_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
 
 // Deploy
 
-fn deploy(frame: &mut Frame, area: Rect, app: &App) {
+pub(crate) fn deploy(frame: &mut Frame, area: Rect, app: &App) {
     let Some(view) = &app.deploy else { return };
     let d = &view.deployment;
     let path = app.service_path(&d.service_id);
@@ -3549,7 +3581,7 @@ pub(crate) fn lines_of(area: Rect, n: u16) -> Vec<Rect> {
 
 fn settings(frame: &mut Frame, area: Rect, app: &App) {
     let [row1, row2, row3] = Layout::vertical([
-        Constraint::Length(6),
+        Constraint::Length(7),
         Constraint::Length(5),
         Constraint::Fill(1),
     ])
@@ -3733,7 +3765,7 @@ fn instance_panel(frame: &mut Frame, area: Rect, app: &App, s: &InstanceSettings
         (None, None, Some(_)) => version.push(Span::styled("  up to date", theme::muted())),
         _ => {}
     }
-    let rows = lines_of(left, 4);
+    let rows = lines_of(left, 5);
     setting_row(
         frame,
         rows[0],
@@ -3783,6 +3815,18 @@ fn instance_panel(frame: &mut Frame, area: Rect, app: &App, s: &InstanceSettings
             _ => {}
         }
         setting_row(frame, *row, "cli", cli, None);
+    }
+    if let (Some(row), Some(o)) = (rows.get(4), &app.setup.data) {
+        setting_row(
+            frame,
+            *row,
+            "setup",
+            vec![Span::styled(
+                format!("{} of {} done", o.done(), o.total()),
+                theme::text(),
+            )],
+            Some(("O", "open")),
+        );
     }
     let rows = lines_of(right, 4);
     let value = |v: String| vec![Span::styled(v, theme::text())];
@@ -5366,7 +5410,7 @@ fn domain_needed(frame: &mut Frame, area: Rect, app: &App, heading: &str) {
 
 // Instance domain
 
-fn domain(frame: &mut Frame, area: Rect, app: &App) {
+pub(crate) fn domain(frame: &mut Frame, area: Rect, app: &App) {
     let view = &app.domain;
     let Some(d) = &view.data else {
         let status = if app.connection_error.is_some() {

@@ -29,7 +29,7 @@ The script needs no other preparation:
 4. The daemon starts the Caddy reverse proxy on ports 80 and 443 by itself.
 5. It opens ports 80, 443 and 7700 in ufw or firewalld if one of them is active.
 6. It logs in the `basse` CLI for root and for the user who ran sudo.
-7. It prints the API URL, the token and the login command for your laptop.
+7. It ends with a summary: what runs (daemon, proxy, Docker), the API URL, the `basse login` line to paste on your laptop with the CLI-only install one-liner, and what to do next.
 
 Running the script again upgrades in place and keeps your data and token. Installs from before the Postgres store kept their state in `/var/lib/basse/basse.db` (SQLite); the upgraded daemon imports that file on its first start, checks the row counts, and renames it to `basse.db.migrated-<timestamp>.bak`. If the import fails it leaves the file untouched and refuses to start, saying why; `bassed migrate-from-sqlite <file>` runs the same import by hand.
 
@@ -48,6 +48,19 @@ On your laptop (macOS or Linux), install only the CLI:
 curl -fsSL https://raw.githubusercontent.com/lassejlv/basse/main/install.sh | sh -s -- --cli
 basse login http://<server-ip>:7700 --token <token>
 basse
+```
+
+## First run
+
+The first time the TUI connects to a new instance it opens **Setup**, a short checklist instead of an empty Overview: the instance domain (recommended), a GitHub source, S3 storage plus nightly instance backups, a notification channel with the Essentials events, and a first app. The first app is either a repository from your GitHub source or a one-click sample (`traefik/whoami` on `whoami-<ip>.sslip.io`), deployed live on screen. Every step can be skipped, and each one reuses the screen or dialog it stands for.
+
+Progress lives in the daemon, so the flow resumes on any laptop. A step counts as done when the instance has it, however it got there. Once you finish or close the flow, the Overview shows a small "Setup 3/5" panel until the recommended steps are done or skipped (`o` opens the flow, `X` hides the panel). Reopen it any time with `: setup` or `O` in Settings. An instance that already had projects when it upgraded is marked as set up and never shows the flow on its own.
+
+Without the TUI:
+
+```sh
+basse setup            # the same steps as questions
+basse setup --status   # the checklist
 ```
 
 ## Update
@@ -91,6 +104,7 @@ The mouse works too: click rows, tabs, dialog fields and the key hints in the bo
 
 | Screen | Keys |
 |---|---|
+| Setup (`: setup`, `O` in Settings) | `⏎` continue or do the step, `s` skip, `↑↓` or `tab` move between steps (or choices), `esc` later. Domain: `e` edit, `r` check again. Backups: `a` add storage, `e` schedule. Notifications: `a` add a channel (it gets the Essentials events), `t` send a test. First app: `⏎` create and deploy, `o` open, `y` copy the URL |
 | Overview | `↑↓` move, `tab` switch pane, `⏎` open, `n` new service, `N` new project, `E` new environment, `d` deploy, `r` restart, `s` stop or start, `l` logs, `/` filter, `S` servers |
 | Service | `1`–`9` or `tab` switch tabs (Overview, Deployments, Logs, Database, Backups, Env, Domains, Volumes, Settings; Database and Backups only for databases), `a` add, `x` remove, `⏎` edit |
 | Database | `v` reveal the password, `c`/`C` copy the internal or public URL, `p` expose on a server port or make internal again, `R` rotate the password |

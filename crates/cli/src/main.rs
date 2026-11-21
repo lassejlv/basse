@@ -4,6 +4,7 @@ mod instance;
 mod notify;
 mod output;
 mod resolve;
+mod setup;
 mod sources;
 
 use anyhow::{Context as _, Result, bail};
@@ -99,6 +100,13 @@ enum Cmd {
     },
     /// Daemon, host and server health.
     Status,
+    /// Walk through setting up this instance: domain, git source, backups, notifications and a
+    /// first app. Picks up where the TUI or an earlier run left off.
+    Setup {
+        /// Only show the checklist.
+        #[arg(long)]
+        status: bool,
+    },
     /// Servers the daemon deploys to.
     #[command(subcommand)]
     Server(ServerCmd),
@@ -735,6 +743,23 @@ async fn dispatch(c: Client, name: String, command: Cmd, json: bool) -> Result<(
         Cmd::Proxy(ProxyCmd::Restart) => instance::restart_proxy(&c, json).await,
         Cmd::Prune => instance::prune(&c, json).await,
         Cmd::Status => status(&c, &name, json).await,
+        Cmd::Setup { status } => {
+            use std::io::IsTerminal;
+            if status || json {
+                let o = c.onboarding().await?;
+                if json {
+                    return output::json(&o);
+                }
+                setup::print_status(&o);
+                return Ok(());
+            }
+            if !std::io::stdin().is_terminal() {
+                bail!("setup asks questions; run it in a terminal, or use --status");
+            }
+            let mut stdin = std::io::stdin().lock();
+            setup::run(&c, &mut setup::Prompt::new(&mut stdin, true)).await?;
+            Ok(())
+        }
         Cmd::Server(cmd) => server(&c, cmd, json).await,
         Cmd::Project(cmd) => project(&c, cmd, json).await,
         Cmd::Environment(cmd) => environment(&c, cmd, json).await,
@@ -896,11 +921,22 @@ async fn login(
         brand::DAEMON_BIN,
         info.version
     ));
-    println!(
-        "{} run {} to open the dashboard",
-        muted("next:"),
-        paint(brand::CLI_BIN, Tone::Accent)
-    );
+    let client = Client::new(&url, config.contexts[&name].token.as_str())?;
+    let pending = client.onboarding().await.is_ok_and(|o| o.open_on_connect());
+    if pending {
+        println!(
+            "{} run {} to set up this instance, or {} without the dashboard",
+            muted("next:"),
+            paint(brand::CLI_BIN, Tone::Accent),
+            paint(format!("{} setup", brand::CLI_BIN), Tone::Accent)
+        );
+    } else {
+        println!(
+            "{} run {} to open the dashboard",
+            muted("next:"),
+            paint(brand::CLI_BIN, Tone::Accent)
+        );
+    }
     Ok(())
 }
 

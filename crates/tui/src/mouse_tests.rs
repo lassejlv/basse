@@ -2375,3 +2375,170 @@ fn settings_update_covers_the_cli_and_the_daemon() {
             .is_some_and(|t| t.text.contains("up to date"))
     );
 }
+
+fn onboarding(
+    status: common::onboarding::OnboardingStatus,
+    states: [common::onboarding::StepState; 5],
+) -> common::onboarding::Onboarding {
+    use common::onboarding::{Step as SetupStep, StepStatus as SetupStatus};
+    common::onboarding::Onboarding {
+        status,
+        current: SetupStep::Welcome,
+        steps: SetupStep::TASKS
+            .into_iter()
+            .zip(states)
+            .map(|(step, state)| SetupStatus { step, state })
+            .collect(),
+        checklist_dismissed: false,
+        automatic: false,
+    }
+}
+
+fn press(app: &mut App, code: KeyCode) {
+    crate::keys::handle(
+        app,
+        crossterm::event::KeyEvent::new(code, KeyModifiers::NONE),
+    );
+}
+
+#[tokio::test]
+async fn setup_opens_once_on_connect_and_esc_hands_over_to_the_checklist() {
+    use common::onboarding::{OnboardingStatus, Step as SetupStep, StepState};
+    let mut app = fixture();
+    app.onboarding_loaded(onboarding(OnboardingStatus::Pending, [StepState::Todo; 5]));
+    assert_eq!(
+        app.screen,
+        Screen::Setup,
+        "a pending instance opens the flow"
+    );
+    assert_eq!(app.setup.step, SetupStep::Welcome);
+
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.setup.step, SetupStep::Domain, "⏎ starts");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.screen, Screen::Overview, "esc leaves for later");
+
+    app.onboarding_loaded(onboarding(OnboardingStatus::Pending, [StepState::Todo; 5]));
+    assert_eq!(app.screen, Screen::Overview, "only once per connection");
+
+    let mut states = [StepState::Todo; 5];
+    states[1] = StepState::Skipped;
+    states[4] = StepState::Done;
+    app.onboarding_loaded(onboarding(OnboardingStatus::Dismissed, states));
+    let buf = draw(&app, 160, 40);
+    assert!(label_on(&buf, label(&buf, "Setup 1/5").y, "Setup 1/5").is_some());
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("Instance domain", Hit::SetupStep(SetupStep::Domain)),
+            ("Backups", Hit::SetupStep(SetupStep::Backups)),
+            ("First app", Hit::SetupStep(SetupStep::FirstApp)),
+        ],
+    );
+    assert_hit(&app, label(&buf, "o open"), char_key('o'));
+    assert_hit(&app, label(&buf, "X dismiss"), char_key('X'));
+
+    let backups = label(&buf, "Backups");
+    click(&mut app, Position::new(backups.x, backups.y));
+    assert_eq!(app.screen, Screen::Setup, "a checklist row opens the flow");
+    assert_eq!(app.setup.step, SetupStep::Backups);
+}
+
+#[tokio::test]
+async fn setup_rail_choices_and_key_bar_have_targets() {
+    use common::onboarding::{OnboardingStatus, Step as SetupStep, StepState};
+    let mut app = fixture();
+    app.onboarding_loaded(onboarding(OnboardingStatus::Pending, [StepState::Todo; 5]));
+    app.go_to_step(SetupStep::Source);
+    let buf = draw(&app, 160, 40);
+    let rail: Vec<(&str, Hit)> = SetupStep::ALL
+        .into_iter()
+        .map(|s| (s.label(), Hit::SetupStep(s)))
+        .collect();
+    for (text, hit) in &rail {
+        let rect = label_in(&buf, 3..20, text);
+        assert_hit(&app, rect, *hit);
+    }
+    for (i, text) in ["GitHub App", "Existing GitHub App", "Personal access token"]
+        .into_iter()
+        .enumerate()
+    {
+        let rect = label_in(&buf, 4..12, text);
+        assert_hit(&app, rect, Hit::SetupChoice(i));
+    }
+    let y = buf.area.bottom() - 1;
+    for (text, hit) in [
+        ("⏎ connect", key(KeyCode::Enter)),
+        ("s skip", char_key('s')),
+        ("esc later", key(KeyCode::Esc)),
+        ("q quit", char_key('q')),
+    ] {
+        assert_hit(
+            &app,
+            label_on(&buf, y, text).unwrap_or_else(|| panic!("missing key hint {text:?}")),
+            hit,
+        );
+    }
+
+    let token = label_in(&buf, 4..12, "Personal access token");
+    click(&mut app, Position::new(token.x, token.y));
+    assert_eq!(app.setup.choice, 2, "a click selects the choice");
+    press(&mut app, KeyCode::Up);
+    assert_eq!(app.setup.choice, 1, "arrows move between choices");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(
+        app.setup.step,
+        SetupStep::Backups,
+        "tab moves to the next step"
+    );
+
+    let buf = draw(&app, 160, 40);
+    let rail_row = label_in(&buf, 3..20, "Git source");
+    click(&mut app, Position::new(rail_row.x, rail_row.y));
+    assert_eq!(
+        app.setup.step,
+        SetupStep::Source,
+        "a rail click goes to the step"
+    );
+    let buf = draw(&app, 160, 40);
+    let token = label_in(&buf, 4..12, "Personal access token");
+    click(&mut app, Position::new(token.x, token.y));
+    click(&mut app, Position::new(token.x, token.y));
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Form(f)) if f.kind == FormKind::AddGithubToken),
+        "a double-click connects with the existing token form"
+    );
+}
+
+#[tokio::test]
+async fn first_app_offers_the_sample_and_skipping_moves_on() {
+    use common::onboarding::{OnboardingStatus, Step as SetupStep, StepState};
+    let mut app = fixture();
+    app.info = Some(common::DaemonInfo {
+        version: "0.5.0".into(),
+        hostname: "fixture-host".into(),
+        public_ip: Some("5.75.12.4".into()),
+        cpu_percent: 0.0,
+        mem_used: 0,
+        mem_total: 0,
+        disk_used: 0,
+        disk_total: 0,
+        cpu_history: Vec::new(),
+        proxy: ProxyStatus::Running,
+        ssh_public_key: None,
+        url: None,
+    });
+    app.onboarding_loaded(onboarding(OnboardingStatus::Pending, [StepState::Todo; 5]));
+    app.go_to_step(SetupStep::FirstApp);
+    let buf = draw(&app, 160, 40);
+    assert_hit(&app, label(&buf, "Sample app"), Hit::SetupChoice(0));
+    label(&buf, "whoami-5-75-12-4.sslip.io");
+    assert!(label_on(&buf, buf.area.bottom() - 1, "⏎ create and deploy").is_some());
+    press(&mut app, KeyCode::Char('s'));
+    assert_eq!(app.setup.step, SetupStep::Done);
+    let buf = draw(&app, 160, 40);
+    label(&buf, "You're set.");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.screen, Screen::Overview, "⏎ on Done finishes");
+}

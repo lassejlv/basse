@@ -3,6 +3,7 @@
 mod support;
 
 use common::api::*;
+use common::onboarding::{OnboardingStatus, Step, StepState};
 use common::*;
 use reqwest::StatusCode;
 use support::Daemon;
@@ -70,6 +71,65 @@ async fn auth_is_required_and_errors_are_json() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_new_instance_is_onboarded_through_the_api() {
+    let Some(daemon) = Daemon::start().await else {
+        return;
+    };
+    let api = daemon.client();
+
+    let o = api.onboarding().await.unwrap();
+    assert_eq!(o.status, OnboardingStatus::Pending);
+    assert!(!o.automatic);
+    assert_eq!(o.current, Step::Welcome);
+    assert_eq!(o.total(), 5);
+    assert_eq!(o.done(), 0);
+
+    let err = api
+        .update_onboarding(&UpdateOnboarding {
+            skip: vec![Step::Welcome],
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("cannot be skipped"), "{err}");
+
+    let o = api
+        .update_onboarding(&UpdateOnboarding {
+            current: Some(Step::Backups),
+            skip: vec![Step::Domain, Step::Source],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(o.current, Step::Backups);
+    assert_eq!(o.state(Step::Domain), StepState::Skipped);
+    assert_eq!(o.state(Step::Backups), StepState::Todo);
+
+    let o = api
+        .update_onboarding(&UpdateOnboarding {
+            status: Some(OnboardingStatus::Dismissed),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(!o.open_on_connect());
+    assert!(o.show_checklist());
+
+    // A project without a live deploy does not finish the first-app step, and does not turn a
+    // running instance into an "upgraded" one.
+    api.create_project(&CreateProject {
+        name: "shop".into(),
+        description: None,
+    })
+    .await
+    .unwrap();
+    let o = api.onboarding().await.unwrap();
+    assert_eq!(o.state(Step::FirstApp), StepState::Todo);
+    assert!(!o.automatic);
+    assert_eq!(o.current, Step::Backups, "progress survives across clients");
 }
 
 #[tokio::test]
@@ -627,6 +687,15 @@ async fn serve_imports_a_sqlite_store_from_v0_1_0() {
         [("GREETING", "hello"), ("EXTRA", "1")]
     );
     assert_eq!(detail.volumes.len(), 1);
+
+    let onboarding = api.onboarding().await.unwrap();
+    assert!(
+        onboarding.automatic,
+        "an upgrade with projects skips the flow"
+    );
+    assert_eq!(onboarding.status, OnboardingStatus::Finished);
+    assert_eq!(onboarding.state(Step::FirstApp), StepState::Done);
+    assert!(!onboarding.show_checklist());
 
     let activity = api.activity(50).await.unwrap();
     assert_eq!(activity.len(), 10);

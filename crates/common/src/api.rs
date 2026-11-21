@@ -145,6 +145,15 @@
 //! | GET | `/instance/backups/{id}/download` | | the encrypted archive as `application/octet-stream` |
 //! | DELETE | `/instance/backups/{id}` | | 204 |
 //!
+//! First-run setup. The daemon stores skips and whether the flow was finished or closed; each
+//! step's `done` is read from the instance itself. An instance that already had projects when it
+//! upgraded starts out finished.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | GET | `/onboarding` | | `onboarding::Onboarding` |
+//! | PATCH | `/onboarding` | `UpdateOnboarding` | `onboarding::Onboarding` (400 for skipping Welcome or Done) |
+//!
 //! Notifications: channels are destinations, rules send events in a scope to one channel.
 //! Channel configs are sealed under the master key; responses only carry the redacted config.
 //! Delivery runs in the background with retries, so no route waits on a channel except `test`.
@@ -165,6 +174,7 @@
 //! | GET | `/notify/deliveries?limit=50&channel_id=&rule_id=` | | `Vec<NotifyDelivery>`, newest first |
 
 use crate::notify::{ChannelConfig, NotifyEvent, RuleScope};
+use crate::onboarding::{OnboardingStatus, Step};
 use crate::{EnvVar, Id, RestartPolicy, SecretValue, Source};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -360,6 +370,20 @@ impl fmt::Debug for ConnectGithubToken {
             .field("html_url", &self.html_url)
             .finish_non_exhaustive()
     }
+}
+
+/// Fields left as `None` keep their value.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateOnboarding {
+    pub status: Option<OnboardingStatus>,
+    pub current: Option<Step>,
+    /// Steps to mark as skipped; only [`Step::TASKS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip: Vec<Step>,
+    /// Skipped steps to put back on the list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unskip: Vec<Step>,
+    pub checklist_dismissed: Option<bool>,
 }
 
 /// Fields left as `None` keep their value. An empty `public_ip_override` (or `auto`) clears the
