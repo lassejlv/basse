@@ -156,12 +156,14 @@ impl Job {
                         .await;
                     total += self.copy_volume(&source, target, svc, name, labels).await?;
                 }
-                done.push(format!(
-                    "{} volume{} · {}",
+                let count = format!(
+                    "{} volume{}",
                     volumes.len(),
-                    if volumes.len() == 1 { "" } else { "s" },
-                    human_size(total)
-                ));
+                    if volumes.len() == 1 { "" } else { "s" }
+                );
+                self.log
+                    .system(format!("Copied {count} ({})", human_size(total)));
+                done.push(count);
             }
         }
         let detail = if done.is_empty() {

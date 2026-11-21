@@ -374,7 +374,12 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                     ("x", "remove"),
                     ("X", "remove + data"),
                 ],
-                Tab::Settings => vec![("tab", "next tab"), ("⏎", "edit"), ("X", "delete service")],
+                Tab::Settings => vec![
+                    ("tab", "next tab"),
+                    ("⏎", "edit"),
+                    ("m", "move"),
+                    ("X", "delete service"),
+                ],
                 Tab::Database => {
                     let view = app.service.as_ref();
                     let reveal = view.is_some_and(|v| v.reveal);
@@ -433,7 +438,12 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                 .as_ref()
                 .is_some_and(|v| v.deployment.can_cancel())
             {
-                keys.extend([("c", "cancel deploy"), ("esc", "back · keeps running")]);
+                let cancel = if app.deploy.as_ref().is_some_and(|v| v.is_move()) {
+                    "cancel move"
+                } else {
+                    "cancel deploy"
+                };
+                keys.extend([("c", cancel), ("esc", "back · keeps running")]);
             } else {
                 keys.push(("esc", "back"));
             }
@@ -2830,21 +2840,27 @@ fn settings_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         kv("id", vec![Span::styled(s.id.clone(), theme::muted())], w),
         Line::raw(""),
         Line::from(vec![
+            Span::styled("m", theme::accent()),
+            Span::styled("  move to another server", theme::muted()),
+        ]),
+        Line::from(vec![
             Span::styled("X", theme::fg(theme::ERR)),
             Span::styled("  delete this service and its containers", theme::muted()),
         ]),
     ]);
-    let delete_row = lines.len() as u16 - 1;
-    if delete_row < inner.height {
-        mouse::key_target(
-            Rect::new(
-                inner.x,
-                inner.y + delete_row,
-                (lines[delete_row as usize].width() as u16).min(inner.width),
-                1,
-            ),
-            "X",
-        );
+    let last = lines.len() as u16 - 1;
+    for (row, key) in [(last - 1, "m"), (last, "X")] {
+        if row < inner.height {
+            mouse::key_target(
+                Rect::new(
+                    inner.x,
+                    inner.y + row,
+                    (lines[row as usize].width() as u16).min(inner.width),
+                    1,
+                ),
+                key,
+            );
+        }
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -2881,6 +2897,9 @@ pub(crate) fn deploy(frame: &mut Frame, area: Rect, app: &App) {
     spans.push(util::deployment_glyph(d.status, app.tick));
     let verb = match d.status {
         DeploymentStatus::Queued => "queued".to_string(),
+        DeploymentStatus::Building | DeploymentStatus::Starting if view.is_move() => {
+            "moving".to_string()
+        }
         DeploymentStatus::Building | DeploymentStatus::Starting => "deploying".to_string(),
         s => s.as_str().to_string(),
     };
@@ -2901,6 +2920,9 @@ pub(crate) fn deploy(frame: &mut Frame, area: Rect, app: &App) {
             format!("{}   ", svc.source.label()),
             theme::muted(),
         ));
+    }
+    if let Some(to) = &view.moving_to {
+        meta.push(Span::styled(format!("→ {to}  "), theme::text()));
     }
     if let Some(c) = &d.commit {
         meta.push(Span::styled(
@@ -3040,6 +3062,19 @@ pub(crate) fn deploy(frame: &mut Frame, area: Rect, app: &App) {
             (None, DeploymentStatus::Live) => {
                 Span::styled("live · old container removed", theme::fg(theme::OK))
             }
+            _ if view.is_move() => {
+                let from = path
+                    .and_then(|(_, _, svc)| app.servers.iter().find(|s| s.id == svc.server_id))
+                    .map_or("the old server", |s| s.name.as_str());
+                let to = view.moving_to.as_deref().unwrap_or("the new one");
+                Span::styled(
+                    truncate(
+                        &format!("{from} serves until {to} is healthy"),
+                        note.width as usize,
+                    ),
+                    theme::muted(),
+                )
+            }
             _ => Span::styled("old container serves until healthy", theme::muted()),
         };
         frame.render_widget(Paragraph::new(msg), note);
@@ -3051,7 +3086,17 @@ pub(crate) fn deploy(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(" · live", theme::fg(theme::INFO))
     };
     let block = panel(
-        vec![Span::styled("Build output", theme::text()), live],
+        vec![
+            Span::styled(
+                if view.is_move() {
+                    "Move output"
+                } else {
+                    "Build output"
+                },
+                theme::text(),
+            ),
+            live,
+        ],
         Some(Line::styled(
             format!("{} lines", view.logs.lines.len()),
             theme::muted(),

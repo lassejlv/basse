@@ -61,7 +61,7 @@ pub struct Move {
 
 impl Plan {
     /// Whether the image comes from the service's source rather than an earlier deployment.
-    fn from_source(&self) -> bool {
+    fn builds_from_source(&self) -> bool {
         match self {
             Plan::Source => true,
             Plan::Move(m) => m.from_source,
@@ -228,7 +228,7 @@ pub async fn enqueue(
         Plan::Move(m) => m.to.clone(),
         _ => state.server(&service.server_id).await?,
     };
-    let mut kinds: Vec<StepKind> = match (plan.from_source(), &service.source) {
+    let mut kinds: Vec<StepKind> = match (plan.builds_from_source(), &service.source) {
         (true, Source::Git { .. }) => vec![StepKind::Clone, StepKind::Build],
         (true, _) => vec![StepKind::Pull],
         (false, _) => Vec::new(),
@@ -534,7 +534,7 @@ impl Job {
                     root,
                     ..
                 },
-            ) if plan.from_source() => {
+            ) if plan.builds_from_source() => {
                 self.set_status(DeploymentStatus::Building).await;
                 let root = root.clone();
                 let dir = self
@@ -566,13 +566,13 @@ impl Job {
                 }
                 tag
             }
-            (_, Source::Image { image }) if plan.from_source() => {
+            (_, Source::Image { image }) if plan.builds_from_source() => {
                 self.set_status(DeploymentStatus::Building).await;
                 let image = docker::normalize_image(image);
                 self.pull(&docker, &image).await?;
                 image
             }
-            (_, Source::Database { kind, version }) if plan.from_source() => {
+            (_, Source::Database { kind, version }) if plan.builds_from_source() => {
                 self.set_status(DeploymentStatus::Building).await;
                 let image = format!("{}:{version}", kind.image());
                 self.pull(&docker, &image).await?;
@@ -592,7 +592,7 @@ impl Job {
         self.transfer(&docker, &svc, Some(&image)).await?;
         self.set_status(DeploymentStatus::Starting).await;
 
-        let reused = !plan.from_source();
+        let reused = !plan.builds_from_source();
         let container = self
             .start(&docker, &svc, &env, &image, reused, previous)
             .await?;

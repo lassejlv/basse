@@ -1060,6 +1060,7 @@ fn service(app: &mut App, key: KeyEvent) {
         }
         (Tab::Settings, KeyCode::Enter | KeyCode::Char('e')) => app.form_edit_service(),
         (Tab::Settings, KeyCode::Char('X')) => ask_delete_service(app, &s),
+        (Tab::Settings, KeyCode::Char('m')) => app.form_move_service(),
         _ => {}
     }
 }

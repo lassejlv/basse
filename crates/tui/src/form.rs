@@ -194,6 +194,12 @@ pub enum FormKind {
     AddVolume {
         service_id: Id,
     },
+    /// Picks the server and whether volumes come along; submitting opens a confirm dialog.
+    MoveService {
+        service_id: Id,
+        /// The server the service runs on now.
+        from: Id,
+    },
     AddServer,
     PublicIp,
     PurgeServer {

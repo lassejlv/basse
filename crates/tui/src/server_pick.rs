@@ -108,6 +108,36 @@ pub fn items(servers: &[Server], address: impl Fn(&Server) -> String) -> Vec<Pic
         .collect()
 }
 
+/// Picker rows for moving `service` off server `from`: like [`items`], with the server it runs
+/// on marked current and disabled, and no default badge, since a move has no default.
+pub fn move_items(
+    servers: &[Server],
+    from: &str,
+    service: &str,
+    address: impl Fn(&Server) -> String,
+) -> Vec<PickItem> {
+    let mut rows = items(servers, address);
+    for row in &mut rows {
+        row.badge.clear();
+        if row.id.as_deref() == Some(from) {
+            row.badge = "current".into();
+            row.note = format!("{service} runs here");
+            row.glyph = Some(("●", theme::muted()));
+            row.disabled = true;
+        }
+    }
+    rows
+}
+
+/// The server a move goes to unless another is picked: the first one that is not `from` and
+/// not offline.
+pub fn move_default<'a>(servers: &'a [Server], from: &str) -> Option<&'a Server> {
+    let others = || servers.iter().filter(move |s| s.id != from);
+    others()
+        .find(|s| s.status != ServerStatus::Offline)
+        .or_else(|| others().next())
+}
+
 /// What a compose service on a remote server should know; every build method deploys there,
 /// but compose resolves bind mounts on the daemon's machine.
 pub const REMOTE_COMPOSE: &str =
@@ -121,7 +151,7 @@ pub fn picker_note(servers: &[Server]) -> String {
         .map(|s| s.name.as_str())
         .collect();
     match offline.as_slice() {
-        [] => "A service stays on the server it is created on.".into(),
+        [] => "Move a service to another server later from its Settings tab.".into(),
         [one] => format!(
             "{one} is offline, so it can't take new services. Check it again from the Servers screen."
         ),
@@ -198,5 +228,32 @@ mod tests {
         assert_eq!(rows[1].note, "connected · docker 27.3");
         assert_eq!(rows[2].note, "offline");
         assert!(picker_note(&servers).starts_with("down is offline"));
+    }
+
+    #[test]
+    fn moving_marks_the_current_server_and_skips_it_by_default() {
+        let servers = [
+            server("main", ServerKind::Local, ServerStatus::Online),
+            server("down", ServerKind::Ssh, ServerStatus::Offline),
+            server("edge", ServerKind::Ssh, ServerStatus::Online),
+        ];
+        assert_eq!(
+            move_default(&servers, "main").map(|s| s.name.as_str()),
+            Some("edge")
+        );
+        assert_eq!(
+            move_default(&servers[..1], "main").map(|s| s.name.as_str()),
+            None
+        );
+        let rows = move_items(&servers, "main", "api", address);
+        let main = rows.iter().find(|r| r.name == "main").unwrap();
+        assert!(main.disabled);
+        assert_eq!(
+            (main.badge.as_str(), main.note.as_str()),
+            ("current", "api runs here")
+        );
+        let edge = rows.iter().find(|r| r.name == "edge").unwrap();
+        assert!(!edge.disabled && edge.badge.is_empty());
+        assert!(rows.iter().find(|r| r.name == "down").unwrap().disabled);
     }
 }

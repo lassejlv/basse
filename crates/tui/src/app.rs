@@ -11,7 +11,7 @@ use common::metrics::{MetricsRange, ServiceMetrics};
 use common::notify as notify_types;
 use common::*;
 use futures_util::StreamExt;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -52,6 +52,8 @@ pub enum Msg {
     DeployLogEnd(Id),
     /// A deploy request was accepted: follow it on the deploy screen.
     Deployed(Box<Deployment>),
+    /// A move was accepted: follow it like a deploy, naming the server it goes to.
+    MoveStarted(Box<Deployment>, String),
     FormDone {
         toast: String,
         then: Then,
@@ -460,6 +462,15 @@ pub struct DeployView {
     pub back: Screen,
     pub announced: bool,
     pub pipeline_offset: usize,
+    /// Name of the server a move goes to, when this screen started the move.
+    pub moving_to: Option<String>,
+}
+
+impl DeployView {
+    /// A deployment that moves the service to another server.
+    pub fn is_move(&self) -> bool {
+        self.deployment.trigger == "move"
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -480,6 +491,13 @@ pub enum ConfirmAction {
         server: bool,
     },
     Rollback(Id),
+    MoveService {
+        service_id: Id,
+        server_id: Id,
+        /// The target's name, for the deploy screen.
+        to: String,
+        copy_volumes: bool,
+    },
     CancelDeploy(Id),
     Stop(Id),
     /// Publish a database service on a host port, or make it internal with `None`.
@@ -1377,6 +1395,13 @@ impl App {
             Msg::Deployed(d) => {
                 self.toast(format!("deployment #{} started", d.number));
                 self.open_deploy(*d);
+            }
+            Msg::MoveStarted(d, to) => {
+                self.toast(format!("moving to {to} as deployment #{}", d.number));
+                self.open_deploy(*d);
+                if let Some(view) = &mut self.deploy {
+                    view.moving_to = Some(to);
+                }
             }
             Msg::FormDone { toast, then } => {
                 self.overlay = None;
@@ -2437,6 +2462,7 @@ impl App {
             task: Some(handle.abort_handle()),
             back,
             pipeline_offset: 0,
+            moving_to: None,
         });
         self.screen = Screen::Deploy;
     }
@@ -2510,7 +2536,7 @@ impl App {
             | ConfirmAction::RotateToken
             | ConfirmAction::Prune
             | ConfirmAction::Update { .. } => "",
-            ConfirmAction::Rollback(_) => "",
+            ConfirmAction::Rollback(_) | ConfirmAction::MoveService { .. } => "",
             ConfirmAction::CancelDeploy(_) => "",
             ConfirmAction::Stop(_) => "service stopped",
             ConfirmAction::DeleteBackup(_) => "backup deleted",
@@ -2613,6 +2639,21 @@ impl App {
             ConfirmAction::Rollback(id) => self.spawn(|c| async move {
                 match c.rollback(&id).await {
                     Ok(d) => Msg::Deployed(Box::new(d)),
+                    Err(e) => Msg::Error(format!("{e:#}")),
+                }
+            }),
+            ConfirmAction::MoveService {
+                service_id,
+                server_id,
+                to,
+                copy_volumes,
+            } => self.spawn(move |c| async move {
+                let body = common::api::MoveService {
+                    server_id,
+                    copy_volumes,
+                };
+                match c.move_service(&service_id, &body).await {
+                    Ok(d) => Msg::MoveStarted(Box::new(d), to),
                     Err(e) => Msg::Error(format!("{e:#}")),
                 }
             }),
@@ -4591,8 +4632,18 @@ impl App {
     }
 
     /// ⏎ on the server field of a create form: every server, offline ones last and disabled.
+    /// A move form also disables the server the service runs on.
     fn pick_server(&mut self, form: Form) {
-        let items = server_pick::items(&self.servers, |s| self.server_address(s));
+        let moving = match &form.kind {
+            FormKind::MoveService { from, .. } => Some(from.clone()),
+            _ => None,
+        };
+        let items = match &moving {
+            Some(from) => server_pick::move_items(&self.servers, from, &form.subtitle, |s| {
+                self.server_address(s)
+            }),
+            None => server_pick::items(&self.servers, |s| self.server_address(s)),
+        };
         let current = Some(form.raw(server_pick::KEY)).filter(|v| !v.is_empty());
         let row = current
             .as_ref()
@@ -4612,9 +4663,20 @@ impl App {
         if compose && self.servers.iter().any(|s| s.kind == ServerKind::Ssh) {
             note.push(Line::styled(server_pick::REMOTE_COMPOSE, theme::muted()));
         }
+        let subtitle = match &moving {
+            Some(from) => format!(
+                "move {} from {}",
+                form.subtitle,
+                self.servers
+                    .iter()
+                    .find(|s| s.id == *from)
+                    .map_or(from.as_str(), |s| s.name.as_str())
+            ),
+            None => format!("new service in {}", form.subtitle),
+        };
         self.open_picker(Picker {
             title: "Server".into(),
-            subtitle: format!("new service in {}", form.subtitle),
+            subtitle,
             kind: PickKind::Server,
             items,
             row,
@@ -5223,6 +5285,137 @@ impl App {
         self.overlay = Some(Overlay::Form(form));
     }
 
+    /// "m" on a service's Settings tab: where to move it and whether its volumes come along.
+    pub fn form_move_service(&mut self) {
+        let Some(detail) = self.service.as_ref().and_then(|v| v.detail.as_ref()) else {
+            return;
+        };
+        let s = &detail.service;
+        let Some(target) = server_pick::move_default(&self.servers, &s.server_id) else {
+            return self
+                .error("there is no other server to move to; add one on the Servers screen");
+        };
+        let mut server = Field::pick(server_pick::KEY, "server", "", "");
+        server_pick::set(&mut server, target, &self.server_address(target));
+        let compose =
+            matches!(&s.source, Source::Git { build, .. } if build.method == BuildMethod::Compose);
+        let database = matches!(s.source, Source::Database { .. });
+        let volumes: Vec<&str> = detail.volumes.iter().map(|v| v.name.as_str()).collect();
+        let (copy, hint) = if database {
+            (true, "databases always copy".to_string())
+        } else if compose {
+            (false, "compose volumes".to_string())
+        } else if volumes.is_empty() {
+            (false, "no volumes".to_string())
+        } else {
+            (true, volumes.join(", "))
+        };
+        let mut from = vec![
+            Span::styled("from ", theme::muted()),
+            Span::styled(detail.server.name.clone(), theme::text()),
+            Span::styled(
+                format!(
+                    "  {}",
+                    server_pick::summary(&detail.server, &self.server_address(&detail.server))
+                ),
+                theme::muted(),
+            ),
+        ];
+        let live = self
+            .service
+            .as_ref()
+            .and_then(|v| {
+                v.deployments
+                    .iter()
+                    .find(|d| d.status == DeploymentStatus::Live)
+            })
+            .map(|d| d.number);
+        if let Some(n) = live {
+            from.push(Span::styled(format!(" · live #{n}"), theme::muted()));
+        }
+        let mut note = vec![
+            format!(
+                "{} keeps serving until the new server passes its health check.",
+                detail.server.name
+            ),
+            format!(
+                "With copy volumes, {} stops while they copy, then starts there.",
+                s.name
+            ),
+        ];
+        if let Some(domain) = detail.domains.first() {
+            note.push(format!(
+                "Point {} at the new server once it is live.",
+                domain.host
+            ));
+        }
+        let form = Form::new(
+            FormKind::MoveService {
+                service_id: s.id.clone(),
+                from: s.server_id.clone(),
+            },
+            "Move",
+            vec![
+                server,
+                Field::toggle("copy_volumes", "copy volumes", copy).hint(hint),
+            ],
+        )
+        .subtitle(s.name.clone())
+        .header(Line::from(from))
+        .note(note)
+        .submit("move", None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    fn submit_move(&mut self) {
+        let Some(Overlay::Form(form)) = &mut self.overlay else {
+            return;
+        };
+        let FormKind::MoveService { service_id, from } = form.kind.clone() else {
+            return;
+        };
+        let server_id = form.raw(server_pick::KEY);
+        let Some(to) = self.servers.iter().find(|s| s.id == server_id) else {
+            return form.fail("pick a server to move to");
+        };
+        if to.id == from {
+            return form.fail(format!("{} already runs on {}", form.subtitle, to.name));
+        }
+        let name = form.subtitle.clone();
+        let from_name = self
+            .servers
+            .iter()
+            .find(|s| s.id == from)
+            .map_or(from.clone(), |s| s.name.clone());
+        let database = self
+            .service
+            .as_ref()
+            .and_then(|v| v.detail.as_ref())
+            .is_some_and(|d| matches!(d.service.source, Source::Database { .. }));
+        let copy_volumes = form.on("copy_volumes") || database;
+        let mut message = format!(
+            "Move {name} to {}? {from_name} keeps serving until {} passes its health check.",
+            to.name, to.name
+        );
+        if copy_volumes {
+            message.push_str(&format!(" {name} stops while its volumes copy."));
+        }
+        self.overlay = Some(Overlay::Confirm(Confirm {
+            title: "Move service".into(),
+            message,
+            danger: false,
+            action: ConfirmAction::MoveService {
+                service_id,
+                server_id: to.id.clone(),
+                to: to.name.clone(),
+                copy_volumes,
+            },
+            verb: "move",
+            busy: None,
+            error: Vec::new(),
+        }));
+    }
+
     /// The address a published port is reachable on.
     pub fn server_address(&self, server: &Server) -> String {
         match server.kind {
@@ -5380,6 +5573,7 @@ impl App {
         };
         match form.kind {
             FormKind::ExposeDatabase { .. } => return self.submit_expose(),
+            FormKind::MoveService { .. } => return self.submit_move(),
             FormKind::DownloadBackup { .. } => return self.submit_download(),
             FormKind::NotifyKind => return self.notify_kind_chosen(),
             FormKind::NotifyChannel { .. } => return self.submit_notify_channel(),
@@ -6415,6 +6609,7 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
         ),
         FormKind::EnvVar { .. }
         | FormKind::ExposeDatabase { .. }
+        | FormKind::MoveService { .. }
         | FormKind::DownloadBackup { .. }
         | FormKind::NotifyKind
         | FormKind::NotifyChannel { .. } => {
