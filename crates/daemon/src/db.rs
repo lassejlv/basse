@@ -544,7 +544,9 @@ impl Db {
 
     async fn volume_query(&self, tail: &str, bind: &str) -> Result<Vec<Volume>> {
         self.fetch(
-            format!("SELECT id, service_id, name, mount_path, created_at FROM volumes {tail}"),
+            format!(
+                "SELECT id, service_id, name, mount_path, created_at, compose FROM volumes {tail}"
+            ),
             &[bind],
             |row| {
                 Ok(Volume {
@@ -553,6 +555,9 @@ impl Db {
                     name: row.try_get(2)?,
                     mount_path: row.try_get(3)?,
                     created_at: row.try_get(4)?,
+                    compose: row
+                        .try_get::<Option<Json<ComposeVolume>>, _>(5)?
+                        .map(|j| j.0),
                 })
             },
         )
@@ -571,6 +576,17 @@ impl Db {
         let mut tx = self.pool.begin().await?;
         insert_volume(&mut tx, v).await?;
         tx.commit().await?;
+        Ok(())
+    }
+
+    /// Saves where a compose volume is mounted and what it holds.
+    pub async fn update_volume(&self, v: &Volume) -> Result<()> {
+        sqlx::query("UPDATE volumes SET mount_path = $2, compose = $3 WHERE id = $1")
+            .bind(&v.id)
+            .bind(&v.mount_path)
+            .bind(v.compose.as_ref().map(Json))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -2238,13 +2254,14 @@ async fn insert_domain(tx: &mut Tx, d: &Domain) -> sqlx::Result<()> {
 
 async fn insert_volume(tx: &mut Tx, v: &Volume) -> sqlx::Result<()> {
     sqlx::query(
-        "INSERT INTO volumes (id, service_id, name, mount_path, created_at) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO volumes (id, service_id, name, mount_path, created_at, compose) VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(&v.id)
     .bind(&v.service_id)
     .bind(&v.name)
     .bind(&v.mount_path)
     .bind(v.created_at)
+    .bind(v.compose.as_ref().map(Json))
     .execute(&mut **tx)
     .await?;
     Ok(())

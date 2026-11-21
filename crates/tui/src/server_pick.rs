@@ -108,11 +108,6 @@ pub fn items(servers: &[Server], address: impl Fn(&Server) -> String) -> Vec<Pic
         .collect()
 }
 
-/// What a compose service on a remote server should know; every build method deploys there,
-/// but compose resolves bind mounts on the daemon's machine.
-pub const REMOTE_COMPOSE: &str =
-    "On an ssh server, compose bind mounts point at paths on this machine; use named volumes.";
-
 /// The line under the picker's list.
 pub fn picker_note(servers: &[Server]) -> String {
     let offline: Vec<&str> = servers

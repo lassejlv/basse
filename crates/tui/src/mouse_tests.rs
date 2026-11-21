@@ -134,6 +134,7 @@ fn fixture() -> App {
                 name: "fixture-data".into(),
                 mount_path: "/fixture/data".into(),
                 created_at: Timestamp::default(),
+                compose: None,
             }],
             container: None,
             compose: Vec::new(),

@@ -253,6 +253,7 @@ pub async fn create(state: &AppState, body: CreateService) -> ApiResult<ServiceR
             name: spec.name,
             mount_path: spec.mount_path,
             created_at: Utc::now(),
+            compose: None,
         });
     }
     db.insert_service(&NewService {
@@ -346,13 +347,13 @@ pub async fn delete(
         if let Err(e) = docker::remove_compose_leftovers(&docker, &project, purge_volumes).await {
             tracing::warn!("cannot remove the compose project of {}: {e:#}", svc.name);
         }
-        if purge_volumes {
-            for v in &volumes {
-                if let Err(e) =
-                    docker::remove_volume(&docker, &docker::volume_name(&svc.id, &v.name)).await
-                {
-                    tracing::warn!("cannot remove volume {}: {e:#}", v.name);
-                }
+        for v in &volumes {
+            let copied = matches!(v.compose, Some(ComposeVolume::Files { .. }));
+            if !(purge_volumes || copied) {
+                continue;
+            }
+            if let Err(e) = docker::remove_volume(&docker, &v.docker_name()).await {
+                tracing::warn!("cannot remove volume {}: {e:#}", v.name);
             }
         }
     }

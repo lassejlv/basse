@@ -1,7 +1,8 @@
 //! The three build methods against a real Docker engine, each with a small fixture repository:
 //! a multi-stage Dockerfile with a target and build args, a compose project with a routed
 //! service and a named volume, and a Node app built by Railpack; and a monorepo whose apps
-//! live in subdirectories, one per method, deployed as services with different roots. Run with
+//! live in subdirectories, one per method, deployed as services with different roots; and compose
+//! bind mounts that keep their data and refresh their config across redeploys. Run with
 //! `cargo test -p daemon --test build_methods -- --ignored --test-threads 1`.
 
 mod support;
@@ -58,6 +59,17 @@ fn fixture(root: &Path, files: &[(&str, &str)]) -> String {
     );
     format!("file://{}", bare.display())
 }
+
+/// A compose service with a config-file bind and a data-dir bind. Each boot counts itself in the
+/// data directory and prints the config file and a file the repository seeded the data with.
+const MOUNTS_COMPOSE: &str = r#"services:
+  app:
+    image: busybox:1.37
+    command: ["sh", "-c", "n=$$(( $$(cat /data/boots 2>/dev/null || echo 0) + 1 )); echo $$n > /data/boots; echo boot=$$n greeting=$$(cat /etc/app/greeting.conf) seed=$$(cat /data/seed.txt); exec sleep 3600"]
+    volumes:
+      - ./config/greeting.conf:/etc/app/greeting.conf:ro
+      - ./data:/data
+"#;
 
 async fn environment(api: &Client) -> Environment {
     api.create_project(&CreateProject {
@@ -556,4 +568,154 @@ async fn railpack_builds_the_app_in_a_monorepo_root() {
     let out = logs(&api, &svc.service.id, None, "worker says").await;
     assert!(out.contains("worker says hello-from-env"), "{out}");
     api.delete_service(&svc.service.id, true).await.unwrap();
+}
+
+/// Commits `files` in the fixture's work tree and pushes them to its bare repository.
+fn commit(root: &Path, files: &[(&str, &str)]) {
+    let work = root.join("work");
+    for (path, body) in files {
+        std::fs::write(work.join(path), body).unwrap();
+    }
+    run(&work, "git", &["commit", "-q", "-am", "change"]);
+    let bare = root.join("repo.git");
+    run(
+        &work,
+        "git",
+        &["push", "-q", bare.to_str().unwrap(), "main"],
+    );
+}
+
+fn docker(args: &[&str]) -> Result<String, String> {
+    let out = Command::new("docker").args(args).output().unwrap();
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn compose_bind_mounts_keep_data_and_refresh_config() {
+    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let api = daemon.client();
+    let env = environment(&api).await;
+    let root = tempfile::tempdir().unwrap();
+    let repo = fixture(
+        root.path(),
+        &[
+            ("compose.yaml", MOUNTS_COMPOSE),
+            ("config/greeting.conf", "hello-v1\n"),
+            ("data/seed.txt", "from-the-repository\n"),
+        ],
+    );
+    let svc = api
+        .create_service(&git_service(
+            &env,
+            "stack",
+            repo,
+            BuildMethod::Compose,
+            8080,
+        ))
+        .await
+        .unwrap()
+        .service;
+
+    let (d, log) = deploy(&api, &svc.id, Duration::from_secs(300)).await;
+    for want in [
+        "Copying ./config/greeting.conf from the repository",
+        "Mounting ./data from volume",
+        "filled from the repository",
+    ] {
+        assert!(log.iter().any(|l| l.contains(want)), "{want}: {log:#?}");
+    }
+    assert!(
+        !daemon.dir.path().join("builds").join(&d.id).exists(),
+        "the clone outlived the deploy"
+    );
+    let out = logs(&api, &svc.id, Some("app"), "boot=1").await;
+    assert!(
+        out.contains("boot=1 greeting=hello-v1 seed=from-the-repository"),
+        "{out}"
+    );
+
+    let (_, log) = deploy(&api, &svc.id, Duration::from_secs(300)).await;
+    assert!(
+        log.iter().any(|l| l.contains("kept from earlier deploys")),
+        "{log:#?}"
+    );
+    let out = logs(&api, &svc.id, Some("app"), "boot=2").await;
+    assert!(out.contains("boot=2 greeting=hello-v1"), "{out}");
+
+    // A config change shows up; the data directory keeps what the service wrote, and the
+    // repository's copy of it is not copied over it again.
+    commit(
+        root.path(),
+        &[
+            ("config/greeting.conf", "hello-v2\n"),
+            ("data/seed.txt", "changed-in-the-repository\n"),
+        ],
+    );
+    deploy(&api, &svc.id, Duration::from_secs(300)).await;
+    let out = logs(&api, &svc.id, Some("app"), "boot=3").await;
+    assert!(
+        out.contains("boot=3 greeting=hello-v2 seed=from-the-repository"),
+        "{out}"
+    );
+
+    let detail = api.service(&svc.id).await.unwrap();
+    let rows: Vec<_> = detail
+        .volumes
+        .iter()
+        .map(|v| (v.name.as_str(), v.mount_path.as_str(), v.compose.clone()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                "data",
+                "/data",
+                Some(ComposeVolume::Data {
+                    path: "data".into()
+                })
+            ),
+            (
+                "files",
+                "/etc/app/greeting.conf",
+                Some(ComposeVolume::Files {
+                    paths: vec!["config/greeting.conf".into()]
+                })
+            ),
+        ]
+    );
+    let (data, files) = (
+        detail.volumes[0].docker_name(),
+        detail.volumes[1].docker_name(),
+    );
+    let copies = docker(&[
+        "run",
+        "--rm",
+        "-v",
+        &format!("{files}:/files"),
+        "busybox:1.37",
+        "ls",
+        "/files",
+    ])
+    .unwrap();
+    assert_eq!(
+        copies.split_whitespace().collect::<Vec<_>>(),
+        ["2", "3"],
+        "only the live deploy's and the newest copy are kept"
+    );
+
+    api.delete_service(&svc.id, false).await.unwrap();
+    assert!(
+        docker(&["volume", "inspect", &files]).is_err(),
+        "the config copies outlived the service"
+    );
+    assert!(
+        docker(&["volume", "inspect", &data]).is_ok(),
+        "data is kept unless the delete asks for it"
+    );
+    docker(&["volume", "rm", &data]).unwrap();
 }

@@ -2704,10 +2704,28 @@ fn volumes_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
                     },
                 )),
                 Cell::from(v.mount_path.clone()),
-                Cell::from(Span::styled(
-                    format!("{}-{}-{}", brand::PREFIX, v.service_id, v.name),
-                    theme::muted(),
-                )),
+                Cell::from(Line::from(match &v.compose {
+                    None => vec![Span::styled("—", theme::muted())],
+                    Some(ComposeVolume::Named { .. }) => {
+                        vec![Span::styled("compose volume", theme::text())]
+                    }
+                    Some(ComposeVolume::Data { path }) => vec![
+                        Span::styled(format!("./{path}"), theme::text()),
+                        Span::styled("  kept", theme::muted()),
+                    ],
+                    Some(ComposeVolume::Files { paths }) => vec![
+                        Span::styled(
+                            paths
+                                .iter()
+                                .map(|p| format!("./{p}"))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            theme::text(),
+                        ),
+                        Span::styled("  copied each deploy", theme::muted()),
+                    ],
+                })),
+                Cell::from(Span::styled(v.docker_name(), theme::muted())),
             ])
             .style(if selected {
                 theme::selected()
@@ -2719,9 +2737,10 @@ fn volumes_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
     ListPanel {
         heading: "Volumes",
         note: "persist across deploys",
-        header: Row::new(["NAME", "MOUNT", "DOCKER VOLUME"]),
+        header: Row::new(["NAME", "MOUNT", "FROM", "DOCKER VOLUME"]),
         widths: vec![
             Constraint::Length(18),
+            Constraint::Fill(1),
             Constraint::Fill(1),
             Constraint::Fill(1),
         ],

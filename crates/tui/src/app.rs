@@ -4603,15 +4603,10 @@ impl App {
             })
             .or_else(|| items.iter().position(|i| !i.disabled))
             .unwrap_or(0);
-        let mut note = vec![Line::styled(
+        let note = vec![Line::styled(
             server_pick::picker_note(&self.servers),
             theme::muted(),
         )];
-        let compose = form.choice("source") <= 1
-            && form.choice_label("build").as_deref() == Some(BUILD_LABELS[2]);
-        if compose && self.servers.iter().any(|s| s.kind == ServerKind::Ssh) {
-            note.push(Line::styled(server_pick::REMOTE_COMPOSE, theme::muted()));
-        }
         self.open_picker(Picker {
             title: "Server".into(),
             subtitle: format!("new service in {}", form.subtitle),

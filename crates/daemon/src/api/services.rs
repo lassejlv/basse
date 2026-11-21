@@ -378,6 +378,7 @@ pub async fn add_volume(
         name: body.name,
         mount_path: body.mount_path,
         created_at: Utc::now(),
+        compose: None,
     };
     state.db.insert_volume(&volume).await?;
     state
@@ -413,10 +414,14 @@ pub async fn delete_volume(
     let rec = services::record(&state, &volume.service_id).await?;
     if q.purge {
         let (_, docker) = state.docker_for(&rec.service.server_id).await?;
-        let name = docker::volume_name(&rec.service.id, &volume.name);
-        if let Err(e) = docker::remove_volume(&docker, &name).await {
+        if let Err(e) = docker::remove_volume(&docker, &volume.docker_name()).await {
+            let fix = if volume.compose.is_some() {
+                "stop the service first"
+            } else {
+                "redeploy first"
+            };
             conflict!(
-                "cannot purge volume '{}' while a container uses it; redeploy first ({e:#})",
+                "cannot purge volume '{}' while a container uses it; {fix} ({e:#})",
                 volume.name
             );
         }

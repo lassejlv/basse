@@ -24,7 +24,7 @@
 //! | POST | `/services` | `CreateService` | `ServiceDetail` |
 //! | GET | `/services/{id}` | | `ServiceDetail` |
 //! | PATCH | `/services/{id}` | `UpdateService` | `ServiceDetail` |
-//! | DELETE | `/services/{id}` | | 204 (removes containers; volumes kept unless `?volumes=true`) |
+//! | DELETE | `/services/{id}` | | 204 (removes containers and a compose service's copied config files; volumes kept unless `?volumes=true`) |
 //! | POST | `/services/{id}/deploy` | `DeployRequest` | `Deployment` (returns at once, runs in background) |
 //! | POST | `/services/{id}/restart` | | `ServiceDetail` |
 //! | POST | `/services/{id}/stop` | | `ServiceDetail` |
