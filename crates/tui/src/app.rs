@@ -1,10 +1,12 @@
 //! Application state, background requests and the actions keys trigger.
 
 use crate::form::{Field, Form, FormKind};
+use crate::notify::{self, NotifyView, RuleDialog};
 use crate::picker::{GitPick, PickFor, PickItem, PickKind, Picker, repo_item};
 use crate::theme;
 use client::{Client, Config};
 use common::api::*;
+use common::notify as notify_types;
 use common::*;
 use futures_util::StreamExt;
 use ratatui::text::Line;
@@ -76,6 +78,17 @@ pub enum Msg {
     StorageTested(Id, Result<StorageTest, String>),
     InstanceBackups(Vec<InstanceBackup>),
     InstanceSchedule(InstanceBackupSchedule),
+    NotifyChannels(Vec<notify_types::NotifyChannel>),
+    NotifyRules(Vec<notify_types::NotifyRule>),
+    NotifyDeliveries(Vec<notify_types::NotifyDelivery>),
+    /// A test sent from the channel list finished.
+    NotifyTested(Id, Result<notify_types::NotifyDelivery, String>),
+    /// The wizard saved a channel; `true` when the wizard created it.
+    NotifyStep(Box<notify_types::NotifyChannel>, bool),
+    /// The wizard's test message finished.
+    NotifyStepTested(Id, Result<notify_types::NotifyDelivery, String>),
+    /// The rule dialog or the wizard's last step finished saving.
+    NotifyDialogDone(Result<String, String>),
     Sources(Vec<GitSource>),
     /// A source polled while its setup dialog is open.
     Source(GitSource),
@@ -126,6 +139,7 @@ pub enum Screen {
     Settings,
     Secrets,
     Storage,
+    Notifications,
     Sources,
     /// The instance domain guide, reached from Settings.
     Domain,
@@ -433,6 +447,8 @@ pub enum ConfirmAction {
     DeleteSecret(Id),
     DeleteStorage(Id),
     DeleteInstanceBackup(Id),
+    DeleteNotifyChannel(Id),
+    DeleteNotifyRule(Id),
     DeleteSource(Id),
     RemoveDomain,
 }
@@ -494,6 +510,7 @@ pub enum Command {
     Settings,
     Secrets,
     Storage,
+    Notifications,
     Sources,
     Domain,
     BackUpInstance,
@@ -505,7 +522,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 20] = [
+    pub const ALL: [Command; 21] = [
         Command::Deploy,
         Command::Restart,
         Command::Stop,
@@ -518,6 +535,7 @@ impl Command {
         Command::Settings,
         Command::Secrets,
         Command::Storage,
+        Command::Notifications,
         Command::Sources,
         Command::Domain,
         Command::BackUpInstance,
@@ -542,6 +560,7 @@ impl Command {
             Command::Settings => "settings",
             Command::Secrets => "secrets",
             Command::Storage => "storage",
+            Command::Notifications => "notifications",
             Command::Sources => "sources",
             Command::Domain => "instance domain",
             Command::BackUpInstance => "back up this instance",
@@ -566,6 +585,7 @@ impl Command {
             Command::Settings => ",",
             Command::Secrets
             | Command::Storage
+            | Command::Notifications
             | Command::Sources
             | Command::Domain
             | Command::BackUpInstance
@@ -600,6 +620,8 @@ pub enum Overlay {
     Palette(Palette),
     Reveal(Reveal),
     Picker(Picker),
+    Rule(RuleDialog),
+    ChannelTest(notify::ChannelTestStep),
     /// The URL that creates a GitHub App and the setup's progress, updated live.
     GithubSetup(GithubSetup),
     /// A GitHub App needs a verified instance domain first; holds the dialog's title.
@@ -814,6 +836,7 @@ pub struct App {
     pub settings: SettingsView,
     pub secrets: SecretsView,
     pub storage: StorageView,
+    pub notify: NotifyView,
     pub sources: SourcesView,
     pub domain: DomainView,
     /// Version the daemon is restarting into after an update.
@@ -855,6 +878,7 @@ impl App {
             settings: SettingsView::default(),
             secrets: SecretsView::default(),
             storage: StorageView::default(),
+            notify: NotifyView::default(),
             sources: SourcesView::default(),
             domain: DomainView::default(),
             updating: None,
@@ -1021,6 +1045,9 @@ impl App {
         if self.screen == Screen::Settings {
             self.load_instance_backups();
         }
+        if self.screen == Screen::Notifications {
+            self.load_notify();
+        }
         if matches!(
             self.screen,
             Screen::Overview | Screen::Settings | Screen::Sources
@@ -1037,6 +1064,7 @@ impl App {
             | Screen::Settings
             | Screen::Secrets
             | Screen::Storage
+            | Screen::Notifications
             | Screen::Sources
             | Screen::Domain => Vec::new(),
         };
@@ -1501,6 +1529,103 @@ impl App {
                 }
             }
             Msg::InstanceSchedule(s) => self.settings.schedule = Some(s),
+            Msg::NotifyChannels(list) => {
+                let view = &mut self.notify;
+                let old = view.selected_channel().map(|c| c.id.clone());
+                view.channel_row =
+                    notify::keep_row(old.as_deref(), &list, |c| &c.id, view.channel_row);
+                view.channels = list;
+            }
+            Msg::NotifyRules(list) => {
+                let view = &mut self.notify;
+                let old = view.selected_rule().map(|r| r.id.clone());
+                view.rule_row = notify::keep_row(old.as_deref(), &list, |r| &r.id, view.rule_row);
+                view.rules = list;
+            }
+            Msg::NotifyDeliveries(list) => {
+                let view = &mut self.notify;
+                let old = view.selected_delivery().map(|d| d.id);
+                view.deliveries = list;
+                let shown = view.deliveries();
+                view.delivery_row = old
+                    .and_then(|id| shown.iter().position(|d| d.id == id))
+                    .unwrap_or(view.delivery_row)
+                    .min(shown.len().saturating_sub(1));
+                view.loaded_at = Some(Instant::now());
+            }
+            Msg::NotifyTested(id, result) => {
+                self.notify.testing.remove(&id);
+                let name = self
+                    .notify
+                    .channel(&id)
+                    .map_or("channel".to_string(), |c| c.name.clone());
+                match result {
+                    Ok(d) if d.status == notify_types::DeliveryStatus::Sent => self.toast(format!(
+                        "{name} ok · delivered in {}ms",
+                        d.latency_ms.unwrap_or_default()
+                    )),
+                    Ok(d) => self.error(format!(
+                        "{name} failed: {}",
+                        d.error.as_deref().unwrap_or("no reason given")
+                    )),
+                    Err(e) => self.error(e),
+                }
+                self.load_notify();
+            }
+            Msg::NotifyStep(channel, created) => {
+                let Some(Overlay::Form(mut form)) = self.overlay.take() else {
+                    return;
+                };
+                if let FormKind::NotifyChannel {
+                    channel_id,
+                    created: was,
+                    ..
+                } = &mut form.kind
+                {
+                    *channel_id = Some(channel.id.clone());
+                    *was = created;
+                }
+                form.busy = false;
+                let id = channel.id.clone();
+                self.overlay = Some(Overlay::ChannelTest(notify::ChannelTestStep {
+                    channel: *channel,
+                    form: Box::new(form),
+                    created,
+                    result: None,
+                    saving: false,
+                }));
+                self.spawn(|c| async move {
+                    let result = c
+                        .test_notify_channel(&id)
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+                    Msg::NotifyStepTested(id, result)
+                });
+                self.load_notify();
+            }
+            Msg::NotifyStepTested(id, result) => {
+                if let Some(Overlay::ChannelTest(step)) = &mut self.overlay
+                    && step.channel.id == id
+                {
+                    step.result = Some(result);
+                }
+            }
+            Msg::NotifyDialogDone(Ok(toast)) => {
+                self.overlay = None;
+                self.toast(toast);
+                self.load_notify();
+            }
+            Msg::NotifyDialogDone(Err(e)) => match &mut self.overlay {
+                Some(Overlay::Rule(d)) => {
+                    d.busy = false;
+                    d.error = Some(e);
+                }
+                Some(Overlay::ChannelTest(step)) => {
+                    step.saving = false;
+                    self.error(e);
+                }
+                _ => self.error(e),
+            },
             Msg::Sources(list) => {
                 let view = &mut self.sources;
                 let selected = view.selected().map(|s| s.id.clone());
@@ -2142,6 +2267,8 @@ impl App {
             | ConfirmAction::DeleteSecret(_)
             | ConfirmAction::DeleteStorage(_) => "",
             ConfirmAction::DeleteInstanceBackup(_) => "instance backup deleted",
+            ConfirmAction::DeleteNotifyChannel(_) => "channel deleted",
+            ConfirmAction::DeleteNotifyRule(_) => "rule deleted",
             ConfirmAction::DeleteSource(_) | ConfirmAction::RemoveDomain => "",
         }
         .to_string();
@@ -2162,6 +2289,12 @@ impl App {
             }
             ConfirmAction::DeleteDomain(id) => {
                 self.act(ok, |c| async move { c.delete_domain(&id).await })
+            }
+            ConfirmAction::DeleteNotifyChannel(id) => {
+                self.act(ok, |c| async move { c.delete_notify_channel(&id).await })
+            }
+            ConfirmAction::DeleteNotifyRule(id) => {
+                self.act(ok, |c| async move { c.delete_notify_rule(&id).await })
             }
             ConfirmAction::DeleteVolume(id, purge) => {
                 self.act(ok, |c| async move { c.delete_volume(&id, purge).await });
@@ -2543,6 +2676,7 @@ impl App {
         self.settings.schedule = None;
         self.secrets = SecretsView::default();
         self.storage = StorageView::default();
+        self.notify = NotifyView::default();
         self.settings.back = Some(Screen::Overview);
         self.open_settings();
         self.toast(format!("connected to {name}"));
@@ -2941,6 +3075,367 @@ impl App {
         ])
         .submit(if edit { "save & test" } else { "add & test" }, None);
         self.overlay = Some(Overlay::Form(form));
+    }
+
+    // Notifications
+
+    pub fn open_notifications(&mut self) {
+        if self.screen != Screen::Notifications {
+            self.notify.back = Some(self.screen);
+        }
+        self.screen = Screen::Notifications;
+        self.refresh();
+    }
+
+    pub fn close_notifications(&mut self) {
+        self.screen = match self.notify.back.take() {
+            Some(Screen::Service) if self.service.is_some() => Screen::Service,
+            Some(
+                back @ (Screen::Servers | Screen::Settings | Screen::Secrets | Screen::Storage),
+            ) => back,
+            _ => Screen::Overview,
+        };
+        self.refresh();
+    }
+
+    pub fn load_notify(&self) {
+        self.spawn(|c| async move {
+            match c.notify_channels().await {
+                Ok(list) => Msg::NotifyChannels(list),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
+        self.spawn(|c| async move {
+            match c.notify_rules().await {
+                Ok(list) => Msg::NotifyRules(list),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
+        self.load_deliveries();
+    }
+
+    pub fn load_deliveries(&self) {
+        let channel = self.notify.channel_filter.clone();
+        self.spawn(move |c| async move {
+            match c
+                .notify_deliveries(notify::LOG_LIMIT, channel.as_deref(), None)
+                .await
+            {
+                Ok(list) => Msg::NotifyDeliveries(list),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
+    }
+
+    /// Sends a test message through the selected channel; the result lands in the list.
+    pub fn test_channel(&mut self) {
+        let Some(c) = self.notify.selected_channel() else {
+            return;
+        };
+        let (id, name) = (c.id.clone(), c.name.clone());
+        if !self.notify.testing.insert(id.clone()) {
+            return;
+        }
+        self.progress(format!("sending a test message to {name}…"));
+        self.spawn(|c| async move {
+            let result = c
+                .test_notify_channel(&id)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            Msg::NotifyTested(id, result)
+        });
+    }
+
+    /// Enable or disable the selected channel or rule.
+    pub fn toggle_notify(&mut self) {
+        match self.notify.section {
+            notify::Section::Channels => {
+                let Some(c) = self.notify.selected_channel() else {
+                    return;
+                };
+                let (id, on) = (c.id.clone(), !c.enabled);
+                let ok = format!("{} {}", c.name, if on { "enabled" } else { "disabled" });
+                let body = UpdateNotifyChannel {
+                    enabled: Some(on),
+                    ..Default::default()
+                };
+                self.act(
+                    ok,
+                    |c| async move { c.update_notify_channel(&id, &body).await },
+                );
+            }
+            notify::Section::Rules => {
+                let Some(r) = self.notify.selected_rule() else {
+                    return;
+                };
+                let (id, on) = (r.id.clone(), !r.enabled);
+                let ok = format!("rule {}", if on { "enabled" } else { "disabled" });
+                let body = UpdateNotifyRule {
+                    enabled: Some(on),
+                    ..Default::default()
+                };
+                self.act(
+                    ok,
+                    |c| async move { c.update_notify_rule(&id, &body).await },
+                );
+            }
+            notify::Section::Deliveries => {}
+        }
+    }
+
+    /// First step of the channel wizard.
+    pub fn form_notify_kind(&mut self) {
+        self.overlay = Some(Overlay::Form(notify::kind_form()));
+    }
+
+    pub fn form_edit_channel(&mut self) {
+        let Some(c) = self.notify.selected_channel().cloned() else {
+            return;
+        };
+        self.overlay = Some(Overlay::Form(notify::channel_form(c.kind, Some(&c), false)));
+    }
+
+    fn notify_kind_chosen(&mut self) {
+        let Some(Overlay::Form(form)) = &self.overlay else {
+            return;
+        };
+        let kind = notify::chosen_kind(form);
+        self.overlay = Some(Overlay::Form(notify::channel_form(kind, None, false)));
+    }
+
+    /// Saves the settings step; a new channel is created disabled until the last step saves it.
+    fn submit_notify_channel(&mut self) {
+        let Some(Overlay::Form(form)) = &mut self.overlay else {
+            return;
+        };
+        let FormKind::NotifyChannel {
+            channel_id,
+            created,
+            ..
+        } = form.kind.clone()
+        else {
+            return;
+        };
+        let (name, config) = match notify::channel_config(form) {
+            Ok(v) => v,
+            Err(e) => return form.fail(e),
+        };
+        form.busy = true;
+        form.error = None;
+        self.spawn(move |c| async move {
+            let saved = match &channel_id {
+                Some(id) => {
+                    let body = UpdateNotifyChannel {
+                        name: Some(name),
+                        enabled: None,
+                        config: Some(config),
+                    };
+                    c.update_notify_channel(id, &body).await
+                }
+                None => {
+                    let body = CreateNotifyChannel {
+                        name,
+                        config,
+                        enabled: false,
+                    };
+                    c.create_notify_channel(&body).await
+                }
+            };
+            match saved {
+                Ok(ch) => Msg::NotifyStep(Box::new(ch), channel_id.is_none() || created),
+                Err(e) => Msg::FormError(format!("{e:#}")),
+            }
+        });
+    }
+
+    /// Esc on a form; a channel the wizard created is deleted again.
+    pub fn cancel_form(&mut self) {
+        if let Some(Overlay::Form(Form {
+            kind:
+                FormKind::NotifyChannel {
+                    channel_id: Some(id),
+                    created: true,
+                    ..
+                },
+            ..
+        })) = self.overlay.take()
+        {
+            self.spawn(|c| async move {
+                match c.delete_notify_channel(&id).await {
+                    Ok(()) => Msg::Toast("channel discarded".into()),
+                    Err(e) => Msg::Error(format!("{e:#}")),
+                }
+            });
+        }
+    }
+
+    pub fn retest_step(&mut self) {
+        let Some(Overlay::ChannelTest(step)) = &mut self.overlay else {
+            return;
+        };
+        if step.saving || step.result.is_none() {
+            return;
+        }
+        step.result = None;
+        let id = step.channel.id.clone();
+        self.spawn(|c| async move {
+            let result = c
+                .test_notify_channel(&id)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            Msg::NotifyStepTested(id, result)
+        });
+    }
+
+    pub fn save_step(&mut self) {
+        let Some(Overlay::ChannelTest(step)) = &mut self.overlay else {
+            return;
+        };
+        if step.saving {
+            return;
+        }
+        let (id, name) = (step.channel.id.clone(), step.channel.name.clone());
+        if !step.created {
+            self.overlay = None;
+            self.toast(format!("{name} saved"));
+            return self.load_notify();
+        }
+        step.saving = true;
+        self.spawn(move |c| async move {
+            let body = UpdateNotifyChannel {
+                enabled: Some(true),
+                ..Default::default()
+            };
+            Msg::NotifyDialogDone(
+                c.update_notify_channel(&id, &body)
+                    .await
+                    .map(|_| format!("{name} added · add a rule to choose its events"))
+                    .map_err(|e| format!("{e:#}")),
+            )
+        });
+    }
+
+    pub fn back_from_step(&mut self) {
+        if let Some(Overlay::ChannelTest(step)) = self.overlay.take() {
+            self.overlay = Some(Overlay::Form(*step.form));
+        }
+    }
+
+    pub fn cancel_step(&mut self) {
+        let Some(Overlay::ChannelTest(step)) = self.overlay.take() else {
+            return;
+        };
+        self.overlay = Some(Overlay::Form(*step.form));
+        self.cancel_form();
+    }
+
+    pub fn rule_dialog(&mut self, edit: bool) {
+        let dialog = if edit {
+            let Some(r) = self.notify.selected_rule() else {
+                return;
+            };
+            RuleDialog::edit(r, self.notify.channel(&r.channel_id))
+        } else {
+            let Some(c) = self.notify.selected_channel() else {
+                return self.error("add a channel first, on the Channels tab");
+            };
+            RuleDialog::new(c)
+        };
+        self.overlay = Some(Overlay::Rule(dialog));
+    }
+
+    pub fn pick_for_rule(&mut self, what: notify::RuleFocus) {
+        let Some(Overlay::Rule(dialog)) = self.overlay.take() else {
+            return;
+        };
+        let (kind, title, items, current, note) = if what == notify::RuleFocus::Channel {
+            (
+                PickKind::Channel,
+                "Channel",
+                notify::channel_items(&self.notify.channels),
+                dialog.channel_id.clone(),
+                "Channels are added on the Channels tab.",
+            )
+        } else {
+            (
+                PickKind::Scope,
+                "Scope",
+                notify::scope_items(self.tree.as_ref()),
+                notify::scope_id(&dialog.scope),
+                "Server and daemon events only reach instance rules.",
+            )
+        };
+        let mut picker = Picker {
+            title: title.into(),
+            subtitle: "rule".into(),
+            kind,
+            items,
+            row: 0,
+            target: PickFor::Rule(Box::new(dialog)),
+            current: Some(current),
+            note: vec![Line::styled(note, theme::muted())],
+            busy: false,
+            git: None,
+        };
+        picker.mark_current();
+        picker.row = picker
+            .items
+            .iter()
+            .position(|i| i.id == picker.current)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::Picker(picker));
+    }
+
+    pub fn submit_rule(&mut self) {
+        let Some(Overlay::Rule(d)) = &mut self.overlay else {
+            return;
+        };
+        if d.events.is_empty() {
+            d.error = Some("pick at least one event".into());
+            return;
+        }
+        d.busy = true;
+        d.error = None;
+        let rule_id = d.rule_id.clone();
+        let channel_id = d.channel_id.clone();
+        let scope = d.scope.clone();
+        let label = format!("{} → {}", d.channel, d.scope_label);
+        let preset = d.preset.map(String::from);
+        let events: Vec<notify_types::NotifyEvent> = d.events.iter().copied().collect();
+        let (dedupe, rate) = (d.dedupe, d.rate);
+        self.spawn(move |c| async move {
+            let result = match rule_id {
+                Some(id) => {
+                    let body = UpdateNotifyRule {
+                        channel_id: Some(channel_id),
+                        scope: Some(scope),
+                        preset: Some(preset.unwrap_or_default()),
+                        events: Some(events),
+                        enabled: None,
+                        dedupe_secs: Some(dedupe),
+                        max_per_hour: Some(rate),
+                    };
+                    c.update_notify_rule(&id, &body)
+                        .await
+                        .map(|_| format!("rule saved · {label}"))
+                }
+                None => {
+                    let body = CreateNotifyRule {
+                        channel_id,
+                        scope,
+                        preset,
+                        events,
+                        enabled: true,
+                        dedupe_secs: Some(dedupe),
+                        max_per_hour: Some(rate),
+                    };
+                    c.create_notify_rule(&body)
+                        .await
+                        .map(|r| format!("rule added · {label} · {} events", r.events.len()))
+                }
+            };
+            Msg::NotifyDialogDone(result.map_err(|e| format!("{e:#}")))
+        });
     }
 
     // Sources
@@ -3386,7 +3881,11 @@ impl App {
         match kind {
             PickKind::Store => self.load_storages(),
             PickKind::SshKey | PickKind::S3Credentials => self.load_secrets(),
-            PickKind::GitSource | PickKind::Repo | PickKind::Branch => {}
+            PickKind::GitSource
+            | PickKind::Repo
+            | PickKind::Branch
+            | PickKind::Channel
+            | PickKind::Scope => {}
         }
     }
 
@@ -3751,6 +4250,7 @@ impl App {
                     theme::muted(),
                 )]
             }
+            PickKind::Channel | PickKind::Scope => Vec::new(),
         };
         self.open_picker(Picker {
             title: title.into(),
@@ -3770,8 +4270,10 @@ impl App {
         let Some(Overlay::Picker(p)) = self.overlay.take() else {
             return;
         };
-        if let PickFor::Field(form, _) = p.target {
-            self.overlay = Some(Overlay::Form(*form));
+        match p.target {
+            PickFor::Field(form, _) => self.overlay = Some(Overlay::Form(*form)),
+            PickFor::Rule(dialog) => self.overlay = Some(Overlay::Rule(*dialog)),
+            _ => {}
         }
     }
 
@@ -3811,6 +4313,7 @@ impl App {
                 PickFor::Field(form, _) => Some(form.get("name"))
                     .filter(|n| !n.is_empty())
                     .unwrap_or("server".into()),
+                PickFor::Rule(_) => "rule".into(),
             };
             let name = unique_name(&format!("{base}-key"), &self.secrets.list);
             return self.spawn(|c| async move {
@@ -3840,6 +4343,23 @@ impl App {
             }
             PickFor::BackupNow { service_id, name } => {
                 self.start_backup(&service_id, &name, id);
+            }
+            PickFor::Rule(mut dialog) => {
+                let id = id.unwrap_or_default();
+                if p.kind == PickKind::Channel {
+                    if let Some(c) = self.notify.channel(&id) {
+                        dialog.channel_detail = c.kind.label().to_string();
+                    }
+                    dialog.channel_id = id;
+                    dialog.channel = name;
+                    dialog.focus = notify::RuleFocus::Scope;
+                } else {
+                    dialog.scope = notify::parse_scope(&id);
+                    dialog.scope_label = name;
+                    dialog.focus = notify::RuleFocus::Dedupe;
+                }
+                dialog.error = None;
+                self.overlay = Some(Overlay::Rule(*dialog));
             }
             PickFor::ServerKey { server_id, server } => {
                 if id == p.current {
@@ -4365,6 +4885,8 @@ impl App {
         match form.kind {
             FormKind::ExposeDatabase { .. } => return self.submit_expose(),
             FormKind::DownloadBackup { .. } => return self.submit_download(),
+            FormKind::NotifyKind => return self.notify_kind_chosen(),
+            FormKind::NotifyChannel { .. } => return self.submit_notify_channel(),
             _ => {}
         }
         match build_request(form, alt) {
@@ -5337,7 +5859,9 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
         ),
         FormKind::EnvVar { .. }
         | FormKind::ExposeDatabase { .. }
-        | FormKind::DownloadBackup { .. } => {
+        | FormKind::DownloadBackup { .. }
+        | FormKind::NotifyKind
+        | FormKind::NotifyChannel { .. } => {
             return Err("internal: this form submits separately".into());
         }
     })

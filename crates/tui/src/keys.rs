@@ -2,6 +2,7 @@
 
 use crate::app::*;
 use crate::form::{FormAction, FormKind};
+use crate::notify::{RuleAction, Section};
 use common::*;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -58,6 +59,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         Screen::Settings => settings(app, key),
         Screen::Secrets => secrets(app, key),
         Screen::Storage => storage(app, key),
+        Screen::Notifications => notifications(app, key),
         Screen::Sources => sources(app, key),
         Screen::Domain => domain(app, key),
     }
@@ -146,6 +148,89 @@ fn domain_input(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('u') if ctrl => input.clear(),
         KeyCode::Char(c) if !ctrl && !c.is_whitespace() => input.push(c),
+        _ => {}
+    }
+}
+
+fn notifications(app: &mut App, key: KeyEvent) {
+    let row = app.notify.row();
+    let section = app.notify.section;
+    match key.code {
+        KeyCode::Esc => return app.close_notifications(),
+        KeyCode::Tab => return app.notify.section = section.step(1),
+        KeyCode::BackTab => return app.notify.section = section.step(-1),
+        KeyCode::Up | KeyCode::Char('k') => return app.notify.select(row.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') => return app.notify.select(row + 1),
+        _ => {}
+    }
+    match (section, key.code) {
+        (Section::Channels, KeyCode::Char('a')) => app.form_notify_kind(),
+        (Section::Channels, KeyCode::Enter) => app.form_edit_channel(),
+        (Section::Channels, KeyCode::Char('t')) => app.test_channel(),
+        (Section::Rules, KeyCode::Char('a')) => app.rule_dialog(false),
+        (Section::Rules, KeyCode::Enter) => app.rule_dialog(true),
+        (Section::Channels | Section::Rules, KeyCode::Char('e')) => app.toggle_notify(),
+        (Section::Channels, KeyCode::Char('x') | KeyCode::Delete) => {
+            let Some(c) = app.notify.selected_channel().cloned() else {
+                return;
+            };
+            let rules = app
+                .notify
+                .rules
+                .iter()
+                .filter(|r| r.channel_id == c.id)
+                .count();
+            let also = match rules {
+                0 => String::new(),
+                1 => " Its rule is removed too.".into(),
+                n => format!(" Its {n} rules are removed too."),
+            };
+            ask_to(
+                app,
+                &format!("Delete channel · {}", c.name),
+                format!("Delete {}? Its credentials are destroyed.{also}", c.name),
+                true,
+                ConfirmAction::DeleteNotifyChannel(c.id),
+                "delete",
+            );
+        }
+        (Section::Rules, KeyCode::Char('x') | KeyCode::Delete) => {
+            let Some(r) = app.notify.selected_rule().cloned() else {
+                return;
+            };
+            let channel = app
+                .notify
+                .channel(&r.channel_id)
+                .map_or("its channel".to_string(), |c| c.name.clone());
+            ask_to(
+                app,
+                "Delete rule",
+                format!(
+                    "Stop sending {} events from {} to {channel}?",
+                    r.events.len(),
+                    r.scope_label
+                ),
+                true,
+                ConfirmAction::DeleteNotifyRule(r.id),
+                "delete",
+            );
+        }
+        (Section::Deliveries, KeyCode::Char('r')) => {
+            app.load_deliveries();
+            app.toast("refreshing the delivery log");
+        }
+        (Section::Deliveries, KeyCode::Char('f')) => {
+            app.notify.failures_only = !app.notify.failures_only;
+            app.notify.delivery_row = 0;
+        }
+        (Section::Deliveries, KeyCode::Char('c')) => {
+            app.notify.channel_filter = match app.notify.channel_filter {
+                Some(_) => None,
+                None => app.notify.selected_delivery().map(|d| d.channel_id.clone()),
+            };
+            app.notify.delivery_row = 0;
+            app.load_deliveries();
+        }
         _ => {}
     }
 }
@@ -268,7 +353,10 @@ fn overlay(app: &mut App, key: KeyEvent) {
     match app.overlay.as_mut() {
         Some(Overlay::Form(form)) => match form.handle_key(key) {
             FormAction::None => {}
-            FormAction::Cancel => app.overlay = None,
+            FormAction::Cancel => {
+                app.cancel_form();
+                app.overlay = None;
+            }
             FormAction::Pick(field) => app.pick_for_form(field),
             FormAction::Submit { alt } => {
                 if matches!(form.kind, FormKind::EnvVar { .. }) {
@@ -364,6 +452,20 @@ fn overlay(app: &mut App, key: KeyEvent) {
             }
             _ => {}
         },
+        Some(Overlay::Rule(d)) => match d.handle_key(key) {
+            RuleAction::None => {}
+            RuleAction::Cancel => app.overlay = None,
+            RuleAction::Save => app.submit_rule(),
+            RuleAction::Pick(what) => app.pick_for_rule(what),
+        },
+        Some(Overlay::ChannelTest(step)) => match key.code {
+            _ if step.saving => {}
+            KeyCode::Char('t') => app.retest_step(),
+            KeyCode::Enter => app.save_step(),
+            KeyCode::BackTab => app.back_from_step(),
+            KeyCode::Esc => app.cancel_step(),
+            _ => {}
+        },
         Some(Overlay::Help) => app.overlay = None,
         None => {}
     }
@@ -412,6 +514,7 @@ pub fn run_command(app: &mut App, cmd: Command) {
         Command::Settings => app.open_settings(),
         Command::Secrets => app.open_secrets(),
         Command::Storage => app.open_storage(),
+        Command::Notifications => app.open_notifications(),
         Command::Sources => app.open_sources(),
         Command::Domain => app.open_domain(),
         Command::BackUpInstance => {
@@ -1137,6 +1240,7 @@ fn settings(app: &mut App, key: KeyEvent) {
         KeyCode::Char('i') => app.form_public_ip(),
         KeyCode::Char('s') => app.open_secrets(),
         KeyCode::Char('o') => app.open_storage(),
+        KeyCode::Char('n') => app.open_notifications(),
         KeyCode::Char('d') => app.open_domain(),
         KeyCode::Char('g') => app.open_sources(),
         KeyCode::Char('m') => {

@@ -2,16 +2,18 @@
 //! detection, kept in fixed-size in-memory ring buffers.
 
 use crate::docker::{self, RunState};
+use crate::notify::Event;
 use crate::state::AppState;
 use bollard::Docker;
 use bollard::models::ContainerStatsResponse;
 use bollard::query_parameters::StatsOptions;
-use common::{ActivityLevel, Id, ServiceStats};
+use common::notify::NotifyEvent;
+use common::{ActivityLevel, Id, ServiceStats, brand};
 use futures_util::StreamExt as _;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use sysinfo::{Disks, System};
 
 /// One sample every 15 seconds, 240 samples: an hour of history.
@@ -39,11 +41,18 @@ struct Series {
 }
 
 /// What the crash detector last saw of a container.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 struct Seen {
     restart_count: i64,
     crash_reported: bool,
+    /// When each restart within LOOP_WINDOW was seen.
+    restarts: VecDeque<Instant>,
+    loop_reported: bool,
 }
+
+/// This many restarts within LOOP_WINDOW is a restart loop.
+const LOOP_RESTARTS: usize = 3;
+const LOOP_WINDOW: Duration = Duration::from_secs(600);
 
 #[derive(Default)]
 pub struct Stats {
@@ -230,11 +239,29 @@ async fn sample_services(state: &AppState) {
             .as_ref()
             .and_then(|s| s.exit_code)
             .unwrap_or(0);
-        let previous = lock(&state.stats.seen).get(container).copied();
+        let oom = inspected
+            .state
+            .as_ref()
+            .and_then(|s| s.oom_killed)
+            .unwrap_or(false);
+        let previous = lock(&state.stats.seen).get(container).cloned();
+        let known = previous.is_some();
         let mut seen = previous.unwrap_or(Seen {
             restart_count,
-            crash_reported: false,
+            ..Seen::default()
         });
+        let crash_event = |detail: String| {
+            let kind = if oom {
+                NotifyEvent::ServiceOomKilled
+            } else {
+                NotifyEvent::ServiceCrashed
+            };
+            Event::new(kind).detail(detail).hint(format!(
+                "{} logs {}",
+                brand::CLI_BIN,
+                rec.service.name
+            ))
+        };
         if let RunState::Exited { code: Some(code) } = run
             && code != 0
             && !seen.crash_reported
@@ -247,8 +274,11 @@ async fn sample_services(state: &AppState) {
                     Some(format!("exit code {code}")),
                 )
                 .await;
+            state
+                .notify_service(&rec.service, crash_event(format!("exit code {code}")))
+                .await;
             seen.crash_reported = true;
-        } else if previous.is_some() && restart_count > seen.restart_count {
+        } else if known && restart_count > seen.restart_count {
             state
                 .service_activity(
                     &rec.service,
@@ -257,6 +287,42 @@ async fn sample_services(state: &AppState) {
                     Some(format!("exit code {exit_code}, restart #{restart_count}")),
                 )
                 .await;
+            let now = Instant::now();
+            seen.restarts.push_back(now);
+            while seen
+                .restarts
+                .front()
+                .is_some_and(|t| now.duration_since(*t) > LOOP_WINDOW)
+            {
+                seen.restarts.pop_front();
+            }
+            let event = if seen.restarts.len() >= LOOP_RESTARTS {
+                (!seen.loop_reported).then(|| {
+                    Event::new(NotifyEvent::ServiceRestartLoop)
+                        .detail(format!(
+                            "{} restarts in {} minutes",
+                            seen.restarts.len(),
+                            LOOP_WINDOW.as_secs() / 60
+                        ))
+                        .hint(format!("{} logs {}", brand::CLI_BIN, rec.service.name))
+                })
+            } else {
+                Some(crash_event(format!(
+                    "the container exited and Docker restarted it (restart #{restart_count})"
+                )))
+            };
+            if let Some(event) = event {
+                seen.loop_reported |= event.kind == NotifyEvent::ServiceRestartLoop;
+                state.notify_service(&rec.service, event).await;
+            }
+        }
+        if seen
+            .restarts
+            .back()
+            .is_some_and(|t| t.elapsed() > LOOP_WINDOW)
+        {
+            seen.restarts.clear();
+            seen.loop_reported = false;
         }
         if run == RunState::Running {
             seen.crash_reported = false;

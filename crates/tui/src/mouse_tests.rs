@@ -1918,3 +1918,322 @@ async fn detected_build_picks_the_method_and_fills_its_file() {
         Some(Hit::FormChoice(_, 3))
     ));
 }
+
+fn notify_channel(name: &str, enabled: bool) -> common::notify::NotifyChannel {
+    use common::notify::*;
+    NotifyChannel {
+        id: format!("{name}-id"),
+        name: name.into(),
+        kind: ChannelKind::Webhook,
+        enabled,
+        config: ChannelConfig::Webhook {
+            url: "https://hooks.example.test/…".into(),
+            secret: None,
+            headers: Vec::new(),
+        },
+        target: "hooks.example.test/…".into(),
+        created_at: Timestamp::default(),
+        last_test: Some(ChannelTest {
+            ok: true,
+            at: Timestamp::default(),
+            error: None,
+            latency_ms: Some(42),
+        }),
+    }
+}
+
+fn notify_fixture() -> App {
+    use common::notify::*;
+    let mut app = fixture();
+    app.screen = Screen::Notifications;
+    app.notify.channels = vec![
+        notify_channel("fixture-hook", true),
+        notify_channel("fixture-quiet", false),
+    ];
+    app.notify.rules = vec![NotifyRule {
+        id: "fixture-rule".into(),
+        channel_id: "fixture-hook-id".into(),
+        scope: RuleScope::Project {
+            id: "fixture-project".into(),
+        },
+        scope_label: "fixture-project".into(),
+        preset: Some("deploys".into()),
+        events: preset("deploys").unwrap().events(),
+        enabled: true,
+        dedupe_secs: 300,
+        max_per_hour: 30,
+        created_at: Timestamp::default(),
+    }];
+    app.notify.deliveries = vec![
+        NotifyDelivery {
+            id: 2,
+            at: Timestamp::default(),
+            channel_id: "fixture-hook-id".into(),
+            channel_name: "fixture-hook".into(),
+            rule_id: Some("fixture-rule".into()),
+            event: Some(NotifyEvent::DeployFailed),
+            subject: "fixture-project/fixture-env/fixture-web #27".into(),
+            title: "fixture-web failed to deploy".into(),
+            status: DeliveryStatus::Failed,
+            attempts: 3,
+            error: Some("fixture refused".into()),
+            latency_ms: None,
+        },
+        NotifyDelivery {
+            id: 1,
+            at: Timestamp::default(),
+            channel_id: "fixture-hook-id".into(),
+            channel_name: "fixture-hook".into(),
+            rule_id: None,
+            event: None,
+            subject: "instance".into(),
+            title: "Test message".into(),
+            status: DeliveryStatus::Sent,
+            attempts: 1,
+            error: None,
+            latency_ms: Some(42),
+        },
+    ];
+    app
+}
+
+#[test]
+fn notifications_tabs_rows_detail_and_key_bar_have_targets() {
+    use crate::notify::Section;
+    let mut app = notify_fixture();
+    let buf = draw(&app, 160, 40);
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("fixture-hook", Hit::Item(0)),
+            ("fixture-quiet", Hit::Item(1)),
+        ],
+    );
+    assert_hit(&app, label(&buf, "LAST TEST"), Hit::List(List::Notify));
+    let rules_tab = assert_hit(
+        &app,
+        label(&buf, "Rules"),
+        Hit::NotifySection(Section::Rules),
+    );
+    assert_hit(
+        &app,
+        label(&buf, "Delivery log"),
+        Hit::NotifySection(Section::Deliveries),
+    );
+    assert_hit(&app, label(&buf, "e disable"), char_key('e'));
+    let y = buf.area.bottom() - 1;
+    for (text, hit) in [
+        ("tab section", key(KeyCode::Tab)),
+        ("a add", char_key('a')),
+        ("⏎ edit", key(KeyCode::Enter)),
+        ("t test", char_key('t')),
+        ("x delete", char_key('x')),
+    ] {
+        let rect = label_on(&buf, y, text).unwrap_or_else(|| panic!("key bar {text:?}"));
+        assert_hit(&app, rect, hit);
+    }
+    let quiet = label(&buf, "fixture-quiet");
+    click(&mut app, Position::new(quiet.x, quiet.y));
+    assert_eq!(app.notify.channel_row, 1);
+    let buf = draw(&app, 160, 40);
+    assert_hit(&app, label(&buf, "e enable"), char_key('e'));
+
+    click(&mut app, rules_tab);
+    assert_eq!(app.notify.section, Section::Rules);
+    let buf = draw(&app, 160, 40);
+    assert_rows(&app, &buf, &[("dedupe 5m · 30/h", Hit::Item(0))]);
+    assert_hit(&app, label(&buf, "LIMITS"), Hit::List(List::Notify));
+
+    app.notify.section = Section::Deliveries;
+    let buf = draw(&app, 160, 40);
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("deploy.failed", Hit::Item(0)),
+            ("test message", Hit::Item(1)),
+        ],
+    );
+    let failures = assert_hit(&app, label(&buf, "f failures only"), char_key('f'));
+    assert_hit(&app, label(&buf, "r refresh"), char_key('r'));
+    click(&mut app, failures);
+    assert!(app.notify.failures_only);
+    assert_eq!(app.notify.deliveries().len(), 1);
+}
+
+#[tokio::test]
+async fn settings_key_bar_links_to_notifications() {
+    let mut app = fixture();
+    app.screen = Screen::Settings;
+    app.settings.settings = Some(InstanceSettings {
+        version: "1.0.0".into(),
+        hostname: "fixture-host".into(),
+        public_ip: None,
+        public_ip_override: None,
+        listen: "127.0.0.1:7700".into(),
+        data_dir: "/fixture".into(),
+        data_dir_size: 0,
+        manage_proxy: true,
+        proxy: ProxyStatus::Running,
+        proxy_image: "example:1".into(),
+        docker_version: None,
+        ssh_public_key: None,
+        reclaimable: None,
+        supervised: false,
+        domain: None,
+        domain_verified: false,
+    });
+    let buf = draw(&app, 160, 40);
+    let link = assert_hit(&app, label(&buf, "n notifications"), char_key('n'));
+    click(&mut app, link);
+    assert_eq!(app.screen, Screen::Notifications);
+}
+
+#[test]
+fn rule_dialog_registers_its_controls_and_clicks_pick_presets_events_and_scope() {
+    use crate::notify::RuleFocus;
+    use common::notify::{NotifyEvent, RuleScope};
+    let mut app = notify_fixture();
+    app.rule_dialog(false);
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Add rule", |hit| {
+        matches!(
+            hit,
+            Hit::RuleField(_)
+                | Hit::RuleChoice(..)
+                | Hit::Preset(0..=4)
+                | Hit::NotifyEvent(_)
+                | Hit::List(List::Rule)
+                | Hit::Key(..)
+        )
+    });
+    assert_hit(&app, label(&buf, "⏎ add rule"), key(KeyCode::Enter));
+    assert_hit(&app, label(&buf, "esc cancel"), key(KeyCode::Esc));
+    let deploys = assert_hit(
+        &app,
+        label(&buf, "the whole deploy lifecycle"),
+        Hit::Preset(1),
+    );
+    click(&mut app, deploys);
+    let event = label(&buf, "Deploy succeeded");
+    assert_hit(&app, event, Hit::NotifyEvent(NotifyEvent::DeploySucceeded));
+    click(&mut app, Position::new(event.x, event.y));
+    let chip = assert_hit(
+        &app,
+        label(&buf, "10/h"),
+        Hit::RuleChoice(RuleFocus::Rate, 1),
+    );
+    click(&mut app, chip);
+    {
+        let Some(Overlay::Rule(d)) = &app.overlay else {
+            panic!("rule dialog closed")
+        };
+        assert_eq!(d.preset, Some("deploys"));
+        assert!(!d.events.contains(&NotifyEvent::DeploySucceeded));
+        assert!(d.events.contains(&NotifyEvent::DeployFailed));
+        assert_eq!(d.rate, 10);
+        assert_eq!(d.focus, RuleFocus::Rate);
+    }
+
+    let scope = assert_hit(
+        &app,
+        label(&buf, "only events inside it"),
+        Hit::RuleField(RuleFocus::Scope),
+    );
+    click(&mut app, scope);
+    assert!(matches!(&app.overlay, Some(Overlay::Picker(_))));
+    let buf = draw(&app, 160, 40);
+    let project = assert_hit(
+        &app,
+        label(&buf, "fixture-project/fixture-env"),
+        Hit::PickRow(2),
+    );
+    click(&mut app, project);
+    click(&mut app, project);
+    let Some(Overlay::Rule(d)) = &app.overlay else {
+        panic!("picker did not return to the rule dialog")
+    };
+    assert_eq!(
+        d.scope,
+        RuleScope::Environment {
+            id: "fixture-env".into()
+        }
+    );
+    assert_eq!(d.scope_label, "fixture-project/fixture-env");
+}
+
+#[test]
+fn channel_wizard_steps_register_only_their_controls() {
+    use crate::form::FormKind;
+    use common::notify::{ChannelKind, DeliveryStatus, NotifyDelivery};
+    let mut app = notify_fixture();
+    app.form_notify_kind();
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Add channel", |hit| {
+        matches!(
+            hit,
+            Hit::FormField(0..=3) | Hit::FormChoice(0..=3, _) | Hit::List(List::Form)
+        ) || [
+            key(KeyCode::Tab),
+            Hit::Key(KeyCode::BackTab, KeyModifiers::SHIFT),
+            key(KeyCode::Esc),
+            key(KeyCode::Enter),
+        ]
+        .contains(&hit)
+    });
+    let ntfy = assert_hit(&app, label(&buf, "ntfy"), Hit::FormChoice(2, 0));
+    click(&mut app, ntfy);
+    let next = assert_hit(&app, label(&buf, "⏎ next"), key(KeyCode::Enter));
+    click(&mut app, next);
+    let Some(Overlay::Form(form)) = &app.overlay else {
+        panic!("expected the settings step")
+    };
+    assert!(matches!(
+        form.kind,
+        FormKind::NotifyChannel {
+            kind: ChannelKind::Ntfy,
+            channel_id: None,
+            ..
+        }
+    ));
+    let buf = draw(&app, 160, 40);
+    assert_hit(&app, label(&buf, "⏎ next: test"), key(KeyCode::Enter));
+    label(&buf, "2 settings");
+
+    let Some(Overlay::Form(form)) = app.overlay.take() else {
+        unreachable!()
+    };
+    app.overlay = Some(Overlay::ChannelTest(crate::notify::ChannelTestStep {
+        channel: notify_channel("fixture-hook", false),
+        form: Box::new(form),
+        created: true,
+        result: Some(Ok(NotifyDelivery {
+            id: 3,
+            at: Timestamp::default(),
+            channel_id: "fixture-hook-id".into(),
+            channel_name: "fixture-hook".into(),
+            rule_id: None,
+            event: None,
+            subject: "instance".into(),
+            title: "Test message".into(),
+            status: DeliveryStatus::Sent,
+            attempts: 1,
+            error: None,
+            latency_ms: Some(42),
+        })),
+        saving: false,
+    }));
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Add channel", |hit| matches!(hit, Hit::Key(..)));
+    assert_hit(&app, label(&buf, "⏎ save"), key(KeyCode::Enter));
+    assert_hit(&app, label(&buf, "t send again"), char_key('t'));
+    assert_hit(&app, label(&buf, "esc cancel"), key(KeyCode::Esc));
+    let back = assert_hit(
+        &app,
+        label(&buf, "⇧tab back"),
+        Hit::Key(KeyCode::BackTab, KeyModifiers::SHIFT),
+    );
+    click(&mut app, back);
+    assert!(matches!(&app.overlay, Some(Overlay::Form(_))));
+}

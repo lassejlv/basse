@@ -5,10 +5,12 @@ use crate::db::{NewService, ServiceRecord, new_id};
 use crate::deploy;
 use crate::docker::{self, RunState};
 use crate::error::{ApiResult, AppError, bad_request, conflict};
+use crate::notify::Event;
 use crate::state::AppState;
 use bollard::query_parameters::StopContainerOptions;
 use chrono::Utc;
 use common::api::{CreateService, UpdateService, VolumeSpec};
+use common::notify::NotifyEvent;
 use common::*;
 use futures_util::future::join_all;
 use std::collections::{HashMap, HashSet};
@@ -268,6 +270,16 @@ pub async fn create(state: &AppState, body: CreateService) -> ApiResult<ServiceR
             Some(service.source.label()),
         )
         .await;
+    if let Source::Database { kind, version } = &service.source {
+        state
+            .notify_service(
+                &service,
+                Event::new(NotifyEvent::DatabaseCreated)
+                    .detail(format!("{kind} {version}"))
+                    .hint(format!("{} db info {}", brand::CLI_BIN, service.name)),
+            )
+            .await;
+    }
     record(state, &service.id).await
 }
 
@@ -429,6 +441,9 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
             state
                 .service_activity(svc, ActivityLevel::Info, "Service stopped".into(), None)
                 .await;
+            state
+                .notify_service(svc, Event::new(NotifyEvent::ServiceStopped))
+                .await;
         }
         Power::Start | Power::Restart => {
             state.db.set_stopped(id, false).await?;
@@ -469,6 +484,12 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
             state
                 .service_activity(svc, ActivityLevel::Info, format!("Service {verb}"), None)
                 .await;
+            let kind = if matches!(action, Power::Start) {
+                NotifyEvent::ServiceStarted
+            } else {
+                NotifyEvent::ServiceRestarted
+            };
+            state.notify_service(svc, Event::new(kind)).await;
         }
     }
     Ok(())

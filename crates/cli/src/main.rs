@@ -1,6 +1,7 @@
 //! Command line interface. With no subcommand it opens the TUI.
 
 mod instance;
+mod notify;
 mod output;
 mod resolve;
 mod sources;
@@ -161,6 +162,9 @@ enum Cmd {
     /// Encrypted backups of the daemon itself, and the domain its API is served on.
     #[command(subcommand)]
     Instance(InstanceCmd),
+    /// Notifications: channels, rules with presets, and the delivery log.
+    #[command(subcommand)]
+    Notify(notify::NotifyCmd),
     /// Git sources services clone from: GitHub Apps and tokens.
     #[command(subcommand, alias = "sources")]
     Source(sources::SourceCmd),
@@ -793,6 +797,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Secrets(cmd) => secrets(&c, cmd, json).await,
         Cmd::Storage(cmd) => storage(&c, cmd, json).await,
         Cmd::Instance(cmd) => instance(&c, cmd, json).await,
+        Cmd::Notify(cmd) => notify::run(&c, cmd, json).await,
         Cmd::Source(cmd) => sources::source(&c, cmd, json).await,
     }
 }

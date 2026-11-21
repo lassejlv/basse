@@ -5,11 +5,13 @@ use super::{Json, no_content};
 use crate::backup_store::BackupStore;
 use crate::db::new_id;
 use crate::error::{ApiResult, AppError, bad_request, conflict};
+use crate::notify::Event;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::Utc;
 use common::api::{CreateStorage, UpdateStorage};
+use common::notify::NotifyEvent;
 use common::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -179,9 +181,15 @@ pub async fn test(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<StorageTest>> {
-    let mut conn = storage(&state, &id).await?;
+    let conn = storage(&state, &id).await?;
+    Ok(Json(run_storage_test(&state, conn).await))
+}
+
+/// Puts, reads and deletes a probe object, records the outcome on the connection and in the
+/// activity feed, and announces a failure.
+pub async fn run_storage_test(state: &AppState, mut conn: StorageConnection) -> StorageTest {
     let started = Instant::now();
-    let outcome = probe(&state, &conn).await;
+    let outcome = probe(state, &conn).await;
     let result = StorageTest {
         ok: outcome.is_ok(),
         at: Utc::now(),
@@ -191,7 +199,18 @@ pub async fn test(
         error: outcome.err().map(|e| format!("{e:#}")),
     };
     conn.last_test = Some(result.clone());
-    state.db.save_storage(&conn).await?;
+    if let Err(e) = state.db.save_storage(&conn).await {
+        tracing::warn!("cannot record the storage test: {e:#}");
+    }
+    if let Some(error) = &result.error {
+        state.notify(
+            Event::new(NotifyEvent::StorageUnreachable)
+                .about(conn.name.clone(), conn.id.clone())
+                .detail(error.clone())
+                .field("Bucket", format!("{}/{}", conn.endpoint, conn.bucket))
+                .hint(format!("{} storage test {}", brand::CLI_BIN, conn.name)),
+        );
+    }
     let (level, message) = if result.ok {
         (
             ActivityLevel::Success,
@@ -213,7 +232,7 @@ pub async fn test(
                 .or_else(|| result.latency_ms.map(|ms| format!("{ms} ms"))),
         )
         .await;
-    Ok(Json(result))
+    result
 }
 
 async fn probe(state: &AppState, conn: &StorageConnection) -> anyhow::Result<()> {

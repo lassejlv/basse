@@ -10,6 +10,7 @@ use crate::deploy;
 use crate::docker::{self, RunState};
 use crate::error::{ApiResult, AppError, bad_request, conflict};
 use crate::host;
+use crate::notify::Event;
 use crate::services;
 use crate::state::AppState;
 use anyhow::{Context as _, Result, bail};
@@ -17,6 +18,7 @@ use async_compression::tokio::bufread::GzipDecoder;
 use async_compression::tokio::write::GzipEncoder;
 use bollard::Docker;
 use chrono::Utc;
+use common::notify::NotifyEvent;
 use common::*;
 use rand::Rng as _;
 use std::collections::HashMap;
@@ -481,6 +483,14 @@ pub async fn rotate_password(state: &Arc<AppState>, rec: &ServiceRecord) -> ApiR
             Some("redeploy services that copied the old connection URL".into()),
         )
         .await;
+    state
+        .notify_service(
+            &t.service,
+            Event::new(NotifyEvent::DatabasePasswordRotated)
+                .detail("Redeploy services that copied the old connection URL.")
+                .hint(format!("{} db info {}", brand::CLI_BIN, t.service.name)),
+        )
+        .await;
     if t.kind == DatabaseKind::Redis {
         // The server reads `$REDIS_PASSWORD` at start; recreate the container so a restart keeps
         // the new password.
@@ -611,6 +621,15 @@ async fn run_backup(state: &AppState, t: &Target, mut backup: Backup, script: &s
                     Some(format!("{} ({})", backup.file_name, human_size(size))),
                 )
                 .await;
+            state
+                .notify_service(
+                    &t.service,
+                    Event::new(NotifyEvent::DatabaseBackupSucceeded)
+                        .detail(format!("{} ({})", backup.file_name, human_size(size)))
+                        .field("Trigger", backup.trigger.as_str())
+                        .field("Storage", backup.storage.as_str()),
+                )
+                .await;
         }
         Err(e) => {
             let message = format!("{e:#}");
@@ -621,7 +640,17 @@ async fn run_backup(state: &AppState, t: &Target, mut backup: Backup, script: &s
                     &t.service,
                     ActivityLevel::Error,
                     "Backup failed".into(),
-                    Some(message),
+                    Some(message.clone()),
+                )
+                .await;
+            state
+                .notify_service(
+                    &t.service,
+                    Event::new(NotifyEvent::DatabaseBackupFailed)
+                        .detail(message)
+                        .field("Trigger", backup.trigger.as_str())
+                        .field("Storage", backup.storage.as_str())
+                        .hint(format!("{} db backups {}", brand::CLI_BIN, t.service.name)),
                 )
                 .await;
         }
@@ -730,6 +759,12 @@ pub async fn restore(state: &Arc<AppState>, backup: &Backup) -> ApiResult<()> {
                     Some(backup.file_name.clone()),
                 )
                 .await;
+            state
+                .notify_service(
+                    &t.service,
+                    Event::new(NotifyEvent::DatabaseRestored).detail(backup.file_name.clone()),
+                )
+                .await;
             Ok(())
         }
         Err(e) => {
@@ -739,6 +774,13 @@ pub async fn restore(state: &Arc<AppState>, backup: &Backup) -> ApiResult<()> {
                     ActivityLevel::Error,
                     "Restore failed".into(),
                     Some(format!("{e:#}")),
+                )
+                .await;
+            state
+                .notify_service(
+                    &t.service,
+                    Event::new(NotifyEvent::DatabaseRestoreFailed)
+                        .detail(format!("{}: {e:#}", backup.file_name)),
                 )
                 .await;
             Err(e

@@ -40,6 +40,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Settings => settings(frame, body, app),
         Screen::Secrets => secrets(frame, body, app),
         Screen::Storage => storage(frame, body, app),
+        Screen::Notifications => crate::notify::render(frame, body, app),
         Screen::Sources => sources(frame, body, app),
         Screen::Domain => domain(frame, body, app),
     }
@@ -68,6 +69,14 @@ pub fn render(frame: &mut Frame, app: &App) {
         Some(Overlay::Picker(p)) => {
             dim(frame, area);
             p.render(frame, area, app.tick);
+        }
+        Some(Overlay::Rule(d)) => {
+            dim(frame, area);
+            d.render(frame, area, app.tick);
+        }
+        Some(Overlay::ChannelTest(step)) => {
+            dim(frame, area);
+            crate::notify::render_test_step(frame, area, step, app.tick);
         }
         Some(Overlay::GithubSetup(setup)) => {
             dim(frame, area);
@@ -100,7 +109,7 @@ fn dim(frame: &mut Frame, area: Rect) {
 }
 
 /// A rounded panel with its title set into the top border.
-fn panel<'a>(title: Vec<Span<'a>>, right: Option<Line<'a>>, focused: bool) -> Block<'a> {
+pub(crate) fn panel<'a>(title: Vec<Span<'a>>, right: Option<Line<'a>>, focused: bool) -> Block<'a> {
     let border = if focused {
         theme::muted()
     } else {
@@ -123,7 +132,7 @@ fn panel<'a>(title: Vec<Span<'a>>, right: Option<Line<'a>>, focused: bool) -> Bl
     block
 }
 
-fn title(text: &str, focused: bool) -> Vec<Span<'static>> {
+pub(crate) fn title(text: &str, focused: bool) -> Vec<Span<'static>> {
     vec![Span::styled(
         text.to_string(),
         if focused {
@@ -135,7 +144,7 @@ fn title(text: &str, focused: bool) -> Vec<Span<'static>> {
 }
 
 /// Body area of a panel with one column of breathing room on each side.
-fn inside(block: &Block, area: Rect) -> Rect {
+pub(crate) fn inside(block: &Block, area: Rect) -> Rect {
     block.inner(area).inner(Margin::new(1, 0))
 }
 
@@ -419,6 +428,7 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("x", "delete"),
             ("s", "secrets"),
             ("o", "storage"),
+            ("n", "notifications"),
         ],
         Screen::Settings => vec![
             ("tab", "backups"),
@@ -467,6 +477,61 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("t", "test"),
             ("x", "delete"),
         ],
+        Screen::Notifications => {
+            let view = &app.notify;
+            match view.section {
+                crate::notify::Section::Channels => {
+                    let toggle = match view.selected_channel() {
+                        Some(c) if !c.enabled => "enable",
+                        _ => "disable",
+                    };
+                    vec![
+                        ("tab", "section"),
+                        ("↑↓", "move"),
+                        ("a", "add"),
+                        ("⏎", "edit"),
+                        ("t", "test"),
+                        ("e", toggle),
+                        ("x", "delete"),
+                    ]
+                }
+                crate::notify::Section::Rules => {
+                    let toggle = match view.selected_rule() {
+                        Some(r) if !r.enabled => "enable",
+                        _ => "disable",
+                    };
+                    vec![
+                        ("tab", "section"),
+                        ("↑↓", "move"),
+                        ("a", "add"),
+                        ("⏎", "edit"),
+                        ("e", toggle),
+                        ("x", "delete"),
+                    ]
+                }
+                crate::notify::Section::Deliveries => vec![
+                    ("tab", "section"),
+                    ("↑↓", "move"),
+                    ("r", "refresh"),
+                    (
+                        "f",
+                        if view.failures_only {
+                            "show all"
+                        } else {
+                            "failures only"
+                        },
+                    ),
+                    (
+                        "c",
+                        if view.channel_filter.is_some() {
+                            "all channels"
+                        } else {
+                            "this channel only"
+                        },
+                    ),
+                ],
+            }
+        }
         Screen::Sources => {
             let mut keys = vec![
                 ("n", "new GitHub App"),
@@ -793,7 +858,7 @@ fn env_state(env: &EnvironmentNode) -> ServiceState {
 }
 
 /// Clickable rows of a table drawn in `inner` with a one-line header and `offset` rows scrolled away.
-fn row_hits(inner: Rect, rows: usize, offset: usize, hit: fn(usize) -> Hit) {
+pub(crate) fn row_hits(inner: Rect, rows: usize, offset: usize, hit: fn(usize) -> Hit) {
     for i in offset..rows {
         let y = inner.y + 1 + (i - offset) as u16;
         if y >= inner.bottom() {
@@ -803,7 +868,7 @@ fn row_hits(inner: Rect, rows: usize, offset: usize, hit: fn(usize) -> Hit) {
     }
 }
 
-fn scroll_offset(selected: usize, height: usize) -> usize {
+pub(crate) fn scroll_offset(selected: usize, height: usize) -> usize {
     (selected + 1).saturating_sub(height)
 }
 
@@ -1723,7 +1788,7 @@ fn hint_at(frame: &mut Frame, area: Rect, column: u16, row: u16, key: &str, labe
     mouse::hints(frame, rect, &[(key, label)], Alignment::Left);
 }
 
-fn rule_line(width: u16) -> Line<'static> {
+pub(crate) fn rule_line(width: u16) -> Line<'static> {
     Line::styled("─".repeat(width as usize), theme::fg(theme::LINE))
 }
 
@@ -3077,7 +3142,7 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
 
 // Overlays
 
-fn dialog(
+pub(crate) fn dialog(
     frame: &mut Frame,
     area: Rect,
     width: u16,
@@ -3428,7 +3493,7 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
 const SETTING_KEY_W: usize = 14;
 
 /// A key/value row of a settings panel. `hint` is a key shown, and clickable, at the right edge.
-fn setting_row(
+pub(crate) fn setting_row(
     frame: &mut Frame,
     line: Rect,
     key: &str,
@@ -3466,7 +3531,7 @@ fn setting_row(
 }
 
 /// The rows of a panel body, one line each.
-fn lines_of(area: Rect, n: u16) -> Vec<Rect> {
+pub(crate) fn lines_of(area: Rect, n: u16) -> Vec<Rect> {
     (0..n)
         .map(|i| {
             Rect::new(

@@ -2,6 +2,7 @@
 
 use anyhow::{Context as _, Result};
 use chrono::Utc;
+use common::notify::*;
 use common::*;
 use rand::Rng as _;
 use serde::Serialize;
@@ -46,6 +47,20 @@ pub struct ScheduleRecord {
     pub schedule: BackupSchedule,
     /// Also set when the schedule is enabled, so enabling never triggers a catch-up run.
     pub last_run_at: Option<Timestamp>,
+}
+
+/// What the TLS monitor last saw on an HTTPS domain.
+#[derive(Debug, Clone)]
+pub struct TlsRecord {
+    pub host: String,
+    /// Hex serial of the certificate.
+    pub serial: String,
+    pub not_before: Timestamp,
+    pub not_after: Timestamp,
+    /// `tls.expiring_soon` was sent for this certificate.
+    pub expiry_warned: bool,
+    /// `tls.certificate_invalid` was sent since the last valid certificate.
+    pub invalid_reported: bool,
 }
 
 /// A git source plus the stored facts the API does not return.
@@ -242,7 +257,9 @@ impl Db {
     }
 
     pub async fn delete_project(&self, id: &str) -> Result<()> {
-        self.execute("DELETE FROM projects WHERE id = $1", id).await
+        self.execute("DELETE FROM projects WHERE id = $1", id)
+            .await?;
+        self.prune_orphan_rules().await
     }
 
     pub async fn environments(&self) -> Result<Vec<Environment>> {
@@ -281,7 +298,8 @@ impl Db {
 
     pub async fn delete_environment(&self, id: &str) -> Result<()> {
         self.execute("DELETE FROM environments WHERE id = $1", id)
-            .await
+            .await?;
+        self.prune_orphan_rules().await
     }
 
     // Services
@@ -419,7 +437,9 @@ impl Db {
     }
 
     pub async fn delete_service(&self, id: &str) -> Result<()> {
-        self.execute("DELETE FROM services WHERE id = $1", id).await
+        self.execute("DELETE FROM services WHERE id = $1", id)
+            .await?;
+        self.prune_orphan_rules().await
     }
 
     pub async fn env(&self, service_id: &str) -> Result<Vec<EnvVar>> {
@@ -448,24 +468,27 @@ impl Db {
     // Domains
 
     pub async fn domains(&self, service_id: &str) -> Result<Vec<Domain>> {
-        self.domain_query("WHERE service_id = $1 ORDER BY created_at, seq", service_id)
-            .await
+        self.domain_query(
+            "WHERE service_id = $1 ORDER BY created_at, seq",
+            &[service_id],
+        )
+        .await
     }
 
     pub async fn domain(&self, id: &str) -> Result<Option<Domain>> {
         Ok(self
-            .domain_query("WHERE id = $1", id)
+            .domain_query("WHERE id = $1", &[id])
             .await?
             .into_iter()
             .next())
     }
 
-    async fn domain_query(&self, tail: &str, bind: &str) -> Result<Vec<Domain>> {
+    async fn domain_query(&self, tail: &str, binds: &[&str]) -> Result<Vec<Domain>> {
         self.fetch(
             format!(
                 "SELECT id, service_id, host, port, tls, created_at, compose_service FROM domains {tail}"
             ),
-            &[bind],
+            binds,
             |row| {
                 Ok(Domain {
                     id: row.try_get(0)?,
@@ -1413,6 +1436,292 @@ impl Db {
         Ok(())
     }
 
+    // Notifications
+
+    pub async fn notify_channels(&self) -> Result<Vec<NotifyChannel>> {
+        self.fetch(
+            format!("{CHANNEL_SELECT} ORDER BY created_at, seq"),
+            &[],
+            channel_from_row,
+        )
+        .await
+    }
+
+    pub async fn notify_channel(&self, id: &str) -> Result<Option<NotifyChannel>> {
+        self.fetch_one(
+            format!("{CHANNEL_SELECT} WHERE id = $1"),
+            &[id],
+            channel_from_row,
+        )
+        .await
+    }
+
+    pub async fn notify_channel_name_taken(&self, name: &str) -> Result<bool> {
+        self.exists("SELECT 1 FROM notify_channels WHERE name = $1", &[name])
+            .await
+    }
+
+    /// The channel's full config, sealed with the master key.
+    pub async fn notify_channel_sealed(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        Ok(
+            sqlx::query_scalar("SELECT sealed FROM notify_channels WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Inserts or updates a channel. `sealed` replaces the stored config when given; it is
+    /// required for a new channel.
+    pub async fn save_notify_channel(
+        &self,
+        c: &NotifyChannel,
+        sealed: Option<&[u8]>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO notify_channels (id, name, kind, enabled, config, sealed, created_at, last_test)
+             VALUES ($1, $2, $3, $4, $5, COALESCE($6, ''::bytea), $7, $8)
+             ON CONFLICT (id) DO UPDATE SET name = $2, kind = $3, enabled = $4, config = $5,
+                    sealed = COALESCE($6, notify_channels.sealed), last_test = $8",
+        )
+        .bind(&c.id)
+        .bind(&c.name)
+        .bind(enum_str(&c.kind))
+        .bind(c.enabled)
+        .bind(Json(&c.config))
+        .bind(sealed)
+        .bind(c.created_at)
+        .bind(c.last_test.as_ref().map(Json))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_notify_channel(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM notify_channels WHERE id = $1", id)
+            .await
+    }
+
+    /// Every rule, with an empty `scope_label` for the caller to fill in.
+    pub async fn notify_rules(&self) -> Result<Vec<NotifyRule>> {
+        self.fetch(
+            format!("{RULE_SELECT} ORDER BY created_at, seq"),
+            &[],
+            rule_from_row,
+        )
+        .await
+    }
+
+    pub async fn notify_rule(&self, id: &str) -> Result<Option<NotifyRule>> {
+        self.fetch_one(format!("{RULE_SELECT} WHERE id = $1"), &[id], rule_from_row)
+            .await
+    }
+
+    pub async fn save_notify_rule(&self, r: &NotifyRule) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO notify_rules (id, channel_id, scope_type, scope_id, preset, events, enabled,
+                    dedupe_secs, max_per_hour, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (id) DO UPDATE SET channel_id = $2, scope_type = $3, scope_id = $4,
+                    preset = $5, events = $6, enabled = $7, dedupe_secs = $8, max_per_hour = $9",
+        )
+        .bind(&r.id)
+        .bind(&r.channel_id)
+        .bind(r.scope.kind())
+        .bind(r.scope.id())
+        .bind(&r.preset)
+        .bind(Json(&r.events))
+        .bind(r.enabled)
+        .bind(i64::from(r.dedupe_secs))
+        .bind(i64::from(r.max_per_hour))
+        .bind(r.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_notify_rule(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM notify_rules WHERE id = $1", id)
+            .await
+    }
+
+    /// Removes rules scoped to a project, environment or service that no longer exists.
+    async fn prune_orphan_rules(&self) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM notify_rules WHERE
+                (scope_type = 'project' AND scope_id NOT IN (SELECT id FROM projects))
+             OR (scope_type = 'environment' AND scope_id NOT IN (SELECT id FROM environments))
+             OR (scope_type = 'service' AND scope_id NOT IN (SELECT id FROM services))",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Records a delivery attempt and returns its id.
+    pub async fn insert_delivery(&self, d: &NotifyDelivery) -> Result<i64> {
+        let id = sqlx::query_scalar(
+            "INSERT INTO notify_deliveries (at, channel_id, rule_id, event, subject, title, status,
+                    attempts, error, latency_ms)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
+        )
+        .bind(d.at)
+        .bind(&d.channel_id)
+        .bind(&d.rule_id)
+        .bind(d.event.map(|e| e.id()))
+        .bind(&d.subject)
+        .bind(&d.title)
+        .bind(d.status.as_str())
+        .bind(i32::try_from(d.attempts).unwrap_or(i32::MAX))
+        .bind(&d.error)
+        .bind(d.latency_ms.and_then(|ms| i64::try_from(ms).ok()))
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(id)
+    }
+
+    pub async fn update_delivery(&self, d: &NotifyDelivery) -> Result<()> {
+        sqlx::query(
+            "UPDATE notify_deliveries SET status = $2, attempts = $3, error = $4, latency_ms = $5
+             WHERE id = $1",
+        )
+        .bind(d.id)
+        .bind(d.status.as_str())
+        .bind(i32::try_from(d.attempts).unwrap_or(i32::MAX))
+        .bind(&d.error)
+        .bind(d.latency_ms.and_then(|ms| i64::try_from(ms).ok()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Newest first, optionally of one channel or rule.
+    pub async fn deliveries(
+        &self,
+        limit: usize,
+        channel_id: Option<&str>,
+        rule_id: Option<&str>,
+    ) -> Result<Vec<NotifyDelivery>> {
+        let rows = sqlx::query(
+            "SELECT d.id, d.at, d.channel_id, c.name, d.rule_id, d.event, d.subject, d.title,
+                    d.status, d.attempts, d.error, d.latency_ms
+             FROM notify_deliveries d JOIN notify_channels c ON c.id = d.channel_id
+             WHERE ($1::text IS NULL OR d.channel_id = $1) AND ($2::text IS NULL OR d.rule_id = $2)
+             ORDER BY d.id DESC LIMIT $3",
+        )
+        .bind(channel_id)
+        .bind(rule_id)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(NotifyDelivery {
+                    id: row.try_get(0)?,
+                    at: row.try_get(1)?,
+                    channel_id: row.try_get(2)?,
+                    channel_name: row.try_get(3)?,
+                    rule_id: row.try_get(4)?,
+                    event: row
+                        .try_get::<Option<String>, _>(5)?
+                        .map(|e| e.parse().map_err(|e: String| decode_error(5, e)))
+                        .transpose()?,
+                    subject: row.try_get(6)?,
+                    title: row.try_get(7)?,
+                    status: row
+                        .try_get::<String, _>(8)?
+                        .parse()
+                        .map_err(|e: String| decode_error(8, e))?,
+                    attempts: u32::try_from(row.try_get::<i32, _>(9)?).unwrap_or(0),
+                    error: row.try_get(10)?,
+                    latency_ms: row
+                        .try_get::<Option<i64>, _>(11)?
+                        .and_then(|ms| u64::try_from(ms).ok()),
+                })
+            })
+            .collect::<sqlx::Result<_>>()
+            .map_err(Into::into)
+    }
+
+    /// Keeps the newest `keep` deliveries.
+    pub async fn prune_deliveries(&self, keep: i64) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM notify_deliveries WHERE id <= (SELECT id FROM notify_deliveries
+                    ORDER BY id DESC OFFSET $1 LIMIT 1)",
+        )
+        .bind(keep)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT value FROM daemon_meta WHERE key = $1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    pub async fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO daemon_meta (key, value) VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = $2",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn tls_certificate(&self, host: &str) -> Result<Option<TlsRecord>> {
+        let row = sqlx::query(
+            "SELECT host, serial, not_before, not_after, expiry_warned, invalid_reported
+             FROM tls_certificates WHERE host = $1",
+        )
+        .bind(host)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(TlsRecord {
+                host: row.try_get(0)?,
+                serial: row.try_get(1)?,
+                not_before: row.try_get(2)?,
+                not_after: row.try_get(3)?,
+                expiry_warned: row.try_get(4)?,
+                invalid_reported: row.try_get(5)?,
+            })
+        })
+        .transpose()
+        .map_err(|e: sqlx::Error| e.into())
+    }
+
+    pub async fn save_tls_certificate(&self, r: &TlsRecord) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO tls_certificates (host, serial, not_before, not_after, expiry_warned,
+                    invalid_reported, checked_at)
+             VALUES ($1, $2, $3, $4, $5, $6, now())
+             ON CONFLICT (host) DO UPDATE SET serial = $2, not_before = $3, not_after = $4,
+                    expiry_warned = $5, invalid_reported = $6, checked_at = now()",
+        )
+        .bind(&r.host)
+        .bind(&r.serial)
+        .bind(r.not_before)
+        .bind(r.not_after)
+        .bind(r.expiry_warned)
+        .bind(r.invalid_reported)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Every HTTPS domain with the service it routes to.
+    pub async fn tls_domains(&self) -> Result<Vec<Domain>> {
+        self.domain_query("WHERE tls ORDER BY host", &[]).await
+    }
+
     // Activity
 
     pub async fn insert_activity(&self, a: &Activity) -> Result<()> {
@@ -1563,6 +1872,52 @@ fn instance_backup_from_row(row: &PgRow) -> sqlx::Result<InstanceBackup> {
         error: row.try_get(7)?,
         created_at: row.try_get(8)?,
         finished_at: row.try_get(9)?,
+    })
+}
+
+const CHANNEL_SELECT: &str =
+    "SELECT id, name, kind, enabled, config, created_at, last_test FROM notify_channels";
+
+fn channel_from_row(row: &PgRow) -> sqlx::Result<NotifyChannel> {
+    let config: ChannelConfig = col_json(row, 4)?;
+    Ok(NotifyChannel {
+        id: row.try_get(0)?,
+        name: row.try_get(1)?,
+        kind: col_enum(row, 2)?,
+        enabled: row.try_get(3)?,
+        target: config.target(),
+        config,
+        created_at: row.try_get(5)?,
+        last_test: row
+            .try_get::<Option<Json<ChannelTest>>, _>(6)?
+            .map(|Json(t)| t),
+    })
+}
+
+const RULE_SELECT: &str = "SELECT id, channel_id, scope_type, scope_id, preset, events, enabled,
+        dedupe_secs, max_per_hour, created_at FROM notify_rules";
+
+fn rule_from_row(row: &PgRow) -> sqlx::Result<NotifyRule> {
+    let scope_type: String = row.try_get(2)?;
+    let scope_id: Option<String> = row.try_get(3)?;
+    let scope = match (scope_type.as_str(), scope_id) {
+        ("instance", _) => RuleScope::Instance,
+        ("project", Some(id)) => RuleScope::Project { id },
+        ("environment", Some(id)) => RuleScope::Environment { id },
+        ("service", Some(id)) => RuleScope::Service { id },
+        (other, _) => return Err(decode_error(2, format!("unknown rule scope '{other}'"))),
+    };
+    Ok(NotifyRule {
+        id: row.try_get(0)?,
+        channel_id: row.try_get(1)?,
+        scope,
+        scope_label: String::new(),
+        preset: row.try_get(4)?,
+        events: col_json(row, 5)?,
+        enabled: row.try_get(6)?,
+        dedupe_secs: u32::try_from(row.try_get::<i64, _>(7)?).unwrap_or(u32::MAX),
+        max_per_hour: u32::try_from(row.try_get::<i64, _>(8)?).unwrap_or(u32::MAX),
+        created_at: row.try_get(9)?,
     })
 }
 

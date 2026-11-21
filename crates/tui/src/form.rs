@@ -34,6 +34,9 @@ pub struct Field {
     pub masked: bool,
     /// What a pick field shows for its value.
     pub shown: String,
+    /// A choice whose pick only lights up while the field is focused, for a row of options where
+    /// the focused row is the answer.
+    pub quiet: bool,
 }
 
 impl Field {
@@ -50,6 +53,7 @@ impl Field {
             visible: true,
             masked: false,
             shown: String::new(),
+            quiet: false,
         }
     }
 
@@ -70,6 +74,11 @@ impl Field {
 
     pub fn masked(mut self) -> Self {
         self.masked = true;
+        self
+    }
+
+    pub fn quiet(mut self) -> Self {
+        self.quiet = true;
         self
     }
 
@@ -170,6 +179,15 @@ pub enum FormKind {
     InstanceSchedule {
         has_passphrase: bool,
     },
+    /// First step of the channel wizard: the focused row's choice is the kind.
+    NotifyKind,
+    /// Second step of the channel wizard. `channel_id` is set when editing, or once the wizard
+    /// has created the channel (`created`).
+    NotifyChannel {
+        kind: common::notify::ChannelKind,
+        channel_id: Option<Id>,
+        created: bool,
+    },
     /// Starts the GitHub App manifest flow.
     CreateGithubApp,
     ConnectGithubApp,
@@ -201,6 +219,8 @@ pub struct Form {
     pub warning: Vec<String>,
     /// Muted explanation shown above the actions.
     pub note: Vec<String>,
+    /// A line above the fields, such as the steps of a wizard.
+    pub header: Option<Line<'static>>,
 }
 
 impl Form {
@@ -217,6 +237,7 @@ impl Form {
             busy: false,
             warning: Vec::new(),
             note: Vec::new(),
+            header: None,
         };
         form.refresh();
         form.focus = form.next_visible(0, 1);
@@ -241,6 +262,11 @@ impl Form {
 
     pub fn note(mut self, lines: Vec<String>) -> Self {
         self.note = lines;
+        self
+    }
+
+    pub fn header(mut self, line: Line<'static>) -> Self {
+        self.header = Some(line);
         self
     }
 
@@ -340,6 +366,23 @@ impl Form {
             }
             if let Some(hour) = self.field_mut("hour") {
                 hour.hint = crate::database::hour_hint(&hour.value);
+            }
+            return;
+        }
+        if let FormKind::NotifyChannel {
+            kind: common::notify::ChannelKind::EmailSmtp,
+            ..
+        } = self.kind
+        {
+            let port = match self.choice("security") {
+                0 => "587",
+                1 => "465",
+                _ => "25",
+            };
+            if let Some(f) = self.field_mut("port")
+                && ["", "587", "465", "25"].contains(&f.value.as_str())
+            {
+                f.value = port.into();
             }
             return;
         }
@@ -548,7 +591,9 @@ impl Form {
         } else {
             self.note.len() + 1
         };
-        let status_rows = warning_rows + note_rows + usize::from(self.error.is_some());
+        let header_rows = if self.header.is_some() { 2 } else { 0 };
+        let status_rows =
+            warning_rows + note_rows + usize::from(self.error.is_some()) + header_rows;
         let roomy = area.height as usize >= visible.len() * 2 + 9 + status_rows;
         let rows_per_field = if roomy { 2 } else { 1 };
         let height = visible.len() * rows_per_field + 6 + status_rows;
@@ -597,6 +642,17 @@ impl Form {
             Rect::new(inner.x, inner.y, inner.width, body_rows as u16),
             Hit::List(mouse::List::Form),
         );
+        let head = match &self.header {
+            Some(line) if body_rows > 3 => {
+                frame.render_widget(
+                    Paragraph::new(line.clone()),
+                    Rect::new(inner.x, inner.y, inner.width, 1),
+                );
+                2
+            }
+            _ => 0,
+        };
+        let body_rows = body_rows - head;
         let field_rows = rows_per_field.min(body_rows);
         let error_rows = usize::from(self.error.is_some() && body_rows > field_rows);
         let warnings = self.warning.len().min(body_rows - field_rows - error_rows);
@@ -613,13 +669,12 @@ impl Form {
 
         let hint_w: u16 = if inner.width >= 76 { 24 } else { 0 };
         let label_w = 16.min(inner.width / 2);
-        let mut y = inner.y;
+        let mut y = inner.y + head as u16;
         for (i, field) in visible.into_iter().skip(start).take(capacity) {
             let focused = i == self.focus;
-            let hint_w = if matches!(field.kind, FieldKind::Choice(_)) && field.hint.is_empty() {
-                0
-            } else {
-                hint_w
+            let hint_w = match field.kind {
+                FieldKind::Choice(_) if field.hint.is_empty() => 0,
+                _ => hint_w,
             };
             let row = Rect::new(inner.x, y, inner.width, 1);
             let [label_a, value_a, hint_a] = Layout::horizontal([
@@ -650,14 +705,10 @@ impl Form {
                         if x >= value_a.right() {
                             break;
                         }
-                        let style = if j == field.choice {
-                            if focused {
-                                theme::chip()
-                            } else {
-                                theme::text().bg(theme::LINE)
-                            }
-                        } else {
-                            theme::muted()
+                        let style = match (j == field.choice, focused, field.quiet) {
+                            (true, true, _) => theme::chip(),
+                            (true, false, false) => theme::text().bg(theme::LINE),
+                            _ => theme::muted(),
                         };
                         let chip = Span::styled(format!(" {opt} "), style);
                         let width = u16::try_from(chip.width()).unwrap_or(u16::MAX);

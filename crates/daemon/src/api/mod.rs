@@ -5,6 +5,7 @@ mod deployments;
 mod domain;
 mod github;
 mod instance;
+mod notify;
 mod projects;
 mod secrets;
 mod servers;
@@ -30,6 +31,8 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 pub use servers::{check_server, ensure_local_proxy};
+pub use settings::latest_version;
+pub use storage::run_storage_test;
 
 pub fn router(state: Arc<AppState>) -> Router {
     let api = Router::new()
@@ -114,6 +117,27 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/instance/backups/{id}", delete(instance::delete))
         .route("/instance/backups/{id}/download", get(instance::download))
+        .route("/notify/catalog", get(notify::catalog))
+        .route(
+            "/notify/channels",
+            get(notify::list_channels).post(notify::create_channel),
+        )
+        .route(
+            "/notify/channels/{id}",
+            get(notify::get_channel)
+                .patch(notify::update_channel)
+                .delete(notify::delete_channel),
+        )
+        .route("/notify/channels/{id}/test", post(notify::test_channel))
+        .route(
+            "/notify/rules",
+            get(notify::list_rules).post(notify::create_rule),
+        )
+        .route(
+            "/notify/rules/{id}",
+            patch(notify::update_rule).delete(notify::delete_rule),
+        )
+        .route("/notify/deliveries", get(notify::deliveries))
         .route("/services/{id}/deployments", get(deployments::list))
         .route("/deployments/{id}", get(deployments::get))
         .route("/deployments/{id}/logs", get(deployments::logs))

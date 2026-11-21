@@ -58,6 +58,16 @@ pub enum Hit {
     PickRow(usize),
     /// A row of the list on a full-screen list such as Secrets.
     Item(usize),
+    /// A tab of the Notifications screen.
+    NotifySection(crate::notify::Section),
+    /// A row of the rule dialog's settings.
+    RuleField(crate::notify::RuleFocus),
+    /// A chip on a row of the rule dialog.
+    RuleChoice(crate::notify::RuleFocus, usize),
+    /// A preset in the rule dialog.
+    Preset(usize),
+    /// An event in the rule dialog's checklist.
+    NotifyEvent(common::notify::NotifyEvent),
     /// A DNS record on the domain guide; a click copies its value.
     Record(usize),
     /// A container of a compose service; a click follows its logs.
@@ -89,6 +99,8 @@ pub enum List {
     Sources,
     Containers,
     InstanceBackups,
+    Notify,
+    Rule,
 }
 
 thread_local! {
@@ -239,6 +251,7 @@ pub fn key_for_label(label: &str) -> Option<(KeyCode, KeyModifiers)> {
         "ctrl+s" => (KeyCode::Char('s'), KeyModifiers::CONTROL),
         "ctrl+r" => (KeyCode::Char('r'), KeyModifiers::CONTROL),
         "ctrl+k" => (KeyCode::Char('k'), KeyModifiers::CONTROL),
+        "space" => (KeyCode::Char(' '), none),
         "ctrl+x" => (KeyCode::Char('x'), KeyModifiers::CONTROL),
         "y" => (KeyCode::Char('y'), none),
         _ => {
@@ -678,6 +691,12 @@ fn click(app: &mut App, hit: Hit, double: bool) {
                 }
             }
             Screen::Settings => app.select_instance_backup(i),
+            Screen::Notifications => {
+                app.notify.select(i);
+                if double {
+                    press(app, KeyCode::Enter, KeyModifiers::NONE);
+                }
+            }
             Screen::Sources => {
                 app.select_source(i);
                 if double {
@@ -686,6 +705,33 @@ fn click(app: &mut App, hit: Hit, double: bool) {
             }
             _ => {}
         },
+        Hit::NotifySection(section) => app.notify.section = section,
+        Hit::RuleField(focus) => {
+            if let Some(Overlay::Rule(d)) = app.overlay.as_mut() {
+                d.click_field(focus);
+                if matches!(
+                    focus,
+                    crate::notify::RuleFocus::Channel | crate::notify::RuleFocus::Scope
+                ) {
+                    press(app, KeyCode::Enter, KeyModifiers::NONE);
+                }
+            }
+        }
+        Hit::RuleChoice(focus, i) => {
+            if let Some(Overlay::Rule(d)) = app.overlay.as_mut() {
+                d.click_choice(focus, i);
+            }
+        }
+        Hit::Preset(i) => {
+            if let Some(Overlay::Rule(d)) = app.overlay.as_mut() {
+                d.click_preset(i);
+            }
+        }
+        Hit::NotifyEvent(event) => {
+            if let Some(Overlay::Rule(d)) = app.overlay.as_mut() {
+                d.click_event(event);
+            }
+        }
         Hit::Container(i) => {
             keys::finish_text_input(app);
             app.pick_container(i);

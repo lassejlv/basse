@@ -4,11 +4,13 @@ use super::{Json, optional_json, servers};
 use crate::config;
 use crate::docker;
 use crate::error::{ApiResult, AppError};
+use crate::notify::Event;
 use crate::state::AppState;
 use crate::{prune, update};
 use axum::body::Bytes;
 use axum::extract::State;
 use common::api::{RotatedToken, UpdateRequest, UpdateSettings};
+use common::notify::NotifyEvent;
 use common::*;
 use std::collections::HashMap;
 use std::path::Path;
@@ -150,6 +152,12 @@ pub async fn rotate_token(State(state): State<Arc<AppState>>) -> ApiResult<Json<
     state
         .activity(ActivityLevel::Info, "API token rotated".into(), None)
         .await;
+    state.notify(
+        Event::new(NotifyEvent::TokenRotated)
+            .about(crate::host::hostname(), "token")
+            .detail("The old API token stopped working; clients must log in with the new one.")
+            .hint(format!("{} login", brand::CLI_BIN)),
+    );
     Ok(Json(RotatedToken { token }))
 }
 
@@ -199,6 +207,11 @@ pub async fn prune(State(state): State<Arc<AppState>>) -> ApiResult<Json<PruneRe
 }
 
 pub async fn version(State(state): State<Arc<AppState>>) -> Json<VersionCheck> {
+    Json(latest_version(&state).await)
+}
+
+/// The latest release, cached for an hour.
+pub async fn latest_version(state: &AppState) -> VersionCheck {
     let cached = state
         .latest_release
         .lock()
@@ -206,7 +219,7 @@ pub async fn version(State(state): State<Arc<AppState>>) -> Json<VersionCheck> {
         .clone()
         .filter(|(at, _)| at.elapsed() < RELEASE_CACHE);
     if let Some((_, check)) = cached {
-        return Json(check);
+        return check;
     }
     let latest = tokio::time::timeout(Duration::from_secs(10), async {
         release::Releases::new()?.latest_tag().await
@@ -231,7 +244,7 @@ pub async fn version(State(state): State<Arc<AppState>>) -> Json<VersionCheck> {
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), check.clone()));
     }
-    Json(check)
+    check
 }
 
 pub async fn self_update(

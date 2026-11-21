@@ -13,6 +13,7 @@ mod error;
 mod github;
 mod host;
 mod instance;
+mod notify;
 mod prune;
 mod restore;
 mod secrets;
@@ -494,6 +495,9 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
     let _ = std::fs::remove_dir_all(dirs.backups_dir().join(".staging"));
     let listen = listen.unwrap_or_else(|| config.listen.clone());
     let state = Arc::new(AppState::new(db, dirs, &config, listen.clone())?);
+    notify::spawn_dispatcher(state.clone());
+    notify::monitor::startup(&state).await;
+    notify::monitor::spawn(state.clone());
     stats::spawn_sampler(state.clone());
     database::spawn_scheduler(state.clone());
     instance::spawn_scheduler(state.clone());
