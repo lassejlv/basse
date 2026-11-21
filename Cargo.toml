@@ -24,6 +24,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "str
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.9"
 tracing = "0.1"
+ssh-key = { version = "0.6", default-features = false, features = ["std", "ecdsa"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [workspace.lints.rust]

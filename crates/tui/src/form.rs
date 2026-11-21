@@ -8,6 +8,14 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use std::time::{Duration, Instant};
+
+/// Keys closer together than this came from one write: a paste the terminal typed out because it
+/// does not support bracketed paste. People don't type that fast.
+const PASTE_BURST: Duration = Duration::from_millis(25);
+
+/// Lines a revealed area shows; it scrolls to its last lines, where typing goes.
+const AREA_ROWS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldKind {
@@ -17,6 +25,8 @@ pub enum FieldKind {
     Toggle,
     /// A value chosen in a picker dialog; ⏎ opens it. `value` holds the id, `shown` its name.
     Pick,
+    /// Multi-line text such as a key or a certificate: ⏎ adds a line and ctrl+s submits.
+    Area,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +47,12 @@ pub struct Field {
     /// A choice whose pick only lights up while the field is focused, for a row of options where
     /// the focused row is the answer.
     pub quiet: bool,
+    /// A masked area shown in clear text (ctrl+r).
+    pub revealed: bool,
+    /// A check of the value shown under an area: what it is, or what is wrong with it.
+    pub status: Option<Result<String, String>>,
+    /// A path field whose file ⏎ reads into this other field.
+    pub loads: Option<&'static str>,
 }
 
 impl Field {
@@ -54,7 +70,23 @@ impl Field {
             masked: false,
             shown: String::new(),
             quiet: false,
+            revealed: false,
+            status: None,
+            loads: None,
         }
+    }
+
+    pub fn area(key: &'static str, label: &'static str) -> Self {
+        Self {
+            kind: FieldKind::Area,
+            ..Self::text(key, label)
+        }
+    }
+
+    /// Makes this a path field: ⏎ reads the file into field `into`.
+    pub fn loads(mut self, into: &'static str) -> Self {
+        self.loads = Some(into);
+        self
     }
 
     /// A field filled from a picker: `id` is the stored value, `shown` its label.
@@ -115,6 +147,24 @@ impl Field {
     pub fn selected(mut self, choice: usize) -> Self {
         self.choice = choice;
         self
+    }
+
+    /// Lines an area's value takes on screen: one while masked, else its last lines.
+    fn area_lines(&self) -> usize {
+        if self.masked && !self.revealed || self.value.is_empty() {
+            1
+        } else {
+            self.value.split('\n').count().min(AREA_ROWS)
+        }
+    }
+
+    /// Terminal rows the field takes: its value, the underline row when roomy, an area's check.
+    fn rows(&self, roomy: bool) -> usize {
+        let base = if roomy { 2 } else { 1 };
+        match self.kind {
+            FieldKind::Area => base + self.area_lines() - 1 + usize::from(self.status.is_some()),
+            _ => base,
+        }
     }
 }
 
@@ -204,6 +254,11 @@ pub enum FormAction {
     },
     /// ⏎ on a pick field: open its picker.
     Pick(&'static str),
+    /// ⏎ on a path field: read the file at `path` into field `into`.
+    Load {
+        path: String,
+        into: &'static str,
+    },
 }
 
 pub struct Form {
@@ -222,6 +277,7 @@ pub struct Form {
     pub note: Vec<String>,
     /// A line above the fields, such as the steps of a wizard.
     pub header: Option<Line<'static>>,
+    last_key: Option<Instant>,
 }
 
 impl Form {
@@ -239,6 +295,7 @@ impl Form {
             warning: Vec::new(),
             note: Vec::new(),
             header: None,
+            last_key: None,
         };
         form.refresh();
         form.focus = form.next_visible(0, 1);
@@ -323,6 +380,26 @@ impl Form {
 
     /// Show only the fields that apply to the current choices, and keep defaults in sync.
     pub fn refresh(&mut self) {
+        if matches!(
+            self.kind,
+            FormKind::AddSecret | FormKind::ReplaceSecret { .. }
+        ) && let Some(f) = self.field_mut("private_key")
+        {
+            f.status = (!f.value.trim().is_empty()).then(|| {
+                common::ssh::inspect_private_key(&f.value).map(|mut k| {
+                    let fp: Vec<char> = k.fingerprint.chars().collect();
+                    if fp.len() > 31 {
+                        let (head, tail) = (&fp[..27], &fp[fp.len() - 3..]);
+                        k.fingerprint = format!(
+                            "{}…{}",
+                            head.iter().collect::<String>(),
+                            tail.iter().collect::<String>()
+                        );
+                    }
+                    k.summary()
+                })
+            });
+        }
         if self.kind == FormKind::CreateGithubApp {
             let organization = self.choice("owner") == 1;
             if let Some(f) = self.field_mut("organization") {
@@ -391,9 +468,9 @@ impl Form {
             let kind = self.choice("kind");
             for f in &mut self.fields {
                 f.visible = match f.key {
-                    "private_key" => kind == 0,
+                    "private_key" | "key_file" => kind == 0,
                     "access_key_id" | "secret_access_key" => kind == 1,
-                    "value" => kind == 2,
+                    "value" | "value_file" => kind == 2,
                     _ => true,
                 };
             }
@@ -506,10 +583,33 @@ impl Form {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> FormAction {
+        self.handle_key_at(key, Instant::now())
+    }
+
+    /// `now` tells a paste typed out by the terminal from a person typing: an ⏎ that arrives
+    /// in the same burst as the keys before it is a line break of the paste, never a submit.
+    pub fn handle_key_at(&mut self, key: KeyEvent, now: Instant) -> FormAction {
         if self.busy {
             return FormAction::None;
         }
+        let burst = self
+            .last_key
+            .is_some_and(|t| now.saturating_duration_since(t) < PASTE_BURST);
+        self.last_key = Some(now);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let field = &self.fields[self.focus];
+        let typed = matches!(field.kind, FieldKind::Text | FieldKind::Area);
+        let line_break = match key.code {
+            KeyCode::Enter => field.kind == FieldKind::Area || burst && typed,
+            KeyCode::Char('j') => ctrl && typed,
+            _ => false,
+        };
+        if line_break {
+            self.fields[self.focus].value.push('\n');
+            self.error = None;
+            self.refresh();
+            return FormAction::None;
+        }
         match key.code {
             KeyCode::Esc => return FormAction::Cancel,
             KeyCode::Char('s') if ctrl => {
@@ -517,12 +617,22 @@ impl Form {
                     alt: self.alt_label.is_some(),
                 };
             }
-            KeyCode::Enter | KeyCode::Char(' ')
-                if self.fields[self.focus].kind == FieldKind::Pick =>
-            {
-                return FormAction::Pick(self.fields[self.focus].key);
+            KeyCode::Char('r') if ctrl && field.kind == FieldKind::Area && field.masked => {
+                self.fields[self.focus].revealed ^= true;
             }
-            KeyCode::Enter => return FormAction::Submit { alt: false },
+            KeyCode::Enter | KeyCode::Char(' ') if field.kind == FieldKind::Pick => {
+                return FormAction::Pick(field.key);
+            }
+            KeyCode::Enter if burst => {}
+            KeyCode::Enter => {
+                return match field.loads {
+                    Some(into) => FormAction::Load {
+                        path: field.value.trim().to_string(),
+                        into,
+                    },
+                    None => FormAction::Submit { alt: false },
+                };
+            }
             KeyCode::Tab | KeyCode::Down => self.move_focus(1),
             KeyCode::BackTab | KeyCode::Up => self.move_focus(-1),
             _ => {
@@ -537,20 +647,24 @@ impl Form {
                     (FieldKind::Toggle, KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right) => {
                         field.on = !field.on
                     }
-                    (FieldKind::Text, KeyCode::Backspace) => {
+                    (FieldKind::Text | FieldKind::Area, KeyCode::Backspace) => {
                         field.value.pop();
                     }
-                    (FieldKind::Text, KeyCode::Char('u')) if ctrl => field.value.clear(),
-                    (FieldKind::Text, KeyCode::Char('w')) if ctrl => {
+                    (FieldKind::Text | FieldKind::Area, KeyCode::Char('u')) if ctrl => {
+                        field.value.clear()
+                    }
+                    (FieldKind::Text | FieldKind::Area, KeyCode::Char('w')) if ctrl => {
                         let trimmed = field.value.trim_end().len();
                         field.value.truncate(trimmed);
                         let cut = field
                             .value
-                            .rfind([' ', '/', '-', '.', ':'])
+                            .rfind([' ', '/', '-', '.', ':', '\n'])
                             .map_or(0, |i| i + 1);
                         field.value.truncate(cut);
                     }
-                    (FieldKind::Text, KeyCode::Char(c)) if !ctrl => field.value.push(c),
+                    (FieldKind::Text | FieldKind::Area, KeyCode::Char(c)) if !ctrl => {
+                        field.value.push(c)
+                    }
                     _ => {}
                 }
                 self.error = None;
@@ -560,17 +674,21 @@ impl Form {
         FormAction::None
     }
 
-    /// Pasted text goes into the focused text field as typed, newlines included.
+    /// Pasted text goes into the focused text field with its line breaks as LF: terminals send
+    /// them as CR, the Enter key. An area keeps every line; a one-line field drops the last break.
     pub fn paste(&mut self, text: &str) {
         if self.busy {
             return;
         }
+        let text = common::ssh::normalize_newlines(text);
         let field = &mut self.fields[self.focus];
-        if field.kind == FieldKind::Text {
-            field.value.push_str(text.trim_end_matches(['\r', '\n']));
-            self.error = None;
-            self.refresh();
+        match field.kind {
+            FieldKind::Area => field.value.push_str(&text),
+            FieldKind::Text => field.value.push_str(text.trim_end_matches('\n')),
+            _ => return,
         }
+        self.error = None;
+        self.refresh();
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, tick: usize) {
@@ -595,9 +713,9 @@ impl Form {
         let header_rows = if self.header.is_some() { 2 } else { 0 };
         let status_rows =
             warning_rows + note_rows + usize::from(self.error.is_some()) + header_rows;
-        let roomy = area.height as usize >= visible.len() * 2 + 9 + status_rows;
-        let rows_per_field = if roomy { 2 } else { 1 };
-        let height = visible.len() * rows_per_field + 6 + status_rows;
+        let field_rows = |roomy: bool| visible.iter().map(|(_, f)| f.rows(roomy)).sum::<usize>();
+        let roomy = area.height as usize >= field_rows(true) + 9 + status_rows;
+        let height = field_rows(roomy) + 6 + status_rows;
         let rect = area.centered(
             Constraint::Length(width),
             Constraint::Length(height.min(usize::from(area.height)) as u16),
@@ -654,24 +772,37 @@ impl Form {
             _ => 0,
         };
         let body_rows = body_rows - head;
-        let field_rows = rows_per_field.min(body_rows);
-        let error_rows = usize::from(self.error.is_some() && body_rows > field_rows);
-        let warnings = self.warning.len().min(body_rows - field_rows - error_rows);
+        let focus_at = visible
+            .iter()
+            .position(|(i, _)| *i == self.focus)
+            .unwrap_or(0);
+        let focus_rows = visible
+            .get(focus_at)
+            .map_or(1, |(_, f)| f.rows(roomy))
+            .min(body_rows);
+        let error_rows = usize::from(self.error.is_some() && body_rows > focus_rows);
+        let warnings = self.warning.len().min(body_rows - focus_rows - error_rows);
         let notes = self
             .note
             .len()
-            .min(body_rows - field_rows - error_rows - warnings);
-        let capacity = (body_rows - error_rows - warnings - notes) / rows_per_field;
-        let start = visible
-            .iter()
-            .position(|(i, _)| *i == self.focus)
-            .unwrap_or(0)
-            .saturating_sub(capacity.saturating_sub(1));
+            .min(body_rows - focus_rows - error_rows - warnings);
+        let room = body_rows - error_rows - warnings - notes;
+        let mut start = focus_at;
+        let mut used = focus_rows;
+        while start > 0 && used + visible[start - 1].1.rows(roomy) <= room {
+            start -= 1;
+            used += visible[start].1.rows(roomy);
+        }
 
         let hint_w: u16 = if inner.width >= 76 { 24 } else { 0 };
         let label_w = 16.min(inner.width / 2);
         let mut y = inner.y + head as u16;
-        for (i, field) in visible.into_iter().skip(start).take(capacity) {
+        let limit = y + room as u16;
+        for (i, field) in visible.into_iter().skip(start) {
+            let rows = field.rows(roomy) as u16;
+            if y + rows > limit && i != self.focus {
+                break;
+            }
             let focused = i == self.focus;
             let hint_w = match field.kind {
                 FieldKind::Choice(_) if field.hint.is_empty() => 0,
@@ -684,7 +815,12 @@ impl Form {
                 Constraint::Length(hint_w),
             ])
             .areas(row);
-            mouse::hit(row, Hit::FormField(i));
+            let lines = if field.kind == FieldKind::Area {
+                field.area_lines() as u16
+            } else {
+                1
+            };
+            mouse::hit(Rect::new(inner.x, y, inner.width, lines), Hit::FormField(i));
             let label = if focused {
                 format!("› {}", field.label)
             } else {
@@ -761,11 +897,60 @@ impl Form {
                         Span::styled("⏎ pick", action),
                     ])
                 }
-                FieldKind::Text => {
+                FieldKind::Area if !field.value.is_empty() => {
+                    let cursor = if focused && tick % 8 < 5 { "▏" } else { " " };
+                    if field.masked && !field.revealed {
+                        let n = field.value.lines().count();
+                        Line::from(vec![
+                            Span::raw(" "),
+                            Span::styled(
+                                "•".repeat(field.value.chars().count().min(32)),
+                                theme::text(),
+                            ),
+                            Span::styled(cursor, theme::accent()),
+                            Span::styled(
+                                format!(" {n} line{}", if n == 1 { "" } else { "s" }),
+                                theme::muted(),
+                            ),
+                        ])
+                    } else {
+                        let all: Vec<&str> = field.value.split('\n').collect();
+                        let shown = &all[all.len() - field.area_lines()..];
+                        let max = value_a.width.saturating_sub(3) as usize;
+                        let wide = row.right() - value_a.x;
+                        let wide_max = wide.saturating_sub(3) as usize;
+                        for (k, line) in shown.iter().enumerate().skip(1) {
+                            let last = k + 1 == shown.len();
+                            let text = if last {
+                                let skip = line.chars().count().saturating_sub(wide_max);
+                                line.chars().skip(skip).collect()
+                            } else {
+                                crate::util::truncate(line, wide_max + 1)
+                            };
+                            let mut spans = vec![Span::raw(" "), Span::styled(text, theme::text())];
+                            if last && focused {
+                                spans.push(Span::styled(cursor, theme::accent()));
+                            }
+                            frame.render_widget(
+                                Paragraph::new(Line::from(spans)),
+                                Rect::new(value_a.x, y + k as u16, wide, 1),
+                            );
+                        }
+                        let mut spans = vec![
+                            Span::raw(" "),
+                            Span::styled(crate::util::truncate(shown[0], max + 1), theme::text()),
+                        ];
+                        if shown.len() == 1 && focused {
+                            spans.push(Span::styled(cursor, theme::accent()));
+                        }
+                        Line::from(spans)
+                    }
+                }
+                FieldKind::Text | FieldKind::Area => {
                     let shown = if field.masked && !field.value.is_empty() {
                         "•".repeat(field.value.chars().count().min(32))
                     } else {
-                        field.value.clone()
+                        field.value.replace('\n', "↵")
                     };
                     let max = value_a.width.saturating_sub(3) as usize;
                     let skip = shown.chars().count().saturating_sub(max);
@@ -787,7 +972,33 @@ impl Form {
                 }
             };
             frame.render_widget(Paragraph::new(value_line), value_a);
-            if hint_w > 0 && !field.hint.is_empty() {
+            let key_hint = match field.kind {
+                FieldKind::Area if field.masked && !field.value.is_empty() => {
+                    Some(("ctrl+r", if field.revealed { "hide" } else { "reveal" }))
+                }
+                _ if field.loads.is_some() => field.hint.split_once(' '),
+                _ => None,
+            };
+            if hint_w > 0
+                && let Some((key, action)) = key_hint
+            {
+                let key_style = if focused || field.kind == FieldKind::Area {
+                    theme::accent()
+                } else {
+                    theme::muted()
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(key, key_style),
+                        Span::styled(format!(" {action}"), theme::muted()),
+                    ])),
+                    hint_a,
+                );
+                if focused && field.kind == FieldKind::Area {
+                    mouse::key_target(hint_a, key);
+                }
+            } else if hint_w > 0 && !field.hint.is_empty() {
                 let style = if field.hint.starts_with('✓') {
                     theme::fg(theme::OK)
                 } else {
@@ -798,18 +1009,43 @@ impl Form {
                     hint_a,
                 );
             }
-            if roomy && matches!(field.kind, FieldKind::Text | FieldKind::Pick) {
-                let rule = "─".repeat(value_a.width as usize);
+            let mut below = y + lines;
+            if roomy
+                && matches!(
+                    field.kind,
+                    FieldKind::Text | FieldKind::Pick | FieldKind::Area
+                )
+            {
+                let width = if lines > 1 {
+                    row.right() - value_a.x
+                } else {
+                    value_a.width
+                };
+                let rule = "─".repeat(width as usize);
                 let style = if focused {
                     theme::accent()
                 } else {
                     theme::fg(theme::LINE)
                 };
-                let underline = Rect::new(value_a.x, y + 1, value_a.width, 1);
+                let underline = Rect::new(value_a.x, below, width, 1);
                 frame.render_widget(Paragraph::new(rule).style(style), underline);
                 mouse::hit(underline, Hit::FormField(i));
+                below += 1;
             }
-            y += rows_per_field as u16;
+            if let Some(status) = &field.status
+                && below < limit
+            {
+                let (text, style) = match status {
+                    Ok(info) => (format!(" ✓ {info}"), theme::fg(theme::OK)),
+                    Err(e) => (format!(" ✕ {e}"), theme::fg(theme::ERR)),
+                };
+                let width = row.right() - value_a.x;
+                frame.render_widget(
+                    Paragraph::new(crate::util::truncate(&text, width as usize)).style(style),
+                    Rect::new(value_a.x, below, width, 1),
+                );
+            }
+            y += rows;
         }
 
         if warnings > 0 {
@@ -861,17 +1097,25 @@ impl Form {
                 Rect::new(inner.x, body_bottom, inner.width, 1),
             );
         }
+        let focused = &self.fields[self.focus];
+        let submit_key = if self.alt_label.is_none()
+            && (focused.kind == FieldKind::Area || focused.loads.is_some())
+        {
+            "ctrl+s"
+        } else {
+            "⏎"
+        };
         let submit = if self.busy {
             format!(" {} working… ", crate::util::spinner(tick))
         } else {
-            format!(" ⏎ {} ", self.submit_label)
+            format!(" {submit_key} {} ", self.submit_label)
         };
         let submit = Line::styled(submit, theme::chip()).right_aligned();
         let submit_w = submit.width().min(usize::from(actions.width)) as u16;
         let submit_area = Rect::new(actions.right() - submit_w, actions.y, submit_w, 1);
         frame.render_widget(submit, submit_area);
         if !self.busy {
-            mouse::key_target(submit_area, "⏎");
+            mouse::key_target(submit_area, submit_key);
         }
         let mut left_w = (submit_area.x - actions.x).saturating_sub(3);
         if let Some(alt) = self.alt_label {
