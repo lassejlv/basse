@@ -906,6 +906,51 @@ pub struct StorageTest {
     pub latency_ms: Option<u64>,
 }
 
+/// An encrypted archive of the daemon itself: its store, `config.toml`, `master.key` and
+/// SSH directory. Restoring one is `<daemon> restore`, not an API call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceBackup {
+    pub id: Id,
+    pub created_at: Timestamp,
+    pub status: BackupStatus,
+    pub trigger: BackupTrigger,
+    /// `instance-<timestamp>-<n>.tar.gz.enc`; also the download name.
+    pub file_name: String,
+    /// Encrypted size; 0 while running or after a failure.
+    pub size_bytes: u64,
+    pub storage: BackupStorage,
+    pub storage_id: Option<Id>,
+    pub error: Option<String>,
+    pub finished_at: Option<Timestamp>,
+}
+
+/// Daily automatic instance backups.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceBackupSchedule {
+    pub enabled: bool,
+    /// Hour of the day (UTC, 0-23) the backup runs.
+    pub hour_utc: u8,
+    /// Scheduled instance backups to keep per store.
+    pub keep: u32,
+    /// Where scheduled backups go; `None` is the data directory.
+    pub storage_id: Option<Id>,
+    /// Whether a passphrase is stored for scheduled runs. The passphrase itself is never
+    /// returned.
+    pub has_passphrase: bool,
+}
+
+impl Default for InstanceBackupSchedule {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hour_utc: 2,
+            keep: 7,
+            storage_id: None,
+            has_passphrase: false,
+        }
+    }
+}
+
 /// Error body returned by every failing API call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiError {

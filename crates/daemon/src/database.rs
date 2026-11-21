@@ -773,6 +773,7 @@ async fn restore_redis(
                 docker::volume_name(&t.service.id, &data.name),
                 data.mount_path
             )],
+            None,
         )
         .await?;
         let outcome = docker::exec_stream(
@@ -907,7 +908,7 @@ fn latest_slot(hour: u8, now: Timestamp) -> Option<Timestamp> {
 
 /// Whether a schedule's latest slot passed without a run. A missed slot (daemon down) runs as
 /// soon as the daemon is back.
-fn is_due(schedule: &BackupSchedule, last_run_at: Option<Timestamp>, now: Timestamp) -> bool {
+pub fn is_due(schedule: &BackupSchedule, last_run_at: Option<Timestamp>, now: Timestamp) -> bool {
     if !schedule.enabled {
         return false;
     }

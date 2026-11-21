@@ -45,6 +45,11 @@ impl Daemon {
         let stdout = String::from_utf8(out.stdout).unwrap();
         let token = token_from(&stdout);
         let serve_env = prepare(dir.path());
+        Some(Self::serve(dir, token, serve_env).await)
+    }
+
+    /// Serves an existing data directory, e.g. one a restore wrote, with its API token.
+    pub async fn serve(dir: TempDir, token: String, serve_env: Vec<(String, String)>) -> Self {
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -72,12 +77,12 @@ impl Daemon {
             assert!(Instant::now() < deadline, "daemon did not come up");
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        Some(Self {
+        Self {
             child,
             url,
             token,
             dir,
-        })
+        }
     }
 
     pub fn client(&self) -> Client {
@@ -102,7 +107,7 @@ pub fn daemon_bin() -> String {
     std::env::var(&var).unwrap_or_else(|_| panic!("{var} is not set; run through cargo test"))
 }
 
-fn daemon_cmd(data_dir: &Path) -> Command {
+pub fn daemon_cmd(data_dir: &Path) -> Command {
     let mut cmd = Command::new(daemon_bin());
     cmd.arg("--data-dir").arg(data_dir);
     cmd

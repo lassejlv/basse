@@ -108,16 +108,21 @@ impl MasterKey {
     }
 }
 
-/// Writes a new file with mode 0600 from the start, so its contents are never readable by
+/// Creates a new file with mode 0600 from the start, so its contents are never readable by
 /// others, not even briefly.
-pub fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
+pub fn create_private(path: &Path) -> Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options
+    options
         .open(path)
-        .with_context(|| format!("cannot create {}", path.display()))?;
+        .with_context(|| format!("cannot create {}", path.display()))
+}
+
+/// Writes a new file with mode 0600; see [`create_private`].
+pub fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    let mut file = create_private(path)?;
     file.write_all(contents)
         .and_then(|()| file.sync_all())
         .with_context(|| format!("cannot write {}", path.display()))
@@ -136,6 +141,15 @@ impl Secrets {
             db,
             key: Arc::new(key),
         }
+    }
+
+    /// Seals other data under the master key, bound to `aad`.
+    pub fn key_seal(&self, aad: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
+        self.key.seal(aad, plaintext)
+    }
+
+    pub fn key_open(&self, aad: &str, blob: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        self.key.open(aad, blob)
     }
 
     pub fn seal(&self, id: &str, value: &SecretValue) -> Result<Vec<u8>> {
