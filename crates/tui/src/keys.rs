@@ -51,6 +51,9 @@ pub fn handle(app: &mut App, key: KeyEvent) {
     if text_input_active(app) {
         return text_input(app, key);
     }
+    if key.code == KeyCode::Char('e') && app.expand_error() {
+        return;
+    }
     match key.code {
         KeyCode::Char('q') => return app.quit = true,
         KeyCode::Char('?') => return app.overlay = Some(Overlay::Help),
@@ -360,6 +363,8 @@ fn text_input(app: &mut App, key: KeyEvent) {
 
 fn overlay(app: &mut App, key: KeyEvent) {
     match app.overlay.as_mut() {
+        Some(Overlay::ServerDetail(_)) => crate::problem::server_detail_keys(app, key),
+        Some(Overlay::ErrorDetail(_)) => crate::problem::error_detail_keys(app, key),
         Some(Overlay::Form(form)) => match form.handle_key(key) {
             FormAction::None => {}
             FormAction::Cancel => {
@@ -1109,7 +1114,12 @@ fn servers(app: &mut App, key: KeyEvent) {
                 app.pick_server_key(&s);
             }
         }
-        KeyCode::Enter | KeyCode::Char('c') => {
+        KeyCode::Enter => {
+            if let Some(s) = selected {
+                app.open_server_detail(s);
+            }
+        }
+        KeyCode::Char('c') => {
             if let Some(s) = selected {
                 app.check_server(&s);
             }

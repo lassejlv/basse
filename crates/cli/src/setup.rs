@@ -697,6 +697,8 @@ mod tests {
             docker_version: None,
             last_checked_at: None,
             created_at: Utc::now(),
+            checks: Vec::new(),
+            problem: None,
         }
     }
 

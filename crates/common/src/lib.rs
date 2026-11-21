@@ -67,6 +67,38 @@ pub struct Server {
     pub docker_version: Option<String>,
     pub last_checked_at: Option<Timestamp>,
     pub created_at: Timestamp,
+    /// Steps of the last remote preflight, in order; empty for the local server.
+    #[serde(default)]
+    pub checks: Vec<PreflightCheck>,
+    /// Why the last check failed; `None` while the server is reachable.
+    #[serde(default)]
+    pub problem: Option<ServerProblem>,
+}
+
+/// One step of the preflight the daemon runs over SSH before it tunnels to a server's Docker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreflightCheck {
+    pub label: String,
+    pub status: CheckStatus,
+    /// What the step found, e.g. the Docker version or the socket's mode and owner.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+/// Why a server cannot be used, and what to do about it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerProblem {
+    /// One line, e.g. "docker isn't installed on 1.2.3.4".
+    pub summary: String,
+    /// The fix, with the command to run when there is one.
+    #[serde(default)]
+    pub fix: Option<String>,
+    /// The full error chain.
+    pub detail: String,
+    /// Docker is missing and the SSH user is root or has passwordless sudo, so
+    /// `POST /servers/{id}/docker` can install it.
+    #[serde(default)]
+    pub can_install_docker: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

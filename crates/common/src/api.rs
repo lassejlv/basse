@@ -15,6 +15,7 @@
 //! | DELETE | `/servers/{id}?purge=true&volumes=true` | | 204, or `ServerCleanup` with `purge` (removes what the daemon put there, its services included, then forgets it) |
 //! | POST | `/servers/{id}/check` | | `Server` |
 //! | POST | `/servers/{id}/proxy` | | `Server` (installs or restarts the proxy) |
+//! | POST | `/servers/{id}/docker` | | `Server` (installs Docker over SSH with get.docker.com, as root or with passwordless sudo, then checks it) |
 //! | GET | `/projects` | | `Vec<Project>` |
 //! | POST | `/projects` | `CreateProject` | `Project` (also creates a `production` environment) |
 //! | DELETE | `/projects/{id}` | | 204 (removes environments, services, containers) |

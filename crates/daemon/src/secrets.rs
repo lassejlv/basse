@@ -168,6 +168,11 @@ impl Secrets {
         serde_json::from_slice(&json).context("the decrypted secret is not valid")
     }
 
+    /// The name of secret `id`, for messages.
+    pub async fn name(&self, id: &str) -> Option<String> {
+        self.db.secret(id).await.ok().flatten().map(|s| s.name)
+    }
+
     /// The private key of an `ssh_key` secret.
     pub async fn ssh_private_key(&self, id: &Id) -> Result<Zeroizing<String>> {
         match self.value(id).await? {

@@ -2,7 +2,9 @@
 //! a server's `ssh_key` secret.
 //!
 //! Each remote server gets one long-lived `ssh -L` process that forwards a local Unix socket to
-//! the remote Docker socket; the Docker client then talks to that socket.
+//! the remote Docker socket; the Docker client then talks to that socket. Before the tunnel
+//! opens, a preflight over SSH (see [`crate::preflight`]) checks that there is a Docker to reach,
+//! and after it opens, the daemon waits until Docker answers a ping through it.
 //!
 //! A secret key is handed to `ssh` as a file that exists only while the connection is being
 //! set up: it is created with mode 0600 in `<data dir>/ssh/keys` (itself 0700) and deleted as
@@ -11,16 +13,19 @@
 //! holding every key in memory behind a socket any process of the daemon's user can use, and it
 //! has to be supervised and restarted; the file lives for the seconds of one handshake.
 
+use crate::preflight::{self, DOCKER_SOCKET, Facts};
 use anyhow::{Context as _, Result, bail};
-use common::Server;
+use common::{PreflightCheck, Server, ServerProblem};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
-const REMOTE_DOCKER_SOCKET: &str = "/var/run/docker.sock";
+/// Refused connections through a fresh tunnel before the forward counts as refused by sshd.
+const REFUSALS: u32 = 3;
 
 /// Key and state files the daemon's ssh invocations use instead of the user's `~/.ssh`.
 #[derive(Debug, Clone)]
@@ -76,6 +81,25 @@ fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', r"'\''"))
 }
 
+/// A remote server that cannot be used, with the preflight checklist that found out why.
+#[derive(Debug, Clone)]
+pub struct Unreachable {
+    pub checks: Vec<PreflightCheck>,
+    pub problem: ServerProblem,
+}
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.problem.summary)?;
+        match &self.problem.fix {
+            Some(fix) => write!(f, " · {fix}"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
 /// A running `ssh -N -L <socket>:/var/run/docker.sock` process.
 pub struct Tunnel {
     child: Child,
@@ -101,39 +125,207 @@ impl Drop for TempKey {
     }
 }
 
-/// Removes key files a crashed daemon may have left behind.
-pub fn clear_temp_keys(paths: &SshPaths) {
-    if let Ok(entries) = std::fs::read_dir(&paths.keys) {
-        for entry in entries.flatten() {
-            let _ = std::fs::remove_file(entry.path());
+/// Removes key files and tunnel sockets a crashed daemon may have left behind.
+pub fn clear_temp_files(paths: &SshPaths) {
+    for dir in [&paths.keys, &paths.sockets] {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let _ = std::fs::remove_file(entry.path());
+            }
         }
     }
 }
 
-impl Tunnel {
-    /// Connects with `private_key` when set, otherwise with the daemon's own key.
-    pub async fn open(
-        paths: &SshPaths,
-        server: &Server,
-        private_key: Option<&str>,
-    ) -> Result<Self> {
+/// How to log in to one server: the ssh options with its key, and `user@host`.
+struct Login {
+    options: Vec<String>,
+    port: String,
+    destination: String,
+    target: String,
+    _key: Option<TempKey>,
+}
+
+impl Login {
+    fn new(paths: &SshPaths, server: &Server, private_key: Option<&str>) -> Result<Self> {
         let host = server.host.as_deref().context("SSH server has no host")?;
         let user = server.user.as_deref().unwrap_or("root");
         let port = server.port.unwrap_or(22);
+        let key = private_key
+            .map(|key| TempKey::write(&paths.keys, &server.id, key))
+            .transpose()?;
+        let options = match &key {
+            Some(key) => paths.options_with_key(&key.0),
+            None => paths.options(),
+        };
+        Ok(Self {
+            options,
+            port: port.to_string(),
+            destination: format!("{user}@{host}"),
+            target: format!("{user}@{host}:{port}"),
+            _key: key,
+        })
+    }
+
+    fn command(&self) -> Command {
+        let mut cmd = Command::new("ssh");
+        cmd.args(&self.options).args(["-p", &self.port]);
+        cmd
+    }
+
+    /// Runs a POSIX sh script on the server, fed through stdin.
+    async fn run(&self, script: &str, timeout: Duration) -> Result<std::process::Output> {
+        let mut child = self
+            .command()
+            .args(["-T", &self.destination, "sh", "-s"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .context("cannot run ssh (install openssh-client)")?;
+        let mut stdin = child.stdin.take().context("ssh stdin")?;
+        stdin.write_all(script.as_bytes()).await?;
+        drop(stdin);
+        tokio::time::timeout(timeout, child.wait_with_output())
+            .await
+            .with_context(|| format!("ssh to {} timed out", self.target))?
+            .context("ssh failed")
+    }
+}
+
+/// Runs a POSIX sh script on a server over SSH and returns its stdout, or an error with its
+/// stderr when it fails.
+pub async fn run(
+    paths: &SshPaths,
+    server: &Server,
+    private_key: Option<&str>,
+    script: &str,
+    timeout: Duration,
+) -> Result<String> {
+    let login = Login::new(paths, server, private_key)?;
+    let out = login.run(script, timeout).await?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tail: Vec<&str> = stdout.lines().chain(stderr.lines()).collect();
+        bail!(
+            "the script on {} failed ({}): {}",
+            login.target,
+            out.status,
+            tail[tail.len().saturating_sub(15)..].join("\n")
+        );
+    }
+    Ok(stdout)
+}
+
+/// Whether Docker answered through a tunnel socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ready {
+    Answered,
+    /// The socket accepted connections but closed them without an answer: the remote end
+    /// refused the forward.
+    Refused,
+    /// Nothing listened on the socket in time.
+    TimedOut,
+}
+
+/// Waits until Docker answers `GET /_ping` through `socket`. A socket that does not exist yet or
+/// does not accept connections yet is retried until `timeout`, since ssh creates the file before
+/// it listens.
+pub async fn wait_for_docker(socket: &Path, timeout: Duration) -> Ready {
+    let deadline = Instant::now() + timeout;
+    let mut refused = 0;
+    loop {
+        match ping(socket).await {
+            Some(true) => return Ready::Answered,
+            Some(false) => {
+                refused += 1;
+                if refused >= REFUSALS {
+                    return Ready::Refused;
+                }
+            }
+            None => {}
+        }
+        if Instant::now() >= deadline {
+            return if refused > 0 {
+                Ready::Refused
+            } else {
+                Ready::TimedOut
+            };
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// `None` when nothing accepts connections on the socket, otherwise whether an HTTP answer came.
+async fn ping(socket: &Path) -> Option<bool> {
+    let mut stream = UnixStream::connect(socket).await.ok()?;
+    let exchange = async {
+        stream
+            .write_all(b"GET /_ping HTTP/1.0\r\nHost: docker\r\n\r\n")
+            .await?;
+        let mut head = [0u8; 5];
+        stream.read_exact(&mut head).await?;
+        std::io::Result::Ok(&head == b"HTTP/")
+    };
+    Some(matches!(
+        tokio::time::timeout(Duration::from_secs(5), exchange).await,
+        Ok(Ok(true))
+    ))
+}
+
+impl Tunnel {
+    /// Checks the server over SSH, then opens the tunnel and waits until Docker answers through
+    /// it. Connects with `private_key` when set (`key_name` names its secret in hints), otherwise
+    /// with the daemon's own key. Fails with [`Unreachable`] when the server cannot be used, and
+    /// returns the preflight checklist on success.
+    pub async fn connect(
+        paths: &SshPaths,
+        server: &Server,
+        private_key: Option<&str>,
+        key_name: Option<&str>,
+    ) -> Result<(Self, Vec<PreflightCheck>)> {
+        let login = Login::new(paths, server, private_key)?;
+        let out = login.run(preflight::SCRIPT, CONNECT_TIMEOUT).await?;
+        if out.status.code() == Some(255) {
+            let report = preflight::login_failed(
+                server,
+                key_name,
+                &paths.known_hosts.to_string_lossy(),
+                &String::from_utf8_lossy(&out.stderr),
+            );
+            return Err(unreachable(report.checks, report.problem));
+        }
+        let report =
+            preflight::diagnose(server, &Facts::parse(&String::from_utf8_lossy(&out.stdout)));
+        let mut checks = report.checks;
+        if report.problem.is_some() {
+            return Err(unreachable(checks, report.problem));
+        }
+        let tunnel = Self::open(paths, server, &login).await?;
+        let ready = wait_for_docker(&tunnel.socket, CONNECT_TIMEOUT).await;
+        if ready == Ready::TimedOut {
+            bail!(
+                "the SSH tunnel to {} did not open within {}s",
+                login.target,
+                CONNECT_TIMEOUT.as_secs()
+            );
+        }
+        let refused = preflight::tunnel_result(server, &mut checks, ready == Ready::Answered);
+        if refused.is_some() {
+            return Err(unreachable(checks, refused));
+        }
+        Ok((tunnel, checks))
+    }
+
+    async fn open(paths: &SshPaths, server: &Server, login: &Login) -> Result<Self> {
         std::fs::create_dir_all(&paths.sockets)
             .with_context(|| format!("cannot create {}", paths.sockets.display()))?;
         let socket = paths.sockets.join(format!("{}.sock", server.id));
         let _ = std::fs::remove_file(&socket);
-        let temp_key = private_key
-            .map(|key| TempKey::write(&paths.keys, &server.id, key))
-            .transpose()?;
-        let options = match &temp_key {
-            Some(key) => paths.options_with_key(&key.0),
-            None => paths.options(),
-        };
-        let mut child = Command::new("ssh")
-            .args(options)
-            .args(["-N", "-T", "-p", &port.to_string()])
+        let mut child = login
+            .command()
+            .args(["-N", "-T"])
             .args([
                 "-o",
                 "ExitOnForwardFailure=yes",
@@ -147,15 +339,15 @@ impl Tunnel {
                 "ServerAliveCountMax=3",
             ])
             .arg("-L")
-            .arg(format!("{}:{REMOTE_DOCKER_SOCKET}", socket.display()))
-            .arg(format!("{user}@{host}"))
+            .arg(format!("{}:{DOCKER_SOCKET}", socket.display()))
+            .arg(&login.destination)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .context("cannot run ssh (install openssh-client)")?;
-        let target = format!("{user}@{host}:{port}");
+        let target = login.target.clone();
         let deadline = Instant::now() + CONNECT_TIMEOUT;
         while !socket.exists() {
             if let Some(status) = child.try_wait()? {
@@ -170,7 +362,6 @@ impl Tunnel {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        drop(temp_key);
         if let Some(stderr) = child.stderr.take() {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
@@ -184,6 +375,13 @@ impl Tunnel {
 
     pub fn is_alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
+fn unreachable(checks: Vec<PreflightCheck>, problem: Option<ServerProblem>) -> anyhow::Error {
+    match problem {
+        Some(problem) => Unreachable { checks, problem }.into(),
+        None => anyhow::anyhow!("the preflight found no problem"),
     }
 }
 
@@ -207,6 +405,7 @@ pub fn paths(ssh_dir: &Path) -> SshPaths {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::UnixListener;
 
     #[test]
     fn git_ssh_command_quotes_paths() {
@@ -217,5 +416,63 @@ mod tests {
             "{cmd}"
         );
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    /// Answers every connection like Docker's `/_ping`.
+    fn serve_docker(listener: UnixListener) {
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 256];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                    .await;
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn waits_for_a_socket_that_appears_late() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("late.sock");
+        let path = socket.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            serve_docker(UnixListener::bind(path).unwrap());
+        });
+        let started = Instant::now();
+        assert_eq!(
+            wait_for_docker(&socket, Duration::from_secs(5)).await,
+            Ready::Answered
+        );
+        assert!(started.elapsed() >= Duration::from_millis(400));
+    }
+
+    #[tokio::test]
+    async fn a_stale_socket_file_is_not_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        assert!(socket.exists());
+        assert_eq!(
+            wait_for_docker(&socket, Duration::from_millis(300)).await,
+            Ready::TimedOut
+        );
+    }
+
+    #[tokio::test]
+    async fn a_socket_that_drops_every_connection_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("refused.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
+        });
+        assert_eq!(
+            wait_for_docker(&socket, Duration::from_secs(5)).await,
+            Ready::Refused
+        );
     }
 }

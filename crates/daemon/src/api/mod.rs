@@ -51,6 +51,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/servers/{id}/check", post(servers::check))
         .route("/servers/{id}/proxy", post(servers::proxy))
+        .route("/servers/{id}/docker", post(servers::install_docker))
         .route("/projects", get(projects::list).post(projects::create))
         .route("/projects/{id}", delete(projects::delete))
         .route(

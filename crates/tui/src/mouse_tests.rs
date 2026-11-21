@@ -36,6 +36,8 @@ fn server(name: &str) -> Server {
         docker_version: None,
         last_checked_at: None,
         created_at: Timestamp::default(),
+        checks: Vec::new(),
+        problem: None,
     }
 }
 
@@ -2745,4 +2747,84 @@ async fn first_app_offers_the_sample_and_skipping_moves_on() {
     label(&buf, "You're set.");
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.screen, Screen::Overview, "⏎ on Done finishes");
+}
+
+fn failing(name: &str) -> Server {
+    use common::{CheckStatus, PreflightCheck, ServerProblem};
+    let check = |label: &str, status| PreflightCheck {
+        label: label.into(),
+        status,
+        detail: None,
+    };
+    Server {
+        checks: vec![
+            check("ssh root@fixture:22", CheckStatus::Pass),
+            check("docker installed", CheckStatus::Fail),
+            check("docker running", CheckStatus::Skipped),
+        ],
+        problem: Some(ServerProblem {
+            summary: "docker isn't installed on fixture".into(),
+            fix: Some("install it with: curl -fsSL https://get.docker.com | sh".into()),
+            detail: "docker isn't installed on fixture".into(),
+            can_install_docker: true,
+        }),
+        ..remote(name, ServerStatus::Offline)
+    }
+}
+
+#[tokio::test]
+async fn a_failing_server_opens_its_checklist_and_offers_the_fix() {
+    let mut app = fixture();
+    app.screen = Screen::Servers;
+    app.servers = vec![server("fixture-node"), failing("fixture-edge")];
+    app.server_row = 1;
+    let buf = draw(&app, 160, 40);
+    let line = label(&buf, "docker isn't installed on fixture");
+    let details = label_on(&buf, line.y, "⏎ details").expect("details hint beside the problem");
+    let details = assert_hit(&app, details, key(KeyCode::Enter));
+    click(&mut app, details);
+    assert!(
+        matches!(&app.overlay, Some(Overlay::ServerDetail(d)) if d.server.name == "fixture-edge")
+    );
+
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Server · fixture-edge", |hit| {
+        matches!(hit, Hit::Key(..))
+    });
+    label(&buf, "✓ ssh root@fixture:22");
+    label(&buf, "✕ docker installed");
+    label(
+        &buf,
+        "fix  install it with: curl -fsSL https://get.docker.com | sh",
+    );
+    assert_hit(&app, label(&buf, "c check again"), char_key('c'));
+    assert_hit(&app, label(&buf, "y copy fix"), char_key('y'));
+    assert_hit(&app, label(&buf, "esc close"), key(KeyCode::Esc));
+    let install = assert_hit(&app, label(&buf, "i install docker"), char_key('i'));
+    click(&mut app, install);
+    assert!(matches!(
+        &app.overlay,
+        Some(Overlay::Confirm(c)) if matches!(&c.action, ConfirmAction::InstallDocker(id) if id == "fixture-edge")
+    ));
+}
+
+#[tokio::test]
+async fn a_cut_error_opens_in_full_with_e_or_a_click() {
+    let mut app = fixture();
+    let long = format!("deploy api failed: {}", "unauthorized ".repeat(20));
+    app.error(long.clone());
+    let buf = draw(&app, 120, 30);
+    let hint = assert_hit(&app, label(&buf, "e details"), char_key('e'));
+    click(&mut app, hint);
+    assert!(matches!(&app.overlay, Some(Overlay::ErrorDetail(e)) if e.text == long));
+    let buf = draw(&app, 120, 30);
+    assert_modal_targets(&app, &buf, "Error", |hit| matches!(hit, Hit::Key(..)));
+    label(&buf, "✕ deploy api failed");
+    assert_hit(&app, label(&buf, "y copy"), char_key('y'));
+    assert_hit(&app, label(&buf, "esc close"), key(KeyCode::Esc));
+
+    app.overlay = None;
+    app.error("short");
+    draw(&app, 120, 30);
+    assert!(!app.expand_error(), "an error that fits is not expandable");
 }
