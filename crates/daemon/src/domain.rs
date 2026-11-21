@@ -1578,7 +1578,10 @@ mod real_proxy {
             }),
             trusted: trusted.into(),
         };
-        docker::install_proxy(&docker, &config).await.unwrap();
+        let pages = crate::proxy_pages::archive(&[]).unwrap();
+        docker::install_proxy(&docker, &config, pages)
+            .await
+            .unwrap();
         assert_eq!(
             docker::proxy_labels_now(&docker).await.unwrap(),
             Some(docker::proxy_container_labels(&config)),
@@ -1605,6 +1608,27 @@ mod real_proxy {
             "the proxy never routed {DOMAIN}: {}",
             docker_cli(&["logs", "--tail", "30", brand::PROXY_CONTAINER])
         );
+    }
+
+    /// Status, content type and body of an https GET through the proxy.
+    async fn fetch(probe: &NetProbe, path: &str, accept: &str) -> Option<(u16, String, String)> {
+        let client = NetProbe::builder(&probe.roots)
+            .resolve(DOMAIN, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .build()
+            .unwrap();
+        let res = client
+            .get(format!("https://{DOMAIN}{path}"))
+            .header("Accept", accept)
+            .send()
+            .await
+            .ok()?;
+        let kind = res
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        Some((res.status().as_u16(), kind, res.text().await.ok()?))
     }
 
     async fn visitor_ip(probe: &NetProbe) -> String {
@@ -1711,6 +1735,43 @@ mod real_proxy {
 
         // Only a trusted proxy's CF-Connecting-IP becomes the visitor address.
         assert_ne!(visitor_ip(&probe.net).await, VISITOR);
+
+        // The daemon's own errors pass through untouched.
+        let (status, _, body) = fetch(&probe.net, "/no-such-route", "application/json")
+            .await
+            .unwrap();
+        assert_eq!((status, body.as_str()), (404, ""));
+
+        // With the daemon down, API clients get a JSON error and browsers the branded page.
+        let dead = std::net::TcpListener::bind("0.0.0.0:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        install(dead, false, &bundled).await;
+        let mut json = None;
+        for _ in 0..60 {
+            json = fetch(&probe.net, "/healthz", "application/json").await;
+            if json.as_ref().is_some_and(|j| j.0 == 503) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let json = json.unwrap();
+        assert_eq!(json.0, 503, "{json:?}");
+        assert_eq!(json.1, "application/json");
+        assert_eq!(
+            serde_json::from_str::<common::ApiError>(&json.2)
+                .unwrap()
+                .error,
+            format!("no server is available for {DOMAIN} right now")
+        );
+        let (status, kind, html) = fetch(&probe.net, "/", "text/html").await.unwrap();
+        assert_eq!(status, 503);
+        assert!(kind.starts_with("text/html"), "{kind}");
+        assert!(html.contains("No server available.") && html.contains(DOMAIN));
+        assert!(!html.contains("{{"), "the page is rendered");
+
         install(
             port,
             false,

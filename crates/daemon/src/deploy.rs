@@ -295,6 +295,7 @@ pub async fn enqueue(
             stopped_previous: None,
             build_tag: None,
             creating_container: false,
+            held: None,
         },
         plan,
         state.deploys.lock_for(&service.id),
@@ -435,6 +436,9 @@ struct Job {
     stopped_previous: Option<String>,
     build_tag: Option<String>,
     creating_container: bool,
+    /// The server whose proxy answers for the service's domains while no container does, so
+    /// it switches to the starting page now and back once the deploy has finished.
+    held: Option<Id>,
 }
 
 impl Job {
@@ -447,6 +451,9 @@ impl Job {
             .context("the service was deleted")?;
         // Two database servers must never run on one data volume, so databases are replaced
         // by stopping the live container first instead of overlapping old and new.
+        if rec.live_container.is_none() || rec.stopped {
+            self.held = Some(rec.service.server_id.clone());
+        }
         let previous = rec
             .live_container
             .filter(|_| matches!(rec.service.source, Source::Database { .. }));
@@ -462,6 +469,9 @@ impl Job {
         let docker = interruptible(&self.phase, self.state.docker.get(&server)).await?;
         self.service = Some(svc.clone());
         self.docker = Some(docker.clone());
+        if let Some(server_id) = &self.held {
+            self.state.refresh_proxy_pages(server_id).await;
+        }
         self.log.system(format!(
             "Deploying {} to server {}",
             svc.source.label(),
@@ -726,6 +736,9 @@ impl Job {
                     None => self.state.activity(level, activity, detail).await,
                 }
             }
+        }
+        if let Some(server_id) = &self.held {
+            self.state.refresh_proxy_pages(server_id).await;
         }
     }
 

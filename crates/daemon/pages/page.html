@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="dark">%%REFRESH%%
+<title>%%TITLE%%</title>
+<style>
+@font-face{font-family:Mono;src:url(data:font/woff2;base64,%%FONT%%) format("woff2");font-display:block}
+:root{--bg:#0e1113;--line:#2a3035;--text:#d8dee3;--muted:#7c878f;--accent:#f5a524;--info:#6ca6e0;--err:#e5534b;color-scheme:dark}
+*{box-sizing:border-box;margin:0;padding:0}
+body{position:relative;display:flex;flex-direction:column;min-height:100vh;min-height:100dvh;background:var(--bg);color:var(--text);font:13px/20px Mono,ui-monospace,monospace;font-variant-ligatures:none;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+header{display:flex;flex-shrink:0;align-items:center;justify-content:space-between;height:56px;padding:0 64px;border-bottom:1px solid var(--line)}
+nav{display:flex;gap:10px}
+.brand{color:var(--accent)}
+.muted{color:var(--muted)}
+.key{display:flex;gap:8px;color:var(--muted);text-decoration:none}
+.key span{color:var(--accent)}
+.key:hover,.key:focus-visible{color:var(--text)}
+.key:focus-visible{outline:1px solid var(--accent);outline-offset:4px}
+main{position:relative;z-index:1;display:flex;flex:1;flex-direction:column;justify-content:center;gap:48px;padding:48px 64px 104px}
+.message{display:flex;flex-direction:column;gap:16px}
+.status{display:flex;gap:10px;color:var(--muted)}
+.dot{color:var(--%%DOT%%)}
+.spin::before{content:"\280B";animation:spin .8s steps(1) infinite}
+@keyframes spin{10%{content:"\2819"}20%{content:"\2839"}30%{content:"\2838"}40%{content:"\283C"}50%{content:"\2834"}60%{content:"\2826"}70%{content:"\2827"}80%{content:"\2807"}90%{content:"\280F"}}
+h1{font-size:40px;font-weight:400;line-height:48px;letter-spacing:-.5px}
+.line{max-width:640px;color:var(--muted);font-size:15px;line-height:24px}
+dl{width:640px;max-width:100%;padding-top:8px;border-top:1px solid var(--line)}
+dl div{display:flex;gap:24px;padding:10px 0;font-size:14px;line-height:22px}
+dt{flex-shrink:0;width:120px;color:var(--muted)}
+dd{min-width:0;overflow-wrap:anywhere}
+.art{position:absolute;right:64px;bottom:56px;width:200px;height:140px;opacity:.55;pointer-events:none}
+@media (max-width:640px){header{height:52px;padding:0 20px}main{gap:36px;padding:40px 20px 184px}.message{gap:12px}h1{font-size:28px;line-height:36px;letter-spacing:-.3px}.line{font-size:14px;line-height:22px}dl div{gap:16px;font-size:13px;line-height:20px}dt{width:72px}.art{right:20px;bottom:24px}}
+@media (prefers-reduced-motion:reduce){.spin::before{animation:none}}
+</style>
+</head>
+<body>
+<header>
+<nav aria-label="breadcrumb"><span class="brand">%%BRAND%%</span><span class="muted" aria-hidden="true">›</span><span>proxy</span></nav>%%HINT%%
+</header>
+<main>
+<div class="message">
+<p class="status"><span class="dot%%DOT_CLASS%%" aria-hidden="true">%%GLYPH%%</span><span>%%STATUS%%</span></p>
+<h1>%%HEADLINE%%</h1>
+<p class="line">%%LINE%%</p>
+</div>
+<dl>
+<div><dt>host</dt><dd>{{html .Host}}</dd></div>
+<div><dt>request</dt><dd>{{placeholder "http.request.uuid"}}</dd></div>
+<div><dt>time</dt><dd>{{(now).UTC.Format "2006-01-02 15:04:05"}} UTC</dd></div>
+</dl>
+</main>
+<img class="art" src="data:image/png;base64,%%ART%%" width="200" height="140" alt="">
+</body>
+</html>

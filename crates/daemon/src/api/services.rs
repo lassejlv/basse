@@ -322,6 +322,7 @@ pub async fn add_domain(
             Some(domain.host.clone()),
         )
         .await;
+    state.refresh_proxy_pages(&rec.service.server_id).await;
     deploy::reconfigure(&state, &rec).await?;
     Ok(Json(domain))
 }
@@ -345,6 +346,7 @@ pub async fn delete_domain(
             Some(domain.host),
         )
         .await;
+    state.refresh_proxy_pages(&rec.service.server_id).await;
     deploy::reconfigure(&state, &rec).await?;
     Ok(no_content())
 }

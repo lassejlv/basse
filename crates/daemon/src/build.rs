@@ -109,6 +109,7 @@ pub fn compose_override(
                 format!("caddy_{i}.reverse_proxy"),
                 format!("{{{{upstreams {port}}}}}"),
             );
+            labels.insert(format!("caddy_{i}.import"), crate::proxy_pages::snippet());
         }
         let mut entry = json!({ "labels": labels });
         if !mine.is_empty() {
