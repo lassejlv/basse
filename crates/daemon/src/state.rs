@@ -1,12 +1,13 @@
 //! Shared application state handed to every handler and background task.
 
 use crate::backup_store::BackupStore;
+use crate::cloudflare::CloudflareIps;
 use crate::config::{Config, DataDir};
 use crate::database;
 use crate::db::Db;
 use crate::deploy::Deploys;
-use crate::docker::{DockerPool, InstanceRoute};
-use crate::domain::{NetProbe, Probe};
+use crate::docker::{DockerPool, InstanceRoute, ProxyConfig};
+use crate::domain::{NetProbe, Probe, Report};
 use crate::error::AppError;
 use crate::notify::Notifier;
 use crate::secrets::{MasterKey, Secrets};
@@ -15,8 +16,8 @@ use anyhow::{Context as _, Result, bail};
 use bollard::Docker;
 use chrono::Utc;
 use common::{
-    Activity, ActivityLevel, BackupStorage, DomainCheck, GitRepo, Id, Server, Service,
-    StorageConnection, Timestamp, VersionCheck,
+    Activity, ActivityLevel, BackupStorage, GitRepo, Id, Server, Service, StorageConnection,
+    Timestamp, VersionCheck,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -46,7 +47,11 @@ pub struct AppState {
     /// DNS and network access for the instance domain checks.
     pub probe: Box<dyn Probe>,
     /// Results of the last instance domain check, for the domain they ran against.
-    pub domain_checks: Mutex<Option<(String, Vec<DomainCheck>, Timestamp)>>,
+    pub domain_checks: Mutex<Option<(String, Report, Timestamp)>>,
+    /// Tokens of the domain checks running now, answered on the verification route.
+    pub verify_nonces: Mutex<Vec<String>>,
+    /// Cloudflare's edge ranges, refreshed daily.
+    pub cloudflare: CloudflareIps,
     /// This server's public addresses as the internet sees them, kept for ten minutes.
     public_ips: Mutex<Option<(Instant, PublicIps)>>,
     /// Repositories each git source can see, by source id, with when they were listed.
@@ -136,6 +141,8 @@ impl AppState {
             latest_release: Mutex::new(None),
             probe: Box::new(NetProbe::new()?),
             domain_checks: Mutex::new(None),
+            verify_nonces: Mutex::default(),
+            cloudflare: CloudflareIps::default(),
             public_ips: Mutex::new(None),
             repo_cache: Mutex::default(),
         })
@@ -199,15 +206,34 @@ impl AppState {
             .map(|d| format!("https://{d}"))
     }
 
-    /// The route to install with the proxy on `server`: only the local server serves the
-    /// instance domain, and only when the API listens beyond loopback.
-    pub fn instance_route(&self, server: &Server) -> Option<InstanceRoute> {
-        if server.kind != common::ServerKind::Local {
-            return None;
+    /// What the proxy on `server` should run with. Only the local server serves the instance
+    /// domain, and only when the API listens beyond loopback.
+    pub async fn proxy_config(&self, server: &Server) -> ProxyConfig {
+        let ranges = self.cloudflare.get(&self.http).await;
+        let route = match (server.kind, self.config().domain) {
+            (common::ServerKind::Local, Some(domain)) => {
+                match self.listen.parse::<std::net::SocketAddr>() {
+                    Ok(listen) => {
+                        let proxied = self
+                            .probe
+                            .resolve(&domain)
+                            .await
+                            .is_ok_and(|ips| ips.iter().any(|ip| ranges.contains(*ip)));
+                        Some(InstanceRoute {
+                            domain,
+                            port: listen.port(),
+                            proxied,
+                        })
+                    }
+                    Err(_) => None,
+                }
+            }
+            _ => None,
+        };
+        ProxyConfig {
+            route,
+            trusted: ranges.to_list(),
         }
-        let domain = self.config().domain?;
-        let port = self.listen.parse::<std::net::SocketAddr>().ok()?.port();
-        Some(InstanceRoute { domain, port })
     }
 
     /// The daemon's `config.toml` as it is now.

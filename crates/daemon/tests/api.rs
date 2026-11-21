@@ -13,6 +13,19 @@ async fn auth_is_required_and_errors_are_json() {
         return;
     };
     let http = reqwest::Client::new();
+
+    // The domain check's token route needs no bearer token, and only knows running checks.
+    let res = http
+        .get(format!(
+            "{}/.well-known/acme-challenge/{}-verify-0123abcd",
+            daemon.url,
+            common::brand::PREFIX
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
     let url = format!("{}{API_PREFIX}/projects", daemon.url);
 
     let res = http.get(&url).send().await.unwrap();
