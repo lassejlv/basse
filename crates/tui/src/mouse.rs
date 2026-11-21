@@ -78,6 +78,14 @@ pub enum Hit {
     MetricsRange(common::metrics::MetricsRange),
     /// What the Metrics tab of a compose service shows: 0 is all containers, then each one.
     MetricsContainer(usize),
+    /// What the Metrics tab of a replicated service shows: 0 is all replicas, then each one.
+    MetricsReplica(usize),
+    /// A replica of the service by its place in the list; a click follows its logs.
+    Replica(usize),
+    /// A row of the Scaling panel on the Settings tab; a double-click edits it.
+    Scaling(usize),
+    /// A panel of the Settings tab: the Scaling panel with `true`, the settings with `false`.
+    ScalingFocus(bool),
     /// A step on the setup rail or the Overview checklist; a click goes there.
     SetupStep(common::onboarding::Step),
     /// A choice of the setup step on screen; a double-click picks it.
@@ -110,6 +118,7 @@ pub enum List {
     Storage,
     Sources,
     Containers,
+    Replicas,
     InstanceBackups,
     Notify,
     Rule,
@@ -772,6 +781,31 @@ fn click(app: &mut App, hit: Hit, double: bool) {
         Hit::MetricsContainer(i) => {
             keys::finish_text_input(app);
             app.pick_metrics_container(i);
+        }
+        Hit::MetricsReplica(i) => {
+            keys::finish_text_input(app);
+            app.pick_metrics_replica(i);
+        }
+        Hit::Replica(i) => {
+            keys::finish_text_input(app);
+            app.pick_replica(i);
+        }
+        Hit::ScalingFocus(focus) => {
+            if let Some(view) = app.service.as_mut()
+                && view.scaling_focus != focus
+            {
+                view.scaling_focus = focus;
+                view.row = 0;
+            }
+        }
+        Hit::Scaling(i) => {
+            if let Some(view) = app.service.as_mut() {
+                view.scaling_focus = true;
+                view.row = i;
+            }
+            if double {
+                press(app, KeyCode::Enter, KeyModifiers::NONE);
+            }
         }
         Hit::Record(i) => {
             if let Some(r) = app

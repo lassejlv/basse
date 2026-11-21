@@ -12,6 +12,7 @@ mod mouse_tests;
 mod notify;
 mod picker;
 mod problem;
+mod replicas;
 mod server_pick;
 mod setup;
 mod theme;

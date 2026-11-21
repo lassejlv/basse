@@ -93,6 +93,8 @@ mod tests {
             primary_domain: None,
             last_deployed_at: None,
             live_deployment_id: None,
+            replicas: 1,
+            scaling: Default::default(),
         };
         let env = |id: &str, name: &str, services: Vec<Service>| EnvironmentNode {
             environment: Environment {

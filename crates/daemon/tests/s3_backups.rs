@@ -149,6 +149,7 @@ async fn postgres_backups_go_to_s3_and_restore_from_it() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();

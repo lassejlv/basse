@@ -7,8 +7,8 @@ use common::metrics::DeployMarker;
 use common::notify::*;
 use common::*;
 use rand::Rng as _;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions, PgRow};
 use sqlx::types::Json;
 use sqlx::{AssertSqlSafe, Connection as _, Postgres, Row as _, Transaction};
@@ -37,9 +37,34 @@ pub struct ServiceRecord {
     pub stopped: bool,
     /// Status of the oldest unfinished deployment, if any.
     pub busy: Option<DeploymentStatus>,
+    /// Replica 0's container, or the live deployment's container for a compose group.
     pub live_container: Option<String>,
     /// Whether any deployment of the service ever failed.
     pub ever_failed: bool,
+    /// The containers serving the service's replicas, by index.
+    pub replicas: Vec<ReplicaRow>,
+}
+
+impl ServiceRecord {
+    /// Each replica's container by index; a compose group's first container stands in as 0.
+    pub fn replica_containers(&self) -> Vec<(u16, String)> {
+        if self.replicas.is_empty() {
+            return self.live_container.iter().map(|c| (0, c.clone())).collect();
+        }
+        self.replicas
+            .iter()
+            .map(|r| (r.index, r.container_id.clone()))
+            .collect()
+    }
+}
+
+/// The container serving one replica slot of a service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplicaRow {
+    pub index: u16,
+    pub server_id: Id,
+    pub deployment_id: Id,
+    pub container_id: String,
 }
 
 /// A custom error page with the HTML the proxy serves.
@@ -347,10 +372,15 @@ impl Db {
                     s.health_path, s.created_at, s.stopped,
                     (SELECT host FROM domains d WHERE d.service_id = s.id ORDER BY d.created_at, d.seq LIMIT 1),
                     (SELECT id FROM deployments WHERE service_id = s.id AND status = 'live' ORDER BY number DESC LIMIT 1),
-                    (SELECT container_id FROM deployments WHERE service_id = s.id AND status = 'live' ORDER BY number DESC LIMIT 1),
+                    COALESCE((SELECT container_id FROM replicas WHERE service_id = s.id ORDER BY idx LIMIT 1),
+                             (SELECT container_id FROM deployments WHERE service_id = s.id AND status = 'live' ORDER BY number DESC LIMIT 1)),
                     (SELECT MAX(finished_at) FROM deployments WHERE service_id = s.id AND status IN ('live', 'superseded')),
                     (SELECT status FROM deployments WHERE service_id = s.id AND status IN ('queued', 'building', 'starting') ORDER BY number LIMIT 1),
-                    EXISTS (SELECT 1 FROM deployments WHERE service_id = s.id AND status = 'failed')
+                    EXISTS (SELECT 1 FROM deployments WHERE service_id = s.id AND status = 'failed'),
+                    s.replicas, s.scaling,
+                    (SELECT COALESCE(json_agg(json_build_object('index', idx, 'server_id', server_id,
+                                     'deployment_id', deployment_id, 'container_id', container_id) ORDER BY idx), '[]'::json)
+                     FROM replicas WHERE service_id = s.id)
              FROM services s {tail}"
         );
         self.fetch(sql, binds, |row| {
@@ -369,6 +399,12 @@ impl Db {
                 primary_domain: row.try_get(11)?,
                 live_deployment_id: row.try_get(12)?,
                 last_deployed_at: row.try_get(14)?,
+                replicas: u16::try_from(row.try_get::<i32, _>(17)?)
+                    .map_err(|e| decode_error(17, e))?,
+                scaling: row
+                    .try_get::<Option<Json<Scaling>>, _>(18)?
+                    .map(|Json(s)| s)
+                    .unwrap_or_default(),
             };
             let busy: Option<String> = row.try_get(15)?;
             Ok(ServiceRecord {
@@ -377,6 +413,7 @@ impl Db {
                 live_container: row.try_get(13)?,
                 busy: busy.map(|s| parse_enum(&s, 15)).transpose()?,
                 ever_failed: row.try_get(16)?,
+                replicas: col_json(row, 19)?,
             })
         })
         .await
@@ -399,8 +436,9 @@ impl Db {
         let s = new.service;
         let mut tx = self.pool.begin().await?;
         sqlx::query(
-            "INSERT INTO services (id, environment_id, server_id, name, source, port, command, restart, health_path, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            "INSERT INTO services (id, environment_id, server_id, name, source, port, command, restart, health_path, created_at,
+                                   replicas, scaling)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
         )
         .bind(&s.id)
         .bind(&s.environment_id)
@@ -412,6 +450,8 @@ impl Db {
         .bind(enum_str(&s.restart))
         .bind(&s.health_path)
         .bind(s.created_at)
+        .bind(i32::from(s.replicas))
+        .bind(Json(&s.scaling))
         .execute(&mut *tx)
         .await?;
         replace_env(&mut tx, &s.id, new.env).await?;
@@ -428,7 +468,7 @@ impl Db {
     pub async fn update_service(&self, s: &Service) -> Result<()> {
         sqlx::query(
             "UPDATE services SET name = $2, source = $3, port = $4, command = $5, restart = $6,
-                    health_path = $7, server_id = $8 WHERE id = $1",
+                    health_path = $7, server_id = $8, scaling = $9 WHERE id = $1",
         )
         .bind(&s.id)
         .bind(&s.name)
@@ -438,8 +478,33 @@ impl Db {
         .bind(enum_str(&s.restart))
         .bind(&s.health_path)
         .bind(&s.server_id)
+        .bind(Json(&s.scaling))
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    /// The number of replicas a service should run; the replica rows follow when the change is
+    /// applied.
+    pub async fn set_replica_count(&self, service_id: &str, replicas: u16) -> Result<()> {
+        sqlx::query("UPDATE services SET replicas = $2 WHERE id = $1")
+            .bind(service_id)
+            .bind(i32::from(replicas))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn insert_replica(&self, service_id: &str, r: &ReplicaRow) -> Result<()> {
+        insert_replica(&self.pool, service_id, r).await
+    }
+
+    pub async fn delete_replica(&self, service_id: &str, index: u16) -> Result<()> {
+        sqlx::query("DELETE FROM replicas WHERE service_id = $1 AND idx = $2")
+            .bind(service_id)
+            .bind(i32::from(index))
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -730,10 +795,23 @@ impl Db {
         .await?)
     }
 
-    /// Marks `deployment` live and the previously live one superseded, atomically. A move
-    /// passes the server the deployment runs on, which the service moves to in the same step.
-    pub async fn switch_live(&self, d: &Deployment, moved_to: Option<&str>) -> Result<()> {
+    /// Marks `deployment` live and the previously live one superseded, and makes `replicas` the
+    /// service's replica set, atomically. A move passes the server the deployment runs on,
+    /// which the service moves to in the same step.
+    pub async fn switch_live(
+        &self,
+        d: &Deployment,
+        moved_to: Option<&str>,
+        replicas: &[ReplicaRow],
+    ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM replicas WHERE service_id = $1")
+            .bind(&d.service_id)
+            .execute(&mut *tx)
+            .await?;
+        for r in replicas {
+            insert_replica(&mut *tx, &d.service_id, r).await?;
+        }
         sqlx::query(
             "UPDATE deployments SET status = 'superseded' WHERE service_id = $1 AND status = 'live' AND id != $2",
         )
@@ -2037,6 +2115,47 @@ impl Db {
     }
 
     /// Drops the buckets each level no longer keeps at `now`; returns how many went.
+    /// The newest raw sample of each container of a service since `since`: its metrics key,
+    /// CPU and memory.
+    pub async fn latest_samples(
+        &self,
+        service_id: &str,
+        since: Timestamp,
+    ) -> Result<Vec<(String, f64, u64)>> {
+        let rows: Vec<(String, f64, f64)> = sqlx::query_as(
+            "SELECT DISTINCT ON (container) container, cpu_sum / samples, mem_sum / samples
+             FROM metrics WHERE service_id = $1 AND resolution = $2 AND at >= $3 AND samples > 0
+             ORDER BY container, at DESC",
+        )
+        .bind(service_id)
+        .bind(metrics::LEVELS[0].0 as i32)
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(key, cpu, mem)| (key, cpu, mem.max(0.0) as u64))
+            .collect())
+    }
+
+    /// Memory the daemon's containers on a server use, from their newest raw samples.
+    pub async fn memory_in_use(&self, server_id: &str, since: Timestamp) -> Result<u64> {
+        let used: Option<f64> = sqlx::query_scalar(
+            "SELECT SUM(mem) FROM (
+                 SELECT DISTINCT ON (m.service_id, m.container) m.mem_sum / m.samples AS mem
+                 FROM metrics m JOIN services s ON s.id = m.service_id
+                 WHERE s.server_id = $1 AND m.resolution = $2 AND m.at >= $3 AND m.samples > 0
+                 ORDER BY m.service_id, m.container, m.at DESC
+             ) latest",
+        )
+        .bind(server_id)
+        .bind(metrics::LEVELS[0].0 as i32)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(used.unwrap_or(0.0).max(0.0) as u64)
+    }
+
     pub async fn expire_metrics(&self, now: Timestamp) -> Result<u64> {
         let (resolutions, cutoffs): (Vec<i32>, Vec<Timestamp>) = metrics::cutoffs(now)
             .iter()
@@ -2405,6 +2524,28 @@ async fn replace_env(tx: &mut Tx, service_id: &str, vars: &[EnvVar]) -> sqlx::Re
 }
 
 /// The serde `snake_case` tag of a unit enum variant.
+async fn insert_replica<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    service_id: &str,
+    r: &ReplicaRow,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO replicas (service_id, idx, server_id, deployment_id, container_id, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (service_id, idx) DO UPDATE SET server_id = $3, deployment_id = $4,
+             container_id = $5, created_at = $6",
+    )
+    .bind(service_id)
+    .bind(i32::from(r.index))
+    .bind(&r.server_id)
+    .bind(&r.deployment_id)
+    .bind(&r.container_id)
+    .bind(Utc::now())
+    .execute(executor)
+    .await?;
+    Ok(())
+}
+
 fn enum_str<T: Serialize>(value: &T) -> String {
     match serde_json::to_value(value) {
         Ok(serde_json::Value::String(s)) => s,
@@ -2588,6 +2729,8 @@ pub mod tests {
             primary_domain: None,
             last_deployed_at: None,
             live_deployment_id: None,
+            replicas: 1,
+            scaling: Default::default(),
         };
         let now = Utc::now();
         let domains = ["a.example.com", "b.example.com"].map(|host| Domain {
@@ -2646,9 +2789,9 @@ pub mod tests {
         assert_eq!(rec.service.port, Some(80));
 
         first.finished_at = Some(Utc::now());
-        db.switch_live(&first, None).await.unwrap();
+        db.switch_live(&first, None, &[]).await.unwrap();
         second.finished_at = Some(Utc::now());
-        db.switch_live(&second, None).await.unwrap();
+        db.switch_live(&second, None, &[]).await.unwrap();
         let first = db.deployment(&first.id).await.unwrap().unwrap();
         assert_eq!(first.status, DeploymentStatus::Superseded);
         let rec = db.service(&svc.id).await.unwrap().unwrap();

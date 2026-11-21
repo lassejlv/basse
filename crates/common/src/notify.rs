@@ -143,6 +143,8 @@ events! {
     ServiceOomKilled => "service.oom_killed", Services, Critical, "Killed out of memory";
     ServiceRestartLoop => "service.restart_loop", Services, Critical, "Restart loop";
     ServiceMemoryHigh => "service.memory_high", Services, Warning, "Memory near its limit";
+    ServiceScaled => "service.scaled", Services, Info, "Service scaled";
+    ServiceScaleLimitReached => "service.scale_limit_reached", Services, Warning, "Scale limit reached";
     DatabaseCreated => "database.created", Databases, Info, "Database created";
     DatabaseBackupSucceeded => "database.backup_succeeded", Databases, Success, "Backup succeeded";
     DatabaseBackupFailed => "database.backup_failed", Databases, Critical, "Backup failed";

@@ -30,9 +30,12 @@
 //! | POST | `/services/{id}/restart` | | `ServiceDetail` |
 //! | POST | `/services/{id}/stop` | | `ServiceDetail` |
 //! | POST | `/services/{id}/start` | | `ServiceDetail` |
-//! | GET | `/services/{id}/logs?tail=200&follow=true&container=web` | | NDJSON `LogLine` stream; `container` picks a compose service |
+//! | GET | `/services/{id}/logs?tail=200&follow=true&container=web&replica=1` | | NDJSON `LogLine` stream; `container` picks a compose service, `replica` a replica by index (default 0) |
 //! | GET | `/services/{id}/stats` | | `ServiceStats` |
-//! | GET | `/services/{id}/metrics?range=1h&container=web` | | `metrics::ServiceMetrics`; `range` is 1h (default), 24h, 7d or 30d; `container` picks a compose service (default: all, summed); 400 for anything else |
+//! | GET | `/services/{id}/metrics?range=1h&container=web&replica=1` | | `metrics::ServiceMetrics`; `range` is 1h (default), 24h, 7d or 30d; `container` picks a compose service and `replica` a replica by index (default: all, summed); 400 for anything else |
+//! | POST | `/services/{id}/scale` | `ScaleRequest` | `ServiceDetail` (returns at once; replicas are added or drained in the background; 409 while autoscaling is on or when the server lacks the memory) |
+//! | PUT | `/services/{id}/autoscale` | `Autoscale` | `ServiceDetail` (turning it on scales into `min..=max` right away) |
+//! | GET | `/services/{id}/capacity` | | `ScaleCapacity` (room for more replicas on the service's server, by memory) |
 //! | PUT | `/services/{id}/env` | `Vec<EnvVar>` | `Vec<EnvVar>` (replaces all; applies on next deploy) |
 //! | POST | `/services/{id}/domains` | `CreateDomain` | `Domain` (applied to the live container at once) |
 //! | DELETE | `/domains/{id}` | | 204 |
@@ -41,7 +44,7 @@
 //! | GET | `/services/{id}/deployments?limit=20` | | `Vec<Deployment>`, newest first |
 //! | GET | `/deployments/{id}` | | `Deployment` |
 //! | GET | `/deployments/{id}/logs?follow=true` | | NDJSON `LogLine` stream, ends when the deployment finishes |
-//! | POST | `/deployments/{id}/cancel` | | `Deployment` (cancelled after cleanup; 409 once live cutover starts) |
+//! | POST | `/deployments/{id}/cancel` | | `Deployment` (cancelled after cleanup, which puts the old replicas back; 409 once the new set is committed) |
 //! | POST | `/deployments/{id}/rollback` | | `Deployment` (new deployment reusing that image) |
 //! | GET | `/settings` | | `InstanceSettings` |
 //! | PATCH | `/settings` | `UpdateSettings` | `InstanceSettings` (persisted in the daemon's config.toml) |
@@ -203,7 +206,7 @@
 
 use crate::notify::{ChannelConfig, NotifyEvent, RuleScope};
 use crate::onboarding::{OnboardingStatus, Step};
-use crate::{EnvVar, Id, RestartPolicy, SecretValue, Source};
+use crate::{EnvVar, Id, LbPolicy, RestartPolicy, SecretValue, Source};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -292,6 +295,9 @@ pub struct CreateService {
     /// Start the first deployment right away.
     #[serde(default)]
     pub deploy: bool,
+    /// Defaults to 1.
+    #[serde(default)]
+    pub replicas: Option<u16>,
 }
 
 /// Fields left as `None` keep their value. `Some(None)` is not used; send an empty string to clear
@@ -308,6 +314,19 @@ pub struct UpdateService {
     /// `false` lets the proxy's own error responses through instead of the branded pages.
     /// Applies at once, without a deploy.
     pub branded_error_pages: Option<bool>,
+    /// Rewrites the service's proxy route at once; no redeploy.
+    #[serde(default)]
+    pub lb_policy: Option<LbPolicy>,
+    #[serde(default)]
+    pub max_surge: Option<u16>,
+    #[serde(default)]
+    pub shared_volume_ok: Option<bool>,
+}
+
+/// Body of `POST /services/{id}/scale`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScaleRequest {
+    pub replicas: u16,
 }
 
 /// A custom error page for a service or the instance. The page must be one HTML file of at

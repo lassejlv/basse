@@ -302,6 +302,7 @@ impl App {
                         domains: domain.into_iter().collect(),
                         volumes: Vec::new(),
                         deploy: true,
+                        replicas: None,
                     })
                     .await?;
                 let first = c

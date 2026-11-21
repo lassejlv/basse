@@ -432,6 +432,52 @@ impl Client {
         self.get(&path).await
     }
 
+    /// Metrics of one replica over `range`.
+    pub async fn replica_metrics(
+        &self,
+        id: &str,
+        range: MetricsRange,
+        replica: u16,
+    ) -> Result<ServiceMetrics> {
+        self.get(&format!(
+            "/services/{id}/metrics?range={range}&replica={replica}"
+        ))
+        .await
+    }
+
+    /// Logs of one replica.
+    pub async fn replica_logs(
+        &self,
+        id: &str,
+        replica: u16,
+        tail: usize,
+        follow: bool,
+    ) -> Result<LogStreamBox> {
+        self.stream(&format!(
+            "/services/{id}/logs?tail={tail}&follow={follow}&replica={replica}"
+        ))
+        .await
+    }
+
+    /// Sets the replica count; replicas are added or drained in the background.
+    pub async fn scale(&self, id: &str, replicas: u16) -> Result<ServiceDetail> {
+        self.post(&format!("/services/{id}/scale"), &ScaleRequest { replicas })
+            .await
+    }
+
+    pub async fn set_autoscale(&self, id: &str, autoscale: &Autoscale) -> Result<ServiceDetail> {
+        Self::json(
+            self.req(Method::PUT, &format!("/services/{id}/autoscale"))
+                .json(autoscale),
+        )
+        .await
+    }
+
+    /// Room for more replicas on the service's server.
+    pub async fn scale_capacity(&self, id: &str) -> Result<ScaleCapacity> {
+        self.get(&format!("/services/{id}/capacity")).await
+    }
+
     pub async fn set_env(&self, id: &str, vars: &[EnvVar]) -> Result<Vec<EnvVar>> {
         Self::json(
             self.req(Method::PUT, &format!("/services/{id}/env"))

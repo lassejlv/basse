@@ -1,9 +1,10 @@
 //! Railpack and Docker Compose builds, run through their CLIs with the output streamed into the
 //! deployment log.
 
-use super::{Cancelled, HEALTH_TIMEOUT, Job, Phase, STABLE_FOR, interruptible, transition};
+use super::{Cancelled, Job, Phase, interruptible, transition};
 use crate::build;
 use crate::docker::{self, RunState};
+use crate::replicas::{HEALTH_TIMEOUT, STABLE_FOR};
 use anyhow::{Context as _, Result, anyhow, bail};
 use bollard::Docker;
 use chrono::Utc;
@@ -374,7 +375,10 @@ impl Job {
         }
         self.d.status = DeploymentStatus::Live;
         self.d.finished_at = Some(now);
-        self.state.db.switch_live(&self.d, self.moved_to()).await?;
+        self.state
+            .db
+            .switch_live(&self.d, self.moved_to(), &[])
+            .await?;
 
         self.begin(StepKind::Cleanup, None).await;
         let mut removed = 0;

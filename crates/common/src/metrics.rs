@@ -87,6 +87,12 @@ pub struct ServiceMetrics {
     pub containers: Vec<String>,
     /// The compose service the points are for; `None` sums every container of the service.
     pub container: Option<String>,
+    /// Indexes of the replicas that reported within the range.
+    #[serde(default)]
+    pub replicas: Vec<u16>,
+    /// The replica the points are for; `None` sums every replica.
+    #[serde(default)]
+    pub replica: Option<u16>,
     /// Oldest first; buckets without samples are left out.
     pub points: Vec<MetricPoint>,
     /// Deployments that went live within the range, oldest first.
@@ -120,6 +126,9 @@ pub struct MetricPoint {
     pub uptime_secs: i64,
     /// Requests through the proxy to the service's domains; `None` when none were measured.
     pub http: Option<HttpPoint>,
+    /// Replicas that reported in the bucket; 0 for compose services.
+    #[serde(default)]
+    pub replicas: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

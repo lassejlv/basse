@@ -170,6 +170,12 @@ fn render(page: &Page) -> String {
         .replace("%%LINE%%", page.line)
 }
 
+/// What hosts with branded pages off answer: the status alone, as Caddy does without error
+/// handling. The body is an unset variable because caddy-docker-proxy drops an empty `""`
+/// token when it rewrites the file, and a lone `respond {err.status_code}` sends the status as
+/// the body.
+const RAW: &str = "\t\thandle @raw {\n\t\t\trespond {http.vars.raw} {err.status_code}\n\t\t}\n";
+
 /// A custom page replacing a built-in one: for a service's hosts, or the instance default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomPage {
@@ -298,7 +304,7 @@ pub fn caddyfile(pages: &ProxyPages) -> String {
     if !pages.raw.is_empty() {
         let raw: Vec<&str> = pages.raw.iter().map(String::as_str).collect();
         matcher(&mut out, "raw", &raw, None);
-        out.push_str("\t\thandle @raw {\n\t\t\trespond \"\" {err.status_code}\n\t\t}\n");
+        out.push_str(RAW);
     }
     let starting: Vec<&str> = pages
         .held
@@ -491,7 +497,9 @@ mod tests {
             ..Default::default()
         });
         let raw = file
-            .find("\t\t@raw host raw.example.com raw2.example.com\n\t\thandle @raw {\n\t\t\trespond \"\" {err.status_code}\n\t\t}")
+            .find(&format!(
+                "\t\t@raw host raw.example.com raw2.example.com\n{RAW}"
+            ))
             .expect("raw branch");
         assert!(raw < file.find("@starting").unwrap());
     }

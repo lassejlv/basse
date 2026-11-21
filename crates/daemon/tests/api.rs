@@ -224,6 +224,7 @@ async fn projects_environments_and_services_crud() {
                 mount_path: "/cache".into(),
             }],
             deploy: false,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -253,6 +254,7 @@ async fn projects_environments_and_services_crud() {
         domains: vec!["shop.example.com".into()],
         volumes: vec![],
         deploy: false,
+        replicas: None,
     };
     let err = api.create_service(&dup).await.unwrap_err();
     assert!(err.to_string().contains("already in use"), "{err}");
@@ -369,6 +371,7 @@ async fn projects_environments_and_services_crud() {
             domains: vec![],
             volumes: vec![],
             deploy: false,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -958,6 +961,7 @@ async fn metrics_validate_the_range_and_start_empty() {
             domains: vec!["shop.example.com".into()],
             volumes: vec![],
             deploy: false,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -1000,4 +1004,337 @@ async fn metrics_validate_the_range_and_start_empty() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn scaling_rules_are_enforced_before_anything_runs() {
+    let Some(daemon) = Daemon::start().await else {
+        return;
+    };
+    let api = daemon.client();
+    api.create_project(&CreateProject {
+        name: "scale".into(),
+        description: None,
+    })
+    .await
+    .unwrap();
+    let env = api.tree().await.unwrap().projects[0].environments[0]
+        .environment
+        .id
+        .clone();
+    let create = |name: &str, source: Source| CreateService {
+        environment_id: env.clone(),
+        server_id: None,
+        name: name.into(),
+        source,
+        port: Some(80),
+        command: None,
+        restart: RestartPolicy::default(),
+        health_path: None,
+        env: vec![],
+        domains: vec![],
+        volumes: vec![],
+        deploy: false,
+        replicas: None,
+    };
+    let web = api
+        .create_service(&create(
+            "web",
+            Source::Image {
+                image: "nginx:alpine".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let id = &web.service.id;
+    assert_eq!(web.service.replicas, 1);
+    assert_eq!(web.service.scaling, Scaling::default());
+
+    // Before the first deploy the count is only stored.
+    let d = api.scale(id, 3).await.unwrap();
+    assert_eq!(d.service.replicas, 3);
+    assert!(d.replicas.is_empty());
+    for bad in [0, MAX_REPLICAS + 1] {
+        let e = api.scale(id, bad).await.unwrap_err();
+        assert!(format!("{e:#}").contains("between 1 and"), "{e:#}");
+    }
+
+    // A volume under several replicas needs the opt-in, and the opt-in can't be dropped then.
+    let volume = CreateVolume {
+        name: "data".into(),
+        mount_path: "/data".into(),
+    };
+    let e = api.add_volume(id, &volume).await.unwrap_err();
+    assert!(format!("{e:#}").contains("shared_volume_ok"), "{e:#}");
+    let shared = |ok| UpdateService {
+        shared_volume_ok: Some(ok),
+        ..Default::default()
+    };
+    api.update_service(id, &shared(true)).await.unwrap();
+    api.add_volume(id, &volume).await.unwrap();
+    let e = api.update_service(id, &shared(false)).await.unwrap_err();
+    assert!(
+        format!("{e:#}").contains("every replica would write"),
+        "{e:#}"
+    );
+    let d = api
+        .update_service(
+            id,
+            &UpdateService {
+                lb_policy: Some(LbPolicy::IpHash),
+                max_surge: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(d.service.scaling.lb_policy, LbPolicy::IpHash);
+    assert_eq!(d.service.scaling.max_surge, 2);
+
+    // Autoscaling: validated, owns the count, and pulls it into its bounds.
+    let mut auto = Autoscale {
+        enabled: true,
+        min: 4,
+        max: 2,
+        cpu_percent: Some(70),
+        ..Default::default()
+    };
+    let e = api.set_autoscale(id, &auto).await.unwrap_err();
+    assert!(format!("{e:#}").contains("below min"), "{e:#}");
+    auto.max = 6;
+    let d = api.set_autoscale(id, &auto).await.unwrap();
+    assert_eq!(d.service.scaling.autoscale, auto);
+    assert_eq!(d.service.replicas, 4, "raised to min");
+    let e = api.scale(id, 2).await.unwrap_err();
+    assert!(format!("{e:#}").contains("turn it off first"), "{e:#}");
+    auto.enabled = false;
+    api.set_autoscale(id, &auto).await.unwrap();
+    assert_eq!(api.scale(id, 2).await.unwrap().service.replicas, 2);
+    let no_target = Autoscale {
+        enabled: true,
+        ..Default::default()
+    };
+    assert!(api.set_autoscale(id, &no_target).await.is_err());
+
+    // Databases run one replica.
+    let db = api
+        .create_service(&create(
+            "pg",
+            Source::Database {
+                kind: DatabaseKind::Postgres,
+                version: "18-alpine".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let e = api.scale(&db.service.id, 2).await.unwrap_err();
+    assert!(format!("{e:#}").contains("one replica"), "{e:#}");
+    let mut many = create(
+        "many",
+        Source::Image {
+            image: "nginx:alpine".into(),
+        },
+    );
+    many.replicas = Some(3);
+    assert_eq!(api.create_service(&many).await.unwrap().service.replicas, 3);
+}
+
+#[tokio::test]
+async fn error_pages_are_validated_stored_and_listed() {
+    let Some(daemon) = Daemon::start().await else {
+        return;
+    };
+    let api = daemon.client();
+    api.create_project(&CreateProject {
+        name: "pages".into(),
+        description: None,
+    })
+    .await
+    .unwrap();
+    let env = api.tree().await.unwrap().projects[0].environments[0]
+        .environment
+        .id
+        .clone();
+    let create = |name: &str, source: Source| CreateService {
+        environment_id: env.clone(),
+        server_id: None,
+        name: name.into(),
+        source,
+        port: Some(80),
+        command: None,
+        restart: RestartPolicy::default(),
+        health_path: None,
+        env: vec![],
+        domains: vec![],
+        volumes: vec![],
+        deploy: false,
+        replicas: None,
+    };
+    let web = api
+        .create_service(&create(
+            "web",
+            Source::Image {
+                image: "nginx:alpine".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let id = web.service.id.as_str();
+    assert_eq!(web.error_pages, ErrorPages::default());
+    let upload = |html: String| SetErrorPage::Upload {
+        html,
+        name: Some("pages/down.html".into()),
+    };
+
+    let page = api
+        .set_error_page(
+            Some(id),
+            ErrorPageKind::NoServer,
+            &upload(r#"<link rel="stylesheet" href="https://fonts.example.com/a.css">down"#.into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.source,
+        ErrorPageSource::Upload {
+            name: Some("down.html".into())
+        }
+    );
+    assert_eq!(page.warnings.len(), 1);
+    assert!(page.warnings[0].contains("fonts.example.com"), "{page:?}");
+    let e = api
+        .set_error_page(
+            Some(id),
+            ErrorPageKind::Timeout,
+            &upload("x".repeat(MAX_ERROR_PAGE_BYTES + 1)),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("at most 256 KB"), "{e:#}");
+    let e = api
+        .set_error_page(
+            Some(id),
+            ErrorPageKind::Timeout,
+            &SetErrorPage::Repo {
+                path: "errors/504.html".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{e:#}").contains("not built from a repository"),
+        "{e:#}"
+    );
+
+    let git = api
+        .create_service(&create(
+            "api",
+            Source::Git {
+                repo: "https://example.com/acme/api.git".into(),
+                branch: "main".into(),
+                dockerfile: "Dockerfile".into(),
+                context: ".".into(),
+                root: String::new(),
+                watch_paths: true,
+                source_id: None,
+                auto_deploy: false,
+                build: Build::default(),
+            },
+        ))
+        .await
+        .unwrap();
+    let e = api
+        .set_error_page(
+            Some(&git.service.id),
+            ErrorPageKind::Timeout,
+            &SetErrorPage::Repo {
+                path: "../504.html".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("inside the repository"), "{e:#}");
+    let repo = api
+        .set_error_page(
+            Some(&git.service.id),
+            ErrorPageKind::Timeout,
+            &SetErrorPage::Repo {
+                path: "./errors/504.html".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.source,
+        ErrorPageSource::Repo {
+            path: "errors/504.html".into()
+        }
+    );
+    assert_eq!(repo.size, None);
+
+    let off = api
+        .update_service(
+            id,
+            &UpdateService {
+                branded_error_pages: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!off.error_pages.branded);
+    assert_eq!(off.error_pages.custom.len(), 1);
+    assert_eq!(off.error_pages.custom[0].kind, ErrorPageKind::NoServer);
+
+    let e = api
+        .set_error_page(
+            None,
+            ErrorPageKind::NotFound,
+            &SetErrorPage::Repo {
+                path: "404.html".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("uploaded"), "{e:#}");
+    api.set_error_page(None, ErrorPageKind::NotFound, &upload("<p>gone</p>".into()))
+        .await
+        .unwrap();
+    let instance = api.instance_error_pages().await.unwrap();
+    assert!(instance.branded);
+    assert_eq!(instance.custom.len(), 1);
+    assert_eq!(instance.custom[0].size, Some(11));
+    assert!(
+        api.service(id)
+            .await
+            .unwrap()
+            .error_pages
+            .page(ErrorPageKind::NotFound)
+            .is_none()
+    );
+
+    api.delete_error_page(None, ErrorPageKind::NotFound)
+        .await
+        .unwrap();
+    let e = api
+        .delete_error_page(None, ErrorPageKind::NotFound)
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("no custom 404 page"), "{e:#}");
+    api.delete_error_page(Some(id), ErrorPageKind::NoServer)
+        .await
+        .unwrap();
+    assert!(api.service(id).await.unwrap().error_pages.custom.is_empty());
+
+    let res = reqwest::Client::new()
+        .put(format!(
+            "{}{API_PREFIX}/services/{id}/error-pages/418",
+            daemon.url
+        ))
+        .bearer_auth(&daemon.token)
+        .json(&upload("x".into()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
