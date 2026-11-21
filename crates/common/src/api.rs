@@ -91,9 +91,22 @@
 //! | PATCH | `/storage/{id}` | `UpdateStorage` | `StorageConnection` |
 //! | DELETE | `/storage/{id}` | | 204; 409 while backups or schedules use it |
 //! | POST | `/storage/{id}/test` | | `StorageTest` (puts, reads and deletes a probe object) |
+//!
+//! Instance backups are encrypted archives of the daemon itself. Restoring one is the
+//! `<daemon> restore` command on the new machine, not an API call.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | GET | `/instance/backups` | | `Vec<InstanceBackup>`, newest first |
+//! | POST | `/instance/backups` | `CreateInstanceBackup` | `InstanceBackup` with status `running` (runs in background) |
+//! | GET | `/instance/backups/schedule` | | `InstanceBackupSchedule` |
+//! | PUT | `/instance/backups/schedule` | `UpdateInstanceBackupSchedule` | `InstanceBackupSchedule` |
+//! | GET | `/instance/backups/{id}/download` | | the encrypted archive as `application/octet-stream` |
+//! | DELETE | `/instance/backups/{id}` | | 204 |
 
 use crate::{EnvVar, Id, RestartPolicy, SecretValue, Source};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateServer {
@@ -284,3 +297,49 @@ pub struct CreateBackup {
     /// Storage connection to write to; `None` keeps the backup in the data directory.
     pub storage_id: Option<Id>,
 }
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CreateInstanceBackup {
+    /// Storage connection to write to; `None` keeps the archive in the data directory.
+    #[serde(default)]
+    pub storage_id: Option<Id>,
+    /// Encrypts the archive. Required, at least 12 characters, and never stored.
+    pub passphrase: String,
+}
+
+impl fmt::Debug for CreateInstanceBackup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CreateInstanceBackup")
+            .field("storage_id", &self.storage_id)
+            .field("passphrase", &"redacted")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct UpdateInstanceBackupSchedule {
+    pub enabled: bool,
+    pub hour_utc: u8,
+    pub keep: u32,
+    #[serde(default)]
+    pub storage_id: Option<Id>,
+    /// Passphrase for scheduled runs, stored encrypted under the master key. Required when no
+    /// passphrase is stored yet and `enabled` is true; `None` keeps the stored one.
+    #[serde(default)]
+    pub passphrase: Option<String>,
+}
+
+impl fmt::Debug for UpdateInstanceBackupSchedule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpdateInstanceBackupSchedule")
+            .field("enabled", &self.enabled)
+            .field("hour_utc", &self.hour_utc)
+            .field("keep", &self.keep)
+            .field("storage_id", &self.storage_id)
+            .field("passphrase", &self.passphrase.as_ref().map(|_| "redacted"))
+            .finish()
+    }
+}
+
+/// Shortest passphrase an instance backup accepts.
+pub const MIN_PASSPHRASE_LEN: usize = 12;

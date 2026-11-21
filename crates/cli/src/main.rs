@@ -154,6 +154,54 @@ enum Cmd {
     /// S3-compatible storage connections for backups (AWS S3, R2, B2, MinIO, ...).
     #[command(subcommand)]
     Storage(StorageCmd),
+    /// Encrypted backups of the daemon itself, for disaster recovery.
+    #[command(subcommand)]
+    Instance(InstanceCmd),
+}
+
+#[derive(Subcommand)]
+enum InstanceCmd {
+    /// Back up the daemon (store, config, master key, SSH keys) and wait for the result.
+    /// The passphrase comes from --passphrase-file or stdin and is never stored.
+    Backup {
+        /// Storage connection to write to; defaults to the daemon's data directory.
+        #[arg(long)]
+        storage: Option<String>,
+        #[arg(long)]
+        passphrase_file: Option<PathBuf>,
+    },
+    /// Instance backups, newest first.
+    Backups,
+    /// Save an instance backup's encrypted archive.
+    Download {
+        /// Backup id or file name; defaults to the newest finished one.
+        backup: Option<String>,
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Delete an instance backup.
+    #[command(alias = "remove")]
+    Rm {
+        backup: String,
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Show or change daily instance backups, e.g. "instance schedule --hour 2 --keep 7
+    /// --storage offsite --passphrase-file pass.txt". The passphrase is stored encrypted under
+    /// the master key so scheduled runs can use it.
+    Schedule {
+        #[arg(long, conflicts_with = "off")]
+        hour: Option<u8>,
+        #[arg(long, conflicts_with = "off")]
+        keep: Option<u32>,
+        /// A storage connection, or "local".
+        #[arg(long, conflicts_with = "off")]
+        storage: Option<String>,
+        #[arg(long, conflicts_with = "off")]
+        passphrase_file: Option<PathBuf>,
+        #[arg(long)]
+        off: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -691,6 +739,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Db(cmd) => db(&c, cmd, json).await,
         Cmd::Secrets(cmd) => secrets(&c, cmd, json).await,
         Cmd::Storage(cmd) => storage(&c, cmd, json).await,
+        Cmd::Instance(cmd) => instance(&c, cmd, json).await,
     }
 }
 
@@ -1383,6 +1432,201 @@ async fn storage(c: &Client, cmd: StorageCmd, json: bool) -> Result<()> {
             confirm(&format!("Remove storage connection {}?", s.name), yes)?;
             c.delete_storage(&s.id).await?;
             output::ok(format!("removed {}", s.name));
+        }
+    }
+    Ok(())
+}
+
+/// The passphrase from a file, or from stdin when it is piped in. Typing it on a terminal would
+/// echo it, so that is refused.
+fn read_passphrase(file: Option<&PathBuf>) -> Result<String> {
+    use std::io::IsTerminal as _;
+    if file.is_none() && std::io::stdin().is_terminal() {
+        bail!("pass --passphrase-file, or pipe the passphrase in on stdin");
+    }
+    let raw = read_value(file)?;
+    let passphrase = raw.trim_end_matches(['\r', '\n']).to_string();
+    if passphrase.chars().count() < MIN_PASSPHRASE_LEN {
+        bail!("the passphrase must be at least {MIN_PASSPHRASE_LEN} characters");
+    }
+    Ok(passphrase)
+}
+
+fn print_instance_backups(list: &[InstanceBackup], storages: &[StorageConnection]) {
+    output::table(
+        &[
+            "ID", "STATUS", "FILE", "SIZE", "WHERE", "TRIGGER", "CREATED",
+        ],
+        list.iter()
+            .map(|b| {
+                vec![
+                    Cell::from(b.id.clone()),
+                    backup_status(b.status),
+                    Cell::from(b.file_name.clone()),
+                    Cell(output::size(b.size_bytes), Tone::Muted),
+                    Cell(
+                        storage_label(storages, b.storage_id.as_deref()),
+                        Tone::Muted,
+                    ),
+                    Cell(b.trigger.as_str().to_string(), Tone::Muted),
+                    Cell(
+                        b.error.clone().unwrap_or_else(|| output::ago(b.created_at)),
+                        if b.error.is_some() {
+                            Tone::Err
+                        } else {
+                            Tone::Muted
+                        },
+                    ),
+                ]
+            })
+            .collect(),
+    );
+}
+
+async fn instance(c: &Client, cmd: InstanceCmd, json: bool) -> Result<()> {
+    match cmd {
+        InstanceCmd::Backup {
+            storage,
+            passphrase_file,
+        } => {
+            let passphrase = read_passphrase(passphrase_file.as_ref())?;
+            let storage_id = match storage {
+                Some(name) => Some(find_storage(c, &name).await?.id),
+                None => None,
+            };
+            let started = c
+                .create_instance_backup(&CreateInstanceBackup {
+                    storage_id,
+                    passphrase,
+                })
+                .await?;
+            output::note(format!("backing up the instance to {}", started.file_name));
+            let b = loop {
+                let b = c
+                    .instance_backups()
+                    .await?
+                    .into_iter()
+                    .find(|b| b.id == started.id)
+                    .context("the instance backup disappeared")?;
+                if b.status != BackupStatus::Running {
+                    break b;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            };
+            if json {
+                return output::json(&b);
+            }
+            match b.status {
+                BackupStatus::Done => output::ok(format!(
+                    "instance backup {} done ({}, {})",
+                    b.id,
+                    b.file_name,
+                    output::size(b.size_bytes)
+                )),
+                _ => bail!("instance backup failed: {}", b.error.unwrap_or_default()),
+            }
+        }
+        InstanceCmd::Backups => {
+            let list = c.instance_backups().await?;
+            if json {
+                return output::json(&list);
+            }
+            if list.is_empty() {
+                println!(
+                    "{} {}",
+                    muted("no instance backups yet:"),
+                    hint("instance backup --passphrase-file <file>")
+                );
+            }
+            print_instance_backups(&list, &c.storages().await?);
+        }
+        InstanceCmd::Download { backup, output } => {
+            use tokio::io::AsyncWriteExt as _;
+            let list = c.instance_backups().await?;
+            let b = match &backup {
+                Some(q) => list.iter().find(|b| b.id == *q || b.file_name == *q),
+                None => list.iter().find(|b| b.status == BackupStatus::Done),
+            }
+            .with_context(|| match &backup {
+                Some(q) => format!("no instance backup '{q}'"),
+                None => "no finished instance backup yet".into(),
+            })?;
+            let path = output.unwrap_or_else(|| PathBuf::from(&b.file_name));
+            let mut stream = c.download_instance_backup(&b.id).await?;
+            let mut file = tokio::fs::File::create(&path)
+                .await
+                .with_context(|| format!("cannot create {}", path.display()))?;
+            while let Some(chunk) = stream.next().await {
+                file.write_all(&chunk?).await?;
+            }
+            file.flush().await?;
+            output::ok(format!(
+                "saved {} ({}); restore it on a new machine with {} restore {} --passphrase-file <file>",
+                path.display(),
+                output::size(b.size_bytes),
+                brand::DAEMON_BIN,
+                path.display()
+            ));
+        }
+        InstanceCmd::Rm { backup, yes } => {
+            let b = c
+                .instance_backups()
+                .await?
+                .into_iter()
+                .find(|b| b.id == backup || b.file_name == backup)
+                .with_context(|| format!("no instance backup '{backup}'"))?;
+            confirm(&format!("Delete instance backup {}?", b.file_name), yes)?;
+            c.delete_instance_backup(&b.id).await?;
+            output::ok(format!("deleted {}", b.file_name));
+        }
+        InstanceCmd::Schedule {
+            hour,
+            keep,
+            storage,
+            passphrase_file,
+            off,
+        } => {
+            let current = c.instance_backup_schedule().await?;
+            let changes =
+                hour.is_some() || keep.is_some() || storage.is_some() || passphrase_file.is_some();
+            let schedule = if off || changes {
+                let storage_id = match storage.as_deref() {
+                    None => current.storage_id.clone(),
+                    Some("local") => None,
+                    Some(name) => Some(find_storage(c, name).await?.id),
+                };
+                let passphrase = match &passphrase_file {
+                    Some(file) => Some(read_passphrase(Some(file))?),
+                    None => None,
+                };
+                c.set_instance_backup_schedule(&UpdateInstanceBackupSchedule {
+                    enabled: !off,
+                    hour_utc: hour.unwrap_or(current.hour_utc),
+                    keep: keep.unwrap_or(current.keep),
+                    storage_id,
+                    passphrase,
+                })
+                .await?
+            } else {
+                current
+            };
+            if json {
+                return output::json(&schedule);
+            }
+            if schedule.enabled {
+                output::ok(format!(
+                    "the instance is backed up daily at {:02}:00 UTC to {}, keeping the last {}",
+                    schedule.hour_utc,
+                    storage_label(&c.storages().await?, schedule.storage_id.as_deref()),
+                    schedule.keep
+                ));
+            } else {
+                println!(
+                    "{} {}",
+                    muted("scheduled instance backups are off:"),
+                    hint("instance schedule --hour 2 --keep 7 --passphrase-file <file>")
+                );
+            }
         }
     }
     Ok(())

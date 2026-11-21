@@ -610,6 +610,7 @@ pub async fn start_helper(
     name: &str,
     image: &str,
     binds: Vec<String>,
+    network_mode: Option<&str>,
 ) -> Result<String> {
     remove_container(docker, name).await?;
     let body = ContainerCreateBody {
@@ -622,6 +623,7 @@ pub async fn start_helper(
         )])),
         host_config: Some(HostConfig {
             binds: Some(binds),
+            network_mode: network_mode.map(str::to_string),
             ..Default::default()
         }),
         ..Default::default()

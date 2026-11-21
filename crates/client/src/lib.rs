@@ -229,6 +229,48 @@ impl Client {
         self.post_empty(&format!("/storage/{id}/test")).await
     }
 
+    // Instance backups
+
+    pub async fn instance_backups(&self) -> Result<Vec<InstanceBackup>> {
+        self.get("/instance/backups").await
+    }
+
+    /// Starts an instance backup; poll [`Self::instance_backups`] until it finishes.
+    pub async fn create_instance_backup(
+        &self,
+        body: &CreateInstanceBackup,
+    ) -> Result<InstanceBackup> {
+        self.post("/instance/backups", body).await
+    }
+
+    /// The encrypted archive of a finished instance backup.
+    pub async fn download_instance_backup(&self, id: &str) -> Result<ByteStreamBox> {
+        let res =
+            Self::send(self.req(Method::GET, &format!("/instance/backups/{id}/download"))).await?;
+        Ok(Box::pin(res.bytes_stream().map(|chunk| {
+            chunk.map(|c| c.to_vec()).map_err(anyhow::Error::from)
+        })))
+    }
+
+    pub async fn delete_instance_backup(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/instance/backups/{id}")).await
+    }
+
+    pub async fn instance_backup_schedule(&self) -> Result<InstanceBackupSchedule> {
+        self.get("/instance/backups/schedule").await
+    }
+
+    pub async fn set_instance_backup_schedule(
+        &self,
+        body: &UpdateInstanceBackupSchedule,
+    ) -> Result<InstanceBackupSchedule> {
+        Self::json(
+            self.req(Method::PUT, "/instance/backups/schedule")
+                .json(body),
+        )
+        .await
+    }
+
     // Secrets
 
     pub async fn secrets(&self) -> Result<Vec<Secret>> {

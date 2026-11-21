@@ -2,6 +2,7 @@
 
 mod databases;
 mod deployments;
+mod instance;
 mod projects;
 mod secrets;
 mod servers;
@@ -100,6 +101,16 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .delete(storage::delete),
         )
         .route("/storage/{id}/test", post(storage::test))
+        .route(
+            "/instance/backups",
+            get(instance::list).post(instance::create),
+        )
+        .route(
+            "/instance/backups/schedule",
+            get(instance::get_schedule).put(instance::set_schedule),
+        )
+        .route("/instance/backups/{id}", delete(instance::delete))
+        .route("/instance/backups/{id}/download", get(instance::download))
         .route("/services/{id}/deployments", get(deployments::list))
         .route("/deployments/{id}", get(deployments::get))
         .route("/deployments/{id}/logs", get(deployments::logs))

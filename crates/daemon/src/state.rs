@@ -28,6 +28,8 @@ pub struct AppState {
     pub stats: Stats,
     pub db_locks: database::Locks,
     pub secrets: Secrets,
+    /// Held while an instance backup runs; there is at most one at a time.
+    pub instance_backup_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     /// Client used for health checks; does not follow redirects so 3xx counts as healthy.
     pub http: reqwest::Client,
     /// Address the API listens on.
@@ -98,6 +100,7 @@ impl AppState {
         Ok(Self {
             docker: DockerPool::new(crate::ssh::paths(&dirs.ssh_dir()), secrets.clone()),
             secrets,
+            instance_backup_lock: Default::default(),
             db,
             dirs,
             deploys: Deploys::default(),
