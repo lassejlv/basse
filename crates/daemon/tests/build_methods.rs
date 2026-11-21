@@ -210,7 +210,9 @@ async fn logs(api: &Client, service_id: &str, container: Option<&str>, want: &st
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn dockerfile_builds_the_target_stage_with_env_as_build_args() {
-    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let daemon = Daemon::start_on_host()
+        .await
+        .expect("these tests need Docker");
     let api = daemon.client();
     let env = environment(&api).await;
     let root = tempfile::tempdir().unwrap();
@@ -253,7 +255,9 @@ async fn dockerfile_builds_the_target_stage_with_env_as_build_args() {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn compose_deploys_a_group_with_routes_and_named_volumes() {
-    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let daemon = Daemon::start_on_host()
+        .await
+        .expect("these tests need Docker");
     let api = daemon.client();
     let env = environment(&api).await;
     let root = tempfile::tempdir().unwrap();
@@ -396,7 +400,9 @@ async fn compose_deploys_a_group_with_routes_and_named_volumes() {
 #[tokio::test]
 #[ignore = "needs Docker and network access for Railpack"]
 async fn railpack_builds_a_node_app_without_a_dockerfile() {
-    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let daemon = Daemon::start_on_host()
+        .await
+        .expect("these tests need Docker");
     let api = daemon.client();
     let env = environment(&api).await;
     let root = tempfile::tempdir().unwrap();
@@ -441,7 +447,9 @@ async fn railpack_builds_a_node_app_without_a_dockerfile() {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn monorepo_services_build_the_app_in_their_root() {
-    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let daemon = Daemon::start_on_host()
+        .await
+        .expect("these tests need Docker");
     let api = daemon.client();
     let env = environment(&api).await;
     let root = tempfile::tempdir().unwrap();
@@ -535,7 +543,9 @@ async fn monorepo_services_build_the_app_in_their_root() {
 #[tokio::test]
 #[ignore = "needs Docker and network access for Railpack"]
 async fn railpack_builds_the_app_in_a_monorepo_root() {
-    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let daemon = Daemon::start_on_host()
+        .await
+        .expect("these tests need Docker");
     let api = daemon.client();
     let env = environment(&api).await;
     let root = tempfile::tempdir().unwrap();

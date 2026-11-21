@@ -17,7 +17,7 @@ use sha2::Sha256;
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
-use support::Daemon;
+use support::{Daemon, Engine};
 
 const DOMAIN: &str = "deploy.example.test";
 const APP_ID: u64 = 4242;
@@ -287,7 +287,7 @@ async fn mock_github() -> String {
 
 /// A daemon whose instance domain counts as verified, as after a passing check.
 async fn daemon_with_domain() -> Option<Daemon> {
-    Daemon::start_with(|dir| {
+    Daemon::start_with(Engine::None, |dir| {
         let path = dir.join("config.toml");
         let mut config: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
         config.insert("domain".into(), DOMAIN.into());

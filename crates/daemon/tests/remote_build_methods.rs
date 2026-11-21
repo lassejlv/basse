@@ -13,7 +13,7 @@ use futures_util::StreamExt as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use support::Daemon;
+use support::{Daemon, Engine};
 
 const DIND_IMAGE: &str = "docker:29-dind";
 
@@ -336,7 +336,9 @@ fn remote_get(remote: &RemoteHost, container: &str, port: u16) -> String {
 #[tokio::test]
 #[ignore = "needs Docker with privileged containers and network access for Railpack"]
 async fn remote_build_methods() {
-    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let daemon = Daemon::start_on_host()
+        .await
+        .expect("these tests need Docker");
     let api = daemon.client();
     let remote = RemoteHost::start(&daemon.dir.path().join("ssh/id_ed25519.pub"));
     let server = api
@@ -544,7 +546,7 @@ async fn remote_build_methods() {
 #[tokio::test]
 #[ignore = "needs Docker with privileged containers"]
 async fn remote_build_after_a_dropped_tunnel() {
-    let daemon = Daemon::start_with(|dir| {
+    let daemon = Daemon::start_with(Engine::Host, |dir| {
         let config = dir.join("slow-clone.gitconfig");
         std::fs::write(&config, "[uploadpack]\n\tpackObjectsHook = \"sleep 8;\"\n").unwrap();
         vec![(
