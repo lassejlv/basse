@@ -1,5 +1,6 @@
 //! Docker access: a client per server plus container, network, image and proxy helpers.
 
+use crate::proxy_pages;
 use crate::secrets::Secrets;
 use crate::ssh::{SshPaths, Tunnel};
 use anyhow::{Context as _, Result, bail};
@@ -252,6 +253,7 @@ pub fn proxy_labels(
             format!("caddy_{i}.reverse_proxy.header_up"),
             REAL_IP_HEADER.into(),
         );
+        labels.insert(format!("caddy_{i}.import"), proxy_pages::snippet());
     }
     labels
 }
@@ -1119,10 +1121,15 @@ pub struct ProxyConfig {
 /// Labels on the proxy container itself: global options, and the routes that send the instance
 /// domain to the daemon. Responses are flushed at once so log streams arrive line by line. On
 /// plain http only the domain check's token goes to the daemon, so the check can tell whether a
-/// request really arrived over http; everything else redirects to https as usual.
+/// request really arrived over http; everything else redirects to https as usual. The routes
+/// answer errors of their own with the branded pages, or JSON for API clients.
 pub fn proxy_container_labels(config: &ProxyConfig) -> HashMap<String, String> {
     let mut labels = HashMap::from([
         (brand::label("proxy"), "true".to_string()),
+        (
+            brand::label("proxy.pages"),
+            proxy_pages::VERSION.to_string(),
+        ),
         (
             "caddy_0.servers.trusted_proxies".to_string(),
             format!("static {}", config.trusted),
@@ -1153,7 +1160,9 @@ pub fn proxy_container_labels(config: &ProxyConfig) -> HashMap<String, String> {
             "caddy.reverse_proxy.header_up_1".to_string(),
             REAL_IP_HEADER.into(),
         ),
+        ("caddy.import".to_string(), proxy_pages::snippet()),
         ("caddy_1".to_string(), format!("http://{}", route.domain)),
+        ("caddy_1.import".to_string(), proxy_pages::snippet()),
         (
             "caddy_1.0_handle".to_string(),
             format!("{}*", crate::domain::verify_prefix()),
@@ -1187,7 +1196,7 @@ pub fn proxy_container_labels(config: &ProxyConfig) -> HashMap<String, String> {
 /// The labels the proxy container was created with, if there is one, leaving out those its
 /// image brings.
 pub async fn proxy_labels_now(docker: &Docker) -> Result<Option<HashMap<String, String>>> {
-    let ours = |k: &String| k.starts_with("caddy") || *k == brand::label("proxy");
+    let ours = |k: &String| k.starts_with("caddy") || k.starts_with(&brand::label("proxy"));
     Ok(inspect(docker, brand::PROXY_CONTAINER).await?.map(|c| {
         c.config
             .and_then(|c| c.labels)
@@ -1198,8 +1207,9 @@ pub async fn proxy_labels_now(docker: &Docker) -> Result<Option<HashMap<String, 
     }))
 }
 
-/// Creates (or recreates) the proxy container on the shared proxy network.
-pub async fn install_proxy(docker: &Docker, config: &ProxyConfig) -> Result<()> {
+/// Creates (or recreates) the proxy container on the shared proxy network, with `pages` (from
+/// [`proxy_pages::archive`]) in place before it starts.
+pub async fn install_proxy(docker: &Docker, config: &ProxyConfig, pages: Vec<u8>) -> Result<()> {
     ensure_network(docker, brand::PROXY_NETWORK).await?;
     if !image_exists(docker, PROXY_IMAGE).await? {
         pull_image(docker, PROXY_IMAGE, |line| {
@@ -1211,7 +1221,14 @@ pub async fn install_proxy(docker: &Docker, config: &ProxyConfig) -> Result<()> 
     let spec = ContainerSpec {
         name: brand::PROXY_CONTAINER.to_string(),
         image: PROXY_IMAGE.to_string(),
-        env: vec![format!("CADDY_INGRESS_NETWORKS={}", brand::PROXY_NETWORK)],
+        env: vec![
+            format!("CADDY_INGRESS_NETWORKS={}", brand::PROXY_NETWORK),
+            format!(
+                "CADDY_DOCKER_CADDYFILE_PATH={}",
+                proxy_pages::caddyfile_path()
+            ),
+            format!("CADDY_DOCKER_POLLING_INTERVAL={PROXY_POLLING}"),
+        ],
         labels: proxy_container_labels(config),
         extra_hosts: vec![format!("{HOST_GATEWAY}:host-gateway")],
         binds: vec![
@@ -1228,7 +1245,27 @@ pub async fn install_proxy(docker: &Docker, config: &ProxyConfig) -> Result<()> 
         ..Default::default()
     };
     let id = create_container(docker, &spec).await?;
+    write_proxy_pages(docker, pages).await?;
     start_container(docker, &id).await
+}
+
+/// How often the proxy rereads its base Caddyfile, which changes without a Docker event when
+/// [`write_proxy_pages`] holds or releases a domain.
+const PROXY_POLLING: &str = "5s";
+
+/// Writes the proxy's base Caddyfile and pages. A running proxy picks them up on its next poll.
+pub async fn write_proxy_pages(docker: &Docker, pages: Vec<u8>) -> Result<()> {
+    docker
+        .upload_to_container(
+            brand::PROXY_CONTAINER,
+            Some(UploadToContainerOptions {
+                path: "/srv".into(),
+                ..Default::default()
+            }),
+            bollard::body_full(pages.into()),
+        )
+        .await
+        .context("cannot write the error pages into the proxy")
 }
 
 /// Removes everything the daemon put on a server: managed containers, the proxy, managed
@@ -1353,6 +1390,7 @@ mod tests {
         let alias = proxy_alias("svc");
         assert_eq!(labels["caddy_0"], "a.com");
         assert_eq!(labels["caddy_0.reverse_proxy"], format!("{alias}:80"));
+        assert_eq!(labels["caddy_0.import"], proxy_pages::snippet());
         assert_eq!(labels["caddy_1"], "http://b.localhost");
         assert_eq!(labels["caddy_1.reverse_proxy"], format!("{alias}:81"));
         assert_eq!(labels["caddy_2"], "c.com");
@@ -1386,6 +1424,9 @@ mod tests {
             format!("x-{}-origin-scheme http", brand::PREFIX)
         );
         assert_eq!(labels["caddy_1.1_handle.redir"], "https://{host}{uri} 308");
+        assert_eq!(labels["caddy.import"], proxy_pages::snippet());
+        assert_eq!(labels["caddy_1.import"], proxy_pages::snippet());
+        assert_eq!(labels[&brand::label("proxy.pages")], proxy_pages::VERSION);
         assert!(!labels.contains_key("caddy.tls.issuer"));
 
         let proxied = proxy_container_labels(&config(true));

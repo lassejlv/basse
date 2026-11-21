@@ -18,6 +18,7 @@ mod metrics;
 mod notify;
 mod onboarding;
 mod preflight;
+mod proxy_pages;
 mod prune;
 mod restore;
 mod secrets;

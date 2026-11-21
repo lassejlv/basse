@@ -6,18 +6,19 @@ use crate::config::{Config, DataDir};
 use crate::database;
 use crate::db::Db;
 use crate::deploy::Deploys;
-use crate::docker::{DockerPool, InstanceRoute, ProxyConfig};
+use crate::docker::{self, DockerPool, InstanceRoute, ProxyConfig};
 use crate::domain::{NetProbe, Probe, Report};
 use crate::error::AppError;
 use crate::notify::Notifier;
+use crate::proxy_pages::{self, HeldHost, Hold};
 use crate::secrets::{MasterKey, Secrets};
 use crate::stats::Stats;
 use anyhow::{Context as _, Result, bail};
 use bollard::Docker;
 use chrono::Utc;
 use common::{
-    Activity, ActivityLevel, BackupStorage, GitRepo, Id, Server, Service, StorageConnection,
-    Timestamp, VersionCheck,
+    Activity, ActivityLevel, BackupStorage, GitRepo, Id, ProxyStatus, Server, Service,
+    StorageConnection, Timestamp, VersionCheck,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -233,6 +234,53 @@ impl AppState {
         ProxyConfig {
             route,
             trusted: ranges.to_list(),
+        }
+    }
+
+    /// The proxy pages for `server_id`, holding a fallback route for every domain there whose
+    /// service has no container to answer: stopped, never deployed, or deploying for the first
+    /// time.
+    pub async fn proxy_pages(&self, server_id: &str) -> Result<Vec<u8>> {
+        let mut held: Vec<HeldHost> = Vec::new();
+        for rec in self.db.services().await? {
+            let svc = &rec.service;
+            let deployed = rec.live_container.is_some() || svc.live_deployment_id.is_some();
+            if svc.server_id != server_id || (deployed && !rec.stopped) {
+                continue;
+            }
+            let hold = if rec.busy.is_some() {
+                Hold::Starting
+            } else {
+                Hold::Down
+            };
+            for d in self.db.domains(&svc.id).await? {
+                if d.port.or(svc.port).is_some() && !held.iter().any(|h| h.host == d.host) {
+                    held.push(HeldHost {
+                        host: d.host,
+                        tls: d.tls,
+                        hold,
+                    });
+                }
+            }
+        }
+        proxy_pages::archive(&held)
+    }
+
+    /// Rewrites the pages on the proxy of `server_id` after a service there gained or lost the
+    /// container that answers for its domains. Failures are logged: a server without a running
+    /// proxy gets its pages when the proxy is installed.
+    pub async fn refresh_proxy_pages(&self, server_id: &str) {
+        let result = async {
+            let server = self.db.server(server_id).await?.context("no such server")?;
+            let docker = self.docker.get(&server).await?;
+            if docker::proxy_status(&docker).await? != ProxyStatus::Running {
+                return Ok(());
+            }
+            docker::write_proxy_pages(&docker, self.proxy_pages(server_id).await?).await
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("cannot update the proxy pages on {server_id}: {e:#}");
         }
     }
 

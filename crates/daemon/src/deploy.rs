@@ -319,6 +319,7 @@ pub async fn enqueue(
             build_tag: None,
             creating_container: false,
             moving: None,
+            held: Vec::new(),
         },
         plan,
         state.deploys.lock_for(&service.id),
@@ -461,6 +462,9 @@ struct Job {
     creating_container: bool,
     /// The old server of a move, and what the move did there and on the target.
     moving: Option<Moving>,
+    /// Servers whose proxy answers for the service's domains while no container does there,
+    /// refreshed when the deploy starts and once it has finished.
+    held: Vec<Id>,
 }
 
 impl Job {
@@ -473,6 +477,7 @@ impl Job {
             .context("the service was deleted")?;
         // Two database servers must never run on one data volume, so databases are replaced
         // by stopping the live container first instead of overlapping old and new.
+        let unserved = rec.live_container.is_none() || rec.stopped;
         let previous = rec.live_container.filter(|_| {
             matches!(rec.service.source, Source::Database { .. }) && !matches!(plan, Plan::Move(_))
         });
@@ -492,6 +497,14 @@ impl Job {
         let docker = interruptible(&self.phase, self.state.docker.get(&server)).await?;
         self.service = Some(svc.clone());
         self.docker = Some(docker.clone());
+        self.held = match &plan {
+            Plan::Move(_) => vec![current.id.clone(), server.id.clone()],
+            _ if unserved => vec![server.id.clone()],
+            _ => Vec::new(),
+        };
+        for server_id in &self.held {
+            self.state.refresh_proxy_pages(server_id).await;
+        }
         if let Plan::Move(m) = &plan {
             let from = interruptible(&self.phase, self.state.docker.get(&current))
                 .await
@@ -769,6 +782,9 @@ impl Job {
                     None => self.state.activity(level, activity, detail).await,
                 }
             }
+        }
+        for server_id in &self.held {
+            self.state.refresh_proxy_pages(server_id).await;
         }
     }
 

@@ -20,6 +20,52 @@ use std::time::{Duration, Instant};
 use support::Daemon;
 
 const WHOAMI_HOST: &str = "whoami.localhost";
+const SLOW_HOST: &str = "slow.localhost";
+
+/// Status, `Retry-After` and body of a request for `host` through the proxy.
+async fn proxied(
+    http: &reqwest::Client,
+    url: &str,
+    host: &str,
+    accept: &str,
+) -> Option<(u16, Option<String>, String)> {
+    let res = http
+        .get(url)
+        .header("Host", host)
+        .header("Accept", accept)
+        .send()
+        .await
+        .ok()?;
+    let retry = res
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    Some((res.status().as_u16(), retry, res.text().await.ok()?))
+}
+
+/// Waits until the proxy answers plain http for `host` with `status`.
+async fn wait_status(
+    http: &reqwest::Client,
+    host: &str,
+    accept: &str,
+    status: u16,
+) -> (Option<String>, String) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let got = proxied(http, "http://127.0.0.1/", host, accept).await;
+        if let Some((s, retry, body)) = &got
+            && *s == status
+        {
+            return (retry.clone(), body.clone());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{host} never answered {status}: {got:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
 
 async fn wait_finished(api: &Client, deployment_id: &str, timeout: Duration) -> Deployment {
     let deadline = Instant::now() + timeout;
@@ -231,6 +277,34 @@ async fn docker_end_to_end() {
         "proxy answered:\n{}",
         body.lines().take(2).collect::<Vec<_>>().join("\n")
     );
+
+    println!("== proxy pages: unknown host, the app's own errors");
+    let (_, page) = wait_status(&http, "nobody.localhost", "text/html", 404).await;
+    assert!(
+        page.contains("Nothing here.") && page.contains("nobody.localhost"),
+        "{page}"
+    );
+    assert!(page.contains(&brand::NAME.to_lowercase()) && !page.contains("{{"));
+    let (_, json) = wait_status(&http, "nobody.localhost", "application/json", 404).await;
+    assert_eq!(
+        serde_json::from_str::<ApiError>(&json).unwrap().error,
+        "no app is set up for nobody.localhost on this server"
+    );
+    let set_health = async |code: &str| {
+        http.post("http://127.0.0.1/health")
+            .header("Host", WHOAMI_HOST)
+            .body(code.to_string())
+            .send()
+            .await
+            .unwrap();
+    };
+    set_health("404").await;
+    let own = proxied(&http, "http://127.0.0.1/health", WHOAMI_HOST, "text/html")
+        .await
+        .unwrap();
+    assert_eq!(own.0, 404, "{own:?}");
+    assert!(!own.2.contains("Nothing here."), "{own:?}");
+    set_health("200").await;
     assert_eq!(service_containers(&sid).len(), 1);
     let detail = wait_state(&api, &sid, ServiceState::Running).await;
     let container = detail.container.unwrap();
@@ -317,14 +391,84 @@ async fn docker_end_to_end() {
         api.stop(&sid).await.unwrap().service.state,
         ServiceState::Stopped
     );
+    let (retry, page) = wait_status(&http, WHOAMI_HOST, "text/html", 503).await;
+    assert!(page.contains("No server available."), "{page}");
+    assert_eq!(retry.as_deref(), Some("30"));
     assert_eq!(
         api.start(&sid).await.unwrap().service.state,
         ServiceState::Running
     );
+    wait_status(&http, WHOAMI_HOST, "text/html", 200).await;
     assert_eq!(
         api.restart(&sid).await.unwrap().service.state,
         ServiceState::Running
     );
+
+    println!("== starting page during a first deploy");
+    let insecure = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .danger_accept_invalid_certs(true)
+        .resolve(SLOW_HOST, "127.0.0.1:443".parse().unwrap())
+        .build()
+        .unwrap();
+    let slow = api
+        .create_service(&CreateService {
+            environment_id: env.id.clone(),
+            server_id: None,
+            name: "slow".into(),
+            source: Source::Image {
+                image: "busybox:1.36".into(),
+            },
+            port: Some(80),
+            command: Some(
+                "sleep 15; mkdir -p /www && echo ok > /www/index.html && exec httpd -f -p 80 -h /www"
+                    .into(),
+            ),
+            restart: RestartPolicy::UnlessStopped,
+            health_path: Some("/".into()),
+            env: vec![],
+            domains: vec![SLOW_HOST.into()],
+            volumes: vec![],
+            deploy: true,
+        })
+        .await
+        .unwrap();
+    let slow_url = format!("https://{SLOW_HOST}/");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let starting = loop {
+        let got = proxied(&insecure, &slow_url, SLOW_HOST, "text/html").await;
+        if let Some(got) = got.as_ref().filter(|g| g.0 == 503) {
+            break got.clone();
+        }
+        assert!(Instant::now() < deadline, "no starting page: {got:?}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    assert!(starting.2.contains("Starting up."), "{starting:?}");
+    assert!(starting.2.contains("http-equiv=\"refresh\""));
+    assert_eq!(starting.1.as_deref(), Some("10"));
+    let deployed = wait_finished(
+        &api,
+        &latest_deployment(&api, &slow.service.id).await.id,
+        Duration::from_secs(120),
+    )
+    .await;
+    assert_eq!(deployed.status, DeploymentStatus::Live, "{deployed:?}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let got = proxied(&insecure, &slow_url, SLOW_HOST, "text/html").await;
+        if got
+            .as_ref()
+            .is_some_and(|g| g.0 == 200 && g.2.trim() == "ok")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the app never took over: {got:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    api.delete_service(&slow.service.id, false).await.unwrap();
 
     println!("== git service");
     let repos = tempfile::tempdir().unwrap();

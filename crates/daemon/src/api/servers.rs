@@ -263,7 +263,11 @@ pub async fn install_docker(
 pub async fn install_proxy(state: &AppState, server: Server) -> ApiResult<Server> {
     let docker = state.docker.get(&server).await?;
     let config = state.proxy_config(&server).await;
-    if let Err(e) = docker::install_proxy(&docker, &config).await {
+    let installed = async {
+        let pages = state.proxy_pages(&server.id).await?;
+        docker::install_proxy(&docker, &config, pages).await
+    };
+    if let Err(e) = installed.await {
         state
             .activity(
                 ActivityLevel::Error,
@@ -294,7 +298,8 @@ pub async fn ensure_local_proxy(state: &AppState, server: Server) {
         );
         let result = async {
             let docker = state.docker.get(&server).await?;
-            docker::install_proxy(&docker, &state.proxy_config(&server).await).await
+            let pages = state.proxy_pages(&server.id).await?;
+            docker::install_proxy(&docker, &state.proxy_config(&server).await, pages).await
         }
         .await;
         let e = match result {
@@ -327,13 +332,15 @@ pub async fn ensure_local_proxy(state: &AppState, server: Server) {
 }
 
 /// Recreates a running proxy whose configuration is out of date: after an upgrade that changed
-/// it, or when the instance domain moved behind Cloudflare's proxy or out from behind it.
+/// it, or when the instance domain moved behind Cloudflare's proxy or out from behind it. An
+/// up-to-date proxy gets this daemon's pages written into it.
 pub async fn sync_proxy(state: &AppState, server: Server) -> ApiResult<()> {
     let docker = state.docker.get(&server).await?;
     let Some(now) = docker::proxy_labels_now(&docker).await? else {
         return Ok(());
     };
     if now == docker::proxy_container_labels(&state.proxy_config(&server).await) {
+        docker::write_proxy_pages(&docker, state.proxy_pages(&server.id).await?).await?;
         return Ok(());
     }
     tracing::info!("the proxy on {} is out of date; recreating it", server.name);
