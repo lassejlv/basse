@@ -6,6 +6,7 @@ use crate::deploy;
 use crate::docker::{self, RunState};
 use crate::error::{ApiResult, AppError, bad_request, conflict};
 use crate::notify::Event;
+use crate::replicas;
 use crate::state::AppState;
 use bollard::query_parameters::StopContainerOptions;
 use chrono::Utc;
@@ -20,8 +21,21 @@ use std::time::Duration;
 /// Read paths give up on an unreachable server after this long and report it as degraded.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// State of a service from its stored facts and its live container.
-pub fn compute_state(rec: &ServiceRecord, run: Option<RunState>, reachable: bool) -> ServiceState {
+/// State of a service from its stored facts and its replicas' containers: running when every
+/// replica runs, degraded when only some do.
+pub fn compute_state(
+    rec: &ServiceRecord,
+    runs: &[Option<RunState>],
+    reachable: bool,
+) -> ServiceState {
+    let running = runs
+        .iter()
+        .filter(|r| **r == Some(RunState::Running))
+        .count();
+    if rec.busy.is_none() && reachable && running > 0 && running < runs.len() {
+        return ServiceState::Degraded;
+    }
+    let run = runs.first().copied().flatten();
     match rec.busy {
         Some(DeploymentStatus::Starting) => return ServiceState::Deploying,
         Some(_) => return ServiceState::Building,
@@ -78,12 +92,13 @@ pub async fn with_states(state: &AppState, recs: Vec<ServiceRecord>) -> Vec<Serv
         .map(|rec| {
             let listing = listings.get(&rec.service.server_id);
             let reachable = !matches!(listing, Some(None));
-            let run = rec
-                .live_container
-                .as_ref()
-                .and_then(|id| listing?.as_ref()?.get(id).copied());
+            let runs: Vec<Option<RunState>> = rec
+                .replica_containers()
+                .iter()
+                .map(|(_, id)| listing?.as_ref()?.get(id).copied())
+                .collect();
             let mut service = rec.service.clone();
-            service.state = compute_state(&rec, run, reachable);
+            service.state = compute_state(&rec, &runs, reachable);
             service
         })
         .collect()
@@ -111,22 +126,38 @@ pub async fn detail(state: &AppState, id: &str) -> ApiResult<ServiceDetail> {
     let server = state.server(&rec.service.server_id).await?;
     let lookup = async {
         let Some(container_id) = &rec.live_container else {
-            return Ok(None);
+            return Ok((None, Vec::new()));
         };
         let docker = state.docker.get(&server).await?;
-        docker::inspect(&docker, container_id).await
+        let live = docker::inspect(&docker, container_id).await?;
+        let replicas = replicas::describe(state, &docker, &rec).await;
+        anyhow::Ok((live, replicas))
     };
-    let (container, run, reachable) = match tokio::time::timeout(LOOKUP_TIMEOUT, lookup).await {
-        Ok(Ok(Some(c))) => (
-            Some(docker::container_info(&c)),
-            Some(RunState::from_inspect(&c)),
-            true,
-        ),
-        Ok(Ok(None)) => (None, None, true),
-        Ok(Err(_)) | Err(_) => (None, None, false),
+    let (container, run, reachable, replicas) =
+        match tokio::time::timeout(LOOKUP_TIMEOUT, lookup).await {
+            Ok(Ok((Some(c), replicas))) => (
+                Some(docker::container_info(&c)),
+                Some(RunState::from_inspect(&c)),
+                true,
+                replicas,
+            ),
+            Ok(Ok((None, replicas))) => (None, None, true, replicas),
+            Ok(Err(_)) | Err(_) => (None, None, false, Vec::new()),
+        };
+    let runs: Vec<Option<RunState>> = if replicas.is_empty() {
+        vec![run]
+    } else {
+        replicas
+            .iter()
+            .map(|r| match r.health {
+                ReplicaHealth::Healthy => Some(RunState::Running),
+                ReplicaHealth::Unhealthy => Some(RunState::Restarting),
+                ReplicaHealth::Down => r.container.as_ref().map(|_| RunState::Other),
+            })
+            .collect()
     };
     let mut service = rec.service.clone();
-    service.state = compute_state(&rec, run, reachable);
+    service.state = compute_state(&rec, &runs, reachable);
     let env = db.env(id).await?;
     let database = database::info(&service, &server, &env, db.public_port(id).await?);
     let compose = match &service.source {
@@ -154,6 +185,7 @@ pub async fn detail(state: &AppState, id: &str) -> ApiResult<ServiceDetail> {
         container,
         database,
         compose,
+        replicas,
     })
 }
 
@@ -220,7 +252,22 @@ pub async fn create(state: &AppState, body: CreateService) -> ApiResult<ServiceR
         primary_domain: None,
         last_deployed_at: None,
         live_deployment_id: None,
+        replicas: body.replicas.unwrap_or(1),
+        scaling: Scaling::default(),
     };
+    if service.replicas == 0 || service.replicas > MAX_REPLICAS {
+        bad_request!("replicas must be between 1 and {MAX_REPLICAS}");
+    }
+    if service.replicas > 1 {
+        if !replicas::supports_replicas(&service.source) {
+            bad_request!("databases and compose services run one replica");
+        }
+        if !volume_specs.is_empty() {
+            conflict!(
+                "several replicas would share the service's volumes; create it with one replica, then scale with shared_volume_ok"
+            );
+        }
+    }
     let mut seen = HashSet::new();
     let mut domains = Vec::new();
     for host in body.domains {
@@ -287,6 +334,22 @@ pub async fn create(state: &AppState, body: CreateService) -> ApiResult<ServiceR
 pub async fn update(state: &AppState, id: &str, body: UpdateService) -> ApiResult<()> {
     let rec = record(state, id).await?;
     let mut s = rec.service;
+    let route_before = (s.scaling.lb_policy, s.health_path.clone());
+    if let Some(policy) = body.lb_policy {
+        s.scaling.lb_policy = policy;
+    }
+    if let Some(surge) = body.max_surge {
+        if surge == 0 || surge > MAX_REPLICAS {
+            bad_request!("the rolling surge is 1 to {MAX_REPLICAS} replicas");
+        }
+        s.scaling.max_surge = surge;
+    }
+    if let Some(ok) = body.shared_volume_ok {
+        s.scaling.shared_volume_ok = ok;
+        if !ok && s.replicas > 1 {
+            replicas::check_volumes(state, &s).await?;
+        }
+    }
     if let Some(name) = body.name {
         validate_name(&name).map_err(AppError::BadRequest)?;
         if state
@@ -318,6 +381,11 @@ pub async fn update(state: &AppState, id: &str, body: UpdateService) -> ApiResul
         s.server_id = state.server(&server_id).await?.id;
     }
     state.db.update_service(&s).await?;
+    if rec.live_container.is_some() && route_before != (s.scaling.lb_policy, s.health_path.clone())
+    {
+        let (_, docker) = state.docker_for(&s.server_id).await?;
+        replicas::apply_route(state, &docker, &s).await?;
+    }
     Ok(())
 }
 
@@ -340,8 +408,11 @@ pub async fn delete(
         let Ok((_, docker)) = state.docker_for(&server_id).await else {
             continue;
         };
-        if let Err(e) = docker::remove_service_containers(&docker, &svc.id, None).await {
+        if let Err(e) = docker::remove_service_containers(&docker, &svc.id, &[]).await {
             tracing::warn!("cannot remove containers of {}: {e:#}", svc.name);
+        }
+        if let Err(e) = docker::remove_container(&docker, &docker::route_container(&svc.id)).await {
+            tracing::warn!("cannot remove the route of {}: {e:#}", svc.name);
         }
         let project = crate::build::compose_project(&svc.id);
         if let Err(e) = docker::remove_compose_leftovers(&docker, &project, purge_volumes).await {
@@ -402,9 +473,9 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
     if rec.busy.is_some() {
         conflict!("a deployment of '{}' is in progress", rec.service.name);
     }
-    let Some(container) = rec.live_container.clone() else {
+    if rec.live_container.is_none() {
         bad_request!("'{}' has not been deployed yet", rec.service.name);
-    };
+    }
     let (_, docker) = state.docker_for(&rec.service.server_id).await?;
     let svc = &rec.service;
     let compose =
@@ -415,10 +486,14 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
             .into_iter()
             .filter_map(|c| c.container.map(|c| c.id))
             .collect()
-    } else if docker::inspect(&docker, &container).await?.is_some() {
-        vec![container]
     } else {
-        Vec::new()
+        let mut existing = Vec::new();
+        for (_, id) in rec.replica_containers() {
+            if docker::inspect(&docker, &id).await?.is_some() {
+                existing.push(id);
+            }
+        }
+        existing
     };
     match action {
         Power::Stop => {
@@ -475,6 +550,9 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
                             anyhow::Error::from(e).context("cannot restart the container")
                         })?;
                 }
+            }
+            if !compose && !targets.is_empty() {
+                replicas::apply_route(state, &docker, svc).await?;
             }
             let verb = if matches!(action, Power::Start) {
                 "started"
@@ -800,11 +878,14 @@ mod tests {
                 primary_domain: None,
                 last_deployed_at: None,
                 live_deployment_id: None,
+                replicas: 1,
+                scaling: Default::default(),
             },
             stopped,
             busy,
             live_container: live.then(|| "c".into()),
             ever_failed,
+            replicas: Vec::new(),
         }
     }
 
@@ -812,17 +893,17 @@ mod tests {
     fn state_follows_deployments_and_container() {
         use ServiceState as S;
         assert_eq!(
-            compute_state(&rec(None, false, false, false), None, true),
+            compute_state(&rec(None, false, false, false), &[None], true),
             S::New
         );
         assert_eq!(
-            compute_state(&rec(None, false, false, true), None, true),
+            compute_state(&rec(None, false, false, true), &[None], true),
             S::Failed
         );
         assert_eq!(
             compute_state(
                 &rec(Some(DeploymentStatus::Building), true, false, false),
-                None,
+                &[None],
                 true
             ),
             S::Building
@@ -830,32 +911,45 @@ mod tests {
         assert_eq!(
             compute_state(
                 &rec(Some(DeploymentStatus::Starting), true, false, false),
-                None,
+                &[None],
                 true
             ),
             S::Deploying
         );
         let live = rec(None, true, false, false);
         assert_eq!(
-            compute_state(&live, Some(RunState::Running), true),
+            compute_state(&live, &[Some(RunState::Running)], true),
             S::Running
         );
         assert_eq!(
-            compute_state(&live, Some(RunState::Restarting), true),
+            compute_state(&live, &[Some(RunState::Restarting)], true),
             S::Degraded
         );
         assert_eq!(
-            compute_state(&live, Some(RunState::Exited { code: Some(1) }), true),
+            compute_state(&live, &[Some(RunState::Exited { code: Some(1) })], true),
             S::Failed
         );
         assert_eq!(
-            compute_state(&live, Some(RunState::Exited { code: Some(0) }), true),
+            compute_state(&live, &[Some(RunState::Exited { code: Some(0) })], true),
             S::Stopped
         );
-        assert_eq!(compute_state(&live, None, false), S::Degraded);
+        assert_eq!(compute_state(&live, &[None], false), S::Degraded);
+        let some_down = [Some(RunState::Running), None, Some(RunState::Running)];
+        assert_eq!(compute_state(&live, &some_down, true), S::Degraded);
+        let first_down = [
+            Some(RunState::Exited { code: Some(1) }),
+            Some(RunState::Running),
+        ];
+        assert_eq!(compute_state(&live, &first_down, true), S::Degraded);
+        let all_up = [Some(RunState::Running), Some(RunState::Running)];
+        assert_eq!(compute_state(&live, &all_up, true), S::Running);
         let stopped = rec(None, true, true, false);
         assert_eq!(
-            compute_state(&stopped, Some(RunState::Exited { code: Some(137) }), true),
+            compute_state(
+                &stopped,
+                &[Some(RunState::Exited { code: Some(137) })],
+                true
+            ),
             S::Stopped
         );
     }

@@ -125,6 +125,7 @@ async fn instance_backup_restores_into_a_fresh_data_dir() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();

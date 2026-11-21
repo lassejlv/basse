@@ -6154,6 +6154,7 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                 },
                 volumes: Vec::new(),
                 deploy: !alt,
+                replicas: None,
             });
             match environment_id {
                 Some(_) => Request::Service(body),
@@ -6194,6 +6195,9 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                     restart: Some(policies[form.choice("restart")]),
                     health_path: Some(form.get("health")),
                     server_id: None,
+                    lb_policy: None,
+                    max_surge: None,
+                    shared_volume_ok: None,
                 },
                 deploy: alt,
             }

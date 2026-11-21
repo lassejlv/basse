@@ -553,6 +553,9 @@ struct CreateArgs {
     /// Create without deploying.
     #[arg(long)]
     no_deploy: bool,
+    /// Identical containers to run behind the load balancer; defaults to 1.
+    #[arg(long)]
+    replicas: Option<u16>,
 }
 
 #[derive(Subcommand)]
@@ -2502,6 +2505,7 @@ async fn create_service(c: &Client, args: CreateArgs) -> Result<()> {
             domains: args.domains,
             volumes,
             deploy,
+            replicas: args.replicas,
         })
         .await?;
     output::ok(format!("created {}", detail.service.name));

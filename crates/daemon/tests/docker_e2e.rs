@@ -175,6 +175,7 @@ async fn docker_end_to_end() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -353,6 +354,7 @@ async fn docker_end_to_end() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -415,6 +417,7 @@ async fn docker_end_to_end() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -459,6 +462,7 @@ async fn docker_end_to_end() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -503,6 +507,7 @@ async fn docker_end_to_end() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -733,6 +738,7 @@ async fn ssh_server_end_to_end() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -1009,6 +1015,7 @@ async fn exercise_database(
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();

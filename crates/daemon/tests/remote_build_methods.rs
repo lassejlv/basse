@@ -230,6 +230,7 @@ fn service(
         domains: vec![],
         volumes: vec![],
         deploy: false,
+        replicas: None,
     }
 }
 

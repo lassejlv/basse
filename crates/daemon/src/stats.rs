@@ -7,6 +7,7 @@ use crate::docker::{self, RunState};
 use crate::metrics::http::{self, HostTotals};
 use crate::metrics::{self, HttpSample, Rates, Sample};
 use crate::notify::Event;
+use crate::replicas;
 use crate::state::AppState;
 use bollard::Docker;
 use bollard::models::{ContainerInspectResponse, ContainerStatsResponse};
@@ -416,10 +417,14 @@ async fn sample_server(state: &AppState, server_id: &str, recs: Vec<ServiceRecor
 }
 
 /// The containers of a service by the name metrics keep them under: the compose service, or
-/// `""` for the one container of any other service.
-async fn targets(docker: &Docker, rec: &ServiceRecord, live: &str) -> Vec<(String, String)> {
+/// the replica (`#0`, `#1`, …) of any other service.
+async fn targets(docker: &Docker, rec: &ServiceRecord) -> Vec<(String, String)> {
     if !metrics::is_compose(&rec.service.source) {
-        return vec![(String::new(), live.to_string())];
+        return rec
+            .replica_containers()
+            .into_iter()
+            .map(|(index, id)| (replicas::metrics_key(index), id))
+            .collect();
     }
     let label = format!(
         "com.docker.compose.project={}",
@@ -472,8 +477,9 @@ async fn sample_service(
 ) {
     let compose = metrics::is_compose(&rec.service.source);
     let now = Utc::now();
-    let mut live_inspected = None;
-    for (name, id) in targets(docker, rec, live).await {
+    let mut watched = Vec::new();
+    let mut requests_left = requests;
+    for (name, id) in targets(docker, rec).await {
         let Ok(Some(inspected)) = docker::inspect(docker, &id).await else {
             continue;
         };
@@ -486,7 +492,12 @@ async fn sample_service(
             sample.uptime_secs = info
                 .started_at
                 .map_or(0, |t| (now - t).num_seconds().max(0));
-            sample.http = requests_for(domains, &name, compose, requests);
+            // A replica's requests can't be told apart, so the first one carries the service's.
+            sample.http = if compose {
+                requests_for(domains, &name, true, requests)
+            } else {
+                requests_for(domains, &name, false, requests_left.take())
+            };
             if let Err(e) = state
                 .db
                 .insert_metric_sample(&rec.service.id, &name, now, &sample)
@@ -498,21 +509,21 @@ async fn sample_service(
                 memory_event(state, rec, &name, &sample).await;
             }
         }
-        if id == live || inspected.id.as_deref() == Some(live) {
-            live_inspected = Some(inspected);
+        if !compose || id == live || inspected.id.as_deref() == Some(live) {
+            watched.push((id, inspected));
         }
     }
     if rec.busy.is_some() {
         return;
     }
-    let inspected = match live_inspected {
-        Some(i) => i,
-        None => match docker::inspect(docker, live).await {
-            Ok(Some(i)) => i,
-            _ => return,
-        },
-    };
-    detect_crash(state, rec, live, &inspected).await;
+    if watched.is_empty()
+        && let Ok(Some(i)) = docker::inspect(docker, live).await
+    {
+        watched.push((live.to_string(), i));
+    }
+    for (id, inspected) in watched {
+        detect_crash(state, rec, &id, &inspected).await;
+    }
 }
 
 async fn memory_event(state: &AppState, rec: &ServiceRecord, container: &str, s: &Sample) {

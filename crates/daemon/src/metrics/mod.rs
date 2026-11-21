@@ -135,6 +135,10 @@ impl Bucket {
             restarts: self.restarts,
             uptime_secs: self.uptime,
             http,
+            replicas: u32::from(
+                self.container.is_empty()
+                    || crate::replicas::index_of_key(&self.container).is_some(),
+            ),
         }
     }
 }
@@ -161,6 +165,7 @@ pub fn combine(buckets: &[Bucket]) -> Vec<MetricPoint> {
         sum.pids += p.pids;
         sum.restarts += p.restarts;
         sum.uptime_secs = sum.uptime_secs.min(p.uptime_secs);
+        sum.replicas += p.replicas;
         sum.http = match (sum.http.take(), p.http) {
             (Some(a), Some(b)) => Some(merge_http(a, b)),
             (a, b) => a.or(b),
@@ -197,20 +202,29 @@ pub async fn service_metrics(
     service_id: &str,
     range: MetricsRange,
     container: Option<&str>,
+    replica: Option<u16>,
     now: Timestamp,
 ) -> anyhow::Result<ServiceMetrics> {
     let step = range.step_secs();
     let from = bucket_start(now - TimeDelta::seconds(range.secs()), step);
+    let key = replica.map(crate::replicas::metrics_key);
     let buckets = state
         .db
-        .metric_buckets(service_id, step, from, container)
+        .metric_buckets(service_id, step, from, key.as_deref().or(container))
         .await?;
     let mut containers = state.db.metric_containers(service_id, step, from).await?;
-    containers.retain(|c| !c.is_empty());
-    let domains = state.db.domains(service_id).await?;
-    let http = domains
+    let mut replicas: Vec<u16> = containers
         .iter()
-        .any(|d| container.is_none() || d.compose_service.as_deref() == container);
+        .filter_map(|c| crate::replicas::index_of_key(c))
+        .collect();
+    replicas.sort_unstable();
+    containers.retain(|c| !c.is_empty() && crate::replicas::index_of_key(c).is_none());
+    let domains = state.db.domains(service_id).await?;
+    // Requests are measured per domain, so they belong to the service, not to one replica.
+    let http = replica.is_none()
+        && domains
+            .iter()
+            .any(|d| container.is_none() || d.compose_service.as_deref() == container);
     let deploys: Vec<DeployMarker> = state.db.deploy_markers(service_id, from).await?;
     Ok(ServiceMetrics {
         range,
@@ -219,6 +233,8 @@ pub async fn service_metrics(
         to: now,
         containers,
         container: container.map(str::to_string),
+        replicas,
+        replica,
         points: combine(&buckets),
         deploys,
         http,

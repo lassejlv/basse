@@ -618,6 +618,7 @@ async fn manifest_flow_install_repos_and_push_deploys() {
         domains: vec![],
         volumes: vec![],
         deploy: false,
+        replicas: None,
     };
     let err = api
         .create_service(&service(

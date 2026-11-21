@@ -224,6 +224,7 @@ async fn projects_environments_and_services_crud() {
                 mount_path: "/cache".into(),
             }],
             deploy: false,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -253,6 +254,7 @@ async fn projects_environments_and_services_crud() {
         domains: vec!["shop.example.com".into()],
         volumes: vec![],
         deploy: false,
+        replicas: None,
     };
     let err = api.create_service(&dup).await.unwrap_err();
     assert!(err.to_string().contains("already in use"), "{err}");
@@ -369,6 +371,7 @@ async fn projects_environments_and_services_crud() {
             domains: vec![],
             volumes: vec![],
             deploy: false,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -958,6 +961,7 @@ async fn metrics_validate_the_range_and_start_empty() {
             domains: vec!["shop.example.com".into()],
             volumes: vec![],
             deploy: false,
+            replicas: None,
         })
         .await
         .unwrap();

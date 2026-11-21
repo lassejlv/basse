@@ -1,9 +1,10 @@
 //! The deploy pipeline: one background task per deployment, serialized per service.
 
-use crate::db::{ServiceRecord, new_id};
-use crate::docker::{self, ContainerSpec, RunState};
+use crate::db::{ReplicaRow, ServiceRecord, new_id};
+use crate::docker::{self, RunState};
 use crate::error::{ApiResult, AppError, bad_request, conflict};
 use crate::notify::Event;
+use crate::replicas;
 use crate::state::AppState;
 use anyhow::{Context as _, Result, anyhow, bail};
 use bollard::Docker;
@@ -26,12 +27,7 @@ use tokio::sync::{broadcast, watch};
 mod methods;
 mod mounts;
 
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
-const STABLE_FOR: Duration = Duration::from_secs(5);
 const GIT_TIMEOUT: Duration = Duration::from_secs(600);
-/// Pause after attaching a container to the proxy so the proxy has loaded its labels (first
-/// deploy, changed domains) before old containers are stopped.
-const PROXY_DRAIN: Duration = Duration::from_secs(2);
 /// Seconds a database gets to shut down before its replacement starts on the same volume.
 const DATABASE_STOP_SECS: i32 = 30;
 
@@ -292,9 +288,11 @@ pub async fn enqueue(
             log,
             service: None,
             docker: None,
-            stopped_previous: None,
+            candidates: Vec::new(),
+            retired: Vec::new(),
+            routed: false,
+            health_skipped: false,
             build_tag: None,
-            creating_container: false,
         },
         plan,
         state.deploys.lock_for(&service.id),
@@ -431,10 +429,15 @@ struct Job {
     log: Arc<DeployLog>,
     service: Option<Service>,
     docker: Option<Docker>,
-    /// Live container stopped before the new one started; restarted if the deploy fails.
-    stopped_previous: Option<String>,
+    /// Containers this deployment created; removed if it fails or is cancelled.
+    candidates: Vec<String>,
+    /// Old replicas drained and stopped along the way; started again if it fails.
+    retired: Vec<String>,
+    /// Whether the service has domains, so replicas join the proxy.
+    routed: bool,
+    /// A remote replica could not be probed for lack of `wget`.
+    health_skipped: bool,
     build_tag: Option<String>,
-    creating_container: bool,
 }
 
 impl Job {
@@ -445,11 +448,7 @@ impl Job {
             .service(&self.d.service_id)
             .await?
             .context("the service was deleted")?;
-        // Two database servers must never run on one data volume, so databases are replaced
-        // by stopping the live container first instead of overlapping old and new.
-        let previous = rec
-            .live_container
-            .filter(|_| matches!(rec.service.source, Source::Database { .. }));
+        let old = rec.replica_containers();
         let mut svc = rec.service;
         let env = db
             .environment(&svc.environment_id)
@@ -552,36 +551,350 @@ impl Job {
         };
         self.d.image = Some(image.clone());
         self.set_status(DeploymentStatus::Starting).await;
-
-        let reused = !matches!(plan, Plan::Source);
-        let container = self
-            .start(&docker, &svc, &env, &image, reused, previous)
-            .await?;
-        let phase = self.phase.clone();
-        if let Err(e) = interruptible(
-            &phase,
-            self.health(&docker, &server, &svc, &env, &container),
-        )
-        .await
-        {
-            let tail = interruptible(&phase, async {
-                Ok(docker::tail_logs(&docker, &container, 30).await)
-            })
-            .await?;
-            if !tail.is_empty() {
-                self.log.system("Last container output:");
-                for line in tail {
-                    self.log.push(line.stream, line.line);
-                }
-            }
-            return Err(e);
+        if !matches!(plan, Plan::Source) {
+            self.ensure_image(&docker, &image).await?;
         }
-        let routed =
-            !docker::proxy_labels(&self.state.db.domains(&svc.id).await?, svc.port, &svc.id)
-                .is_empty();
-        self.switch(&docker, &svc, &container, routed).await?;
-        self.cleanup(&svc, &container).await;
+        self.roll_out(&docker, &server, &svc, &env, &image, &old)
+            .await
+    }
+
+    /// Replaces the old replicas with new ones running `image`, `max_surge` at a time: each
+    /// batch starts, passes its health check and joins the proxy before the old replicas of the
+    /// same indexes are drained and stopped. Stopped replicas are only removed once the whole new
+    /// set is committed, so a failure or cancel anywhere before that starts them again.
+    /// Databases run one replica and stop the old one first, as two database servers must
+    /// never share a data volume.
+    async fn roll_out(
+        &mut self,
+        docker: &Docker,
+        server: &Server,
+        svc: &Service,
+        env: &Environment,
+        image: &str,
+        old: &[(u16, String)],
+    ) -> Result<()> {
+        let database = matches!(svc.source, Source::Database { .. });
+        let n = if replicas::supports_replicas(&svc.source) {
+            svc.replicas.max(1)
+        } else {
+            1
+        };
+        let db = &self.state.db;
+        let domains = db.domains(&svc.id).await?;
+        self.routed = !docker::upstream_labels(&domains, svc.port).is_empty();
+        for d in domains.iter().filter(|d| d.port.or(svc.port).is_none()) {
+            self.log.push(
+                LogStream::Stderr,
+                format!(
+                    "Domain {} is not routed: set a port on the service or the domain",
+                    d.host
+                ),
+            );
+        }
+        if let (Some(host_port), Some(port)) = (db.public_port(&svc.id).await?, svc.port) {
+            self.log.system(format!(
+                "Publishing port {port} on the server as {host_port}"
+            ));
+        }
+        if n > 1 {
+            let volumes = db.volumes(&svc.id).await?;
+            if !volumes.is_empty() {
+                let names: Vec<&str> = volumes.iter().map(|v| v.mount_path.as_str()).collect();
+                if !svc.scaling.shared_volume_ok {
+                    bail!(
+                        "{n} replicas would share the volume at {}; scale to 1 or set shared_volume_ok",
+                        names.join(", ")
+                    );
+                }
+                self.log.push(
+                    LogStream::Stderr,
+                    format!(
+                        "Warning: all {n} replicas write the same volume at {}",
+                        names.join(", ")
+                    ),
+                );
+            }
+            self.log.system(format!(
+                "Rolling out {n} replicas, {} at a time",
+                svc.scaling.max_surge.clamp(1, n)
+            ));
+        }
+        let surge = usize::from(svc.scaling.max_surge.clamp(1, n));
+        let indexes: Vec<u16> = (0..n).collect();
+        let mut fresh: Vec<(u16, String)> = Vec::new();
+        self.begin(StepKind::Start, (n > 1).then(|| format!("0/{n}")))
+            .await;
+        let mut last_name = String::new();
+        for batch in indexes.chunks(surge) {
+            let mut started = Vec::with_capacity(batch.len());
+            for &index in batch {
+                self.check_cancelled()?;
+                if database {
+                    self.stop_old_database(docker, old).await?;
+                }
+                let spec = interruptible(
+                    &self.phase,
+                    replicas::container_spec(
+                        &self.state,
+                        docker,
+                        svc,
+                        env,
+                        image,
+                        &self.d.id,
+                        self.d.number,
+                        index,
+                    ),
+                )
+                .await?;
+                docker::remove_container(docker, &spec.name).await?;
+                self.check_cancelled()?;
+                let id = docker::create_container(docker, &spec).await?;
+                self.candidates.push(id.clone());
+                if self.d.container_id.is_none() {
+                    self.d.container_id = Some(id.clone());
+                    self.persist().await;
+                }
+                self.check_cancelled()?;
+                docker::start_container(docker, &id).await?;
+                if n > 1 {
+                    self.log
+                        .system(format!("Started replica #{index}: {}", spec.name));
+                } else {
+                    self.log.system(format!("Started container {}", spec.name));
+                }
+                last_name = spec.name;
+                started.push((index, id));
+            }
+            if n > 1 {
+                let count = fresh.len() + started.len();
+                self.detail(StepKind::Start, format!("{count}/{n}")).await;
+            }
+            for (index, id) in &started {
+                self.replica_health(docker, server, svc, env, *index, id, n)
+                    .await?;
+            }
+            if fresh.is_empty() {
+                self.begin(StepKind::Switch, None).await;
+                let phase = self.phase.clone();
+                interruptible(&phase, replicas::apply_route(&self.state, docker, svc)).await?;
+            }
+            if self.routed {
+                for (_, id) in &started {
+                    replicas::route(docker, &svc.id, id).await?;
+                }
+                let alias = docker::proxy_alias(&svc.id);
+                self.log.system(format!("Attached to the proxy as {alias}"));
+                tokio::time::sleep(replicas::PROXY_SETTLE).await;
+            }
+            fresh.extend(started);
+            let leaving: Vec<String> = old
+                .iter()
+                .filter(|(i, _)| batch.contains(i))
+                .map(|(_, id)| id.clone())
+                .collect();
+            self.retire(docker, leaving).await?;
+            if n > 1 {
+                self.detail(StepKind::Switch, format!("{}/{n} switched", fresh.len()))
+                    .await;
+            }
+        }
+        let extra: Vec<String> = old
+            .iter()
+            .filter(|(i, _)| *i >= n)
+            .map(|(_, id)| id.clone())
+            .collect();
+        self.retire(docker, extra).await?;
+
+        if !transition(&self.phase, Phase::CuttingOver) {
+            return Err(Cancelled.into());
+        }
+        self.end(
+            StepKind::Start,
+            Some(if n > 1 {
+                format!("{n} replicas")
+            } else {
+                last_name
+            }),
+        )
+        .await;
+        if self.health_skipped {
+            self.mark(
+                StepKind::Health,
+                StepStatus::Skipped,
+                Some("skipped (remote)".into()),
+            )
+            .await;
+        } else {
+            self.mark(StepKind::Health, StepStatus::Done, None).await;
+        }
+        let now = Utc::now();
+        let detail = if n > 1 {
+            format!("#{} live · {n} replicas", self.d.number)
+        } else {
+            format!("#{} live", self.d.number)
+        };
+        if let Some(step) = self.step_mut(StepKind::Switch) {
+            step.status = StepStatus::Done;
+            step.detail = Some(detail);
+            step.finished_at = Some(now);
+        }
+        self.d.status = DeploymentStatus::Live;
+        self.d.finished_at = Some(now);
+        let rows: Vec<ReplicaRow> = fresh
+            .iter()
+            .map(|(index, id)| ReplicaRow {
+                index: *index,
+                server_id: server.id.clone(),
+                deployment_id: self.d.id.clone(),
+                container_id: id.clone(),
+            })
+            .collect();
+        self.state.db.switch_live(&self.d, &rows).await?;
+        self.log.system(if n > 1 {
+            "Traffic switched to the new replicas"
+        } else {
+            "Traffic switched to the new container"
+        });
+        let keep: Vec<String> = fresh.into_iter().map(|(_, id)| id).collect();
+        self.cleanup(svc, &keep).await;
         Ok(())
+    }
+
+    async fn ensure_image(&mut self, docker: &Docker, image: &str) -> Result<()> {
+        interruptible(&self.phase, async {
+            if !docker::image_exists(docker, image).await? {
+                if image.starts_with(&format!("{}/", brand::PREFIX)) {
+                    bail!(
+                        "image {image} no longer exists on the server; deploy from source instead"
+                    );
+                }
+                self.pull_image(docker, image).await?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Stops the running database container before its replacement starts on the same volume.
+    async fn stop_old_database(&mut self, docker: &Docker, old: &[(u16, String)]) -> Result<()> {
+        for (_, previous) in old {
+            if self.retired.contains(previous) {
+                continue;
+            }
+            let running = interruptible(&self.phase, docker::inspect(docker, previous))
+                .await?
+                .is_some_and(|c| {
+                    matches!(
+                        RunState::from_inspect(&c),
+                        RunState::Running | RunState::Restarting
+                    )
+                });
+            if !running {
+                continue;
+            }
+            self.check_cancelled()?;
+            self.log
+                .system("Stopping the previous container: a database cannot share its data volume");
+            self.retired.push(previous.clone());
+            docker::stop_container(docker, previous, DATABASE_STOP_SECS).await?;
+        }
+        Ok(())
+    }
+
+    /// Drains old replicas out of the proxy and stops them; they stay until the new set is
+    /// committed, so a failure can start them again.
+    async fn retire(&mut self, docker: &Docker, ids: Vec<String>) -> Result<()> {
+        let ids: Vec<String> = ids
+            .into_iter()
+            .filter(|id| !self.retired.contains(id))
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.retired.extend(ids.iter().cloned());
+        self.log.system(format!(
+            "Draining {} old container{}",
+            ids.len(),
+            if ids.len() == 1 { "" } else { "s" }
+        ));
+        let phase = self.phase.clone();
+        interruptible(&phase, replicas::drain(docker, &ids)).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn replica_health(
+        &mut self,
+        docker: &Docker,
+        server: &Server,
+        svc: &Service,
+        env: &Environment,
+        index: u16,
+        container: &str,
+        n: u16,
+    ) -> Result<()> {
+        let label = match (svc.health_path.as_deref(), svc.port) {
+            (Some(path), Some(_)) => format!("GET {}", path_with_slash(path)),
+            _ => format!("running for {}s", replicas::STABLE_FOR.as_secs()),
+        };
+        let label = if n > 1 {
+            format!("#{index} {label}")
+        } else {
+            label
+        };
+        if self
+            .step_mut(StepKind::Health)
+            .is_some_and(|s| s.status == StepStatus::Pending)
+        {
+            self.begin(StepKind::Health, Some(label)).await;
+        } else {
+            self.detail(StepKind::Health, label).await;
+        }
+        let log = self.log.clone();
+        let phase = self.phase.clone();
+        let outcome = interruptible(
+            &phase,
+            replicas::wait_healthy(&self.state, docker, server, svc, env, container, |line| {
+                log.system(line)
+            }),
+        )
+        .await;
+        let prefix = if n > 1 {
+            format!(" (replica #{index})")
+        } else {
+            String::new()
+        };
+        match outcome {
+            Ok(replicas::Health::Passed(detail)) => {
+                self.log
+                    .system(format!("Health check passed{prefix}: {detail}"));
+                let detail = if n > 1 {
+                    format!("#{index} {detail}")
+                } else {
+                    detail
+                };
+                self.detail(StepKind::Health, detail).await;
+                Ok(())
+            }
+            Ok(replicas::Health::Skipped) => {
+                self.log
+                    .system("Health check skipped: the image has no wget");
+                self.health_skipped = true;
+                Ok(())
+            }
+            Err(e) => {
+                let tail = interruptible(&phase, async {
+                    Ok(docker::tail_logs(docker, container, 30).await)
+                })
+                .await?;
+                if !tail.is_empty() {
+                    self.log.system("Last container output:");
+                    for line in tail {
+                        self.log.push(line.stream, line.line);
+                    }
+                }
+                Err(e)
+            }
+        }
     }
 
     async fn finish(&mut self, result: Result<()>, started: Instant) {
@@ -644,22 +957,21 @@ impl Job {
                     }
                 }
                 if let Some(docker) = &self.docker {
-                    match self.remove_candidate(docker, cancelled).await {
-                        Ok(()) => {
-                            if let Some(previous) = &self.stopped_previous {
-                                match docker::start_container(docker, previous).await {
-                                    Ok(()) => self.log.system("Restarted the previous container"),
-                                    Err(e) => self.log.push(
-                                        LogStream::Stderr,
-                                        format!("Cannot restart the previous container: {e:#}"),
-                                    ),
-                                }
-                            }
-                        }
-                        Err(e) => self.log.push(
+                    let database = self
+                        .service
+                        .as_ref()
+                        .is_some_and(|s| matches!(s.source, Source::Database { .. }));
+                    if !database {
+                        self.restore_retired(docker).await;
+                    }
+                    if let Err(e) = self.remove_candidates(docker, cancelled).await {
+                        self.log.push(
                             LogStream::Stderr,
                             format!("Cannot remove candidate container: {e:#}"),
-                        ),
+                        );
+                    }
+                    if database {
+                        self.restore_retired(docker).await;
                     }
                     if cancelled && let Some(tag) = &self.build_tag {
                         self.remove_build_image(docker, tag).await;
@@ -744,22 +1056,65 @@ impl Job {
         }
     }
 
-    async fn remove_candidate(&self, docker: &Docker, cancelled: bool) -> Result<()> {
-        let containers = match &self.d.container_id {
-            Some(id) => vec![id.clone()],
-            None if self.creating_container => {
-                let label = format!("{}={}", brand::label("deployment"), self.d.id);
-                docker::list_by_label(docker, &label)
-                    .await?
-                    .into_iter()
-                    .filter_map(|container| container.id)
-                    .collect()
+    /// Starts the old replicas this deployment stopped and puts them back behind the proxy, so
+    /// the old set serves again.
+    async fn restore_retired(&self, docker: &Docker) {
+        if self.retired.is_empty() {
+            return;
+        }
+        for id in &self.retired {
+            let restored = async {
+                docker::start_container(docker, id).await?;
+                if self.routed {
+                    let svc = &self.d.service_id;
+                    if let Err(e) = replicas::route(docker, svc, id).await
+                        && !docker::inspect(docker, id).await?.is_some_and(|c| {
+                            docker::container_info(&c)
+                                .networks
+                                .iter()
+                                .any(|n| n == brand::PROXY_NETWORK)
+                        })
+                    {
+                        return Err(e);
+                    }
+                }
+                anyhow::Ok(())
+            };
+            match restored.await {
+                Ok(()) => {}
+                Err(e) => self.log.push(
+                    LogStream::Stderr,
+                    format!(
+                        "Cannot restart old container {}: {e:#}",
+                        docker::short_id(id)
+                    ),
+                ),
             }
-            None => return Ok(()),
-        };
-        for id in containers {
+        }
+        self.log.system(if self.retired.len() == 1 {
+            "Restarted the previous container".to_string()
+        } else {
+            format!("Restarted {} previous containers", self.retired.len())
+        });
+        if self.routed {
+            tokio::time::sleep(replicas::PROXY_SETTLE).await;
+        }
+    }
+
+    /// Removes the containers this deployment created, draining them out of the proxy first.
+    async fn remove_candidates(&self, docker: &Docker, cancelled: bool) -> Result<()> {
+        if self.candidates.is_empty() {
+            return Ok(());
+        }
+        if self.routed {
+            for id in &self.candidates {
+                docker::disconnect_from_proxy(docker, id).await?;
+            }
+            tokio::time::sleep(replicas::DRAIN).await;
+        }
+        for id in &self.candidates {
             if !cancelled {
-                docker::remove_container(docker, &id).await?;
+                docker::remove_container(docker, id).await?;
                 continue;
             }
             let options = RemoveContainerOptions {
@@ -767,7 +1122,7 @@ impl Job {
                 v: true,
                 ..Default::default()
             };
-            if let Err(e) = docker.remove_container(&id, Some(options)).await
+            if let Err(e) = docker.remove_container(id, Some(options)).await
                 && !docker::is_not_found(&e)
             {
                 return Err(e.into());
@@ -1031,246 +1386,8 @@ impl Job {
         docker::pull_image(docker, image, |line| self.log.push(LogStream::Stdout, line)).await
     }
 
-    async fn start(
-        &mut self,
-        docker: &Docker,
-        svc: &Service,
-        env: &Environment,
-        image: &str,
-        reused: bool,
-        previous: Option<String>,
-    ) -> Result<String> {
-        self.check_cancelled()?;
-        self.begin(StepKind::Start, None).await;
-        if reused {
-            interruptible(&self.phase, async {
-                if !docker::image_exists(docker, image).await? {
-                    if image.starts_with(&format!("{}/", brand::PREFIX)) {
-                        bail!(
-                            "image {image} no longer exists on the server; deploy from source instead"
-                        );
-                    }
-                    self.pull_image(docker, image).await?;
-                }
-                Ok(())
-            })
-            .await?;
-        }
-        let db = &self.state.db;
-        let domains = db.domains(&svc.id).await?;
-        let volumes = db.volumes(&svc.id).await?;
-        let vars = db.env(&svc.id).await?;
-        let published = match (db.public_port(&svc.id).await?, svc.port) {
-            (Some(host_port), Some(port)) => {
-                self.log.system(format!(
-                    "Publishing port {port} on the server as {host_port}"
-                ));
-                vec![(format!("{port}/tcp"), host_port)]
-            }
-            _ => Vec::new(),
-        };
-
-        let env_net = docker::env_network(&env.id);
-        docker::ensure_network(docker, &env_net).await?;
-        let mut labels = docker::proxy_labels(&domains, svc.port, &svc.id);
-        for d in domains.iter().filter(|d| d.port.or(svc.port).is_none()) {
-            self.log.push(
-                LogStream::Stderr,
-                format!(
-                    "Domain {} is not routed: set a port on the service or the domain",
-                    d.host
-                ),
-            );
-        }
-        let networks = vec![(env_net, vec![svc.name.clone()])];
-        labels.insert(brand::label("managed"), "true".into());
-        labels.insert(brand::label("service"), svc.id.clone());
-        labels.insert(brand::label("deployment"), self.d.id.clone());
-        let mut binds = Vec::with_capacity(volumes.len());
-        for v in &volumes {
-            let name = docker::volume_name(&svc.id, &v.name);
-            docker::ensure_volume(docker, &name).await?;
-            binds.push(format!("{name}:{}", v.mount_path));
-        }
-        let spec = ContainerSpec {
-            name: docker::container_name(&svc.name, &env.id, self.d.number),
-            image: image.to_string(),
-            env: vars
-                .iter()
-                .map(|v| format!("{}={}", v.key, v.value))
-                .collect(),
-            cmd: svc
-                .command
-                .clone()
-                .map(|c| vec!["sh".into(), "-c".into(), c]),
-            labels,
-            binds,
-            restart: svc.restart,
-            networks,
-            published,
-            publish_ip: None,
-            extra_hosts: Vec::new(),
-        };
-        self.check_cancelled()?;
-        docker::remove_container(docker, &spec.name).await?;
-        self.check_cancelled()?;
-        if let Some(previous) = previous
-            && interruptible(&self.phase, docker::inspect(docker, &previous))
-                .await?
-                .is_some_and(|c| {
-                    matches!(
-                        RunState::from_inspect(&c),
-                        RunState::Running | RunState::Restarting
-                    )
-                })
-        {
-            self.check_cancelled()?;
-            self.log
-                .system("Stopping the previous container: a database cannot share its data volume");
-            docker::stop_container(docker, &previous, DATABASE_STOP_SECS).await?;
-            self.stopped_previous = Some(previous);
-        }
-        self.check_cancelled()?;
-        self.creating_container = true;
-        let id = docker::create_container(docker, &spec).await?;
-        self.d.container_id = Some(id.clone());
-        self.persist().await;
-        self.check_cancelled()?;
-        docker::start_container(docker, &id).await?;
-        self.log.system(format!("Started container {}", spec.name));
-        self.end(StepKind::Start, Some(spec.name)).await;
-        Ok(id)
-    }
-
-    async fn health(
-        &mut self,
-        docker: &Docker,
-        server: &Server,
-        svc: &Service,
-        env: &Environment,
-        container: &str,
-    ) -> Result<()> {
-        let (Some(path), Some(port)) = (svc.health_path.as_deref(), svc.port) else {
-            self.begin(
-                StepKind::Health,
-                Some(format!("running for {}s", STABLE_FOR.as_secs())),
-            )
-            .await;
-            let deadline = Instant::now() + STABLE_FOR;
-            while Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                ensure_running(docker, container).await?;
-            }
-            self.end(
-                StepKind::Health,
-                Some(format!("running for {}s", STABLE_FOR.as_secs())),
-            )
-            .await;
-            return Ok(());
-        };
-        let path = if path.starts_with('/') {
-            path.to_string()
-        } else {
-            format!("/{path}")
-        };
-        self.begin(StepKind::Health, Some(format!("GET {path}")))
-            .await;
-        let deadline = Instant::now() + HEALTH_TIMEOUT;
-        let mut last_error = String::from("no response");
-        loop {
-            let inspected = ensure_running(docker, container).await?;
-            if server.kind == ServerKind::Local {
-                if let Some(ip) = docker::container_ip(&inspected, &docker::env_network(&env.id)) {
-                    match self
-                        .state
-                        .http
-                        .get(format!("http://{ip}:{port}{path}"))
-                        .send()
-                        .await
-                    {
-                        Ok(res) if res.status().is_success() || res.status().is_redirection() => {
-                            let detail = format!("GET {path} -> {}", res.status().as_u16());
-                            self.log.system(format!("Health check passed: {detail}"));
-                            self.end(StepKind::Health, Some(detail)).await;
-                            return Ok(());
-                        }
-                        Ok(res) => last_error = format!("HTTP {}", res.status()),
-                        Err(e) => last_error = describe_reqwest_error(&e),
-                    }
-                }
-            } else {
-                let url = format!("http://127.0.0.1:{port}{path}");
-                let cmd = ["wget", "-q", "-O", "/dev/null", "-T", "3", &url]
-                    .map(String::from)
-                    .to_vec();
-                match docker::exec(docker, container, cmd).await? {
-                    0 => {
-                        self.end(StepKind::Health, Some(format!("GET {path} -> ok")))
-                            .await;
-                        return Ok(());
-                    }
-                    126 | 127 => {
-                        self.log
-                            .system("Health check skipped: the image has no wget");
-                        self.mark(
-                            StepKind::Health,
-                            StepStatus::Skipped,
-                            Some("skipped (remote)".into()),
-                        )
-                        .await;
-                        return Ok(());
-                    }
-                    code => last_error = format!("wget exited with {code}"),
-                }
-            }
-            if Instant::now() >= deadline {
-                bail!(
-                    "health check GET {path} on port {port} failed for {}s: {last_error}",
-                    HEALTH_TIMEOUT.as_secs()
-                );
-            }
-            self.log.system(format!(
-                "Waiting for GET {path} on port {port}: {last_error}"
-            ));
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-    }
-
-    /// Puts the healthy container behind the proxy, then marks it live. Old containers keep
-    /// serving until cleanup stops them.
-    async fn switch(
-        &mut self,
-        docker: &Docker,
-        svc: &Service,
-        container: &str,
-        routed: bool,
-    ) -> Result<()> {
-        if !transition(&self.phase, Phase::CuttingOver) {
-            return Err(Cancelled.into());
-        }
-        self.begin(StepKind::Switch, None).await;
-        if routed {
-            let alias = docker::proxy_alias(&svc.id);
-            docker::connect_to_proxy(docker, container, &alias).await?;
-            self.log.system(format!("Attached to the proxy as {alias}"));
-            tokio::time::sleep(PROXY_DRAIN).await;
-        }
-        let now = Utc::now();
-        let detail = format!("#{} live", self.d.number);
-        if let Some(step) = self.step_mut(StepKind::Switch) {
-            step.status = StepStatus::Done;
-            step.detail = Some(detail);
-            step.finished_at = Some(now);
-        }
-        self.d.status = DeploymentStatus::Live;
-        self.d.finished_at = Some(now);
-        self.state.db.switch_live(&self.d).await?;
-        self.log.system("Traffic switched to the new container");
-        Ok(())
-    }
-
     /// Removes previous containers. Failures are logged; the deployment stays live.
-    async fn cleanup(&mut self, svc: &Service, keep: &str) {
+    async fn cleanup(&mut self, svc: &Service, keep: &[String]) {
         self.begin(StepKind::Cleanup, None).await;
         let mut removed = 0;
         let mut errors = Vec::new();
@@ -1284,7 +1401,7 @@ impl Job {
             let Ok((_, docker)) = self.state.docker_for(&server_id).await else {
                 continue;
             };
-            match docker::remove_service_containers(&docker, &svc.id, Some(keep)).await {
+            match docker::remove_service_containers(&docker, &svc.id, keep).await {
                 Ok(n) => removed += n,
                 Err(e) => errors.push(format!("{e:#}")),
             }
@@ -1359,34 +1476,11 @@ impl Job {
     }
 }
 
-/// Fails unless the container is running and has not restarted.
-async fn ensure_running(
-    docker: &Docker,
-    container: &str,
-) -> Result<bollard::models::ContainerInspectResponse> {
-    let inspected = docker::inspect(docker, container)
-        .await?
-        .context("the container disappeared")?;
-    match RunState::from_inspect(&inspected) {
-        RunState::Running if inspected.restart_count.unwrap_or(0) == 0 => Ok(inspected),
-        RunState::Running | RunState::Restarting => bail!("the container is crash-looping"),
-        RunState::Exited { code } => {
-            bail!(
-                "the container exited with code {}",
-                code.map_or("?".into(), |c| c.to_string())
-            )
-        }
-        RunState::Other => bail!("the container is not running"),
-    }
-}
-
-fn describe_reqwest_error(e: &reqwest::Error) -> String {
-    if e.is_timeout() {
-        "timed out".into()
-    } else if e.is_connect() {
-        "connection refused".into()
+fn path_with_slash(path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_string()
     } else {
-        e.to_string()
+        format!("/{path}")
     }
 }
 

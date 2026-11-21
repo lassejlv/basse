@@ -229,6 +229,7 @@ impl LiveApp {
                 domains,
                 volumes: vec![],
                 deploy: false,
+                replicas: None,
             })
             .await
             .unwrap();

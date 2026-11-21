@@ -59,6 +59,8 @@ fn service(name: &str) -> Service {
         primary_domain: None,
         last_deployed_at: None,
         live_deployment_id: None,
+        replicas: 1,
+        scaling: Default::default(),
     }
 }
 
@@ -138,6 +140,7 @@ fn fixture() -> App {
             }],
             container: None,
             compose: Vec::new(),
+            replicas: Vec::new(),
             database: None,
         },
     );
@@ -2780,6 +2783,7 @@ fn metrics_data(range: common::metrics::MetricsRange) -> common::metrics::Servic
                 p50_ms: Some(18.0),
                 p95_ms: Some(120.0),
             }),
+            replicas: 1,
         })
         .collect();
     common::metrics::ServiceMetrics {
@@ -2788,6 +2792,8 @@ fn metrics_data(range: common::metrics::MetricsRange) -> common::metrics::Servic
         from,
         to,
         containers: vec!["frontend".into(), "queue".into()],
+        replicas: Vec::new(),
+        replica: None,
         container: None,
         points,
         deploys: vec![DeployMarker {
