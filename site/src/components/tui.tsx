@@ -3,7 +3,7 @@ import { brand } from "@/config"
 import { cn } from "@/lib/utils"
 
 /*
- * The TUI's Overview screen as real text, after the Paper artboard "01 Overview" and the
+ * The TUI's Overview screen as real text, after the Paper artboard "OVR-01 Overview" and the
  * ratatui layout in crates/tui. Sample data, not a screenshot, so it stays crisp and selectable.
  */
 

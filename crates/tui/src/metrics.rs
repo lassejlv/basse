@@ -1,5 +1,5 @@
 //! The Metrics tab of a service: a range switcher, a container switcher for compose groups,
-//! and six braille line charts with deploy markers, following the "89 Service · Metrics"
+//! and six braille line charts with deploy markers, following the "SVC-05 Service · Metrics"
 //! artboards in Paper.
 
 use crate::app::{App, ServiceView};
