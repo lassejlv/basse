@@ -119,6 +119,12 @@ pub struct Config {
     /// The managed Postgres container, used when `database_url` is unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub postgres: Option<ManagedPostgres>,
+    /// Domain the proxy serves the API on with automatic HTTPS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// When every check of `domain` last passed; cleared when the domain changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_verified_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Credentials and port of the Postgres container the daemon runs for its own state.
@@ -226,6 +232,8 @@ mod tests {
             public_ip_override: None,
             database_url: None,
             postgres: None,
+            domain: None,
+            domain_verified_at: None,
         };
         assert_eq!(config.token_hash().unwrap(), hash_token(&token));
     }
@@ -238,6 +246,8 @@ mod tests {
             public_ip_override: None,
             database_url: None,
             postgres: None,
+            domain: None,
+            domain_verified_at: None,
         }
     }
 

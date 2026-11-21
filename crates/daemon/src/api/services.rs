@@ -118,6 +118,8 @@ pub struct LogsQuery {
     tail: Option<usize>,
     #[serde(default)]
     follow: bool,
+    /// A compose service of a compose build.
+    container: Option<String>,
 }
 
 pub async fn logs(
@@ -132,8 +134,22 @@ pub async fn logs(
             rec.service.name
         ))
     };
-    let container = rec.live_container.clone().ok_or_else(missing)?;
     let (_, docker) = state.docker_for(&rec.service.server_id).await?;
+    let container = match &q.container {
+        Some(name) => services::compose_services(&docker, &id)
+            .await?
+            .into_iter()
+            .find(|c| c.name == *name)
+            .and_then(|c| c.container)
+            .map(|c| c.id)
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "'{}' has no compose service '{name}' running",
+                    rec.service.name
+                ))
+            })?,
+        None => rec.live_container.clone().ok_or_else(missing)?,
+    };
     if docker::inspect(&docker, &container).await?.is_none() {
         return Err(missing());
     }
@@ -225,6 +241,22 @@ pub async fn add_domain(
     if body.port == Some(0) {
         bad_request!("port must be between 1 and 65535");
     }
+    let compose = matches!(&rec.service.source, Source::Git { build, .. } if build.method == BuildMethod::Compose);
+    let compose_service = body
+        .compose_service
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    match (compose, &compose_service) {
+        (true, None) => bad_request!(
+            "'{}' is a compose build: say which compose service the domain routes to",
+            rec.service.name
+        ),
+        (false, Some(_)) => bad_request!(
+            "'{}' is not a compose build, so the domain cannot name a compose service",
+            rec.service.name
+        ),
+        _ => {}
+    }
     if state.db.domain_taken(&host).await? {
         conflict!("domain '{host}' is already in use");
     }
@@ -234,6 +266,7 @@ pub async fn add_domain(
         host,
         port: body.port,
         tls: body.tls,
+        compose_service,
         created_at: Utc::now(),
     };
     state.db.insert_domain(&domain).await?;

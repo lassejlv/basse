@@ -189,6 +189,12 @@ pub async fn reveal(
     Path(id): Path<String>,
 ) -> ApiResult<Json<RevealedSecret>> {
     let secret = secret(&state, &id).await?;
+    if secret.kind == SecretKind::GithubApp {
+        bad_request!(
+            "secret '{}' holds GitHub App credentials, which are never revealed",
+            secret.name
+        );
+    }
     let value = state.secrets.value(&secret.id).await?;
     state
         .activity(

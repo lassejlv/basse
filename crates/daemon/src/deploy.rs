@@ -23,6 +23,8 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::{broadcast, watch};
 
+mod methods;
+
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const STABLE_FOR: Duration = Duration::from_secs(5);
 const GIT_TIMEOUT: Duration = Duration::from_secs(600);
@@ -308,6 +310,11 @@ pub async fn reconfigure(
     if rec.stopped || (rec.service.live_deployment_id.is_none() && rec.busy.is_none()) {
         return Ok(None);
     }
+    if let Source::Git { build, .. } = &rec.service.source
+        && build.method == BuildMethod::Compose
+    {
+        return enqueue(state, rec, "config", Plan::Source).await.map(Some);
+    }
     enqueue(state, rec, "config", Plan::Reconfigure)
         .await
         .map(Some)
@@ -442,7 +449,7 @@ impl Job {
         let previous = rec
             .live_container
             .filter(|_| matches!(rec.service.source, Source::Database { .. }));
-        let svc = rec.service;
+        let mut svc = rec.service;
         let env = db
             .environment(&svc.environment_id)
             .await?
@@ -484,15 +491,34 @@ impl Job {
                 Source::Git {
                     repo,
                     branch,
-                    dockerfile,
-                    context,
+                    source_id,
+                    ..
                 },
             ) => {
                 self.set_status(DeploymentStatus::Building).await;
-                let dir = self.clone_repo(repo, branch).await?;
-                let tag = docker::build_tag(&svc.id, self.d.number);
-                self.build(&docker, &svc, &dir, context, dockerfile, &tag)
+                let dir = self
+                    .clone_repo(&repo.clone(), &branch.clone(), source_id.clone().as_deref())
                     .await?;
+                let build = self.resolve_build(&mut svc, &dir).await?;
+                self.service = Some(svc.clone());
+                let Source::Git { context, .. } = &svc.source else {
+                    unreachable!("checked above");
+                };
+                let tag = docker::build_tag(&svc.id, self.d.number);
+                match build.method {
+                    BuildMethod::Compose => {
+                        return self
+                            .deploy_compose(&docker, &server, &svc, &dir, &build)
+                            .await;
+                    }
+                    BuildMethod::Railpack => {
+                        self.build_railpack(&server, &svc, &dir, context, &tag)
+                            .await?
+                    }
+                    BuildMethod::Dockerfile | BuildMethod::Auto => {
+                        self.build(&docker, &svc, &dir, &build, &tag).await?
+                    }
+                }
                 tag
             }
             (Plan::Source, Source::Image { image }) => {
@@ -752,7 +778,12 @@ impl Job {
 
     // Steps
 
-    async fn clone_repo(&mut self, repo: &str, branch: &str) -> Result<PathBuf> {
+    async fn clone_repo(
+        &mut self,
+        repo: &str,
+        branch: &str,
+        source_id: Option<&str>,
+    ) -> Result<PathBuf> {
         self.begin(StepKind::Clone, Some(format!("{repo}@{branch}")))
             .await;
         let dir = self.state.dirs.build_dir(&self.d.id);
@@ -761,19 +792,31 @@ impl Job {
         {
             return Err(e.into());
         }
+        let (url, auth) = match source_id {
+            Some(id) => {
+                let (url, token) = crate::sources::clone_access(&self.state, id, repo).await?;
+                self.log
+                    .system("Cloning with a short-lived token from the git source");
+                (url, crate::github::git_auth_env(&token))
+            }
+            None => (repo.to_string(), Vec::new()),
+        };
         let dir_arg = dir.to_string_lossy().into_owned();
         let out = self
-            .git(&[
-                "clone",
-                "--depth",
-                "1",
-                "--single-branch",
-                "--branch",
-                branch,
-                "--",
-                repo,
-                &dir_arg,
-            ])
+            .git_with(
+                &[
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--single-branch",
+                    "--branch",
+                    branch,
+                    "--",
+                    &url,
+                    &dir_arg,
+                ],
+                auth,
+            )
             .await?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -801,10 +844,17 @@ impl Job {
     }
 
     async fn git(&self, args: &[&str]) -> Result<Output> {
+        self.git_with(args, Vec::new()).await
+    }
+
+    /// Runs git with extra environment, such as the token header of
+    /// [`crate::github::git_auth_env`].
+    async fn git_with(&self, args: &[&str], env: Vec<(String, String)>) -> Result<Output> {
         self.check_cancelled()?;
         let ssh = crate::ssh::paths(&self.state.dirs.ssh_dir()).git_ssh_command();
         let mut child = tokio::process::Command::new("git")
             .args(args)
+            .envs(env)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_SSH_COMMAND", ssh)
             .stdin(Stdio::null())
@@ -866,11 +916,26 @@ impl Job {
         docker: &Docker,
         svc: &Service,
         repo_dir: &Path,
-        context: &str,
-        dockerfile: &str,
+        build: &Build,
         tag: &str,
     ) -> Result<()> {
+        let Source::Git {
+            dockerfile,
+            context,
+            ..
+        } = &svc.source
+        else {
+            bail!("not a git service");
+        };
         self.begin(StepKind::Build, None).await;
+        let build_args: HashMap<String, String> = self
+            .state
+            .db
+            .env(&svc.id)
+            .await?
+            .into_iter()
+            .map(|v| (v.key, v.value))
+            .collect();
         let context_dir = safe_join(repo_dir, context)?;
         let dockerfile_rel = clean_relative(dockerfile)?;
         if !context_dir.join(&dockerfile_rel).is_file() {
@@ -890,6 +955,8 @@ impl Job {
         let options = BuildImageOptions {
             dockerfile: dockerfile_rel.to_string_lossy().into_owned(),
             t: Some(tag.to_string()),
+            target: build.target.clone().unwrap_or_default(),
+            buildargs: (!build_args.is_empty()).then_some(build_args),
             rm: true,
             forcerm: true,
             labels: Some(HashMap::from([
@@ -1035,6 +1102,7 @@ impl Job {
             networks,
             published,
             publish_ip: None,
+            extra_hosts: Vec::new(),
         };
         self.check_cancelled()?;
         docker::remove_container(docker, &spec.name).await?;

@@ -1,16 +1,18 @@
-//! The picker dialog: choose an SSH key, S3 credentials or a backup store from a list.
+//! The picker dialog: choose an SSH key, S3 credentials, a backup store, or a git source,
+//! repository and branch from a list.
 
 use crate::form::Form;
 use crate::mouse::List;
 use crate::mouse::{self, Hit};
 use crate::theme;
 use crate::util::truncate;
-use common::{Id, Secret, SecretKind, StorageConnection};
+use common::{GitBranch, GitRepo, Id, Secret, SecretKind, StorageConnection};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use std::time::Instant;
 
 /// What the list holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +27,31 @@ pub enum PickKind {
     Channel,
     /// What a rule listens to; items are filled by the rule dialog.
     Scope,
+    /// A ready git source for a new service.
+    GitSource,
+    /// A repository of a source, searched and paged on the daemon.
+    Repo,
+    /// A branch of a repository, filtered here.
+    Branch,
+}
+
+/// State of the repository and branch pickers: the search line and the page.
+#[derive(Default)]
+pub struct GitPick {
+    pub source_id: Id,
+    pub repo: String,
+    pub search: String,
+    /// 1-based.
+    pub page: u32,
+    pub pages: u32,
+    /// Repositories matching the search across all pages.
+    pub total: u32,
+    pub loading: bool,
+    /// When the search last changed; the request waits for typing to pause.
+    pub typed_at: Option<Instant>,
+    /// Every branch; `items` holds the ones matching the search.
+    pub branches: Vec<GitBranch>,
+    pub error: Option<String>,
 }
 
 /// Where the choice goes.
@@ -46,6 +73,8 @@ pub struct PickItem {
     pub detail: String,
     pub note: String,
     pub note_style: Style,
+    /// A muted tag after the name, e.g. `private` or `default`.
+    pub badge: String,
     /// Leading status glyph.
     pub glyph: Option<(&'static str, Style)>,
     /// Text that c copies, e.g. the public key.
@@ -62,6 +91,7 @@ impl PickItem {
             detail: detail.into(),
             note: String::new(),
             note_style: theme::muted(),
+            badge: String::new(),
             glyph: None,
             copy: None,
             generate: false,
@@ -81,6 +111,18 @@ pub struct Picker {
     pub note: Vec<Line<'static>>,
     /// Set while a key is being generated.
     pub busy: bool,
+    /// The search line and paging of the repository and branch pickers.
+    pub git: Option<GitPick>,
+}
+
+/// A repository row: `private` as a badge, the default branch and when it was last pushed.
+pub fn repo_item(r: &GitRepo) -> PickItem {
+    let mut item = PickItem::new(Some(r.full_name.clone()), &r.full_name, &r.default_branch);
+    if r.private {
+        item.badge = "private".into();
+    }
+    item.note = r.pushed_at.map(crate::util::ago).unwrap_or_default();
+    item
 }
 
 /// "ssh-ed25519 AAAAC3Nz…q9Lk" and the key's comment.
@@ -161,6 +203,7 @@ impl Picker {
         let selected = self.items.get(self.row).map(|i| (i.id.clone(), i.generate));
         let mut items = Vec::new();
         match self.kind {
+            PickKind::GitSource | PickKind::Repo | PickKind::Branch => return,
             PickKind::SshKey => {
                 let (key, comment) = daemon_key.map(short_key).unwrap_or_default();
                 let mut own = PickItem::new(
@@ -228,6 +271,35 @@ impl Picker {
             .unwrap_or(0);
     }
 
+    /// Show the branches whose name contains the search, the default one first.
+    pub fn filter_branches(&mut self) {
+        let Some(git) = &self.git else {
+            return;
+        };
+        let needle = git.search.to_lowercase();
+        let mut branches: Vec<&GitBranch> = git
+            .branches
+            .iter()
+            .filter(|b| b.name.to_lowercase().contains(&needle))
+            .collect();
+        branches.sort_by_key(|b| !b.default);
+        self.items = branches
+            .into_iter()
+            .map(|b| {
+                let mut item = PickItem::new(Some(b.name.clone()), &b.name, "");
+                if b.default {
+                    item.badge = "default".into();
+                }
+                item
+            })
+            .collect();
+        self.row = self
+            .current
+            .as_ref()
+            .and_then(|c| self.items.iter().position(|i| i.id.as_ref() == Some(c)))
+            .unwrap_or(0);
+    }
+
     pub fn mark_current(&mut self) {
         for item in &mut self.items {
             if !item.generate && item.id == self.current {
@@ -247,10 +319,8 @@ impl Picker {
         self.items.get(self.row)
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, tick: usize) {
-        let width = area.width.saturating_sub(4).min(110);
-        let list_h = self.items.len().max(1) as u16;
-        let height = list_h + self.note.len() as u16 + 7;
+    /// Draw the dialog frame with its title, centered in `area`; returns the padded inside.
+    fn open(&self, frame: &mut Frame, area: Rect, width: u16, height: u16) -> Rect {
         let rect = area.centered(
             Constraint::Length(width),
             Constraint::Length(height.min(area.height)),
@@ -276,6 +346,37 @@ impl Picker {
             .title_top(Line::from(heading));
         let inner = block.inner(rect).inner(ratatui::layout::Margin::new(2, 1));
         frame.render_widget(block, rect);
+        inner
+    }
+
+    /// The footer: hints on the left, the accept chip on the right.
+    fn footer(&self, frame: &mut Frame, keys: Rect, chip: String, hints: &[(&str, &str)]) {
+        let chip = Span::styled(chip, theme::chip());
+        let chip_w = (chip.width() as u16).min(keys.width);
+        let chip_area = Rect::new(keys.right() - chip_w, keys.y, chip_w, 1);
+        frame.render_widget(Paragraph::new(chip), chip_area);
+        if !self.busy {
+            mouse::key_target(chip_area, "⏎");
+        }
+        mouse::hints(
+            frame,
+            Rect {
+                width: keys.width.saturating_sub(chip_w + 1),
+                ..keys
+            },
+            hints,
+            Alignment::Left,
+        );
+    }
+
+    pub fn render(&self, frame: &mut Frame, area: Rect, tick: usize) {
+        if self.git.is_some() {
+            return self.render_search(frame, area, tick);
+        }
+        let width = area.width.saturating_sub(4).min(110);
+        let list_h = self.items.len().max(1) as u16;
+        let height = list_h + self.note.len() as u16 + 7;
+        let inner = self.open(frame, area, width, height);
         let [list, _, note, _, rule, keys] = Layout::vertical([
             Constraint::Length(list_h),
             Constraint::Length(1),
@@ -351,6 +452,9 @@ impl Picker {
 
         let chip = match self.selected() {
             _ if self.busy => format!(" {} generating… ", crate::util::spinner(tick)),
+            Some(i) if i.generate && self.kind == PickKind::GitSource => {
+                " ⏎ open sources ".to_string()
+            }
             Some(i) if i.generate => " ⏎ generate ".to_string(),
             Some(i) if matches!(self.target, PickFor::BackupNow { .. }) => {
                 format!(" ⏎ back up to {} ", truncate(&i.name, 30))
@@ -358,27 +462,201 @@ impl Picker {
             Some(i) => format!(" ⏎ use {} ", truncate(&i.name, 30)),
             None => " ⏎ close ".to_string(),
         };
-        let chip = Span::styled(chip, theme::chip());
-        let chip_w = (chip.width() as u16).min(keys.width);
-        let chip_area = Rect::new(keys.right() - chip_w, keys.y, chip_w, 1);
-        frame.render_widget(Paragraph::new(chip), chip_area);
-        if !self.busy {
-            mouse::key_target(chip_area, "⏎");
-        }
         let copyable = self.selected().is_some_and(|i| i.copy.is_some());
         let hints: &[(&str, &str)] = if copyable {
             &[("↑↓", "move"), ("c", "copy public key"), ("esc", "cancel")]
         } else {
             &[("↑↓", "move"), ("esc", "cancel")]
         };
-        mouse::hints(
-            frame,
+        self.footer(frame, keys, chip, hints);
+    }
+
+    /// The repository and branch pickers: a search line, the rows and the page.
+    fn render_search(&self, frame: &mut Frame, area: Rect, tick: usize) {
+        let Some(git) = &self.git else {
+            return;
+        };
+        let repos = self.kind == PickKind::Repo;
+        let list_h = if repos {
+            crate::app::REPO_PAGE as u16
+        } else {
+            git.branches.len().clamp(1, 12) as u16
+        };
+        let header_h = u16::from(repos);
+        let width = area.width.saturating_sub(4).min(110);
+        let inner = self.open(frame, area, width, list_h + header_h + 11);
+        let [search, underline, header, list, _, status, _, rule, keys] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(header_h),
+            Constraint::Length(list_h),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+
+        let [label, input] =
+            Layout::horizontal([Constraint::Length(10), Constraint::Fill(1)]).areas(search);
+        frame.render_widget(Paragraph::new("› search").style(theme::accent()), label);
+        let cursor = if tick % 8 < 5 { "▏" } else { " " };
+        let mut line = vec![
+            Span::raw(" "),
+            Span::styled(git.search.clone(), theme::text()),
+            Span::styled(cursor, theme::accent()),
+        ];
+        if git.search.is_empty() {
+            line.push(Span::styled(
+                match (repos, git.total) {
+                    (true, 0) => "type to filter repositories".to_string(),
+                    (true, n) => format!("type to filter {n} repositories"),
+                    (false, _) => format!("type to filter {} branches", git.branches.len()),
+                },
+                theme::muted(),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(line)), input);
+        frame.render_widget(
+            Paragraph::new("─".repeat(input.width as usize)).style(theme::accent()),
             Rect {
-                width: keys.width.saturating_sub(chip_w + 1),
-                ..keys
+                y: underline.y,
+                ..input
             },
-            hints,
-            Alignment::Left,
         );
+
+        let columns = |row: Rect| {
+            Layout::horizontal([
+                Constraint::Length(2),
+                Constraint::Fill(1),
+                Constraint::Length(10),
+                Constraint::Length(if repos { 18 } else { 0 }),
+                Constraint::Length(if repos { 10 } else { 0 }),
+            ])
+            .areas::<5>(row)
+        };
+        if repos {
+            let [_, name, _, branch, pushed] = columns(header);
+            for (area, text) in [
+                (name, "NAME"),
+                (branch, "DEFAULT BRANCH"),
+                (pushed, "PUSHED"),
+            ] {
+                frame.render_widget(Paragraph::new(text).style(theme::muted()), area);
+            }
+        }
+
+        mouse::hit(list, Hit::List(List::Picker));
+        if self.items.is_empty() {
+            let (text, style) = match (&git.error, git.loading) {
+                (Some(e), _) => (format!("✕ {e}"), theme::fg(theme::ERR)),
+                (None, true) => (
+                    format!("{} loading…", crate::util::spinner(tick)),
+                    theme::fg(theme::INFO),
+                ),
+                (None, false) if repos => ("no repository matches".into(), theme::muted()),
+                (None, false) => ("no branch matches".into(), theme::muted()),
+            };
+            frame.render_widget(Paragraph::new(format!("  {text}")).style(style), list);
+        }
+        let offset = self.row.saturating_sub(list_h.saturating_sub(1) as usize);
+        for (i, item) in self
+            .items
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(list_h as usize)
+        {
+            let selected = i == self.row;
+            let row = Rect::new(list.x, list.y + (i - offset) as u16, list.width, 1);
+            if selected {
+                frame.render_widget(Block::new().style(Style::new().bg(theme::LINE)), row);
+            }
+            let [_, name, badge, branch, pushed] = columns(row);
+            let name_style = if selected {
+                theme::accent()
+            } else {
+                theme::text()
+            };
+            frame.render_widget(
+                Paragraph::new(truncate(&item.name, name.width.saturating_sub(1) as usize))
+                    .style(name_style),
+                name,
+            );
+            frame.render_widget(
+                Paragraph::new(item.badge.clone()).style(theme::muted()),
+                badge,
+            );
+            frame.render_widget(
+                Paragraph::new(item.detail.clone()).style(theme::text()),
+                branch,
+            );
+            frame.render_widget(
+                Paragraph::new(item.note.clone()).style(theme::muted()),
+                pushed,
+            );
+            mouse::hit(row, Hit::PickRow(i));
+        }
+
+        let mut line = Vec::new();
+        if git.loading && !self.items.is_empty() {
+            line.push(Span::styled(
+                format!("{} ", crate::util::spinner(tick)),
+                theme::fg(theme::INFO),
+            ));
+        }
+        if repos {
+            line.extend([
+                Span::styled("page ", theme::muted()),
+                Span::styled(git.page.to_string(), theme::text()),
+                Span::styled(
+                    format!(
+                        " of {} · {} {}",
+                        git.pages.max(1),
+                        git.total,
+                        if git.search.is_empty() {
+                            "repositories · newest push first".to_string()
+                        } else {
+                            format!("matching {}", git.search)
+                        }
+                    ),
+                    theme::muted(),
+                ),
+            ]);
+        } else if git.search.is_empty() {
+            line.push(Span::styled(
+                format!("{} branches", git.branches.len()),
+                theme::muted(),
+            ));
+        } else {
+            line.push(Span::styled(
+                format!("{} of {} branches", self.items.len(), git.branches.len()),
+                theme::muted(),
+            ));
+        }
+        if let Some(e) = git.error.as_ref().filter(|_| !self.items.is_empty()) {
+            line.push(Span::styled(format!("  ✕ {e}"), theme::fg(theme::ERR)));
+        }
+        frame.render_widget(Paragraph::new(Line::from(line)), status);
+        frame.render_widget(
+            Paragraph::new("─".repeat(rule.width as usize)).style(theme::fg(theme::LINE)),
+            rule,
+        );
+        let chip = match self.selected() {
+            Some(i) => format!(" ⏎ use {} ", truncate(&i.name, 30)),
+            None => " ⏎ back ".to_string(),
+        };
+        let hints: &[(&str, &str)] = if repos {
+            &[
+                ("type", "search"),
+                ("↑↓", "move"),
+                ("←→", "page"),
+                ("esc", "back"),
+            ]
+        } else {
+            &[("type", "search"), ("↑↓", "move"), ("esc", "back")]
+        };
+        self.footer(frame, keys, chip, hints);
     }
 }

@@ -63,6 +63,14 @@ pub struct TlsRecord {
     pub invalid_reported: bool,
 }
 
+/// A git source plus the stored facts the API does not return.
+#[derive(Debug, Clone)]
+pub struct SourceRecord {
+    pub source: GitSource,
+    /// Organization the manifest flow creates the app in.
+    pub organization: Option<String>,
+}
+
 /// New service with everything inserted alongside it.
 pub struct NewService<'a> {
     pub service: &'a Service,
@@ -477,7 +485,9 @@ impl Db {
 
     async fn domain_query(&self, tail: &str, binds: &[&str]) -> Result<Vec<Domain>> {
         self.fetch(
-            format!("SELECT id, service_id, host, port, tls, created_at FROM domains {tail}"),
+            format!(
+                "SELECT id, service_id, host, port, tls, created_at, compose_service FROM domains {tail}"
+            ),
             binds,
             |row| {
                 Ok(Domain {
@@ -487,6 +497,7 @@ impl Db {
                     port: col_port(row, 3)?,
                     tls: row.try_get(4)?,
                     created_at: row.try_get(5)?,
+                    compose_service: row.try_get(6)?,
                 })
             },
         )
@@ -1054,6 +1065,165 @@ impl Db {
 
     pub async fn delete_secret(&self, id: &str) -> Result<()> {
         self.execute("DELETE FROM secrets WHERE id = $1", id).await
+    }
+
+    // Git sources
+
+    /// Every git source, oldest first, with the services that clone from it.
+    pub async fn sources(&self) -> Result<Vec<SourceRecord>> {
+        let mut sources = self
+            .fetch(
+                format!("{SOURCE_SELECT} ORDER BY created_at, seq"),
+                &[],
+                source_from_row,
+            )
+            .await?;
+        for rec in &mut sources {
+            rec.source.used_by = self.source_usages(&rec.source.id).await?;
+        }
+        Ok(sources)
+    }
+
+    pub async fn source(&self, id: &str) -> Result<Option<SourceRecord>> {
+        let Some(mut rec) = self
+            .fetch_one(
+                format!("{SOURCE_SELECT} WHERE id = $1"),
+                &[id],
+                source_from_row,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        rec.source.used_by = self.source_usages(id).await?;
+        Ok(Some(rec))
+    }
+
+    async fn source_usages(&self, id: &str) -> Result<Vec<Usage>> {
+        let rows = sqlx::query(
+            "SELECT id, name FROM services WHERE source->>'source_id' = $1 ORDER BY created_at, seq",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(Usage {
+                    kind: UsageKind::Service,
+                    id: row.try_get(0)?,
+                    name: row.try_get(1)?,
+                })
+            })
+            .collect::<sqlx::Result<_>>()
+            .map_err(Into::into)
+    }
+
+    pub async fn source_name_taken(&self, name: &str) -> Result<bool> {
+        self.exists("SELECT 1 FROM git_sources WHERE name = $1", &[name])
+            .await
+    }
+
+    /// Inserts or updates a source. The setup state is only written by `set_source_setup`.
+    pub async fn save_source(&self, r: &SourceRecord) -> Result<()> {
+        let s = &r.source;
+        let id = |v: Option<u64>| v.and_then(|v| i64::try_from(v).ok());
+        sqlx::query(
+            "INSERT INTO git_sources (id, name, kind, html_url, api_url, organization, owner,
+                    owner_kind, app_id, app_slug, installation_id, status, status_detail, secret_id,
+                    last_checked_at, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+             ON CONFLICT (id) DO UPDATE SET name = $2, html_url = $4, api_url = $5,
+                    organization = $6, owner = $7, owner_kind = $8, app_id = $9, app_slug = $10,
+                    installation_id = $11, status = $12, status_detail = $13, secret_id = $14,
+                    last_checked_at = $15",
+        )
+        .bind(&s.id)
+        .bind(&s.name)
+        .bind(enum_str(&s.kind))
+        .bind(&s.html_url)
+        .bind(&s.api_url)
+        .bind(&r.organization)
+        .bind(&s.owner)
+        .bind(s.owner_kind.as_ref().map(enum_str))
+        .bind(id(s.app_id))
+        .bind(&s.app_slug)
+        .bind(id(s.installation_id))
+        .bind(enum_str(&s.status))
+        .bind(&s.status_detail)
+        .bind(&s.secret_id)
+        .bind(s.last_checked_at)
+        .bind(s.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Stores the hash of the manifest flow's state, or clears it with `None`.
+    pub async fn set_source_setup(
+        &self,
+        id: &str,
+        state_sha256: Option<&str>,
+        expires_at: Option<Timestamp>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE git_sources SET setup_state_sha256 = $2, setup_expires_at = $3 WHERE id = $1",
+        )
+        .bind(id)
+        .bind(state_sha256)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The hash of the manifest flow's state while it has not expired.
+    pub async fn source_setup_state(&self, id: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT setup_state_sha256 FROM git_sources
+             WHERE id = $1 AND setup_expires_at > now() AND setup_state_sha256 IS NOT NULL",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// Deletes a source and the secret holding its credentials.
+    pub async fn delete_source(&self, id: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let secret: Option<Option<String>> =
+            sqlx::query_scalar("DELETE FROM git_sources WHERE id = $1 RETURNING secret_id")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if let Some(Some(secret)) = secret {
+            sqlx::query("DELETE FROM secrets WHERE id = $1")
+                .bind(secret)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Git services cloning from `source_id` whose repository is `full_name`, any case.
+    pub async fn services_tracking(
+        &self,
+        source_id: &str,
+        full_name: &str,
+    ) -> Result<Vec<ServiceRecord>> {
+        Ok(self
+            .services()
+            .await?
+            .into_iter()
+            .filter(|rec| match &rec.service.source {
+                Source::Git {
+                    repo,
+                    source_id: Some(id),
+                    ..
+                } => id == source_id && repo.eq_ignore_ascii_case(full_name),
+                _ => false,
+            })
+            .collect())
     }
 
     // Storage connections
@@ -1643,7 +1813,48 @@ const SECRET_USAGES: &str = "SELECT ssh_key_secret_id, 'server', id, name FROM s
      WHERE ssh_key_secret_id IS NOT NULL
      UNION ALL
      SELECT credentials_secret_id, 'storage', id, name FROM storage_connections
+     UNION ALL
+     SELECT secret_id, 'source', id, name FROM git_sources WHERE secret_id IS NOT NULL
      ORDER BY 1, 2, 4";
+
+const SOURCE_SELECT: &str =
+    "SELECT id, name, kind, html_url, api_url, organization, owner, owner_kind,
+        app_id, app_slug, installation_id, status, status_detail, secret_id, last_checked_at,
+        created_at FROM git_sources";
+
+fn source_from_row(row: &PgRow) -> sqlx::Result<SourceRecord> {
+    let id = |idx: usize| -> sqlx::Result<Option<u64>> {
+        row.try_get::<Option<i64>, _>(idx)?
+            .map(|v| u64::try_from(v).map_err(|e| decode_error(idx, e)))
+            .transpose()
+    };
+    Ok(SourceRecord {
+        organization: row.try_get(5)?,
+        source: GitSource {
+            id: row.try_get(0)?,
+            name: row.try_get(1)?,
+            kind: col_enum(row, 2)?,
+            html_url: row.try_get(3)?,
+            api_url: row.try_get(4)?,
+            owner: row.try_get(6)?,
+            owner_kind: row
+                .try_get::<Option<String>, _>(7)?
+                .map(|s| parse_enum(&s, 7))
+                .transpose()?,
+            app_id: id(8)?,
+            app_slug: row.try_get(9)?,
+            installation_id: id(10)?,
+            status: col_enum(row, 11)?,
+            status_detail: row.try_get(12)?,
+            secret_id: row.try_get(13)?,
+            last_checked_at: row.try_get(14)?,
+            created_at: row.try_get(15)?,
+            install_url: None,
+            webhook_url: None,
+            used_by: Vec::new(),
+        },
+    })
+}
 
 const INSTANCE_BACKUP_SELECT: &str = "SELECT id, status, trigger, file_name, size_bytes, storage,
         storage_id, error, created_at, finished_at FROM instance_backups";
@@ -1824,7 +2035,8 @@ async fn insert_environment(tx: &mut Tx, e: &Environment) -> sqlx::Result<()> {
 
 async fn insert_domain(tx: &mut Tx, d: &Domain) -> sqlx::Result<()> {
     sqlx::query(
-        "INSERT INTO domains (id, service_id, host, port, tls, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO domains (id, service_id, host, port, tls, created_at, compose_service)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(&d.id)
     .bind(&d.service_id)
@@ -1832,6 +2044,7 @@ async fn insert_domain(tx: &mut Tx, d: &Domain) -> sqlx::Result<()> {
     .bind(d.port.map(i32::from))
     .bind(d.tls)
     .bind(d.created_at)
+    .bind(&d.compose_service)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -2031,6 +2244,7 @@ pub mod tests {
             host: host.into(),
             port: None,
             tls: true,
+            compose_service: None,
             created_at: now,
         });
         let env_vars = [

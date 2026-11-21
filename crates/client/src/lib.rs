@@ -377,9 +377,19 @@ impl Client {
         self.post_empty(&format!("/services/{id}/start")).await
     }
 
-    pub async fn service_logs(&self, id: &str, tail: usize, follow: bool) -> Result<LogStreamBox> {
-        self.stream(&format!("/services/{id}/logs?tail={tail}&follow={follow}"))
-            .await
+    /// Container logs; `container` picks one service of a compose build.
+    pub async fn service_logs(
+        &self,
+        id: &str,
+        tail: usize,
+        follow: bool,
+        container: Option<&str>,
+    ) -> Result<LogStreamBox> {
+        let mut path = format!("/services/{id}/logs?tail={tail}&follow={follow}");
+        if let Some(c) = container {
+            path.push_str(&format!("&container={c}"));
+        }
+        self.stream(&path).await
     }
 
     pub async fn service_stats(&self, id: &str) -> Result<ServiceStats> {
@@ -441,6 +451,90 @@ impl Client {
 
     pub async fn update(&self, body: &UpdateRequest) -> Result<UpdateResult> {
         self.post("/settings/update", body).await
+    }
+
+    pub async fn instance_domain(&self) -> Result<InstanceDomain> {
+        self.get("/settings/domain").await
+    }
+
+    /// Routes `domain` to the API and runs the checks once.
+    pub async fn set_instance_domain(&self, domain: &str) -> Result<InstanceDomain> {
+        let body = SetInstanceDomain {
+            domain: domain.to_string(),
+        };
+        Self::json(self.req(Method::PUT, "/settings/domain").json(&body)).await
+    }
+
+    pub async fn check_instance_domain(&self) -> Result<InstanceDomain> {
+        self.post_empty("/settings/domain/check").await
+    }
+
+    pub async fn remove_instance_domain(&self) -> Result<InstanceDomain> {
+        Self::json(self.req(Method::DELETE, "/settings/domain")).await
+    }
+
+    // Git sources
+
+    pub async fn sources(&self) -> Result<Vec<GitSource>> {
+        self.get("/sources").await
+    }
+
+    pub async fn source(&self, id: &str) -> Result<GitSource> {
+        self.get(&format!("/sources/{id}")).await
+    }
+
+    /// Starts the GitHub App manifest flow; open the returned `setup_url` in a browser.
+    pub async fn create_github_app(&self, body: &CreateGithubApp) -> Result<GithubAppSetup> {
+        self.post("/sources/github", body).await
+    }
+
+    pub async fn connect_github_app(&self, body: &ConnectGithubApp) -> Result<GitSource> {
+        self.post("/sources/github/connect", body).await
+    }
+
+    pub async fn connect_github_token(&self, body: &ConnectGithubToken) -> Result<GitSource> {
+        self.post("/sources/github/token", body).await
+    }
+
+    pub async fn check_source(&self, id: &str) -> Result<GitSource> {
+        self.post_empty(&format!("/sources/{id}/check")).await
+    }
+
+    pub async fn delete_source(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/sources/{id}")).await
+    }
+
+    /// Repositories the source can clone, filtered by `query` on `owner/name`.
+    pub async fn source_repos(
+        &self,
+        id: &str,
+        query: &str,
+        page: u32,
+        per_page: u32,
+    ) -> Result<RepoPage> {
+        let rb = self
+            .req(Method::GET, &format!("/sources/{id}/repos"))
+            .query(&[
+                ("q", query.to_string()),
+                ("page", page.to_string()),
+                ("per_page", per_page.to_string()),
+            ]);
+        Self::json(rb).await
+    }
+
+    /// The build method a branch would get: Dockerfile, else compose file, else Railpack.
+    pub async fn detect_build(&self, id: &str, repo: &str, branch: &str) -> Result<BuildDetection> {
+        let rb = self
+            .req(Method::GET, &format!("/sources/{id}/detect"))
+            .query(&[("repo", repo), ("branch", branch)]);
+        Self::json(rb).await
+    }
+
+    pub async fn source_branches(&self, id: &str, repo: &str) -> Result<Vec<GitBranch>> {
+        let rb = self
+            .req(Method::GET, &format!("/sources/{id}/branches"))
+            .query(&[("repo", repo)]);
+        Self::json(rb).await
     }
 
     // Databases

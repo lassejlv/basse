@@ -31,6 +31,7 @@ pub async fn info(State(state): State<Arc<AppState>>) -> ApiResult<Json<DaemonIn
     Ok(Json(DaemonInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         hostname: host::hostname(),
+        url: state.instance_url(),
         public_ip: state.config().public_ip(),
         cpu_percent: sample.cpu_percent,
         mem_used: sample.mem_used,

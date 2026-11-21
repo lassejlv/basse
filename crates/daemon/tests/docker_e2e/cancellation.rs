@@ -52,6 +52,9 @@ async fn cancelling_during_build_stops_docker_and_preserves_the_live_deployment(
                 branch: "main".into(),
                 dockerfile: "Dockerfile".into(),
                 context: ".".into(),
+                source_id: None,
+                auto_deploy: true,
+                build: common::Build::default(),
             }),
             ..UpdateService::default()
         })

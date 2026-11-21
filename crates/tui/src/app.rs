@@ -2,7 +2,7 @@
 
 use crate::form::{Field, Form, FormKind};
 use crate::notify::{self, NotifyView, RuleDialog};
-use crate::picker::{PickFor, PickKind, Picker};
+use crate::picker::{GitPick, PickFor, PickItem, PickKind, Picker, repo_item};
 use crate::theme;
 use client::{Client, Config};
 use common::api::*;
@@ -22,6 +22,10 @@ const LOG_CAP: usize = 5000;
 const REFRESH: Duration = Duration::from_secs(3);
 /// Settings are heavier to compute (disk usage, Docker), so they refresh less often.
 const SETTINGS_REFRESH: Duration = Duration::from_secs(15);
+/// Repositories per page of the repository picker.
+pub const REPO_PAGE: u32 = 10;
+/// How long typing in the repository search pauses before the daemon is asked.
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// Results of background work, applied on the UI thread.
 pub enum Msg {
@@ -85,6 +89,31 @@ pub enum Msg {
     NotifyStepTested(Id, Result<notify_types::NotifyDelivery, String>),
     /// The rule dialog or the wizard's last step finished saving.
     NotifyDialogDone(Result<String, String>),
+    Sources(Vec<GitSource>),
+    /// A source polled while its setup dialog is open.
+    Source(GitSource),
+    /// A source check finished.
+    SourceChecked(Id, Result<GitSource, String>),
+    /// The instance domain, with the toast to show when an action produced it.
+    Domain(Result<InstanceDomain, String>, Option<String>),
+    Repos {
+        source: Id,
+        query: String,
+        page: u32,
+        result: Result<RepoPage, String>,
+    },
+    Branches {
+        source: Id,
+        repo: String,
+        result: Result<Vec<GitBranch>, String>,
+    },
+    /// What the picked repository and branch build with.
+    Detected {
+        source: Id,
+        repo: String,
+        branch: String,
+        result: Result<BuildDetection, String>,
+    },
 }
 
 /// Where to go after a form succeeds.
@@ -97,6 +126,8 @@ pub enum Then {
     /// Show the public key of a key the daemon just generated.
     ShowKey(Box<Secret>),
     InstanceSchedule(InstanceBackupSchedule),
+    /// Show the URL that creates a GitHub App, and follow its setup.
+    GithubSetup(Box<GithubAppSetup>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +140,9 @@ pub enum Screen {
     Secrets,
     Storage,
     Notifications,
+    Sources,
+    /// The instance domain guide, reached from Settings.
+    Domain,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -333,9 +367,25 @@ pub struct ServiceView {
     pub reveal: bool,
     /// A database service: shows the Database and Backups tabs.
     pub database: bool,
+    /// The compose service whose logs the Logs tab shows.
+    pub container: Option<String>,
 }
 
 impl ServiceView {
+    /// The services of a compose build; empty for other build methods.
+    pub fn compose(&self) -> &[ComposeService] {
+        self.detail.as_ref().map_or(&[], |d| d.compose.as_slice())
+    }
+
+    /// The compose service the Logs tab follows: the one picked, else the first.
+    pub fn log_container(&self) -> Option<&str> {
+        let compose = self.compose();
+        self.container
+            .as_deref()
+            .filter(|c| compose.iter().any(|s| s.name == *c))
+            .or(compose.first().map(|s| s.name.as_str()))
+    }
+
     pub fn tabs(&self) -> Vec<Tab> {
         Tab::of(self.database)
     }
@@ -399,6 +449,8 @@ pub enum ConfirmAction {
     DeleteInstanceBackup(Id),
     DeleteNotifyChannel(Id),
     DeleteNotifyRule(Id),
+    DeleteSource(Id),
+    RemoveDomain,
 }
 
 impl ConfirmAction {
@@ -412,7 +464,9 @@ impl ConfirmAction {
             ConfirmAction::RotateToken => Some("rotating"),
             ConfirmAction::Prune => Some("pruning"),
             ConfirmAction::Update { .. } => Some("downloading"),
-            ConfirmAction::DeleteSecret(_) | ConfirmAction::DeleteStorage(_) => Some("deleting"),
+            ConfirmAction::DeleteSecret(_)
+            | ConfirmAction::DeleteStorage(_)
+            | ConfirmAction::DeleteSource(_) => Some("deleting"),
             _ => None,
         }
     }
@@ -457,6 +511,8 @@ pub enum Command {
     Secrets,
     Storage,
     Notifications,
+    Sources,
+    Domain,
     BackUpInstance,
     AddServer,
     SetupProxy,
@@ -466,7 +522,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 19] = [
+    pub const ALL: [Command; 21] = [
         Command::Deploy,
         Command::Restart,
         Command::Stop,
@@ -480,6 +536,8 @@ impl Command {
         Command::Secrets,
         Command::Storage,
         Command::Notifications,
+        Command::Sources,
+        Command::Domain,
         Command::BackUpInstance,
         Command::AddServer,
         Command::SetupProxy,
@@ -503,6 +561,8 @@ impl Command {
             Command::Secrets => "secrets",
             Command::Storage => "storage",
             Command::Notifications => "notifications",
+            Command::Sources => "sources",
+            Command::Domain => "instance domain",
             Command::BackUpInstance => "back up this instance",
             Command::AddServer => "add server",
             Command::SetupProxy => "set up proxy on this server",
@@ -526,6 +586,8 @@ impl Command {
             Command::Secrets
             | Command::Storage
             | Command::Notifications
+            | Command::Sources
+            | Command::Domain
             | Command::BackUpInstance
             | Command::AddServer
             | Command::SetupProxy => "",
@@ -560,7 +622,35 @@ pub enum Overlay {
     Picker(Picker),
     Rule(RuleDialog),
     ChannelTest(notify::ChannelTestStep),
+    /// The URL that creates a GitHub App and the setup's progress, updated live.
+    GithubSetup(GithubSetup),
+    /// A GitHub App needs a verified instance domain first; holds the dialog's title.
+    DomainNeeded(&'static str),
     Help,
+}
+
+/// A GitHub App being created with the manifest flow.
+pub struct GithubSetup {
+    pub source: GitSource,
+    /// The manifest URL, known only right after creation; later the install URL is shown.
+    pub setup_url: Option<String>,
+}
+
+impl GithubSetup {
+    /// Where the browser needs to go next.
+    pub fn url(&self) -> Option<&str> {
+        match self.source.status {
+            GitSourceStatus::Pending => self
+                .setup_url
+                .as_deref()
+                .or(self.source.install_url.as_deref()),
+            _ => self
+                .source
+                .install_url
+                .as_deref()
+                .or(self.setup_url.as_deref()),
+        }
+    }
 }
 
 pub struct Toast {
@@ -651,6 +741,51 @@ impl SecretsView {
     }
 }
 
+/// The instance domain guide: the domain, the DNS records to create and the checks.
+#[derive(Default)]
+pub struct DomainView {
+    pub data: Option<InstanceDomain>,
+    /// The domain being typed; `Some` while the input is open.
+    pub input: Option<String>,
+    /// What runs right now, e.g. "checking".
+    pub busy: Option<&'static str>,
+    /// Screen to return to on esc.
+    pub back: Option<Screen>,
+}
+
+/// The Sources screen: where services get their code.
+#[derive(Default)]
+pub struct SourcesView {
+    pub list: Vec<GitSource>,
+    pub loaded: bool,
+    pub row: usize,
+    /// Sources being checked right now.
+    pub checking: HashSet<Id>,
+    /// Screen to return to on esc.
+    pub back: Option<Screen>,
+}
+
+impl SourcesView {
+    pub fn selected(&self) -> Option<&GitSource> {
+        self.list.get(self.row)
+    }
+
+    pub fn ready(&self) -> Vec<&GitSource> {
+        self.list
+            .iter()
+            .filter(|s| s.status == GitSourceStatus::Ready)
+            .collect()
+    }
+}
+
+/// "github app · acme", what a source is and whose.
+pub fn source_summary(s: &GitSource) -> String {
+    match &s.owner {
+        Some(owner) => format!("{} · {owner}", s.kind.label()),
+        None => s.kind.label().to_string(),
+    }
+}
+
 /// The Storage screen: S3-compatible buckets for backups.
 #[derive(Default)]
 pub struct StorageView {
@@ -702,6 +837,8 @@ pub struct App {
     pub secrets: SecretsView,
     pub storage: StorageView,
     pub notify: NotifyView,
+    pub sources: SourcesView,
+    pub domain: DomainView,
     /// Version the daemon is restarting into after an update.
     pub updating: Option<String>,
     /// No new requests while the token is being rotated: the old one is about to stop working.
@@ -742,6 +879,8 @@ impl App {
             secrets: SecretsView::default(),
             storage: StorageView::default(),
             notify: NotifyView::default(),
+            sources: SourcesView::default(),
+            domain: DomainView::default(),
             updating: None,
             rotating: false,
             overlay: None,
@@ -832,6 +971,10 @@ impl App {
         if self.screen == Screen::Deploy && self.tick.is_multiple_of(4) {
             self.refresh_deployment();
         }
+        if self.tick.is_multiple_of(16) {
+            self.poll_setup();
+        }
+        self.search_repos_when_due();
         if self.tick.is_multiple_of(8) {
             self.poll_running_backups();
             if self.screen == Screen::Settings
@@ -905,6 +1048,15 @@ impl App {
         if self.screen == Screen::Notifications {
             self.load_notify();
         }
+        if matches!(
+            self.screen,
+            Screen::Overview | Screen::Settings | Screen::Sources
+        ) {
+            self.load_sources();
+        }
+        if self.screen == Screen::Domain && self.domain.busy.is_none() {
+            self.load_domain();
+        }
         let ids: Vec<Id> = match self.screen {
             Screen::Overview => self.env_services().iter().map(|s| s.id.clone()).collect(),
             Screen::Service | Screen::Deploy => self.service.iter().map(|s| s.id.clone()).collect(),
@@ -912,7 +1064,9 @@ impl App {
             | Screen::Settings
             | Screen::Secrets
             | Screen::Storage
-            | Screen::Notifications => Vec::new(),
+            | Screen::Notifications
+            | Screen::Sources
+            | Screen::Domain => Vec::new(),
         };
         for id in ids {
             self.load_stats(&id);
@@ -1153,6 +1307,14 @@ impl App {
                     Then::OpenDeploy(d) => self.open_deploy(*d),
                     Then::ShowKey(s) => self.show_key(&s),
                     Then::InstanceSchedule(s) => self.settings.schedule = Some(s),
+                    Then::GithubSetup(setup) => {
+                        let GithubAppSetup { source, setup_url } = *setup;
+                        self.upsert_source(source.clone());
+                        self.overlay = Some(Overlay::GithubSetup(GithubSetup {
+                            source,
+                            setup_url: Some(setup_url),
+                        }));
+                    }
                 }
             }
             Msg::FormError(e) => {
@@ -1240,13 +1402,21 @@ impl App {
                 if matches!(
                     &self.overlay,
                     Some(Overlay::Confirm(Confirm {
-                        action: ConfirmAction::DeleteSecret(_) | ConfirmAction::DeleteStorage(_),
+                        action: ConfirmAction::DeleteSecret(_)
+                            | ConfirmAction::DeleteStorage(_)
+                            | ConfirmAction::DeleteSource(_),
                         ..
                     }))
                 ) =>
             {
                 let hint = match (self.screen, self.secrets.selected().map(|s| s.kind)) {
                     (Screen::Storage, _) => None,
+                    (Screen::Sources, _) => {
+                        Some("Point those services at another source first, on their Settings tab.")
+                    }
+                    (_, Some(SecretKind::GithubApp)) => {
+                        Some("Delete the source that uses it instead, on the Sources screen.")
+                    }
                     (_, Some(SecretKind::SshKey)) => Some(
                         "Pick another key for those servers first: Servers, select the server, K change key.",
                     ),
@@ -1456,6 +1626,155 @@ impl App {
                 }
                 _ => self.error(e),
             },
+            Msg::Sources(list) => {
+                let view = &mut self.sources;
+                let selected = view.selected().map(|s| s.id.clone());
+                view.list = list;
+                view.loaded = true;
+                view.row = selected
+                    .and_then(|id| view.list.iter().position(|s| s.id == id))
+                    .unwrap_or(view.row)
+                    .min(view.list.len().saturating_sub(1));
+            }
+            Msg::Source(s) => self.upsert_source(s),
+            Msg::SourceChecked(id, result) => {
+                self.sources.checking.remove(&id);
+                match result {
+                    Ok(s) => {
+                        match s.status {
+                            GitSourceStatus::Ready => self.toast(format!("{} is ready", s.name)),
+                            status => self.error(format!(
+                                "{} is {}{}",
+                                s.name,
+                                status.as_str(),
+                                s.status_detail
+                                    .as_deref()
+                                    .map(|d| format!(": {d}"))
+                                    .unwrap_or_default()
+                            )),
+                        }
+                        self.upsert_source(s);
+                    }
+                    Err(e) => self.error(e),
+                }
+            }
+            Msg::Domain(result, toast) => {
+                let acted = toast.is_some();
+                self.domain.busy = None;
+                match result {
+                    Ok(d) => {
+                        if acted || d.domain.is_none() {
+                            self.domain.input = d.domain.is_none().then(String::new);
+                        }
+                        self.domain.data = Some(d);
+                        if let Some(t) = toast {
+                            self.toast(t);
+                        }
+                    }
+                    Err(e) => self.error(e),
+                }
+                if acted {
+                    self.load_settings();
+                }
+            }
+            Msg::Repos {
+                source,
+                query,
+                page,
+                result,
+            } => {
+                let Some(Overlay::Picker(p)) = &mut self.overlay else {
+                    return;
+                };
+                let Some(git) = p.git.as_mut().filter(|g| {
+                    p.kind == PickKind::Repo
+                        && g.source_id == source
+                        && g.search == query
+                        && g.page == page
+                }) else {
+                    return;
+                };
+                git.loading = false;
+                match result {
+                    Ok(repos) => {
+                        git.error = None;
+                        git.total = repos.total;
+                        git.pages = repos.pages();
+                        p.items = repos.repos.iter().map(repo_item).collect();
+                        p.row = p
+                            .current
+                            .as_ref()
+                            .and_then(|c| p.items.iter().position(|i| i.id.as_ref() == Some(c)))
+                            .unwrap_or(0);
+                    }
+                    Err(e) => git.error = Some(e),
+                }
+            }
+            Msg::Branches {
+                source,
+                repo,
+                result,
+            } => {
+                let Some(Overlay::Picker(p)) = &mut self.overlay else {
+                    return;
+                };
+                let Some(git) = p.git.as_mut().filter(|g| {
+                    p.kind == PickKind::Branch && g.source_id == source && g.repo == repo
+                }) else {
+                    return;
+                };
+                git.loading = false;
+                match result {
+                    Ok(branches) => {
+                        git.error = None;
+                        git.branches = branches;
+                        p.filter_branches();
+                    }
+                    Err(e) => git.error = Some(e),
+                }
+            }
+            Msg::Detected {
+                source,
+                repo,
+                branch,
+                result,
+            } => {
+                let Some(Overlay::Form(form)) = &mut self.overlay else {
+                    return;
+                };
+                if !matches!(form.kind, FormKind::NewService { .. })
+                    || form.raw("git_source") != source
+                    || form.raw("gh_repo") != repo
+                    || form.raw("gh_branch") != branch
+                {
+                    return;
+                }
+                let Ok(found) = result else {
+                    return;
+                };
+                let auto = form.choice("build") == 0;
+                if let Some(build) = form.field_mut("build") {
+                    build.placeholder = detected_note(&found);
+                    if auto {
+                        build.choice = BuildMethod::ALL
+                            .iter()
+                            .position(|m| *m == found.method)
+                            .unwrap_or(0);
+                    }
+                }
+                let key = match found.method {
+                    BuildMethod::Compose => Some("compose_file"),
+                    BuildMethod::Dockerfile => Some("dockerfile"),
+                    _ => None,
+                };
+                if auto
+                    && let (Some(key), Some(file)) = (key, found.file)
+                    && let Some(f) = form.field_mut(key)
+                {
+                    f.value = file;
+                }
+                form.refresh();
+            }
             Msg::StorageTested(id, result) => {
                 self.storage.testing.remove(&id);
                 let name = self.storage.name(&id).unwrap_or("storage").to_string();
@@ -1697,6 +2016,7 @@ impl App {
             database: matches!(tab, Tab::Database | Tab::Backups)
                 || self.details.get(id).is_some_and(|d| d.database.is_some())
                 || self.all_services().any(|s| s.id == id && is_database(s)),
+            container: None,
         });
         self.load_detail(id);
         self.load_deployments(id);
@@ -1757,8 +2077,12 @@ impl App {
         }
         view.logs = LogBuffer::new();
         let id = view.id.clone();
+        let container = view.log_container().map(str::to_string);
         let handle = tokio::spawn(async move {
-            match client.service_logs(&id, 500, true).await {
+            match client
+                .service_logs(&id, 500, true, container.as_deref())
+                .await
+            {
                 Ok(mut stream) => {
                     while let Some(item) = stream.next().await {
                         match item {
@@ -1785,6 +2109,38 @@ impl App {
 
     pub fn restart_service_logs(&mut self) {
         self.start_service_logs();
+    }
+
+    /// Follow the logs of compose service `i` on the Logs tab.
+    pub fn pick_container(&mut self, i: usize) {
+        let Some(view) = self.service.as_mut() else {
+            return;
+        };
+        let Some(name) = view.compose().get(i).map(|s| s.name.clone()) else {
+            return;
+        };
+        view.container = Some(name);
+        if view.tab == Tab::Logs {
+            self.start_service_logs();
+        } else {
+            self.set_tab(Tab::Logs);
+        }
+    }
+
+    /// "c" on the Logs tab of a compose service: the next container.
+    pub fn next_container(&mut self) {
+        let Some(view) = self.service.as_ref() else {
+            return;
+        };
+        let compose = view.compose();
+        if compose.is_empty() {
+            return;
+        }
+        let at = view
+            .log_container()
+            .and_then(|c| compose.iter().position(|s| s.name == c))
+            .unwrap_or(0);
+        self.pick_container((at + 1) % compose.len());
     }
 
     pub fn open_deploy(&mut self, deployment: Deployment) {
@@ -1913,6 +2269,7 @@ impl App {
             ConfirmAction::DeleteInstanceBackup(_) => "instance backup deleted",
             ConfirmAction::DeleteNotifyChannel(_) => "channel deleted",
             ConfirmAction::DeleteNotifyRule(_) => "rule deleted",
+            ConfirmAction::DeleteSource(_) | ConfirmAction::RemoveDomain => "",
         }
         .to_string();
         match action {
@@ -2037,6 +2394,24 @@ impl App {
                     .map(|_| "storage deleted".to_string());
                 Msg::ConfirmDone(result.map_err(|e| format!("{e:#}")))
             }),
+            ConfirmAction::DeleteSource(id) => self.spawn(|c| async move {
+                let result = c
+                    .delete_source(&id)
+                    .await
+                    .map(|_| "source deleted".to_string());
+                Msg::ConfirmDone(result.map_err(|e| format!("{e:#}")))
+            }),
+            ConfirmAction::RemoveDomain => {
+                self.domain.busy = Some("removing");
+                self.spawn(|c| async move {
+                    Msg::Domain(
+                        c.remove_instance_domain()
+                            .await
+                            .map_err(|e| format!("{e:#}")),
+                        Some("domain removed · the API answers on its IP again".into()),
+                    )
+                });
+            }
             ConfirmAction::RestoreBackup(id, file) => self.spawn(|c| async move {
                 let result = c
                     .restore_backup(&id)
@@ -2094,6 +2469,7 @@ impl App {
                 theme::muted(),
             )],
             busy: false,
+            git: None,
         });
         if let (Some(Overlay::Picker(p)), Some(s)) = (&mut self.overlay, scheduled) {
             p.select(&s);
@@ -2438,12 +2814,26 @@ impl App {
         let what = match s.kind {
             SecretKind::SshKey => "the public key",
             SecretKind::S3Credentials => "the access key id",
+            SecretKind::GithubApp => "the app id",
             SecretKind::Generic => return self.error("a generic secret has no public part"),
         };
         match s.public_part.clone() {
             Some(p) => self.copy(&p, what),
             None => self.error("no public part"),
         }
+    }
+
+    /// A GitHub App secret belongs to its source: the daemon refuses to reveal or change it.
+    pub fn refuse_managed_secret(&mut self) -> bool {
+        let Some(s) = self.secrets.selected() else {
+            return false;
+        };
+        if s.kind != SecretKind::GithubApp {
+            return false;
+        }
+        let msg = format!("{} · change it on the Sources screen", managed_by(s));
+        self.error(msg);
+        true
     }
 
     pub fn copy_secret_value(&mut self) {
@@ -2475,7 +2865,7 @@ impl App {
                 Field::choice(
                     "kind",
                     "kind",
-                    SecretKind::ALL
+                    ADDABLE_SECRETS
                         .iter()
                         .map(|k| k.label().to_string())
                         .collect(),
@@ -2542,6 +2932,7 @@ impl App {
                 Field::text("secret_access_key", "secret key").masked(),
             ],
             SecretKind::Generic => vec![Field::text("value", "value").masked()],
+            SecretKind::GithubApp => return,
         };
         let users = if s.used_by.is_empty() {
             "Nothing uses it yet.".to_string()
@@ -2984,6 +3375,7 @@ impl App {
             current: Some(current),
             note: vec![Line::styled(note, theme::muted())],
             busy: false,
+            git: None,
         };
         picker.mark_current();
         picker.row = picker
@@ -3043,6 +3435,335 @@ impl App {
                 }
             };
             Msg::NotifyDialogDone(result.map_err(|e| format!("{e:#}")))
+        });
+    }
+
+    // Sources
+
+    pub fn load_sources(&self) {
+        self.spawn(|c| async move {
+            match c.sources().await {
+                Ok(s) => Msg::Sources(s),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
+    }
+
+    fn upsert_source(&mut self, s: GitSource) {
+        if let Some(Overlay::GithubSetup(setup)) = &mut self.overlay
+            && setup.source.id == s.id
+        {
+            if s.status == GitSourceStatus::Ready && setup.source.status != GitSourceStatus::Ready {
+                self.toast = Some(Toast {
+                    text: format!("{} connected", s.name),
+                    error: false,
+                    busy: false,
+                    at: Instant::now(),
+                });
+            }
+            setup.source = s.clone();
+        }
+        match self.sources.list.iter_mut().find(|x| x.id == s.id) {
+            Some(slot) => *slot = s,
+            None => self.sources.list.push(s),
+        }
+    }
+
+    /// Follow a GitHub App setup while its dialog is open.
+    fn poll_setup(&self) {
+        let Some(Overlay::GithubSetup(setup)) = &self.overlay else {
+            return;
+        };
+        if setup.source.status == GitSourceStatus::Ready {
+            return;
+        }
+        let id = setup.source.id.clone();
+        self.spawn(|c| async move {
+            match c.source(&id).await {
+                Ok(s) => Msg::Source(s),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
+    }
+
+    pub fn open_sources(&mut self) {
+        if self.screen != Screen::Sources {
+            self.sources.back = Some(self.screen);
+        }
+        self.screen = Screen::Sources;
+        self.load_settings();
+        self.load_domain();
+        self.refresh();
+    }
+
+    pub fn close_sources(&mut self) {
+        self.screen = match self.sources.back.take() {
+            Some(Screen::Service) if self.service.is_some() => Screen::Service,
+            Some(
+                back @ (Screen::Servers | Screen::Settings | Screen::Secrets | Screen::Storage),
+            ) => back,
+            _ => Screen::Overview,
+        };
+        self.refresh();
+    }
+
+    pub fn select_source(&mut self, row: usize) {
+        self.sources.row = row.min(self.sources.list.len().saturating_sub(1));
+    }
+
+    /// Mints a token with the source's credentials and updates its status.
+    pub fn check_source(&mut self) {
+        let Some(s) = self.sources.selected() else {
+            return;
+        };
+        let (id, name) = (s.id.clone(), s.name.clone());
+        if !self.sources.checking.insert(id.clone()) {
+            return;
+        }
+        self.progress(format!("checking {name}…"));
+        self.spawn(|c| async move {
+            let result = c.check_source(&id).await.map_err(|e| format!("{e:#}"));
+            Msg::SourceChecked(id, result)
+        });
+    }
+
+    /// ⏎ on a GitHub App that is not ready: show where to finish it.
+    pub fn continue_setup(&mut self) {
+        let Some(s) = self.sources.selected() else {
+            return;
+        };
+        if s.kind != GitSourceKind::GithubApp || s.status == GitSourceStatus::Ready {
+            return;
+        }
+        self.overlay = Some(Overlay::GithubSetup(GithubSetup {
+            source: s.clone(),
+            setup_url: None,
+        }));
+    }
+
+    pub fn open_url(&mut self, url: &str) {
+        let program = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        let opened = std::process::Command::new(program)
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok();
+        if opened {
+            self.toast("opened in your browser");
+        } else {
+            self.error("no browser to open here · c copies the URL");
+        }
+    }
+
+    /// The GitHub URL a form starts with, and what a typed one means for the request.
+    fn github_url(form: &Form) -> Option<String> {
+        let url = form.get("html_url");
+        let url = url.trim_end_matches('/');
+        (!url.is_empty() && url != DEFAULT_GITHUB).then(|| url.to_string())
+    }
+
+    /// GitHub calls back to the instance domain, so apps wait until it is verified.
+    fn domain_needed(&mut self, title: &'static str) -> bool {
+        let needed = self
+            .settings
+            .settings
+            .as_ref()
+            .is_some_and(|s| !s.domain_verified);
+        if needed {
+            self.overlay = Some(Overlay::DomainNeeded(title));
+        }
+        needed
+    }
+
+    /// "n" on Sources: the manifest flow, once the instance domain is verified.
+    pub fn form_github_app(&mut self) {
+        if self.domain_needed("New GitHub App") {
+            return;
+        }
+        let form = Form::new(
+            FormKind::CreateGithubApp,
+            "New GitHub App",
+            vec![
+                Field::text("name", "name")
+                    .placeholder("acme-github")
+                    .hint("shown in New service"),
+                Field::choice(
+                    "owner",
+                    "owner",
+                    vec!["personal account".into(), "organization".into()],
+                ),
+                Field::text("organization", "organization").hint("its login on GitHub"),
+                Field::text("html_url", "github url")
+                    .value(DEFAULT_GITHUB)
+                    .hint("change for Enterprise"),
+            ],
+        )
+        .subtitle("created for you on GitHub")
+        .note(vec![
+            "GitHub asks you to confirm the app in your browser, then where to install it.".into(),
+        ])
+        .submit("continue on GitHub", None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    pub fn form_connect_app(&mut self) {
+        if self.domain_needed("Connect GitHub App") {
+            return;
+        }
+        let form = Form::new(
+            FormKind::ConnectGithubApp,
+            "Connect GitHub App",
+            vec![
+                Field::text("name", "name").placeholder("acme-github"),
+                Field::text("html_url", "github url")
+                    .value(DEFAULT_GITHUB)
+                    .hint("or your Enterprise URL"),
+                Field::text("app_id", "app id").hint("from the app's page"),
+                Field::text("private_key", "private key")
+                    .masked()
+                    .hint("a .pem path, or paste"),
+                Field::text("installation", "installation")
+                    .placeholder("found on its own if empty")
+                    .hint("optional"),
+                Field::text("webhook_secret", "webhook secret")
+                    .masked()
+                    .placeholder("none")
+                    .hint("optional"),
+            ],
+        )
+        .subtitle("one you created on GitHub")
+        .note(vec![
+            "For deploy on push, set the app's webhook URL to the one Sources shows after this."
+                .into(),
+        ])
+        .submit("connect & check", None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    pub fn form_github_token(&mut self) {
+        let form = Form::new(
+            FormKind::AddGithubToken,
+            "Add token",
+            vec![
+                Field::text("name", "name").placeholder("deploy-token"),
+                Field::text("token", "token").masked().hint("paste it"),
+                Field::text("html_url", "github url")
+                    .value(DEFAULT_GITHUB)
+                    .hint("or Enterprise"),
+            ],
+        )
+        .subtitle("GitHub")
+        .note(vec![
+            "Needs read access to contents and metadata. Tokens can't deploy on push; use a".into(),
+            "GitHub App for that.".into(),
+        ])
+        .submit("add & check", None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    // Instance domain
+
+    pub fn load_domain(&self) {
+        self.spawn(|c| async move {
+            Msg::Domain(
+                c.instance_domain().await.map_err(|e| format!("{e:#}")),
+                None,
+            )
+        });
+    }
+
+    pub fn open_domain(&mut self) {
+        if self.screen != Screen::Domain {
+            self.domain.back = Some(self.screen);
+        }
+        self.screen = Screen::Domain;
+        self.domain.input = None;
+        self.domain.busy = None;
+        self.load_domain();
+        self.refresh();
+    }
+
+    pub fn close_domain(&mut self) {
+        self.domain.input = None;
+        self.screen = match self.domain.back.take() {
+            Some(Screen::Sources) => Screen::Sources,
+            Some(Screen::Service) if self.service.is_some() => Screen::Service,
+            Some(Screen::Overview) => Screen::Overview,
+            _ => Screen::Settings,
+        };
+        self.refresh();
+    }
+
+    /// "e" on the guide: type another domain.
+    pub fn edit_domain(&mut self) {
+        let current = self.domain.data.as_ref().and_then(|d| d.domain.clone());
+        self.domain.input = Some(current.unwrap_or_default());
+    }
+
+    /// Esc while typing: back to the guide, or out when there is no domain yet.
+    pub fn cancel_domain_input(&mut self) {
+        if self
+            .domain
+            .data
+            .as_ref()
+            .is_some_and(|d| d.domain.is_some())
+        {
+            self.domain.input = None;
+        } else {
+            self.close_domain();
+        }
+    }
+
+    /// ⏎ while typing: route the domain to the API and run the checks.
+    pub fn save_domain(&mut self) {
+        if self.domain.busy.is_some() {
+            return;
+        }
+        let Some(input) = &self.domain.input else {
+            return;
+        };
+        let domain = input
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_lowercase();
+        if !domain.contains('.') || domain.contains(char::is_whitespace) {
+            return self.error("enter a hostname like deploy.example.com");
+        }
+        self.domain.busy = Some("checking");
+        self.spawn(|c| async move {
+            let result = c.set_instance_domain(&domain).await;
+            let toast = match &result {
+                Ok(d) => domain_toast(d),
+                Err(_) => None,
+            };
+            Msg::Domain(result.map_err(|e| format!("{e:#}")), toast)
+        });
+    }
+
+    /// "r" on the guide: run the five checks again.
+    pub fn check_domain(&mut self) {
+        if self.domain.busy.is_some() {
+            return;
+        }
+        if self.domain.data.as_ref().is_none_or(|d| d.domain.is_none()) {
+            return self.error("enter a domain first");
+        }
+        self.domain.busy = Some("checking");
+        self.spawn(|c| async move {
+            let result = c.check_instance_domain().await;
+            let toast = match &result {
+                Ok(d) => domain_toast(d),
+                Err(_) => None,
+            };
+            Msg::Domain(result.map_err(|e| format!("{e:#}")), toast)
         });
     }
 
@@ -3154,13 +3875,311 @@ impl App {
     }
 
     fn open_picker(&mut self, picker: Picker) {
-        let store = picker.kind == PickKind::Store;
+        let kind = picker.kind;
         self.overlay = Some(Overlay::Picker(picker));
         self.refill_picker();
-        if store {
-            self.load_storages();
-        } else {
-            self.load_secrets();
+        match kind {
+            PickKind::Store => self.load_storages(),
+            PickKind::SshKey | PickKind::S3Credentials => self.load_secrets(),
+            PickKind::GitSource
+            | PickKind::Repo
+            | PickKind::Branch
+            | PickKind::Channel
+            | PickKind::Scope => {}
+        }
+    }
+
+    /// ⏎ on the git source field: the ready sources, then the repository and branch pickers.
+    fn pick_git_source(&mut self, form: Form) {
+        let current = Some(form.raw("git_source")).filter(|v| !v.is_empty());
+        let mut items: Vec<PickItem> = self
+            .sources
+            .ready()
+            .into_iter()
+            .map(|s| {
+                let mut item = PickItem::new(Some(s.id.clone()), &s.name, source_summary(s));
+                item.glyph = Some(("●", theme::fg(theme::OK)));
+                item.note = match (s.kind, s.installation_id) {
+                    (GitSourceKind::GithubApp, Some(i)) => format!("installation {i}"),
+                    (GitSourceKind::GithubApp, None) => "github app".into(),
+                    (GitSourceKind::GithubToken, _) => "no deploy on push".into(),
+                };
+                item
+            })
+            .collect();
+        let mut connect = PickItem::new(None, "+ connect a source", "opens the Sources screen");
+        connect.generate = true;
+        items.push(connect);
+        let waiting: Vec<&str> = self
+            .sources
+            .list
+            .iter()
+            .filter(|s| s.status != GitSourceStatus::Ready)
+            .map(|s| s.name.as_str())
+            .collect();
+        let note = match waiting.as_slice() {
+            [] => "Sources are GitHub Apps and tokens, set up on the Sources screen.".to_string(),
+            [one] => format!("{one} is not ready yet; finish it on the Sources screen."),
+            many => format!(
+                "{} sources are not ready yet; finish them on the Sources screen.",
+                many.len()
+            ),
+        };
+        let row = current
+            .as_ref()
+            .and_then(|c| items.iter().position(|i| i.id.as_ref() == Some(c)))
+            .unwrap_or(0);
+        self.open_picker(Picker {
+            title: "Git source".into(),
+            subtitle: form.subtitle.clone(),
+            kind: PickKind::GitSource,
+            items,
+            row,
+            target: PickFor::Field(Box::new(form), "git_source"),
+            current,
+            note: vec![Line::styled(note, theme::muted())],
+            busy: false,
+            git: None,
+        });
+    }
+
+    fn pick_repo(&mut self, form: Form) {
+        let source_id = form.raw("git_source");
+        if source_id.is_empty() {
+            let mut form = form;
+            form.fail("pick a git source first");
+            self.overlay = Some(Overlay::Form(form));
+            return;
+        }
+        let name = self
+            .sources
+            .list
+            .iter()
+            .find(|s| s.id == source_id)
+            .map_or(String::new(), |s| s.name.clone());
+        let current = Some(form.raw("gh_repo")).filter(|v| !v.is_empty());
+        self.open_picker(Picker {
+            title: "Repository".into(),
+            subtitle: name,
+            kind: PickKind::Repo,
+            items: Vec::new(),
+            row: 0,
+            target: PickFor::Field(Box::new(form), "gh_repo"),
+            current,
+            note: Vec::new(),
+            busy: false,
+            git: Some(GitPick {
+                source_id,
+                page: 1,
+                pages: 1,
+                ..GitPick::default()
+            }),
+        });
+        self.request_repos();
+    }
+
+    fn pick_branch(&mut self, form: Form) {
+        let (source_id, repo) = (form.raw("git_source"), form.raw("gh_repo"));
+        if repo.is_empty() {
+            let mut form = form;
+            form.fail("pick a repository first");
+            self.overlay = Some(Overlay::Form(form));
+            return;
+        }
+        let current = Some(form.raw("gh_branch")).filter(|v| !v.is_empty());
+        let (source, name) = (source_id.clone(), repo.clone());
+        self.open_picker(Picker {
+            title: "Branch".into(),
+            subtitle: repo.clone(),
+            kind: PickKind::Branch,
+            items: Vec::new(),
+            row: 0,
+            target: PickFor::Field(Box::new(form), "gh_branch"),
+            current,
+            note: Vec::new(),
+            busy: false,
+            git: Some(GitPick {
+                source_id,
+                repo,
+                loading: true,
+                ..GitPick::default()
+            }),
+        });
+        self.spawn(|c| async move {
+            let result = c
+                .source_branches(&source, &name)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            Msg::Branches {
+                source,
+                repo: name,
+                result,
+            }
+        });
+    }
+
+    /// Ask the daemon for the open repository picker's page and search.
+    pub fn request_repos(&mut self) {
+        let Some(Overlay::Picker(p)) = &mut self.overlay else {
+            return;
+        };
+        let Some(git) = p.git.as_mut().filter(|_| p.kind == PickKind::Repo) else {
+            return;
+        };
+        git.typed_at = None;
+        git.loading = true;
+        let (source, query, page) = (git.source_id.clone(), git.search.clone(), git.page);
+        self.spawn(move |c| async move {
+            let result = c
+                .source_repos(&source, &query, page, REPO_PAGE)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            Msg::Repos {
+                source,
+                query,
+                page,
+                result,
+            }
+        });
+    }
+
+    /// Typing in the repository search waits for a pause before it asks the daemon.
+    fn search_repos_when_due(&mut self) {
+        let due = matches!(
+            &self.overlay,
+            Some(Overlay::Picker(Picker { git: Some(git), .. }))
+                if git.typed_at.is_some_and(|t| t.elapsed() >= SEARCH_DEBOUNCE)
+        );
+        if due {
+            self.request_repos();
+        }
+    }
+
+    /// A typed character or backspace in a search picker.
+    pub fn picker_search(&mut self, edit: impl FnOnce(&mut String)) {
+        let Some(Overlay::Picker(p)) = &mut self.overlay else {
+            return;
+        };
+        let Some(git) = p.git.as_mut() else {
+            return;
+        };
+        let before = git.search.clone();
+        edit(&mut git.search);
+        if git.search == before {
+            return;
+        }
+        match p.kind {
+            PickKind::Repo => {
+                git.page = 1;
+                git.typed_at = Some(Instant::now());
+            }
+            _ => p.filter_branches(),
+        }
+    }
+
+    /// ← and → in the repository picker.
+    pub fn picker_page(&mut self, step: i32) {
+        let Some(Overlay::Picker(p)) = &mut self.overlay else {
+            return;
+        };
+        let Some(git) = p.git.as_mut().filter(|_| p.kind == PickKind::Repo) else {
+            return;
+        };
+        let page = git
+            .page
+            .saturating_add_signed(step)
+            .clamp(1, git.pages.max(1));
+        if page != git.page {
+            git.page = page;
+            p.row = 0;
+            self.request_repos();
+        }
+    }
+
+    /// A choice in one of the GitHub pickers fills its field, then the next picker opens.
+    fn accept_git_pick(&mut self, p: Picker) {
+        let PickFor::Field(mut form, key) = p.target else {
+            return;
+        };
+        let Some(item) = p.items.get(p.row) else {
+            self.overlay = Some(Overlay::Form(*form));
+            return;
+        };
+        let value = item.id.clone().unwrap_or_default();
+        let set = |form: &mut Form, key: &str, value: &str, shown: &str, detail: &str| {
+            if let Some(f) = form.field_mut(key) {
+                f.value = value.to_string();
+                f.shown = shown.to_string();
+                f.placeholder = detail.to_string();
+            }
+        };
+        form.error = None;
+        match p.kind {
+            PickKind::GitSource if item.generate => {
+                self.overlay = None;
+                self.open_sources();
+            }
+            PickKind::GitSource => {
+                set(&mut form, key, &value, &item.name, &item.detail);
+                if form.raw("gh_repo").is_empty() || value != p.current.unwrap_or_default() {
+                    set(&mut form, "gh_repo", "", "", "pick a repository");
+                    set(&mut form, "gh_branch", "", "", "pick a branch");
+                }
+                form.refresh();
+                self.pick_repo(*form);
+            }
+            PickKind::Repo => {
+                set(
+                    &mut form,
+                    key,
+                    &value,
+                    &item.name,
+                    if item.badge.is_empty() {
+                        "public"
+                    } else {
+                        &item.badge
+                    },
+                );
+                set(
+                    &mut form,
+                    "gh_branch",
+                    &item.detail,
+                    &item.detail,
+                    "default",
+                );
+                if form.get("name").is_empty()
+                    && let Some(name) = form.field_mut("name")
+                {
+                    name.value = derive_name(&value);
+                }
+                form.refresh();
+                self.pick_branch(*form);
+            }
+            _ => {
+                set(&mut form, key, &value, &item.name, &item.badge);
+                if let Some(build) = form.field_mut("build") {
+                    build.placeholder.clear();
+                }
+                form.refresh();
+                if let Some(i) = form.fields.iter().position(|f| f.key == key) {
+                    form.focus = i;
+                    form.move_focus(1);
+                }
+                let (source, repo) = (form.raw("git_source"), form.raw("gh_repo"));
+                self.overlay = Some(Overlay::Form(*form));
+                self.spawn(move |c| async move {
+                    let result = c
+                        .detect_build(&source, &repo, &value)
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+                    Msg::Detected {
+                        source,
+                        repo,
+                        branch: value,
+                        result,
+                    }
+                });
+            }
         }
     }
 
@@ -3194,6 +4213,7 @@ impl App {
                 ),
             ],
             busy: false,
+            git: None,
         });
     }
 
@@ -3202,6 +4222,12 @@ impl App {
         let Some(Overlay::Form(form)) = self.overlay.take() else {
             return;
         };
+        match key {
+            "git_source" => return self.pick_git_source(form),
+            "gh_repo" => return self.pick_repo(form),
+            "gh_branch" => return self.pick_branch(form),
+            _ => {}
+        }
         let current = Some(form.raw(key)).filter(|v| !v.is_empty());
         let (kind, title) = match key {
             "ssh_key" => (PickKind::SshKey, "SSH key"),
@@ -3218,10 +4244,12 @@ impl App {
                 "S3 credentials secrets; add them on the Secrets screen.",
                 theme::muted(),
             )],
-            PickKind::Store => vec![Line::styled(
-                "Storage connections are managed on the Storage screen (o in Settings).",
-                theme::muted(),
-            )],
+            PickKind::Store | PickKind::GitSource | PickKind::Repo | PickKind::Branch => {
+                vec![Line::styled(
+                    "Storage connections are managed on the Storage screen (o in Settings).",
+                    theme::muted(),
+                )]
+            }
             PickKind::Channel | PickKind::Scope => Vec::new(),
         };
         self.open_picker(Picker {
@@ -3234,6 +4262,7 @@ impl App {
             current,
             note,
             busy: false,
+            git: None,
         });
     }
 
@@ -3262,6 +4291,15 @@ impl App {
             return;
         };
         if p.busy {
+            return;
+        }
+        if matches!(
+            p.kind,
+            PickKind::GitSource | PickKind::Repo | PickKind::Branch
+        ) {
+            if let Some(Overlay::Picker(p)) = self.overlay.take() {
+                self.accept_git_pick(p);
+            }
             return;
         }
         let Some(item) = p.selected() else {
@@ -3393,23 +4431,45 @@ impl App {
             .iter()
             .map(|k| k.image().to_string())
             .collect();
+        let ready = self.sources.ready();
+        let only = match ready.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        };
+        let github = !ready.is_empty() || !self.sources.loaded;
+        let mut source = Field::pick(
+            "git_source",
+            "git source",
+            only.map(|s| s.id.clone()).unwrap_or_default(),
+            only.map(|s| s.name.clone()).unwrap_or_default(),
+        );
+        source.placeholder = only.map_or("pick a source".into(), source_summary);
+        let mut gh_repo = Field::pick("gh_repo", "repository", "", "");
+        gh_repo.placeholder = "pick a repository".into();
+        let mut gh_branch = Field::pick("gh_branch", "branch", "", "");
+        gh_branch.placeholder = "pick a branch".into();
         let mut fields = vec![
             Field::choice(
                 "source",
                 "source",
                 vec![
-                    "Git repository".into(),
+                    "GitHub".into(),
+                    "Git URL".into(),
                     "Docker image".into(),
                     "Database".into(),
                 ],
-            ),
+            )
+            .selected(if github { 0 } else { 1 }),
+            source,
+            gh_repo,
+            gh_branch,
             Field::text("repo", "repository")
                 .placeholder("https://github.com/acme/api")
                 .hint("https or ssh url"),
             Field::text("branch", "branch").value("main"),
-            Field::text("dockerfile", "dockerfile")
-                .value("Dockerfile")
-                .hint("path in the repo"),
+        ];
+        fields.extend(build_fields(None, ""));
+        fields.extend([
             Field::text("image", "image").placeholder("ghcr.io/acme/web:latest"),
             Field::choice("engine", "engine", engines),
             Field::text("version", "version").hint("empty = newest"),
@@ -3420,7 +4480,8 @@ impl App {
             Field::text("domain", "domain")
                 .placeholder("app.example.com")
                 .hint("optional · https"),
-        ];
+            Field::toggle("auto_deploy", "auto-deploy", true),
+        ]);
         if servers.len() > 1 {
             fields.push(Field::choice("server", "server", servers));
         }
@@ -3436,7 +4497,11 @@ impl App {
             project.project.name, env.environment.name
         ))
         .submit("create & deploy", Some("create only"))
-        .focus_on("repo");
+        .focus_on(match (github, only) {
+            (false, _) => "repo",
+            (true, None) => "git_source",
+            (true, Some(_)) => "gh_repo",
+        });
         self.overlay = Some(Overlay::Form(form));
     }
 
@@ -3452,16 +4517,25 @@ impl App {
             RestartPolicy::No,
         ];
         let mut fields = vec![Field::text("name", "name").value(s.name.clone())];
+        let mut git_source = None;
         match &s.source {
             Source::Git {
                 repo,
                 branch,
-                dockerfile,
+                source_id,
+                auto_deploy,
                 ..
             } => {
                 fields.push(Field::text("repo", "repository").value(repo.clone()));
                 fields.push(Field::text("branch", "branch").value(branch.clone()));
-                fields.push(Field::text("dockerfile", "dockerfile").value(dockerfile.clone()));
+                fields.extend(build_fields(Some(&s.source), "applies on next deploy"));
+                if source_id.is_some() {
+                    fields.push(
+                        Field::toggle("auto_deploy", "auto-deploy", *auto_deploy)
+                            .hint("deploys every push"),
+                    );
+                }
+                git_source = source_id.clone();
             }
             Source::Image { image } => {
                 fields.push(Field::text("image", "image").value(image.clone()))
@@ -3489,6 +4563,7 @@ impl App {
         let form = Form::new(
             FormKind::EditService {
                 service_id: s.id.clone(),
+                source_id: git_source,
             },
             "Settings",
             fields,
@@ -3501,27 +4576,39 @@ impl App {
     pub fn form_domain(&mut self) {
         let Some(view) = &self.service else { return };
         let port = view.detail.as_ref().and_then(|d| d.service.port);
+        let compose: Vec<String> = view.compose().iter().map(|s| s.name.clone()).collect();
+        let mut fields = vec![
+            Field::text("host", "host")
+                .placeholder("shop.example.com")
+                .hint("point an A record here"),
+        ];
+        if !compose.is_empty() {
+            fields.push(
+                Field::choice("compose_service", "service", compose).hint("in the compose file"),
+            );
+        }
+        fields.extend([
+            Field::text("port", "port")
+                .placeholder(port.map_or("service port".into(), |p| p.to_string()))
+                .hint("container port"),
+            Field::toggle("tls", "https", true).hint("automatic certificate"),
+        ]);
+        let subtitle = match (&view.detail, view.compose().is_empty()) {
+            (Some(d), false) => format!("{} · compose", d.service.name),
+            _ => self
+                .info
+                .as_ref()
+                .and_then(|i| i.public_ip.clone())
+                .unwrap_or_default(),
+        };
         let form = Form::new(
             FormKind::AddDomain {
                 service_id: view.id.clone(),
             },
             "Add domain",
-            vec![
-                Field::text("host", "host")
-                    .placeholder("shop.example.com")
-                    .hint("point an A record here"),
-                Field::text("port", "port")
-                    .placeholder(port.map_or("service port".into(), |p| p.to_string()))
-                    .hint("container port"),
-                Field::toggle("tls", "https", true).hint("automatic certificate"),
-            ],
+            fields,
         )
-        .subtitle(
-            self.info
-                .as_ref()
-                .and_then(|i| i.public_ip.clone())
-                .unwrap_or_default(),
-        )
+        .subtitle(subtitle)
         .submit("add", None);
         self.overlay = Some(Overlay::Form(form));
     }
@@ -3876,6 +4963,28 @@ impl App {
     }
 }
 
+const DEFAULT_GITHUB: &str = "https://github.com";
+
+/// What a finished set or check of the instance domain says.
+fn domain_toast(d: &InstanceDomain) -> Option<String> {
+    let domain = d.domain.clone()?;
+    if d.verified {
+        return Some(format!(
+            "{domain} verified · {} answers",
+            d.url.as_deref().unwrap_or(&domain)
+        ));
+    }
+    let passed = d
+        .checks
+        .iter()
+        .filter(|c| c.status == CheckStatus::Pass)
+        .count();
+    Some(format!(
+        "{domain} · {passed} of {} checks pass",
+        DomainCheckKind::ALL.len()
+    ))
+}
+
 /// How an instance backup comes back on a new machine.
 pub fn restore_hint() -> String {
     format!(
@@ -3892,6 +5001,22 @@ pub fn secret_text(value: &SecretValue) -> String {
             secret_access_key, ..
         } => secret_access_key.clone(),
         SecretValue::Generic { value } => value.clone(),
+        SecretValue::GithubApp { private_key, .. } => private_key.clone(),
+    }
+}
+
+/// Kinds a person can add on the Secrets screen; GitHub App credentials come from a source.
+pub const ADDABLE_SECRETS: [SecretKind; 3] = [
+    SecretKind::SshKey,
+    SecretKind::S3Credentials,
+    SecretKind::Generic,
+];
+
+/// "managed by source acme-github", from what uses a GitHub App secret.
+pub fn managed_by(s: &Secret) -> String {
+    match s.used_by.iter().find(|u| u.kind == UsageKind::Source) {
+        Some(u) => format!("managed by source {}", u.name),
+        None => "managed by its source".to_string(),
     }
 }
 
@@ -3997,6 +5122,18 @@ enum Request {
     Storage(Option<Id>, CreateStorage),
     InstanceBackup(CreateInstanceBackup),
     InstanceSchedule(UpdateInstanceBackupSchedule),
+    GithubApp(CreateGithubApp),
+    ConnectApp(ConnectGithubApp),
+    Token(ConnectGithubToken),
+}
+
+/// "acme-github is ready", or what is wrong with a source that was just connected.
+fn connected(s: &GitSource) -> String {
+    match (s.status, &s.status_detail) {
+        (GitSourceStatus::Ready, _) => format!("{} connected · ready", s.name),
+        (status, Some(detail)) => format!("{} added · {}: {detail}", s.name, status.as_str()),
+        (status, None) => format!("{} added · {}", s.name, status.as_str()),
+    }
 }
 
 impl Request {
@@ -4153,6 +5290,17 @@ impl Request {
                 };
                 (toast, Then::InstanceSchedule(s))
             }
+            Request::GithubApp(body) => {
+                let setup = c.create_github_app(&body).await?;
+                (
+                    format!("{} created · open the URL to continue", setup.source.name),
+                    Then::GithubSetup(Box::new(setup)),
+                )
+            }
+            Request::ConnectApp(body) => {
+                (connected(&c.connect_github_app(&body).await?), Then::Stay)
+            }
+            Request::Token(body) => (connected(&c.connect_github_token(&body).await?), Then::Stay),
             Request::Schedule(id, body) => {
                 let s = c.set_backup_schedule(&id, &body).await?;
                 (
@@ -4210,6 +5358,9 @@ fn secret_value(form: &Form, kind: SecretKind) -> Result<SecretValue, String> {
         SecretKind::Generic => SecretValue::Generic {
             value: required("value", "the value")?,
         },
+        SecretKind::GithubApp => {
+            return Err("GitHub App credentials are managed by their source".into());
+        }
     })
 }
 
@@ -4243,6 +5394,88 @@ fn port(text: &str, required: bool) -> Result<Option<u16>, String> {
         .filter(|p| *p > 0)
         .map(Some)
         .ok_or_else(|| format!("'{text}' is not a valid port"))
+}
+
+/// Chip labels of the build methods, in `BuildMethod::ALL` order.
+const BUILD_LABELS: [&str; 4] = ["auto", "Dockerfile", "Compose", "Railpack"];
+
+/// The build method chips and the fields each method needs, filled from a git source when
+/// editing. `note` is a fixed hint on the chips, e.g. what the repository was detected as.
+fn build_fields(git: Option<&Source>, note: &str) -> Vec<Field> {
+    let (dockerfile, context, build) = match git {
+        Some(Source::Git {
+            dockerfile,
+            context,
+            build,
+            ..
+        }) => (dockerfile.clone(), context.clone(), build.clone()),
+        _ => (
+            "Dockerfile".into(),
+            ".".into(),
+            Build {
+                method: BuildMethod::Auto,
+                ..Build::default()
+            },
+        ),
+    };
+    let mut method = Field::choice(
+        "build",
+        "build",
+        BUILD_LABELS.iter().map(|l| l.to_string()).collect(),
+    )
+    .selected(
+        BuildMethod::ALL
+            .iter()
+            .position(|m| *m == build.method)
+            .unwrap_or(0),
+    );
+    method.placeholder = note.into();
+    vec![
+        method,
+        Field::text("dockerfile", "dockerfile")
+            .value(dockerfile)
+            .hint("path in the repo"),
+        Field::text("context", "context")
+            .value(context)
+            .hint("folder sent to build"),
+        Field::text("target", "target")
+            .value(build.target.unwrap_or_default())
+            .placeholder("stage to build")
+            .hint("optional"),
+        Field::text("compose_file", "compose file")
+            .value(build.compose_file.unwrap_or_default())
+            .placeholder("found on its own")
+            .hint("one group"),
+    ]
+}
+
+/// The Dockerfile, build context and build settings typed in the build fields.
+fn build_parts(form: &Form) -> (String, String, Build) {
+    let typed = |key: &str| Some(form.get(key)).filter(|v| !v.is_empty());
+    let method = BuildMethod::ALL[form.choice("build").min(BuildMethod::ALL.len() - 1)];
+    (
+        typed("dockerfile").unwrap_or("Dockerfile".into()),
+        typed("context").unwrap_or(".".into()),
+        Build {
+            method,
+            target: typed("target"),
+            compose_file: typed("compose_file"),
+        },
+    )
+}
+
+/// "✓ compose.yaml", what decided the build at the repository's root; short enough for a hint.
+fn detected_note(d: &BuildDetection) -> String {
+    let what = match (d.method, &d.file) {
+        (BuildMethod::Railpack, _) => "Railpack".to_string(),
+        (_, Some(file)) => file.clone(),
+        (method, None) => BUILD_LABELS[BuildMethod::ALL
+            .iter()
+            .position(|m| *m == method)
+            .unwrap_or(0)]
+        .to_string(),
+    };
+    format!("✓ {what}")
 }
 
 /// Derive a service name from a repo url or image reference: `acme/api.git` gives `api`.
@@ -4289,6 +5522,28 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
         FormKind::NewService { environment_id } => {
             let source = match form.choice("source") {
                 0 => {
+                    let source_id = form.get("git_source");
+                    if source_id.is_empty() {
+                        return Err("pick a git source (⏎ on git source)".into());
+                    }
+                    let repo = form.get("gh_repo");
+                    if repo.is_empty() {
+                        return Err("pick a repository (⏎ on repository)".into());
+                    }
+                    let (dockerfile, context, build) = build_parts(form);
+                    Source::Git {
+                        repo,
+                        branch: Some(form.get("gh_branch"))
+                            .filter(|b| !b.is_empty())
+                            .unwrap_or("main".into()),
+                        dockerfile,
+                        context,
+                        source_id: Some(source_id),
+                        auto_deploy: form.on("auto_deploy"),
+                        build,
+                    }
+                }
+                1 => {
                     let repo = form.get("repo");
                     if repo.is_empty() {
                         return Err("repository is required".into());
@@ -4298,14 +5553,18 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                             .filter(|v| !v.is_empty())
                             .unwrap_or(default.into())
                     };
+                    let (dockerfile, context, build) = build_parts(form);
                     Source::Git {
                         repo,
                         branch: or("branch", "main"),
-                        dockerfile: or("dockerfile", "Dockerfile"),
-                        context: ".".into(),
+                        dockerfile,
+                        context,
+                        source_id: None,
+                        auto_deploy: false,
+                        build,
                     }
                 }
-                1 => {
+                2 => {
                     let image = form.get("image");
                     if image.is_empty() {
                         return Err("image is required".into());
@@ -4351,13 +5610,20 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                 deploy: !alt,
             }))
         }
-        FormKind::EditService { service_id } => {
+        FormKind::EditService {
+            service_id,
+            source_id,
+        } => {
             let source = if !form.get("repo").is_empty() {
+                let (dockerfile, context, build) = build_parts(form);
                 Some(Source::Git {
                     repo: form.get("repo"),
                     branch: form.get("branch"),
-                    dockerfile: form.get("dockerfile"),
-                    context: ".".into(),
+                    dockerfile,
+                    context,
+                    source_id: source_id.clone(),
+                    auto_deploy: source_id.is_none() || form.on("auto_deploy"),
+                    build,
                 })
             } else if !form.get("image").is_empty() {
                 Some(Source::Image {
@@ -4395,6 +5661,7 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                     host: host.to_string(),
                     port: port(&form.get("port"), false)?,
                     tls: form.on("tls"),
+                    compose_service: form.choice_label("compose_service"),
                 },
             )
         }
@@ -4455,7 +5722,7 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
             )?,
         ),
         FormKind::AddSecret => {
-            let kind = SecretKind::ALL[form.choice("kind")];
+            let kind = ADDABLE_SECRETS[form.choice("kind")];
             Request::Secret(CreateSecret {
                 name: named("name")?,
                 value: secret_value(form, kind)?,
@@ -4520,6 +5787,62 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                 },
             )
         }
+        FormKind::CreateGithubApp => {
+            let organization = (form.choice("owner") == 1)
+                .then(|| form.get("organization"))
+                .map(|o| o.trim_start_matches('@').to_string());
+            if organization.as_ref().is_some_and(String::is_empty) {
+                return Err("enter the organization's login".into());
+            }
+            Request::GithubApp(CreateGithubApp {
+                name: named("name")?,
+                organization,
+                html_url: App::github_url(form),
+                api_url: None,
+            })
+        }
+        FormKind::ConnectGithubApp => {
+            let app_id = form
+                .get("app_id")
+                .parse::<u64>()
+                .map_err(|_| "the app id is a number, on the app's settings page")?;
+            let key = form.raw("private_key");
+            if key.trim().is_empty() {
+                return Err("the private key is required, a .pem path or pasted".into());
+            }
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let installation = form.get("installation");
+            let installation_id = if installation.is_empty() {
+                None
+            } else {
+                Some(
+                    installation
+                        .parse::<u64>()
+                        .map_err(|_| "the installation id is a number, or leave it empty")?,
+                )
+            };
+            Request::ConnectApp(ConnectGithubApp {
+                name: named("name")?,
+                app_id,
+                private_key: read_private_key(key.trim(), home.as_deref())?,
+                installation_id,
+                webhook_secret: Some(form.raw("webhook_secret")).filter(|s| !s.is_empty()),
+                html_url: App::github_url(form),
+                api_url: None,
+            })
+        }
+        FormKind::AddGithubToken => {
+            let token = form.raw("token").trim().to_string();
+            if token.is_empty() {
+                return Err("paste the token".into());
+            }
+            Request::Token(ConnectGithubToken {
+                name: named("name")?,
+                token,
+                html_url: App::github_url(form),
+                api_url: None,
+            })
+        }
         FormKind::RenameSecret { secret_id } => Request::UpdateSecret(
             secret_id.clone(),
             UpdateSecret {
@@ -4547,6 +5870,64 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_service_sends_the_build_method_and_its_fields() {
+        let mut form = Form::new(
+            FormKind::NewService {
+                environment_id: "e".into(),
+            },
+            "New service",
+            [
+                vec![
+                    Field::choice("source", "source", vec!["GitHub".into(), "Git URL".into()])
+                        .selected(1),
+                    Field::text("repo", "repository").value("https://github.com/acme/api"),
+                    Field::text("branch", "branch").value("main"),
+                ],
+                build_fields(None, ""),
+                vec![Field::text("name", "name"), Field::text("port", "port")],
+            ]
+            .concat(),
+        );
+        form.field_mut("build").unwrap().choice = 1;
+        form.field_mut("target").unwrap().value = "runtime".into();
+        form.refresh();
+        let Ok(Request::Service(body)) = build_request(&form, false) else {
+            panic!("a create request");
+        };
+        let Source::Git {
+            dockerfile,
+            context,
+            build,
+            ..
+        } = &body.source
+        else {
+            panic!("a git source");
+        };
+        assert_eq!((dockerfile.as_str(), context.as_str()), ("Dockerfile", "."));
+        assert_eq!(build.method, BuildMethod::Dockerfile);
+        assert_eq!(build.target.as_deref(), Some("runtime"));
+        assert_eq!(build.compose_file, None);
+
+        form.field_mut("build").unwrap().choice = 2;
+        form.refresh();
+        let Ok(Request::Service(body)) = build_request(&form, false) else {
+            panic!("a create request");
+        };
+        let Source::Git { build, .. } = &body.source else {
+            panic!("a git source");
+        };
+        assert_eq!(build.method, BuildMethod::Compose);
+        assert_eq!(build.target, None, "hidden fields are not sent");
+        assert_eq!(
+            detected_note(&BuildDetection {
+                method: BuildMethod::Railpack,
+                file: None
+            }),
+            "✓ Railpack"
+        );
+    }
 
     #[test]
     fn names_derive_from_sources() {

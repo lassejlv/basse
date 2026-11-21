@@ -28,7 +28,7 @@
 //! | POST | `/services/{id}/restart` | | `ServiceDetail` |
 //! | POST | `/services/{id}/stop` | | `ServiceDetail` |
 //! | POST | `/services/{id}/start` | | `ServiceDetail` |
-//! | GET | `/services/{id}/logs?tail=200&follow=true` | | NDJSON `LogLine` stream |
+//! | GET | `/services/{id}/logs?tail=200&follow=true&container=web` | | NDJSON `LogLine` stream; `container` picks a compose service |
 //! | GET | `/services/{id}/stats` | | `ServiceStats` |
 //! | PUT | `/services/{id}/env` | `Vec<EnvVar>` | `Vec<EnvVar>` (replaces all; applies on next deploy) |
 //! | POST | `/services/{id}/domains` | `CreateDomain` | `Domain` (applied to the live container at once) |
@@ -47,6 +47,40 @@
 //! | POST | `/settings/prune` | | `PruneResult` (old build images, dangling images, build cache) |
 //! | GET | `/settings/version` | | `VersionCheck` (latest release, cached for an hour) |
 //! | POST | `/settings/update` | `UpdateRequest` | `UpdateResult` (replaces the binaries, then the daemon exits to restart) |
+//! | GET | `/settings/domain` | | `InstanceDomain` (the DNS records to create and the last check) |
+//! | PUT | `/settings/domain` | `SetInstanceDomain` | `InstanceDomain` (routes the domain to the API through the proxy, then checks it) |
+//! | POST | `/settings/domain/check` | | `InstanceDomain` (DNS, ports 80 and 443, certificate, API) |
+//! | DELETE | `/settings/domain` | | `InstanceDomain` (the API is served on IP:port only again) |
+//!
+//! Git sources. Credentials are stored as secrets and never returned. GitHub App sources need a
+//! verified instance domain, because GitHub calls back to it.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | GET | `/sources` | | `Vec<GitSource>` |
+//! | POST | `/sources/github` | `CreateGithubApp` | `GithubAppSetup` (open `setup_url` to create the app with the manifest flow) |
+//! | POST | `/sources/github/connect` | `ConnectGithubApp` | `GitSource` (an existing app, checked against GitHub) |
+//! | POST | `/sources/github/token` | `ConnectGithubToken` | `GitSource` (a personal access token) |
+//! | GET | `/sources/{id}` | | `GitSource` |
+//! | POST | `/sources/{id}/check` | | `GitSource` (mints a token and updates the status) |
+//! | DELETE | `/sources/{id}` | | 204, or 409 while a service uses it |
+//! | GET | `/sources/{id}/repos?q=&page=1&per_page=30` | | `RepoPage` (`q` matches `owner/name`) |
+//! | GET | `/sources/{id}/branches?repo=owner/name` | | `Vec<GitBranch>`, default branch first |
+//! | GET | `/sources/{id}/detect?repo=owner/name&branch=main` | | `BuildDetection` (Dockerfile, else compose file, else Railpack) |
+//!
+//! GitHub calls these without a bearer token; each checks its own proof instead.
+//!
+//! | Method | Path | Proof |
+//! |---|---|---|
+//! | GET | `/github/{id}/start?state=` | the setup state; an HTML page that posts the app manifest to GitHub |
+//! | GET | `/github/{id}/callback?code=&state=` | the setup state; exchanges the code for the app's credentials, then redirects to the install page |
+//! | GET | `/github/{id}/setup?installation_id=` | the installation must belong to the app, asked with the app's JWT |
+//! | POST | `/github/{id}/webhook` | `X-Hub-Signature-256` with the app's webhook secret; a push to a tracked branch deploys |
+//!
+//! Git services build with `Source::Git.build`: a Dockerfile (with `target` and the service's
+//! env as build args), a compose file deployed as one group (`ServiceDetail.compose` lists its
+//! containers; domains name a `compose_service`), or Railpack. Changing the method with
+//! `PATCH /services/{id}` applies on the next deploy.
 //!
 //! Database services (`Source::Database`) also have these routes; other services get 400.
 //! `ServiceDetail.database` carries their `DatabaseInfo`.
@@ -240,10 +274,85 @@ pub struct CreateDomain {
     pub port: Option<u16>,
     #[serde(default = "default_true")]
     pub tls: bool,
+    /// Required for compose builds: the service in the compose file to route to.
+    #[serde(default)]
+    pub compose_service: Option<String>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetInstanceDomain {
+    /// A hostname such as `deploy.example.com`, without scheme or path.
+    pub domain: String,
+}
+
+/// Start the GitHub App manifest flow.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateGithubApp {
+    pub name: String,
+    /// Create the app in this organization; `None` creates it on the personal account of
+    /// whoever opens the setup URL.
+    #[serde(default)]
+    pub organization: Option<String>,
+    /// GitHub Enterprise web URL; defaults to `https://github.com`.
+    #[serde(default)]
+    pub html_url: Option<String>,
+    /// GitHub Enterprise API URL; defaults to `https://api.github.com`, or `<html_url>/api/v3`.
+    #[serde(default)]
+    pub api_url: Option<String>,
+}
+
+/// Connect a GitHub App that already exists.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ConnectGithubApp {
+    pub name: String,
+    pub app_id: u64,
+    /// The app's PEM private key.
+    pub private_key: String,
+    /// Defaults to the app's only installation.
+    #[serde(default)]
+    pub installation_id: Option<u64>,
+    /// Needed for push webhooks.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+    #[serde(default)]
+    pub html_url: Option<String>,
+    #[serde(default)]
+    pub api_url: Option<String>,
+}
+
+impl fmt::Debug for ConnectGithubApp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectGithubApp")
+            .field("name", &self.name)
+            .field("app_id", &self.app_id)
+            .field("installation_id", &self.installation_id)
+            .field("html_url", &self.html_url)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Connect with a personal access token, for single repositories without webhooks.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ConnectGithubToken {
+    pub name: String,
+    pub token: String,
+    #[serde(default)]
+    pub html_url: Option<String>,
+    #[serde(default)]
+    pub api_url: Option<String>,
+}
+
+impl fmt::Debug for ConnectGithubToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectGithubToken")
+            .field("name", &self.name)
+            .field("html_url", &self.html_url)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Fields left as `None` keep their value. An empty `public_ip_override` (or `auto`) clears the

@@ -2,12 +2,15 @@
 
 mod api;
 mod backup_store;
+mod build;
 mod config;
 mod database;
 mod db;
 mod deploy;
 mod docker;
+mod domain;
 mod error;
+mod github;
 mod host;
 mod instance;
 mod notify;
@@ -15,6 +18,7 @@ mod prune;
 mod restore;
 mod secrets;
 mod services;
+mod sources;
 mod sqlite_import;
 mod ssh;
 mod state;
@@ -241,6 +245,8 @@ async fn init(dirs: &DataDir, opts: InitOptions, listen: Option<String>) -> Resu
     let token = config::generate_token();
     let existing = Config::load(dirs).ok().filter(|_| opts.force);
     let existing_ip_override = existing.as_ref().and_then(|c| c.public_ip_override.clone());
+    let existing_domain = existing.as_ref().and_then(|c| c.domain.clone());
+    let existing_domain_verified_at = existing.as_ref().and_then(|c| c.domain_verified_at);
     let manage_proxy = opts.manage_proxy && existing.as_ref().is_none_or(|c| c.manage_proxy);
     let database_url = opts
         .database_url
@@ -262,6 +268,8 @@ async fn init(dirs: &DataDir, opts: InitOptions, listen: Option<String>) -> Resu
         postgres: database_url.is_none().then_some(postgres),
         database_url,
         public_ip_override: existing_ip_override,
+        domain: existing_domain,
+        domain_verified_at: existing_domain_verified_at,
     };
     config.save(dirs)?;
     if let Some(path) = &opts.token_file {

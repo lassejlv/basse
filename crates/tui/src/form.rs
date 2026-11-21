@@ -130,6 +130,8 @@ pub enum FormKind {
     },
     EditService {
         service_id: Id,
+        /// The git source the service clones from, which makes auto-deploy editable.
+        source_id: Option<Id>,
     },
     AddDomain {
         service_id: Id,
@@ -186,6 +188,10 @@ pub enum FormKind {
         channel_id: Option<Id>,
         created: bool,
     },
+    /// Starts the GitHub App manifest flow.
+    CreateGithubApp,
+    ConnectGithubApp,
+    AddGithubToken,
 }
 
 pub enum FormAction {
@@ -296,6 +302,15 @@ impl Form {
         self.field(key).map_or(0, |f| f.choice)
     }
 
+    /// The chosen option of a visible choice field.
+    pub fn choice_label(&self, key: &str) -> Option<String> {
+        let f = self.field(key).filter(|f| f.visible)?;
+        match &f.kind {
+            FieldKind::Choice(options) => options.get(f.choice).cloned(),
+            _ => None,
+        }
+    }
+
     pub fn on(&self, key: &str) -> bool {
         self.field(key).is_some_and(|f| f.on)
     }
@@ -306,7 +321,14 @@ impl Form {
     }
 
     /// Show only the fields that apply to the current choices, and keep defaults in sync.
-    fn refresh(&mut self) {
+    pub fn refresh(&mut self) {
+        if self.kind == FormKind::CreateGithubApp {
+            let organization = self.choice("owner") == 1;
+            if let Some(f) = self.field_mut("organization") {
+                f.visible = organization;
+            }
+            return;
+        }
         if self.kind == FormKind::PublicIp {
             let fixed = self.choice("mode") == 1;
             if let Some(ip) = self.field_mut("ip") {
@@ -376,6 +398,11 @@ impl Form {
             }
             return;
         }
+        if matches!(self.kind, FormKind::EditService { .. }) {
+            let has_build = self.field("build").is_some();
+            self.build_fields(has_build);
+            return;
+        }
         if !matches!(self.kind, FormKind::NewService { .. }) {
             return;
         }
@@ -385,11 +412,26 @@ impl Form {
             .min(common::DatabaseKind::ALL.len() - 1)];
         for f in &mut self.fields {
             f.visible = match f.key {
-                "repo" | "branch" | "dockerfile" => source == 0,
-                "image" => source == 1,
-                "engine" | "version" => source == 2,
-                "port" | "domain" => source != 2,
+                "git_source" | "gh_repo" | "gh_branch" | "auto_deploy" => source == 0,
+                "repo" | "branch" => source == 1,
+                "build" | "dockerfile" | "context" | "target" | "compose_file" => source <= 1,
+                "image" => source == 2,
+                "engine" | "version" => source == 3,
+                "port" | "domain" => source != 3,
                 _ => true,
+            };
+        }
+        self.build_fields(source <= 1);
+        let token = self.field("git_source").is_some_and(|f| {
+            f.placeholder
+                .starts_with(common::GitSourceKind::GithubToken.label())
+        });
+        let branch = self.get("gh_branch");
+        if let Some(auto) = self.field_mut("auto_deploy") {
+            auto.hint = match (token, branch.as_str()) {
+                (true, _) => "needs a GitHub App".into(),
+                (false, "") => "deploys every push".into(),
+                (false, b) => format!("every push to {b}"),
             };
         }
         if let Some(version) = self.field_mut("version") {
@@ -397,8 +439,33 @@ impl Form {
         }
         if let Some(name) = self.field_mut("name") {
             name.placeholder = match source {
-                2 => db.image().to_string(),
+                3 => db.image().to_string(),
                 _ => "derived from the source".to_string(),
+            };
+        }
+    }
+
+    /// Show the fields of the chosen build method. The build chips' placeholder is a fixed hint,
+    /// e.g. what the repository was detected as; otherwise the hint describes the method.
+    fn build_fields(&mut self, git: bool) {
+        let method =
+            common::BuildMethod::ALL[self.choice("build").min(common::BuildMethod::ALL.len() - 1)];
+        for f in &mut self.fields {
+            match f.key {
+                "build" => f.visible = git,
+                "dockerfile" | "context" | "target" => {
+                    f.visible = git && method == common::BuildMethod::Dockerfile
+                }
+                "compose_file" => f.visible = git && method == common::BuildMethod::Compose,
+                _ => {}
+            }
+        }
+        if let Some(build) = self.field_mut("build") {
+            build.hint = match method {
+                _ if !build.placeholder.is_empty() => build.placeholder.clone(),
+                common::BuildMethod::Auto => "picks on first deploy".into(),
+                common::BuildMethod::Railpack => "detects the language".into(),
+                common::BuildMethod::Dockerfile | common::BuildMethod::Compose => String::new(),
             };
         }
     }
@@ -606,7 +673,7 @@ impl Form {
         for (i, field) in visible.into_iter().skip(start).take(capacity) {
             let focused = i == self.focus;
             let hint_w = match field.kind {
-                FieldKind::Choice(_) if !field.quiet || field.hint.is_empty() => 0,
+                FieldKind::Choice(_) if field.hint.is_empty() => 0,
                 _ => hint_w,
             };
             let row = Rect::new(inner.x, y, inner.width, 1);
@@ -683,11 +750,12 @@ impl Form {
                         &field.placeholder,
                         room.saturating_sub(shown.chars().count() + 2),
                     );
-                    let used = 1 + shown.chars().count() + 2 + detail.chars().count();
+                    let gap = if shown.is_empty() { "" } else { "  " };
+                    let used = 1 + shown.chars().count() + gap.len() + detail.chars().count();
                     Line::from(vec![
                         Span::raw(" "),
                         Span::styled(shown, theme::text()),
-                        Span::styled(format!("  {detail}"), theme::muted()),
+                        Span::styled(format!("{gap}{detail}"), theme::muted()),
                         Span::raw(" ".repeat((value_a.width as usize).saturating_sub(used + 7))),
                         Span::styled("⏎ pick", action),
                     ])
@@ -858,17 +926,39 @@ mod tests {
                 Field::choice(
                     "source",
                     "source",
-                    vec!["Git".into(), "Image".into(), "Database".into()],
+                    vec![
+                        "GitHub".into(),
+                        "Git URL".into(),
+                        "Image".into(),
+                        "Database".into(),
+                    ],
                 ),
+                Field::pick("git_source", "git source", "", ""),
+                Field::pick("gh_repo", "repository", "", ""),
+                Field::pick("gh_branch", "branch", "", ""),
                 Field::text("repo", "repository"),
                 Field::text("branch", "branch"),
+                Field::choice(
+                    "build",
+                    "build",
+                    vec![
+                        "auto".into(),
+                        "Dockerfile".into(),
+                        "Compose".into(),
+                        "Railpack".into(),
+                    ],
+                ),
                 Field::text("dockerfile", "dockerfile"),
+                Field::text("context", "context"),
+                Field::text("target", "target"),
+                Field::text("compose_file", "compose file"),
                 Field::text("image", "image"),
                 Field::choice("engine", "engine", vec!["postgres".into()]),
                 Field::text("version", "version"),
                 Field::text("name", "name"),
                 Field::text("port", "port"),
                 Field::text("domain", "domain"),
+                Field::toggle("auto_deploy", "auto-deploy", true),
             ],
         )
     }
@@ -1080,8 +1170,52 @@ abc
     }
 
     #[test]
+    fn build_method_shows_its_own_fields_and_hint() {
+        let mut form = service_form();
+        let visible = |f: &Form| -> Vec<&str> {
+            ["build", "dockerfile", "context", "target", "compose_file"]
+                .into_iter()
+                .filter(|k| f.fields.iter().any(|x| x.key == *k && x.visible))
+                .collect()
+        };
+        let hint = |f: &Form| {
+            f.fields
+                .iter()
+                .find(|x| x.key == "build")
+                .unwrap()
+                .hint
+                .clone()
+        };
+        assert_eq!(visible(&form), ["build"]);
+        assert_eq!(hint(&form), "picks on first deploy");
+        form.focus = form.fields.iter().position(|f| f.key == "build").unwrap();
+        form.handle_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(visible(&form), ["build", "dockerfile", "context", "target"]);
+        form.handle_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(visible(&form), ["build", "compose_file"]);
+        form.handle_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(visible(&form), ["build"]);
+        assert_eq!(hint(&form), "detects the language");
+        form.field_mut("build").unwrap().placeholder = "detected: Dockerfile".into();
+        form.refresh();
+        assert_eq!(hint(&form), "detected: Dockerfile");
+        form.focus = 0;
+        form.handle_key(KeyEvent::from(KeyCode::Right));
+        form.handle_key(KeyEvent::from(KeyCode::Right));
+        assert!(visible(&form).is_empty(), "images have no build");
+    }
+
+    #[test]
     fn source_choice_controls_visible_fields() {
         let mut form = service_form();
+        let visible = |f: &Form, key: &str| f.fields.iter().any(|x| x.key == key && x.visible);
+        for key in ["git_source", "gh_repo", "gh_branch", "auto_deploy", "build"] {
+            assert!(visible(&form, key), "{key} shows for GitHub");
+        }
+        assert!(!visible(&form, "repo"));
+        form.handle_key(KeyEvent::from(KeyCode::Right));
+        assert!(visible(&form, "repo") && visible(&form, "build"));
+        assert!(!visible(&form, "git_source") && !visible(&form, "auto_deploy"));
         assert!(
             form.fields
                 .iter()
@@ -1118,6 +1252,7 @@ abc
     #[test]
     fn typing_edits_the_focused_field_and_tab_skips_hidden_ones() {
         let mut form = service_form();
+        form.handle_key(KeyEvent::from(KeyCode::Right));
         form.handle_key(KeyEvent::from(KeyCode::Right));
         form.handle_key(KeyEvent::from(KeyCode::Tab));
         assert_eq!(form.fields[form.focus].key, "image");

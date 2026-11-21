@@ -653,6 +653,7 @@ mod tests {
                 host: host.into(),
                 port: Some(8080),
                 tls: true,
+                compose_service: None,
                 created_at: created,
             })
             .to_vec();

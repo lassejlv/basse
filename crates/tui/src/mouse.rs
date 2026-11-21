@@ -68,6 +68,10 @@ pub enum Hit {
     Preset(usize),
     /// An event in the rule dialog's checklist.
     NotifyEvent(common::notify::NotifyEvent),
+    /// A DNS record on the domain guide; a click copies its value.
+    Record(usize),
+    /// A container of a compose service; a click follows its logs.
+    Container(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +96,8 @@ pub enum List {
     Picker,
     Secrets,
     Storage,
+    Sources,
+    Containers,
     InstanceBackups,
     Notify,
     Rule,
@@ -171,13 +177,18 @@ pub fn span_target(area: Rect, offset: usize, width: usize, target: Hit) {
 }
 
 pub fn key_target(rect: Rect, label: &str) {
-    if label == "↑↓" {
-        span_target(rect, 0, 1, Hit::Key(KeyCode::Up, KeyModifiers::NONE));
+    let pair = match label {
+        "↑↓" => Some((KeyCode::Up, KeyCode::Down)),
+        "←→" => Some((KeyCode::Left, KeyCode::Right)),
+        _ => None,
+    };
+    if let Some((first, second)) = pair {
+        span_target(rect, 0, 1, Hit::Key(first, KeyModifiers::NONE));
         span_target(
             rect,
             1,
             rect.width.saturating_sub(1) as usize,
-            Hit::Key(KeyCode::Down, KeyModifiers::NONE),
+            Hit::Key(second, KeyModifiers::NONE),
         );
     } else if let Some((code, mods)) = key_for_label(label) {
         hit(rect, Hit::Key(code, mods));
@@ -206,7 +217,7 @@ pub fn hints(frame: &mut Frame, area: Rect, hints: &[(&str, &str)], align: Align
         let line = Line::from(vec![
             Span::styled(
                 *key,
-                if key_for_label(key).is_some() || *key == "↑↓" {
+                if key_for_label(key).is_some() || matches!(*key, "↑↓" | "←→") {
                     theme::accent()
                 } else {
                     theme::muted()
@@ -334,6 +345,8 @@ pub fn paint_hover(buf: &mut Buffer, mouse: &MouseState) {
             | Hit::PaletteRow(_)
             | Hit::PickRow(_)
             | Hit::Item(_)
+            | Hit::Record(_)
+            | Hit::Container(_)
     );
     let rect = rect.intersection(buf.area);
     for y in rect.top()..rect.bottom() {
@@ -684,6 +697,12 @@ fn click(app: &mut App, hit: Hit, double: bool) {
                     press(app, KeyCode::Enter, KeyModifiers::NONE);
                 }
             }
+            Screen::Sources => {
+                app.select_source(i);
+                if double {
+                    press(app, KeyCode::Enter, KeyModifiers::NONE);
+                }
+            }
             _ => {}
         },
         Hit::NotifySection(section) => app.notify.section = section,
@@ -711,6 +730,21 @@ fn click(app: &mut App, hit: Hit, double: bool) {
         Hit::NotifyEvent(event) => {
             if let Some(Overlay::Rule(d)) = app.overlay.as_mut() {
                 d.click_event(event);
+            }
+        }
+        Hit::Container(i) => {
+            keys::finish_text_input(app);
+            app.pick_container(i);
+        }
+        Hit::Record(i) => {
+            if let Some(r) = app
+                .domain
+                .data
+                .as_ref()
+                .and_then(|d| d.records.get(i))
+                .cloned()
+            {
+                app.copy(&r.value, &format!("the {} record value", r.kind));
             }
         }
         Hit::FormChoice(i, choice) => {
@@ -816,6 +850,26 @@ mod tests {
         buf.set_string(0, 1, "world", ratatui::style::Style::new());
         assert_eq!(selected_text(&buf, &sel((1, 0), (3, 1))), "ell\norl");
         assert_eq!(selected_text(&buf, &sel((0, 0), (7, 0))), "hello");
+    }
+
+    #[test]
+    fn paired_arrow_hints_split_into_two_targets() {
+        reset();
+        key_target(Rect::new(4, 0, 7, 1), "←→");
+        let hits = HITS.with_borrow(Clone::clone);
+        assert_eq!(
+            hits,
+            [
+                (
+                    Rect::new(4, 0, 1, 1),
+                    Hit::Key(KeyCode::Left, KeyModifiers::NONE)
+                ),
+                (
+                    Rect::new(5, 0, 6, 1),
+                    Hit::Key(KeyCode::Right, KeyModifiers::NONE)
+                ),
+            ]
+        );
     }
 
     #[test]

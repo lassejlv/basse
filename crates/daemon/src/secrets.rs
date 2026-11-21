@@ -200,6 +200,10 @@ pub fn validate(value: &SecretValue) -> std::result::Result<Option<String>, Stri
             }
             Ok(None)
         }
+        SecretValue::GithubApp { .. } => Err(format!(
+            "GitHub App credentials are managed by git sources: see `{} source github`",
+            common::brand::CLI_BIN
+        )),
     }
 }
 
@@ -216,7 +220,7 @@ pub fn normalize(value: SecretValue) -> SecretValue {
             access_key_id: access_key_id.trim().to_string(),
             secret_access_key: secret_access_key.trim().to_string(),
         },
-        generic @ SecretValue::Generic { .. } => generic,
+        other @ (SecretValue::Generic { .. } | SecretValue::GithubApp { .. }) => other,
     }
 }
 
