@@ -15,7 +15,9 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use bollard::query_parameters::LogsOptions;
 use chrono::Utc;
-use common::api::{CreateDomain, CreateService, CreateVolume, DeployRequest, UpdateService};
+use common::api::{
+    CreateDomain, CreateService, CreateVolume, DeployRequest, MoveService, UpdateService,
+};
 use common::metrics::{MetricsRange, ServiceMetrics};
 use common::*;
 use futures_util::StreamExt as _;
@@ -89,6 +91,15 @@ pub async fn deploy(
     Ok(Json(
         deploy::enqueue(&state, &rec, &trigger, Plan::Source).await?,
     ))
+}
+
+pub async fn relocate(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<MoveService>,
+) -> ApiResult<Json<Deployment>> {
+    let rec = services::record(&state, &id).await?;
+    Ok(Json(deploy::relocate(&state, &rec, body).await?))
 }
 
 pub async fn restart(
