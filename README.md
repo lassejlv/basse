@@ -365,4 +365,4 @@ cargo test --workspace   # starts throwaway postgres:18-alpine and MinIO contain
 cargo test -p daemon --test docker_e2e -- --ignored --test-threads 1   # needs Docker and free ports 80/443
 ```
 
-The TUI design lives in Paper: [Basse TUI](https://app.paper.design/file/01M7X3Z4P0WETSB6Q8Q6WXA4TR/p-1-0).
+The TUI design lives in Paper: [Basse TUI](https://app.paper.design/file/01M7X3Z4P0WETSB6Q8Q6WXA4TR/p-1-0). The link opens the cover page, `00 Cover & index`, which lists one page per product area with its board code and maps the old board numbers to the current `AREA-nn` names.
