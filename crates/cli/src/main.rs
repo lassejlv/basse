@@ -141,8 +141,11 @@ enum Cmd {
         #[arg(long, short = 'n', default_value_t = 200)]
         tail: usize,
         /// For compose builds: the compose service to show.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "replica")]
         container: Option<String>,
+        /// One replica by index (default 0).
+        #[arg(long)]
+        replica: Option<u16>,
     },
     /// Restart a service's container.
     Restart { service: String },
@@ -453,8 +456,64 @@ enum ServiceCmd {
         #[arg(long, default_value = "1h")]
         range: MetricsRange,
         /// One compose service instead of the whole group.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "replica")]
         container: Option<String>,
+        /// One replica by index instead of all of them.
+        #[arg(long)]
+        replica: Option<u16>,
+    },
+    /// The service's replicas: health, usage, restarts.
+    Ps {
+        service: String,
+    },
+    /// Set the number of replicas, or how they are balanced and rolled out. Scaling adds or
+    /// drains containers without a deploy.
+    Scale {
+        service: String,
+        /// Replicas to run.
+        replicas: Option<u16>,
+        /// Load balancing: least_conn, round_robin or ip_hash (sticky sessions).
+        #[arg(long)]
+        lb: Option<LbPolicy>,
+        /// Replicas a rolling deploy starts at once.
+        #[arg(long)]
+        surge: Option<u16>,
+        /// Allow several replicas although the service has a volume: true or false.
+        #[arg(long)]
+        shared_volume_ok: Option<bool>,
+        /// Return once the change is accepted instead of waiting for the replicas.
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Scale automatically between --min and --max on CPU, memory or requests per replica.
+    /// Without flags it shows the current settings.
+    Autoscale {
+        service: String,
+        /// Turn autoscaling off; the replica count stays where it is.
+        #[arg(long, conflicts_with_all = ["min", "max", "cpu", "memory", "rps"])]
+        off: bool,
+        #[arg(long)]
+        min: Option<u16>,
+        #[arg(long)]
+        max: Option<u16>,
+        /// Target CPU per replica, in percent of one core; 0 removes the target.
+        #[arg(long)]
+        cpu: Option<u16>,
+        /// Target memory per replica, in percent of its limit; 0 removes the target.
+        #[arg(long)]
+        memory: Option<u8>,
+        /// Target requests per second per replica; 0 removes the target.
+        #[arg(long)]
+        rps: Option<u32>,
+        /// Least time between scaling up, e.g. 60s or 2m.
+        #[arg(long, value_parser = parse_secs)]
+        up_cooldown: Option<u32>,
+        /// Least time between scaling down, e.g. 5m.
+        #[arg(long, value_parser = parse_secs)]
+        down_cooldown: Option<u32>,
+        /// Scaling down follows the highest need of this window, e.g. 5m.
+        #[arg(long, value_parser = parse_secs)]
+        stabilization: Option<u32>,
     },
     /// Show or change how a git service is built; applies on the next deploy.
     Build {
@@ -574,6 +633,9 @@ struct CreateArgs {
     /// Create without deploying.
     #[arg(long)]
     no_deploy: bool,
+    /// Identical containers to run behind the load balancer; defaults to 1.
+    #[arg(long)]
+    replicas: Option<u16>,
 }
 
 #[derive(Subcommand)]
@@ -843,11 +905,16 @@ async fn dispatch(c: Client, name: String, command: Cmd, json: bool) -> Result<(
             follow,
             tail,
             container,
+            replica,
         } => {
             let (_, _, s) = find(&c, &service).await?;
-            let mut stream = c
-                .service_logs(&s.id, tail, follow, container.as_deref())
-                .await?;
+            let mut stream = match replica {
+                Some(index) => c.replica_logs(&s.id, index, tail, follow).await?,
+                None => {
+                    c.service_logs(&s.id, tail, follow, container.as_deref())
+                        .await?
+                }
+            };
             while let Some(line) = stream.next().await {
                 print_log(&line?, true);
             }
@@ -938,12 +1005,147 @@ async fn dispatch(c: Client, name: String, command: Cmd, json: bool) -> Result<(
 }
 
 /// One row per measure: now, average, peak and a sparkline of the range.
+/// `90s`, `5m`, `1h` or plain seconds.
+fn parse_secs(s: &str) -> Result<u32, String> {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last() {
+        Some('s') => (&s[..s.len() - 1], 1),
+        Some('m') => (&s[..s.len() - 1], 60),
+        Some('h') => (&s[..s.len() - 1], 3600),
+        _ => (s, 1),
+    };
+    num.parse::<u32>()
+        .ok()
+        .and_then(|n| n.checked_mul(mult))
+        .ok_or_else(|| format!("'{s}' is not a duration like 60s, 5m or 1h"))
+}
+
+async fn scale_service(c: &Client, s: &Service, n: u16, no_wait: bool, json: bool) -> Result<()> {
+    let d = c.scale(&s.id, n).await?;
+    if json && no_wait {
+        return output::json(&d);
+    }
+    let live = d.service.live_deployment_id.is_some();
+    if no_wait || !live {
+        output::ok(format!(
+            "{} set to {n} replica{}{}",
+            s.name,
+            if n == 1 { "" } else { "s" },
+            if live {
+                ""
+            } else {
+                " (applies on the first deploy)"
+            }
+        ));
+        return Ok(());
+    }
+    output::note(format!(
+        "scaling {} from {} to {n}",
+        s.name,
+        d.replicas.len()
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        let d = c.service(&s.id).await?;
+        let healthy = d
+            .replicas
+            .iter()
+            .filter(|r| r.health == ReplicaHealth::Healthy)
+            .count();
+        if d.replicas.len() == usize::from(n) && healthy == d.replicas.len() {
+            if json {
+                return output::json(&d);
+            }
+            output::ok(format!(
+                "{} runs {n} replica{}",
+                s.name,
+                if n == 1 { "" } else { "s" }
+            ));
+            print_replicas(&d);
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            output::warn(format!(
+                "{} has {} of {n} replicas after 5 minutes; see \"{} activity\"",
+                s.name,
+                d.replicas.len(),
+                brand::CLI_BIN
+            ));
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+fn print_replicas(d: &ServiceDetail) {
+    let svc = &d.service;
+    if d.replicas.is_empty() {
+        output::note(if svc.live_deployment_id.is_some() {
+            "no replicas: compose services list their containers in \"service show\""
+        } else {
+            "not deployed yet"
+        });
+        return;
+    }
+    output::table(
+        &["#", "HEALTH", "CPU", "MEM", "RESTARTS", "UP", "CONTAINER"],
+        d.replicas
+            .iter()
+            .map(|r| {
+                let tone = match r.health {
+                    ReplicaHealth::Healthy => Tone::Ok,
+                    ReplicaHealth::Unhealthy => Tone::Info,
+                    ReplicaHealth::Down => Tone::Err,
+                };
+                let c = r.container.as_ref();
+                vec![
+                    Cell::from(format!("#{}", r.index)),
+                    Cell(
+                        if r.routed || r.health != ReplicaHealth::Healthy {
+                            r.health.as_str().to_string()
+                        } else {
+                            "healthy, not routed".into()
+                        },
+                        tone,
+                    ),
+                    Cell::from(r.cpu_percent.map_or("—".into(), |v| format!("{v:.0}%"))),
+                    Cell::from(r.mem_used.map_or("—".into(), output::bytes)),
+                    Cell::from(c.map_or("—".into(), |c| c.restart_count.to_string())),
+                    Cell(
+                        c.and_then(|c| c.started_at)
+                            .filter(|_| r.health != ReplicaHealth::Down)
+                            .map_or("—".into(), output::ago),
+                        Tone::Muted,
+                    ),
+                    Cell(c.map_or("gone".into(), |c| c.name.clone()), Tone::Muted),
+                ]
+            })
+            .collect(),
+    );
+    let a = &svc.scaling.autoscale;
+    let auto = if a.enabled {
+        format!(" · autoscale {}", a.summary())
+    } else {
+        String::new()
+    };
+    println!(
+        "{}",
+        muted(format!(
+            "{} of {} replicas · {}{auto}",
+            d.replicas.len(),
+            svc.replicas,
+            svc.scaling.lb_policy
+        ))
+    );
+}
+
 fn print_metrics(scope: &str, s: &Service, m: &ServiceMetrics) {
     const WIDTH: usize = 32;
     let which = m
         .container
         .as_deref()
         .map(|c| format!(" · {c}"))
+        .or(m.replica.map(|r| format!(" · replica #{r}")))
         .unwrap_or_default();
     println!(
         "{}{which} {}",
@@ -961,6 +1163,24 @@ fn print_metrics(scope: &str, s: &Service, m: &ServiceMetrics) {
             muted(format!(
                 "containers {} · --container picks one",
                 m.containers.join(" ")
+            ))
+        );
+    }
+    if m.replica.is_none() && m.replicas.len() > 1 {
+        let counts: Vec<u32> = m.points.iter().map(|p| p.replicas).collect();
+        let (lo, hi) = (
+            counts.iter().min().copied().unwrap_or(0),
+            counts.iter().max().copied().unwrap_or(0),
+        );
+        println!(
+            "{}",
+            muted(format!(
+                "replicas {} · {lo}–{hi} over the range · --replica picks one",
+                m.replicas
+                    .iter()
+                    .map(|r| format!("#{r}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             ))
         );
     }
@@ -2268,6 +2488,28 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
                 println!("{}{}", k("build"), build_label(&d.service.source, build));
             }
             println!("{}{}", k("server"), d.server.name);
+            if !d.replicas.is_empty() || d.service.replicas > 1 {
+                let healthy = d
+                    .replicas
+                    .iter()
+                    .filter(|r| r.health == ReplicaHealth::Healthy)
+                    .count();
+                let a = &d.service.scaling.autoscale;
+                println!(
+                    "{}{healthy}/{} healthy {}",
+                    k("replicas"),
+                    d.service.replicas,
+                    muted(format!(
+                        "· {}{}",
+                        d.service.scaling.lb_policy,
+                        if a.enabled {
+                            format!(" · autoscale {}", a.summary())
+                        } else {
+                            String::new()
+                        }
+                    ))
+                );
+            }
             println!(
                 "{}{}",
                 k("port"),
@@ -2311,15 +2553,144 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
             service,
             range,
             container,
+            replica,
         } => {
             let (p, e, s) = find(c, &service).await?;
-            let m = c
-                .service_metrics(&s.id, range, container.as_deref())
-                .await?;
+            let m = match replica {
+                Some(index) => c.replica_metrics(&s.id, range, index).await?,
+                None => {
+                    c.service_metrics(&s.id, range, container.as_deref())
+                        .await?
+                }
+            };
             if json {
                 return output::json(&m);
             }
             print_metrics(&format!("{}/{}", p.name, e.name), &s, &m);
+        }
+        ServiceCmd::Ps { service } => {
+            let (_, _, s) = find(c, &service).await?;
+            let d = c.service(&s.id).await?;
+            if json {
+                return output::json(&d.replicas);
+            }
+            print_replicas(&d);
+        }
+        ServiceCmd::Scale {
+            service,
+            replicas,
+            lb,
+            surge,
+            shared_volume_ok,
+            no_wait,
+        } => {
+            let (_, _, s) = find(c, &service).await?;
+            if replicas.is_none() && lb.is_none() && surge.is_none() && shared_volume_ok.is_none() {
+                bail!("give a replica count, or --lb, --surge or --shared-volume-ok");
+            }
+            if lb.is_some() || surge.is_some() || shared_volume_ok.is_some() {
+                let d = c
+                    .update_service(
+                        &s.id,
+                        &UpdateService {
+                            lb_policy: lb,
+                            max_surge: surge,
+                            shared_volume_ok,
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+                let sc = &d.service.scaling;
+                output::ok(format!(
+                    "{}: {} · surge {}{}",
+                    s.name,
+                    sc.lb_policy,
+                    sc.max_surge,
+                    if sc.shared_volume_ok {
+                        " · shared volume allowed"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+            if let Some(n) = replicas {
+                scale_service(c, &s, n, no_wait, json).await?;
+            }
+        }
+        ServiceCmd::Autoscale {
+            service,
+            off,
+            min,
+            max,
+            cpu,
+            memory,
+            rps,
+            up_cooldown,
+            down_cooldown,
+            stabilization,
+        } => {
+            let (_, _, s) = find(c, &service).await?;
+            let mut a = s.scaling.autoscale.clone();
+            let changed = off
+                || min.is_some()
+                || max.is_some()
+                || cpu.is_some()
+                || memory.is_some()
+                || rps.is_some()
+                || up_cooldown.is_some()
+                || down_cooldown.is_some()
+                || stabilization.is_some();
+            if changed {
+                a.enabled = !off;
+                if let Some(v) = min {
+                    a.min = v;
+                }
+                if let Some(v) = max {
+                    a.max = v;
+                }
+                if let Some(v) = cpu {
+                    a.cpu_percent = (v > 0).then_some(v);
+                }
+                if let Some(v) = memory {
+                    a.memory_percent = (v > 0).then_some(v);
+                }
+                if let Some(v) = rps {
+                    a.rps = (v > 0).then_some(v);
+                }
+                if let Some(v) = up_cooldown {
+                    a.scale_up_cooldown_secs = v;
+                }
+                if let Some(v) = down_cooldown {
+                    a.scale_down_cooldown_secs = v;
+                }
+                if let Some(v) = stabilization {
+                    a.stabilization_secs = v;
+                }
+                a.validate().map_err(anyhow::Error::msg)?;
+                let d = c.set_autoscale(&s.id, &a).await?;
+                a = d.service.scaling.autoscale;
+            }
+            if json {
+                return output::json(&a);
+            }
+            if a.enabled {
+                let verb = if changed { "on" } else { "is on" };
+                output::ok(format!(
+                    "autoscaling {verb} for {}: {} · cooldown up {} / down {} · window {}",
+                    s.name,
+                    a.summary(),
+                    output::duration(i64::from(a.scale_up_cooldown_secs)),
+                    output::duration(i64::from(a.scale_down_cooldown_secs)),
+                    output::duration(i64::from(a.stabilization_secs)),
+                ));
+            } else {
+                output::note(format!(
+                    "autoscaling is off for {}; {} replica{}",
+                    s.name,
+                    s.replicas,
+                    if s.replicas == 1 { "" } else { "s" }
+                ));
+            }
         }
         ServiceCmd::Build {
             service,
@@ -2562,6 +2933,7 @@ async fn create_service(c: &Client, args: CreateArgs) -> Result<()> {
             domains: args.domains,
             volumes,
             deploy,
+            replicas: args.replicas,
         })
         .await?;
     output::ok(format!("created {}", detail.service.name));

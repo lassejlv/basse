@@ -19,8 +19,8 @@ use bollard::query_parameters::{
 };
 use bollard::{API_DEFAULT_VERSION, Docker};
 use common::{
-    ContainerInfo, Domain, Id, LogLine, LogStream, PreflightCheck, ProxyStatus, RestartPolicy,
-    Server, ServerCleanup, ServerKind, brand,
+    ContainerInfo, Domain, Id, LbPolicy, LogLine, LogStream, PreflightCheck, ProxyStatus,
+    RestartPolicy, Server, ServerCleanup, ServerKind, brand,
 };
 use futures_util::StreamExt as _;
 use std::collections::HashMap;
@@ -184,9 +184,18 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 // Names
 
-pub fn container_name(service_name: &str, env_id: &str, number: i64) -> String {
+/// Name of one replica's container: the deployment number it runs and its replica index.
+pub fn container_name(service_name: &str, env_id: &str, number: i64, replica: u16) -> String {
     let short: String = env_id.chars().take(6).collect();
-    format!("{}-{service_name}-{short}-{number}", brand::PREFIX)
+    format!(
+        "{}-{service_name}-{short}-{number}-r{replica}",
+        brand::PREFIX
+    )
+}
+
+/// The container holding a service's proxy route; see [`route_labels`].
+pub fn route_container(service_id: &str) -> String {
+    format!("{}-route-{service_id}", brand::PREFIX)
 }
 
 pub fn env_network(env_id: &str) -> String {
@@ -222,40 +231,136 @@ pub fn proxy_alias(service_id: &str) -> String {
     format!("{}-{service_id}", brand::PREFIX)
 }
 
-/// Labels routing the domains to the service through the proxy. Domains without a port
-/// (none on the domain and none on the service) are skipped.
-pub fn proxy_labels(
-    domains: &[Domain],
-    service_port: Option<u16>,
-    service_id: &str,
-) -> HashMap<String, String> {
-    let alias = proxy_alias(service_id);
-    let mut labels = HashMap::new();
-    let routable = domains
-        .iter()
-        .filter_map(|d| d.port.or(service_port).map(|p| (d, p)));
-    for (i, (domain, port)) in routable.enumerate() {
-        let site = if domain.tls {
-            domain.host.clone()
+/// The domains that route somewhere, with the container port they route to. Domains without a
+/// port (none on the domain and none on the service) are skipped.
+fn routable(domains: &[Domain], service_port: Option<u16>) -> impl Iterator<Item = (String, u16)> {
+    domains.iter().filter_map(move |d| {
+        let port = d.port.or(service_port)?;
+        let site = if d.tls {
+            d.host.clone()
         } else {
-            format!("http://{}", domain.host)
+            format!("http://{}", d.host)
         };
+        Some((site, port))
+    })
+}
+
+/// Labels a replica carries so the proxy adds its address on the proxy network to the
+/// upstreams of each of the service's domains. The proxy merges the labels of every container
+/// that names the same site, so replicas only differ in their address. The error pages are
+/// imported here as well as on the route, with the same value, so they hold while the route
+/// container is being replaced.
+pub fn upstream_labels(domains: &[Domain], service_port: Option<u16>) -> HashMap<String, String> {
+    let mut labels = HashMap::new();
+    for (i, (site, port)) in routable(domains, service_port).enumerate() {
         labels.insert(format!("caddy_{i}"), site);
         labels.insert(
             format!("caddy_{i}.reverse_proxy"),
-            format!("{alias}:{port}"),
-        );
-        labels.insert(
-            format!("caddy_{i}.reverse_proxy.lb_try_duration"),
-            "5s".into(),
-        );
-        labels.insert(
-            format!("caddy_{i}.reverse_proxy.header_up"),
-            REAL_IP_HEADER.into(),
+            format!("{{{{upstreams {port}}}}}"),
         );
         labels.insert(format!("caddy_{i}.import"), proxy_pages::snippet());
     }
     labels
+}
+
+/// How the proxy balances a service's domains over its replicas, carried by the service's route
+/// container ([`route_container`]) and nowhere else: when two containers give one site different
+/// options, caddy-docker-proxy drops the whole configuration and every site on the server goes
+/// down. Keeping the options on one container lets them change without touching the replicas,
+/// and with no replica left the route alone answers 503, which the imported error handling
+/// turns into the "No server available" page.
+///
+/// Health checks and retries: an active probe of `health_path` when the service has one, a
+/// replica that fails a request is skipped for 30 seconds, and a request whose replica cannot
+/// be reached is retried at once on up to three others. Retries are counted, not timed: with
+/// `lb_try_duration` Caddy waits between tries and gives up when the configuration reloads,
+/// which is exactly what happens when a replica dies. A killed replica's address stops
+/// answering instead of refusing, so dials give up after a second.
+pub fn route_labels(
+    domains: &[Domain],
+    service_port: Option<u16>,
+    policy: LbPolicy,
+    health_path: Option<&str>,
+) -> HashMap<String, String> {
+    let mut labels = HashMap::new();
+    for (i, (site, _)) in routable(domains, service_port).enumerate() {
+        let rp = format!("caddy_{i}.reverse_proxy");
+        labels.insert(format!("caddy_{i}"), site);
+        labels.insert(format!("{rp}.lb_policy"), policy.as_str().into());
+        labels.insert(format!("{rp}.lb_retries"), "3".into());
+        labels.insert(format!("{rp}.transport"), "http".into());
+        labels.insert(format!("{rp}.transport.dial_timeout"), "1s".into());
+        labels.insert(format!("{rp}.fail_duration"), "30s".into());
+        labels.insert(format!("{rp}.header_up"), REAL_IP_HEADER.into());
+        labels.insert(format!("caddy_{i}.import"), proxy_pages::snippet());
+        if let Some(path) = health_path {
+            let path = if path.starts_with('/') {
+                path.to_string()
+            } else {
+                format!("/{path}")
+            };
+            labels.insert(format!("{rp}.health_uri"), path);
+            labels.insert(format!("{rp}.health_interval"), "5s".into());
+            labels.insert(format!("{rp}.health_timeout"), "3s".into());
+        }
+    }
+    labels
+}
+
+/// Creates, replaces or removes a service's route container so it carries `labels`. The old
+/// one is removed before the new one starts, never alongside it (see [`route_labels`]); in
+/// between the replicas' own labels keep routing with the proxy's defaults.
+pub async fn ensure_route(
+    docker: &Docker,
+    service_id: &str,
+    labels: HashMap<String, String>,
+) -> Result<()> {
+    let name = route_container(service_id);
+    let current = inspect(docker, &name).await?;
+    if labels.is_empty() {
+        if current.is_some() {
+            remove_container(docker, &name).await?;
+        }
+        return Ok(());
+    }
+    if let Some(c) = &current {
+        let carried: HashMap<String, String> = c
+            .config
+            .as_ref()
+            .and_then(|c| c.labels.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(k, _)| k.starts_with("caddy"))
+            .collect();
+        if carried == labels && RunState::from_inspect(c) == RunState::Running {
+            return Ok(());
+        }
+        let options = RemoveContainerOptions {
+            force: true,
+            ..Default::default()
+        };
+        if let Err(e) = docker.remove_container(&name, Some(options)).await
+            && !is_not_found(&e)
+        {
+            return Err(e).context("cannot replace the route container");
+        }
+    }
+    if !image_exists(docker, HELPER_IMAGE).await? {
+        pull_image(docker, HELPER_IMAGE, |_| {}).await?;
+    }
+    let mut labels = labels;
+    labels.insert(brand::label("managed"), "true".into());
+    labels.insert(brand::label("route"), service_id.into());
+    let spec = ContainerSpec {
+        name,
+        image: HELPER_IMAGE.into(),
+        cmd: Some(vec!["sleep".into(), "infinity".into()]),
+        labels,
+        restart: RestartPolicy::UnlessStopped,
+        ..Default::default()
+    };
+    let id = create_container(docker, &spec).await?;
+    start_container(docker, &id).await
 }
 
 /// Hands upstreams the visitor's address as `X-Real-IP`: the connecting address, or the one a
@@ -406,16 +511,17 @@ pub async fn list_by_label(docker: &Docker, label: &str) -> Result<Vec<Container
         .context("cannot list containers")
 }
 
-/// Removes every container of a service on one server. Returns how many were removed.
+/// Removes every container of a service on one server but `keep`. Returns how many were
+/// removed.
 pub async fn remove_service_containers(
     docker: &Docker,
     service_id: &str,
-    keep: Option<&str>,
+    keep: &[String],
 ) -> Result<usize> {
     let mut removed = 0;
     for c in list_service_containers(docker, service_id).await? {
         let Some(id) = c.id else { continue };
-        if keep.is_some_and(|k| k == id) {
+        if keep.contains(&id) {
             continue;
         }
         remove_container(docker, &id).await?;
@@ -1377,24 +1483,53 @@ mod tests {
     }
 
     #[test]
-    fn proxy_labels_route_each_domain() {
-        let labels = proxy_labels(
-            &[
-                domain("a.com", None, true),
-                domain("b.localhost", Some(81), false),
-                domain("c.com", None, true),
-            ],
-            Some(80),
-            "svc",
-        );
-        let alias = proxy_alias("svc");
+    fn replicas_add_their_address_to_each_domain() {
+        let domains = [
+            domain("a.com", None, true),
+            domain("b.localhost", Some(81), false),
+            domain("c.com", None, true),
+        ];
+        let labels = upstream_labels(&domains, Some(80));
         assert_eq!(labels["caddy_0"], "a.com");
-        assert_eq!(labels["caddy_0.reverse_proxy"], format!("{alias}:80"));
-        assert_eq!(labels["caddy_0.import"], proxy_pages::snippet());
+        assert_eq!(labels["caddy_0.reverse_proxy"], "{{upstreams 80}}");
         assert_eq!(labels["caddy_1"], "http://b.localhost");
-        assert_eq!(labels["caddy_1.reverse_proxy"], format!("{alias}:81"));
+        assert_eq!(labels["caddy_1.reverse_proxy"], "{{upstreams 81}}");
         assert_eq!(labels["caddy_2"], "c.com");
-        assert!(proxy_labels(&[domain("a.com", None, true)], None, "svc").is_empty());
+        assert_eq!(labels["caddy_0.import"], proxy_pages::snippet());
+        assert_eq!(
+            labels.len(),
+            9,
+            "replicas carry no proxy options: {labels:?}"
+        );
+        assert!(upstream_labels(&[domain("a.com", None, true)], None).is_empty());
+    }
+
+    #[test]
+    fn the_route_carries_every_option_but_no_upstream() {
+        let domains = [domain("a.com", None, true), domain("b.com", None, false)];
+        let route = route_labels(&domains, Some(80), LbPolicy::IpHash, Some("healthz"));
+        assert_eq!(route["caddy_0"], "a.com");
+        assert_eq!(route["caddy_1"], "http://b.com");
+        assert!(!route.contains_key("caddy_0.reverse_proxy"));
+        assert_eq!(route["caddy_0.reverse_proxy.lb_policy"], "ip_hash");
+        assert_eq!(route["caddy_0.import"], proxy_pages::snippet());
+        assert_eq!(route["caddy_1.reverse_proxy.health_uri"], "/healthz");
+        assert_eq!(route["caddy_0.reverse_proxy.fail_duration"], "30s");
+        assert_eq!(route["caddy_0.reverse_proxy.lb_retries"], "3");
+        assert!(!route.contains_key("caddy_0.reverse_proxy.lb_try_duration"));
+        assert_eq!(route["caddy_0.reverse_proxy.transport.dial_timeout"], "1s");
+        let plain = route_labels(&domains, Some(80), LbPolicy::LeastConn, None);
+        assert_eq!(plain["caddy_0.reverse_proxy.lb_policy"], "least_conn");
+        assert!(!plain.contains_key("caddy_0.reverse_proxy.health_uri"));
+        // Every site a replica names has its options on the route, and nothing else.
+        let replica = upstream_labels(&domains, Some(80));
+        for (k, v) in replica
+            .iter()
+            .filter(|(k, _)| !k.ends_with(".reverse_proxy"))
+        {
+            assert_eq!(route.get(k), Some(v));
+        }
+        assert!(route_labels(&domains, None, LbPolicy::LeastConn, None).is_empty());
     }
 
     #[test]
@@ -1450,7 +1585,12 @@ mod tests {
         );
         assert_eq!(labels[&brand::label("proxy")], "true");
         assert!(!labels.contains_key("caddy"));
-        let service = proxy_labels(&[domain("a.com", None, true)], Some(80), "svc");
+        let service = route_labels(
+            &[domain("a.com", None, true)],
+            Some(80),
+            LbPolicy::LeastConn,
+            None,
+        );
         assert_eq!(
             service["caddy_0.reverse_proxy.header_up"],
             "X-Real-IP {client_ip}"
@@ -1480,8 +1620,8 @@ mod tests {
     #[test]
     fn names_use_the_prefix() {
         assert_eq!(
-            container_name("web", "abcdefghijkl", 3),
-            format!("{}-web-abcdef-3", brand::PREFIX)
+            container_name("web", "abcdefghijkl", 3, 2),
+            format!("{}-web-abcdef-3-r2", brand::PREFIX)
         );
         assert_eq!(build_tag("svc", 2), format!("{}/svc:2", brand::PREFIX));
     }

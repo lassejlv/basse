@@ -5,6 +5,8 @@
 #[cfg(target_os = "linux")]
 #[path = "docker_e2e/cancellation.rs"]
 mod cancellation;
+#[path = "docker_e2e/replicas.rs"]
+mod replicas;
 mod support;
 
 use client::Client;
@@ -221,6 +223,7 @@ async fn docker_end_to_end() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -430,6 +433,7 @@ async fn docker_end_to_end() {
             domains: vec![SLOW_HOST.into()],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -497,6 +501,7 @@ async fn docker_end_to_end() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -559,6 +564,7 @@ async fn docker_end_to_end() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -603,6 +609,7 @@ async fn docker_end_to_end() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -647,6 +654,7 @@ async fn docker_end_to_end() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -877,6 +885,7 @@ async fn ssh_server_end_to_end() {
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();
@@ -1153,6 +1162,7 @@ async fn exercise_database(
             domains: vec![],
             volumes: vec![],
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap();

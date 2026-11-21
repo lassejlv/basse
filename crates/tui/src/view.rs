@@ -99,6 +99,10 @@ pub fn render(frame: &mut Frame, app: &App) {
             dim(frame, area);
             crate::problem::render_error_detail(frame, area, e);
         }
+        Some(Overlay::Scale(d)) => {
+            dim(frame, area);
+            crate::replicas::render_scale(frame, area, d, app.tick);
+        }
         None => {}
     }
     mouse::finish_frame(&app.mouse);
@@ -322,9 +326,12 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                         .service
                         .as_ref()
                         .is_some_and(|v| !v.compose().is_empty());
+                    let replicated = app.service.as_ref().is_some_and(ServiceView::replicated);
                     let mut keys = vec![("tab", "next tab")];
                     if compose {
                         keys.push(("c", "container"));
+                    } else if replicated {
+                        keys.push(("c", "replica"));
                     }
                     keys.extend([
                         ("f", "follow"),
@@ -374,12 +381,20 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                     ("x", "remove"),
                     ("X", "remove + data"),
                 ],
-                Tab::Settings => vec![
-                    ("tab", "next tab"),
-                    ("⏎", "edit"),
-                    ("m", "move"),
-                    ("X", "delete service"),
-                ],
+                Tab::Settings => {
+                    let scalable = app
+                        .service
+                        .as_ref()
+                        .and_then(|v| v.detail.as_ref())
+                        .is_some_and(|d| crate::replicas::scalable(&d.service));
+                    let mut keys = vec![("tab", "next tab"), ("⏎", "edit")];
+                    if scalable {
+                        keys.extend([("←→", "panel"), ("s", "scale"), ("a", "autoscale")]);
+                    }
+                    keys.push(("m", "move"));
+                    keys.push(("X", "delete service"));
+                    keys
+                }
                 Tab::Database => {
                     let view = app.service.as_ref();
                     let reveal = view.is_some_and(|v| v.reveal);
@@ -410,6 +425,13 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                     ("x", "delete"),
                     ("e", "schedule"),
                 ],
+                Tab::Overview if app.service.as_ref().is_some_and(ServiceView::replicated) => vec![
+                    ("tab", "next tab"),
+                    ("↑↓", "replica"),
+                    ("⏎", "logs"),
+                    ("d", "deploy"),
+                    ("r", "restart"),
+                ],
                 Tab::Overview => vec![
                     ("tab", "next tab"),
                     ("d", "deploy"),
@@ -425,6 +447,12 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                         .is_some_and(|v| !v.compose().is_empty())
                     {
                         keys.push(("c", "container"));
+                    } else if app
+                        .service
+                        .as_ref()
+                        .is_some_and(|v| !v.metric_replicas().is_empty())
+                    {
+                        keys.push(("c", "replica"));
                     }
                     keys.extend([("d", "deploy"), ("r", "restart")]);
                     keys
@@ -1485,6 +1513,12 @@ fn service(frame: &mut Frame, area: Rect, app: &App) {
             format!(" {}", s.state.as_str()),
             util::state_style(s.state),
         ));
+        if s.replicas > 1 {
+            spans.push(Span::styled(
+                format!(" · {} replicas", s.replicas),
+                util::state_style(s.state),
+            ));
+        }
         let live = view.deployments.iter().find(|d| {
             s.live_deployment_id
                 .as_ref()
@@ -1608,18 +1642,24 @@ const CONTAINER_H: u16 = 9;
 
 fn rail(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
     let compose = view.compose();
-    let height = if compose.is_empty() {
-        CONTAINER_H
-    } else {
-        (compose.len() as u16 + 2).clamp(4, CONTAINER_H + 4)
+    let replicated = view.replicated();
+    if replicated && view.tab == Tab::Overview {
+        return deployments_panel(frame, area, app, view);
+    }
+    let height = match () {
+        _ if !compose.is_empty() => (compose.len() as u16 + 2).clamp(4, CONTAINER_H + 4),
+        _ if replicated => (view.replicas().len() as u16 + 2).clamp(4, CONTAINER_H + 4),
+        _ => CONTAINER_H,
     };
     let [c_area, d_area] = Layout::vertical([Constraint::Length(height), Constraint::Fill(1)])
         .spacing(1)
         .areas(area);
-    if compose.is_empty() {
-        container_panel(frame, c_area, view);
-    } else {
+    if !compose.is_empty() {
         containers_panel(frame, c_area, view);
+    } else if replicated {
+        crate::replicas::replicas_rail(frame, c_area, view);
+    } else {
+        container_panel(frame, c_area, view);
     }
     deployments_panel(frame, d_area, app, view);
 }
@@ -1843,15 +1883,29 @@ fn deployments_panel(frame: &mut Frame, d_area: Rect, app: &App, view: &ServiceV
 fn service_overview(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
     let (main, rail_area) = with_rail(area);
     if let Some(d) = &view.detail {
-        let block = panel(title("Overview", true), None, true);
+        let lines = service_lines(app, Some(d), &d.service);
+        let replicated = view.replicated();
+        let (main, replicas) = if replicated {
+            let [main, replicas, _] = Layout::vertical([
+                Constraint::Length(lines.len() as u16 + 4),
+                Constraint::Length(crate::replicas::panel_height(view)),
+                Constraint::Fill(1),
+            ])
+            .spacing(1)
+            .areas(main);
+            (main, Some(replicas))
+        } else {
+            (main, None)
+        };
+        let block = panel(title("Overview", !replicated), None, !replicated);
         let inner = inside(&block, main).inner(Margin::new(1, 1));
         frame.render_widget(block, main);
         domain_targets(inner, Some(d));
-        frame.render_widget(
-            Paragraph::new(service_lines(app, Some(d), &d.service)),
-            inner,
-        );
-        charts(frame, inner, app.stats.get(&view.id));
+        frame.render_widget(Paragraph::new(lines), inner);
+        match replicas {
+            Some(area) => crate::replicas::replicas_panel(frame, area, view),
+            None => charts(frame, inner, app.stats.get(&view.id)),
+        }
     }
     rail(frame, rail_area, app, view);
 }
@@ -2359,6 +2413,9 @@ fn logs_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
     if let Some(c) = view.log_container() {
         heading.push(Span::styled(" · ", theme::muted()));
         heading.push(Span::styled(c.to_string(), theme::text()));
+    } else if let Some(r) = view.log_replica() {
+        heading.push(Span::styled(" · ", theme::muted()));
+        heading.push(Span::styled(format!("replica #{r}"), theme::text()));
     }
     heading.push(state);
     let block = panel(heading, Some(Line::from(right)), true);
@@ -2760,15 +2817,23 @@ fn volumes_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
 }
 
 fn settings_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
+    let [area, scaling] = Layout::horizontal([Constraint::Percentage(47), Constraint::Fill(1)])
+        .spacing(1)
+        .areas(area);
+    crate::replicas::scaling_panel(frame, scaling, view);
+    let focused = !view.scaling_focus;
     let block = panel(
-        title("Settings", true),
-        Some(Line::styled("⏎ to edit", theme::muted())),
-        true,
+        title("Settings", focused),
+        focused.then(|| Line::styled("⏎ to edit", theme::muted())),
+        focused,
     );
     let inner = inside(&block, area).inner(Margin::new(1, 1));
     frame.render_widget(block, area);
     let Some(d) = &view.detail else { return };
-    if area.width >= 23 {
+    if crate::replicas::scalable(&d.service) {
+        mouse::hit(area, Hit::ScalingFocus(false));
+    }
+    if focused && area.width >= 23 {
         mouse::key_target(Rect::new(area.right() - 11, area.y, 9, 1), "⏎");
     }
     let s = &d.service;
@@ -3007,7 +3072,7 @@ pub(crate) fn deploy(frame: &mut Frame, area: Rect, app: &App) {
             };
             let detail = truncate(
                 s.detail.as_deref().unwrap_or(""),
-                (inner.width as usize).saturating_sub(22),
+                (inner.width as usize).saturating_sub(13 + took.len()),
             );
             let pad =
                 (inner.width as usize).saturating_sub(12 + detail.chars().count() + took.len());
@@ -3076,10 +3141,15 @@ pub(crate) fn deploy(frame: &mut Frame, area: Rect, app: &App) {
             ])),
             bar,
         );
+        let old = if path.is_some_and(|(_, _, s)| s.replicas > 1) {
+            ("old replicas", "serve")
+        } else {
+            ("old container", "serves")
+        };
         let msg = match (&d.error, d.status) {
             (Some(e), _) => Span::styled(truncate(e, note.width as usize), theme::fg(theme::ERR)),
             (None, DeploymentStatus::Live) => {
-                Span::styled("live · old container removed", theme::fg(theme::OK))
+                Span::styled(format!("live · {} removed", old.0), theme::fg(theme::OK))
             }
             _ if view.is_move() => {
                 let from = path
@@ -3094,7 +3164,7 @@ pub(crate) fn deploy(frame: &mut Frame, area: Rect, app: &App) {
                     theme::muted(),
                 )
             }
-            _ => Span::styled("old container serves until healthy", theme::muted()),
+            _ => Span::styled(format!("{} {} until healthy", old.0, old.1), theme::muted()),
         };
         frame.render_widget(Paragraph::new(msg), note);
     }

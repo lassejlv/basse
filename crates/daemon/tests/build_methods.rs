@@ -120,6 +120,7 @@ fn git_service(
         domains: vec![],
         volumes: vec![],
         deploy: false,
+        replicas: None,
     }
 }
 

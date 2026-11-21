@@ -59,6 +59,8 @@ fn service(name: &str) -> Service {
         primary_domain: None,
         last_deployed_at: None,
         live_deployment_id: None,
+        replicas: 1,
+        scaling: Default::default(),
     }
 }
 
@@ -138,6 +140,7 @@ fn fixture() -> App {
             }],
             container: None,
             compose: Vec::new(),
+            replicas: Vec::new(),
             database: None,
         },
     );
@@ -392,7 +395,7 @@ async fn cancel_controls_target_the_running_deployment_and_hide_after_cutover() 
     click(&mut app, keep);
     app.deploy.as_mut().unwrap().deployment.steps.push(Step {
         kind: StepKind::Switch,
-        status: StepStatus::Running,
+        status: StepStatus::Done,
         detail: None,
         started_at: None,
         finished_at: None,
@@ -549,6 +552,8 @@ fn service_tab_labels_and_list_rows_match_their_targets() {
         reveal: false,
         database: true,
         container: None,
+        replica: None,
+        scaling_focus: false,
         metrics: Default::default(),
     });
     app.backups.insert(
@@ -2781,6 +2786,7 @@ fn metrics_data(range: common::metrics::MetricsRange) -> common::metrics::Servic
                 p50_ms: Some(18.0),
                 p95_ms: Some(120.0),
             }),
+            replicas: 1,
         })
         .collect();
     common::metrics::ServiceMetrics {
@@ -2789,6 +2795,8 @@ fn metrics_data(range: common::metrics::MetricsRange) -> common::metrics::Servic
         from,
         to,
         containers: vec!["frontend".into(), "queue".into()],
+        replicas: Vec::new(),
+        replica: None,
         container: None,
         points,
         deploys: vec![DeployMarker {
@@ -3157,4 +3165,294 @@ async fn move_needs_another_server() {
     app.open_service("fixture-web", Tab::Settings);
     press(&mut app, KeyCode::Char('m'));
     assert!(app.overlay.is_none());
+}
+
+fn replicas_fixture() -> App {
+    let mut app = fixture();
+    let scaling = common::Scaling {
+        lb_policy: common::LbPolicy::LeastConn,
+        max_surge: 1,
+        shared_volume_ok: true,
+        autoscale: common::Autoscale {
+            enabled: true,
+            min: 2,
+            max: 6,
+            cpu_percent: Some(70),
+            ..Default::default()
+        },
+    };
+    let replica = |index: u16| common::Replica {
+        index,
+        server_id: "fixture-node".into(),
+        deployment_id: None,
+        container: Some(common::ContainerInfo {
+            id: format!("fixture-r{index}"),
+            name: format!("fixture-web-r{index}"),
+            image: "example:1".into(),
+            state: "running".into(),
+            started_at: None,
+            restart_count: i64::from(index),
+            exit_code: None,
+            ports: Vec::new(),
+            networks: Vec::new(),
+        }),
+        health: common::ReplicaHealth::Healthy,
+        routed: true,
+        cpu_percent: Some(12.0),
+        mem_used: Some(84 << 20),
+    };
+    let detail = app.details.get_mut("fixture-web").expect("fixture detail");
+    detail.service.replicas = 3;
+    detail.service.scaling = scaling.clone();
+    detail.service.state = common::ServiceState::Running;
+    detail.replicas = (0..3).map(replica).collect();
+    for node in &mut app.tree.as_mut().expect("fixture tree").projects[0].environments {
+        for s in node.services.iter_mut().filter(|s| s.id == "fixture-web") {
+            s.replicas = 3;
+            s.scaling = scaling.clone();
+            s.state = common::ServiceState::Running;
+        }
+    }
+    app
+}
+
+#[tokio::test]
+async fn replica_rows_follow_logs_and_the_rail_picks_another_replica() {
+    let mut app = replicas_fixture();
+    app.open_service("fixture-web", Tab::Overview);
+    let buf = draw(&app, 160, 40);
+    label(&buf, "running · 3 replicas");
+    label(&buf, "least_conn · autoscale 2–6 · cpu 70%");
+    for heading in ["STATE", "HEALTH", "RESTARTS", "UPTIME", "CONTAINER"] {
+        label(&buf, heading);
+    }
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("fixture-web-r0", Hit::Replica(0)),
+            ("fixture-web-r1", Hit::Replica(1)),
+            ("fixture-web-r2", Hit::Replica(2)),
+        ],
+    );
+    assert_hit(&app, label(&buf, "⏎ logs"), key(KeyCode::Enter));
+    let y = buf.area.bottom() - 1;
+    for (text, hit) in [
+        ("↑", key(KeyCode::Up)),
+        ("⏎ logs", key(KeyCode::Enter)),
+        ("d deploy", char_key('d')),
+    ] {
+        assert_hit(&app, label_on(&buf, y, text).expect("key bar hint"), hit);
+    }
+
+    press(&mut app, KeyCode::Down);
+    assert_eq!(app.service.as_ref().map(|v| v.row), Some(1));
+    press(&mut app, KeyCode::Enter);
+    let view = app.service.as_ref().expect("service view");
+    assert_eq!(view.tab, Tab::Logs);
+    assert_eq!(view.log_replica(), Some(1));
+
+    app.set_tab(Tab::Overview);
+    let buf = draw(&app, 160, 40);
+    let r2 = label(&buf, "fixture-web-r2");
+    click(&mut app, Position::new(r2.x, r2.y));
+    assert_eq!(app.service.as_ref().and_then(|v| v.log_replica()), Some(2));
+
+    let buf = draw(&app, 160, 40);
+    label(&buf, "Logs · replica #2");
+    let rail = label(&buf, "Replicas").y;
+    for i in 0..3u16 {
+        let row = label_on(&buf, rail + 1 + i, &format!("#{i}")).expect("rail row");
+        assert_hit(&app, row, Hit::Replica(usize::from(i)));
+    }
+    let r0 = label_on(&buf, rail + 1, "#0").expect("rail row");
+    click(&mut app, Position::new(r0.x, r0.y));
+    assert_eq!(app.service.as_ref().and_then(|v| v.log_replica()), Some(0));
+    let buf = draw(&app, 160, 40);
+    let next = assert_hit(
+        &app,
+        label_on(&buf, buf.area.bottom() - 1, "c replica").expect("replica hint"),
+        char_key('c'),
+    );
+    click(&mut app, next);
+    assert_eq!(app.service.as_ref().and_then(|v| v.log_replica()), Some(1));
+}
+
+#[tokio::test]
+async fn scaling_panel_rows_hints_and_the_scale_dialog_have_targets() {
+    let mut app = replicas_fixture();
+    app.open_service("fixture-web", Tab::Settings);
+    let buf = draw(&app, 160, 40);
+    label(&buf, "2–6 replicas · cpu 70%");
+    label(&buf, "cooldown up 60s / down 5m");
+    label(&buf, "round_robin, ip_hash for sticky sessions");
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("load balancing", Hit::Scaling(1)),
+            ("rolling surge", Hit::Scaling(2)),
+            ("shared volume", Hit::Scaling(4)),
+        ],
+    );
+    let lb = label(&buf, "load balancing");
+    assert_hit(&app, Rect::new(lb.x, lb.y - 1, 8, 1), Hit::Scaling(0));
+    assert_hit(&app, Rect::new(lb.x, lb.y + 2, 9, 1), Hit::Scaling(3));
+    assert_hit(&app, label(&buf, "s scale"), char_key('s'));
+    assert_hit(&app, label(&buf, "a autoscale"), char_key('a'));
+    let y = buf.area.bottom() - 1;
+    for (text, hit) in [
+        ("←", key(KeyCode::Left)),
+        ("s scale", char_key('s')),
+        ("a autoscale", char_key('a')),
+    ] {
+        assert_hit(&app, label_on(&buf, y, text).expect("key bar hint"), hit);
+    }
+
+    click(&mut app, Position::new(lb.x, lb.y));
+    let view = app.service.as_ref().expect("service view");
+    assert!(view.scaling_focus);
+    assert_eq!(view.row, 1);
+    let buf = draw(&app, 160, 40);
+    assert_hit(&app, label(&buf, "⏎ to edit"), key(KeyCode::Enter));
+    let image = label(&buf, "example:1");
+    click(&mut app, Position::new(image.x, image.y));
+    assert!(!app.service.as_ref().expect("service view").scaling_focus);
+
+    let surge = label(&buf, "rolling surge");
+    click(&mut app, Position::new(surge.x, surge.y));
+    click(&mut app, Position::new(surge.x, surge.y));
+    assert!(matches!(
+        &app.overlay,
+        Some(Overlay::Form(f)) if matches!(f.kind, FormKind::RollingSurge { .. })
+    ));
+    app.overlay = None;
+
+    let buf = draw(&app, 160, 40);
+    let auto = label(&buf, "a autoscale");
+    click(&mut app, Position::new(auto.x, auto.y));
+    let Some(Overlay::Form(form)) = &app.overlay else {
+        panic!("autoscale form");
+    };
+    assert!(matches!(form.kind, FormKind::Autoscale { .. }));
+    assert_eq!(form.choice_label("enabled").as_deref(), Some("on"));
+    let buf = draw(&app, 160, 40);
+    for (text, field) in [("req/s per replica", 5), ("scale-down cooldown", 7)] {
+        let row = label(&buf, text);
+        assert_eq!(
+            mouse::hit_at(&app.mouse, row.x, row.y),
+            Some(Hit::FormField(field))
+        );
+    }
+    label(&buf, "Scales on the average over the last minute.");
+    app.overlay = None;
+
+    let buf = draw(&app, 160, 40);
+    let scale = label(&buf, "s scale");
+    click(&mut app, Position::new(scale.x, scale.y));
+    let buf = draw(&app, 160, 40);
+    label(&buf, "Autoscaling manages these replicas: 2–6 · cpu 70%.");
+    let hints = label(&buf, "a autoscale   esc cancel");
+    assert_hit(&app, Rect { width: 11, ..hints }, char_key('a'));
+
+    let Some(Overlay::Scale(d)) = app.overlay.as_mut() else {
+        panic!("scale dialog");
+    };
+    d.autoscale = None;
+    app.apply(crate::app::Msg::Capacity(
+        "fixture-web".into(),
+        Ok(common::ScaleCapacity {
+            server_id: "fixture-node".into(),
+            mem_total: 8 << 30,
+            mem_free: 800 << 20,
+            per_replica: 85 << 20,
+            fits_more: 9,
+        }),
+    ));
+    let buf = draw(&app, 160, 40);
+    label(&buf, "3 → 3");
+    label(
+        &buf,
+        "Memory headroom on server fixture-node fits 9 more replicas (~85 MiB each)",
+    );
+    let adjust = label(&buf, "↑↓ adjust");
+    let up = assert_hit(&app, Rect::new(adjust.x, adjust.y, 1, 1), key(KeyCode::Up));
+    assert_hit(&app, label(&buf, "esc cancel"), key(KeyCode::Esc));
+    assert_hit(&app, label(&buf, "⏎ scale"), key(KeyCode::Enter));
+    click(&mut app, up);
+    let buf = draw(&app, 160, 40);
+    label(&buf, "3 → 4");
+    label(&buf, "Starts 4 replicas on the first deploy.");
+    if let Some(Overlay::Scale(d)) = app.overlay.as_mut() {
+        d.live = true;
+    }
+    let buf = draw(&app, 160, 40);
+    label(&buf, "Adds 1 container. No redeploy.");
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+    let buf = draw(&app, 160, 40);
+    label(&buf, "Drains 1 container. No redeploy.");
+
+    let Some(Overlay::Scale(d)) = app.overlay.as_mut() else {
+        panic!("scale dialog");
+    };
+    d.shared_ok = false;
+    let buf = draw(&app, 160, 40);
+    label(&buf, "✕ Replicas > 1 refused");
+    label(&buf, "fixture-data → /fixture/data");
+    assert_hit(&app, label(&buf, "space toggle"), char_key(' '));
+    let check = label(&buf, "[ ]  Allow a shared volume");
+    click(&mut app, Position::new(check.x, check.y));
+    let buf = draw(&app, 160, 40);
+    label(&buf, "[x]  Allow a shared volume");
+    let esc = label(&buf, "esc cancel");
+    click(&mut app, Position::new(esc.x, esc.y));
+    assert!(app.overlay.is_none());
+}
+
+#[tokio::test]
+async fn metrics_tab_picks_replicas_and_charts_their_count() {
+    use common::metrics::MetricsRange;
+    let mut app = replicas_fixture();
+    app.open_service("fixture-web", Tab::Metrics);
+    let mut data = metrics_data(MetricsRange::Hour);
+    data.containers = Vec::new();
+    data.replicas = vec![0, 1, 2];
+    for (i, p) in data.points.iter_mut().enumerate() {
+        p.replicas = if i < 180 { 2 } else { 3 };
+    }
+    app.service.as_mut().expect("service view").metrics.data = Some(data);
+    let buf = draw(&app, 164, 40);
+    label(&buf, "Replicas  3 now · min 2 · max 6");
+    label(&buf, "autoscale on");
+    let toolbar = label(&buf, "1 1h").y;
+    for (i, text) in ["all replicas", "#0", "#1", "#2"].into_iter().enumerate() {
+        assert_hit(
+            &app,
+            label_on(&buf, toolbar, text).expect("replica"),
+            Hit::MetricsReplica(i),
+        );
+    }
+    assert_hit(
+        &app,
+        label_on(&buf, toolbar, "c").expect("c"),
+        char_key('c'),
+    );
+    assert_hit(
+        &app,
+        label_on(&buf, buf.area.bottom() - 1, "c replica").expect("key bar"),
+        char_key('c'),
+    );
+    let picked = |app: &App| app.service.as_ref().expect("service view").metrics.replica;
+    let one = label_on(&buf, toolbar, "#1").expect("#1");
+    click(&mut app, Position::new(one.x, one.y));
+    assert_eq!(picked(&app), Some(1));
+    press(&mut app, KeyCode::Char('c'));
+    assert_eq!(picked(&app), Some(2));
+    press(&mut app, KeyCode::Char('c'));
+    assert_eq!(picked(&app), None, "c wraps around to all replicas");
+    let all = label_on(&buf, toolbar, "all replicas").expect("all");
+    press(&mut app, KeyCode::Char('c'));
+    click(&mut app, Position::new(all.x, all.y));
+    assert_eq!(picked(&app), None);
 }

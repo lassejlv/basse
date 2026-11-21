@@ -304,9 +304,13 @@ impl Job {
         let Some(m) = self.moving.take() else { return };
         let mut removed = 0;
         let mut errors = Vec::new();
-        match docker::remove_service_containers(&m.docker, &svc.id, None).await {
+        match docker::remove_service_containers(&m.docker, &svc.id, &[]).await {
             Ok(n) => removed = n,
             Err(e) => errors.push(format!("{e:#}")),
+        }
+        if let Err(e) = docker::remove_container(&m.docker, &docker::route_container(&svc.id)).await
+        {
+            errors.push(format!("{e:#}"));
         }
         if is_compose(svc)
             && let Err(e) =
@@ -379,11 +383,16 @@ impl Job {
             return;
         };
         if let Some(target) = self.docker.clone() {
-            if let Err(e) = docker::remove_service_containers(&target, &svc.id, None).await {
+            if let Err(e) = docker::remove_service_containers(&target, &svc.id, &[]).await {
                 self.log.push(
                     LogStream::Stderr,
                     format!("Cannot remove the containers on the target: {e:#}"),
                 );
+            }
+            if let Err(e) =
+                docker::remove_container(&target, &docker::route_container(&svc.id)).await
+            {
+                self.log.push(LogStream::Stderr, format!("{e:#}"));
             }
             if is_compose(&svc)
                 && let Err(e) = docker::remove_compose_leftovers(

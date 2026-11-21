@@ -219,6 +219,7 @@ async fn move_service() {
                 mount_path: "/www".into(),
             }],
             deploy: false,
+            replicas: None,
         })
         .await
         .unwrap()
@@ -392,6 +393,7 @@ async fn move_service() {
             domains: Vec::new(),
             volumes: Vec::new(),
             deploy: true,
+            replicas: None,
         })
         .await
         .unwrap()

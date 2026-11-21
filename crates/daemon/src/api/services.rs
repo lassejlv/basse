@@ -6,6 +6,7 @@ use crate::deploy::{self, Plan};
 use crate::docker;
 use crate::error::{ApiResult, AppError, bad_request, conflict};
 use crate::metrics;
+use crate::replicas;
 use crate::services::{self, Power};
 use crate::state::AppState;
 use crate::stats;
@@ -16,7 +17,8 @@ use axum::response::Response;
 use bollard::query_parameters::LogsOptions;
 use chrono::Utc;
 use common::api::{
-    CreateDomain, CreateService, CreateVolume, DeployRequest, MoveService, UpdateService,
+    CreateDomain, CreateService, CreateVolume, DeployRequest, MoveService, ScaleRequest,
+    UpdateService,
 };
 use common::metrics::{MetricsRange, ServiceMetrics};
 use common::*;
@@ -133,6 +135,8 @@ pub struct LogsQuery {
     follow: bool,
     /// A compose service of a compose build.
     container: Option<String>,
+    /// A replica by index.
+    replica: Option<u16>,
 }
 
 pub async fn logs(
@@ -161,7 +165,17 @@ pub async fn logs(
                     rec.service.name
                 ))
             })?,
-        None => rec.live_container.clone().ok_or_else(missing)?,
+        None => match q.replica {
+            Some(index) => rec
+                .replica_containers()
+                .into_iter()
+                .find(|(i, _)| *i == index)
+                .map(|(_, id)| id)
+                .ok_or_else(|| {
+                    AppError::NotFound(format!("'{}' has no replica #{index}", rec.service.name))
+                })?,
+            None => rec.live_container.clone().ok_or_else(missing)?,
+        },
     };
     if docker::inspect(&docker, &container).await?.is_none() {
         return Err(missing());
@@ -243,6 +257,7 @@ pub async fn stats(
 pub struct MetricsQuery {
     range: Option<String>,
     container: Option<String>,
+    replica: Option<u16>,
 }
 
 pub async fn metrics(
@@ -262,9 +277,75 @@ pub async fn metrics(
     if container.is_some() && !metrics::is_compose(&rec.service.source) {
         bad_request!("only compose services have containers to pick");
     }
+    if container.is_some() && q.replica.is_some() {
+        bad_request!("pick a container or a replica, not both");
+    }
     Ok(Json(
-        metrics::service_metrics(&state, &id, range, container, Utc::now()).await?,
+        metrics::service_metrics(&state, &id, range, container, q.replica, Utc::now()).await?,
     ))
+}
+
+pub async fn scale(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<ScaleRequest>,
+) -> ApiResult<Json<ServiceDetail>> {
+    let rec = services::record(&state, &id).await?;
+    if rec.service.scaling.autoscale.enabled {
+        conflict!(
+            "autoscaling manages the replicas of '{}'; turn it off first",
+            rec.service.name
+        );
+    }
+    replicas::scale(&state, &rec, body.replicas, "manual".into()).await?;
+    Ok(Json(services::detail(&state, &id).await?))
+}
+
+pub async fn autoscale(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<Autoscale>,
+) -> ApiResult<Json<ServiceDetail>> {
+    body.validate().map_err(AppError::BadRequest)?;
+    let rec = services::record(&state, &id).await?;
+    let mut svc = rec.service.clone();
+    if body.enabled && body.max > 1 {
+        if !replicas::supports_replicas(&svc.source) {
+            bad_request!("databases and compose services run one replica");
+        }
+        replicas::check_volumes(&state, &svc).await?;
+    }
+    svc.scaling.autoscale = body.clone();
+    state.db.update_service(&svc).await?;
+    let enabled = if body.enabled { "on" } else { "off" };
+    state
+        .service_activity(
+            &svc,
+            ActivityLevel::Info,
+            format!("Autoscaling {enabled}"),
+            body.enabled.then(|| body.summary()),
+        )
+        .await;
+    if body.enabled {
+        let bounded = svc.replicas.clamp(body.min, body.max);
+        if bounded != svc.replicas {
+            state.db.set_replica_count(&id, bounded).await?;
+            replicas::spawn_reconcile(
+                &state,
+                &id,
+                format!("autoscale: within {}–{}", body.min, body.max),
+            );
+        }
+    }
+    Ok(Json(services::detail(&state, &id).await?))
+}
+
+pub async fn capacity(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<ScaleCapacity>> {
+    let rec = services::record(&state, &id).await?;
+    Ok(Json(replicas::capacity(&state, &rec).await?))
 }
 
 pub async fn set_env(
@@ -384,6 +465,15 @@ pub async fn add_volume(
         .any(|v| v.mount_path == body.mount_path)
     {
         conflict!("another volume is already mounted at {}", body.mount_path);
+    }
+    let svc = &rec.service;
+    if (svc.replicas > 1 || svc.scaling.autoscale.enabled && svc.scaling.autoscale.max > 1)
+        && !svc.scaling.shared_volume_ok
+    {
+        conflict!(
+            "'{}' runs several replicas, which would all write this volume; set shared_volume_ok or scale to 1 first",
+            svc.name
+        );
     }
     let volume = Volume {
         id: new_id(),

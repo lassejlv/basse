@@ -644,6 +644,7 @@ async fn first_app(
             domains: domain.iter().cloned().collect(),
             volumes: Vec::new(),
             deploy: true,
+            replicas: None,
         })
         .await?;
     ok(format!(
@@ -771,6 +772,8 @@ mod tests {
             primary_domain: body.domains.first().cloned(),
             last_deployed_at: None,
             live_deployment_id: None,
+            replicas: 1,
+            scaling: Default::default(),
         }
     }
 
@@ -982,6 +985,7 @@ mod tests {
                     container: None,
                     database: None,
                     compose: Vec::new(),
+                    replicas: Vec::new(),
                 })
             }
             ("GET", "/services/s1/deployments") => ok(vec![deployment(DeploymentStatus::Building)]),

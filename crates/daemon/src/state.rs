@@ -33,6 +33,7 @@ pub struct AppState {
     pub dirs: DataDir,
     pub deploys: Deploys,
     pub stats: Stats,
+    pub autoscaler: crate::autoscale::Tracker,
     pub db_locks: database::Locks,
     pub secrets: Secrets,
     pub notifier: Notifier,
@@ -135,6 +136,7 @@ impl AppState {
             dirs,
             deploys: Deploys::default(),
             stats: Stats::default(),
+            autoscaler: Default::default(),
             db_locks: database::Locks::default(),
             http,
             listen,
@@ -245,7 +247,10 @@ impl AppState {
         for rec in self.db.services().await? {
             let svc = &rec.service;
             let deployed = rec.live_container.is_some() || svc.live_deployment_id.is_some();
-            if svc.server_id != server_id || (deployed && !rec.stopped) {
+            // A stopped service keeps its route container, which answers for its domains with
+            // the error pages itself; holding them here too would define each site twice.
+            let routed = deployed && crate::replicas::has_route(&svc.source);
+            if svc.server_id != server_id || (deployed && !rec.stopped) || routed {
                 continue;
             }
             let hold = if rec.busy.is_some() {

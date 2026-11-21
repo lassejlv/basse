@@ -433,6 +433,239 @@ pub struct Service {
     /// The deployment whose container currently serves traffic.
     #[serde(default)]
     pub live_deployment_id: Option<Id>,
+    /// Identical containers the service runs, behind the proxy's load balancer. Autoscaling
+    /// moves it between its bounds. Always 1 for databases and compose services.
+    #[serde(default = "one")]
+    pub replicas: u16,
+    #[serde(default)]
+    pub scaling: Scaling,
+}
+
+/// Most replicas one service may run.
+pub const MAX_REPLICAS: u16 = 50;
+
+fn one() -> u16 {
+    1
+}
+
+/// How the proxy spreads requests over a service's replicas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LbPolicy {
+    /// The replica with the fewest requests in flight.
+    #[default]
+    LeastConn,
+    RoundRobin,
+    /// Sticky sessions: a visitor's address always picks the same replica.
+    IpHash,
+}
+
+impl LbPolicy {
+    pub const ALL: [Self; 3] = [Self::LeastConn, Self::RoundRobin, Self::IpHash];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LeastConn => "least_conn",
+            Self::RoundRobin => "round_robin",
+            Self::IpHash => "ip_hash",
+        }
+    }
+}
+
+impl fmt::Display for LbPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for LbPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.to_ascii_lowercase().replace('-', "_");
+        Self::ALL
+            .into_iter()
+            .find(|p| p.as_str() == s)
+            .ok_or_else(|| {
+                format!("unknown load balancing policy '{s}', expected one of least_conn, round_robin, ip_hash")
+            })
+    }
+}
+
+/// How a service's replicas are routed, rolled out and scaled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Scaling {
+    #[serde(default)]
+    pub lb_policy: LbPolicy,
+    /// Replicas a rolling deploy starts at once before it removes old ones.
+    #[serde(default = "one")]
+    pub max_surge: u16,
+    /// Allows more than one replica although the service mounts a volume, which every replica
+    /// then writes at the same time.
+    #[serde(default)]
+    pub shared_volume_ok: bool,
+    #[serde(default)]
+    pub autoscale: Autoscale,
+}
+
+impl Default for Scaling {
+    fn default() -> Self {
+        Self {
+            lb_policy: LbPolicy::default(),
+            max_surge: 1,
+            shared_volume_ok: false,
+            autoscale: Autoscale::default(),
+        }
+    }
+}
+
+/// Automatic scaling between `min` and `max` replicas. Each target is an average per replica
+/// over the last minute; the service gets as many replicas as the busiest target needs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Autoscale {
+    pub enabled: bool,
+    pub min: u16,
+    pub max: u16,
+    /// CPU in percent of one core.
+    #[serde(default)]
+    pub cpu_percent: Option<u16>,
+    /// Memory in percent of the container's limit (the server's memory without one).
+    #[serde(default)]
+    pub memory_percent: Option<u8>,
+    /// Requests per second through the proxy.
+    #[serde(default)]
+    pub rps: Option<u32>,
+    /// Least time after any scaling before the service scales up again.
+    #[serde(default = "default_up_cooldown")]
+    pub scale_up_cooldown_secs: u32,
+    /// Least time after any scaling before the service scales down again.
+    #[serde(default = "default_down_cooldown")]
+    pub scale_down_cooldown_secs: u32,
+    /// Scaling down follows the highest recommendation of this window, so a short dip does not
+    /// remove replicas.
+    #[serde(default = "default_down_cooldown")]
+    pub stabilization_secs: u32,
+}
+
+fn default_up_cooldown() -> u32 {
+    60
+}
+
+fn default_down_cooldown() -> u32 {
+    300
+}
+
+impl Default for Autoscale {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min: 1,
+            max: 4,
+            cpu_percent: None,
+            memory_percent: None,
+            rps: None,
+            scale_up_cooldown_secs: default_up_cooldown(),
+            scale_down_cooldown_secs: default_down_cooldown(),
+            stabilization_secs: default_down_cooldown(),
+        }
+    }
+}
+
+impl Autoscale {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.min == 0 {
+            return Err("min must be at least 1".into());
+        }
+        if self.max < self.min {
+            return Err(format!("max ({}) is below min ({})", self.max, self.min));
+        }
+        if self.max > MAX_REPLICAS {
+            return Err(format!("max is at most {MAX_REPLICAS} replicas"));
+        }
+        if self.cpu_percent == Some(0) || self.cpu_percent.is_some_and(|c| c > 1000) {
+            return Err("the CPU target is 1 to 1000 percent of one core".into());
+        }
+        if self.memory_percent.is_some_and(|m| m == 0 || m > 100) {
+            return Err("the memory target is 1 to 100 percent".into());
+        }
+        if self.rps == Some(0) {
+            return Err("the requests target is at least 1 per second".into());
+        }
+        if self.enabled
+            && self.cpu_percent.is_none()
+            && self.memory_percent.is_none()
+            && self.rps.is_none()
+        {
+            return Err("autoscaling needs a CPU, memory or requests target".into());
+        }
+        Ok(())
+    }
+
+    /// Short summary such as `2–6 · cpu 70% · rps 50`.
+    pub fn summary(&self) -> String {
+        let mut parts = vec![format!("{}–{}", self.min, self.max)];
+        if let Some(cpu) = self.cpu_percent {
+            parts.push(format!("cpu {cpu}%"));
+        }
+        if let Some(mem) = self.memory_percent {
+            parts.push(format!("mem {mem}%"));
+        }
+        if let Some(rps) = self.rps {
+            parts.push(format!("rps {rps}"));
+        }
+        parts.join(" · ")
+    }
+}
+
+/// Whether a replica can take requests, from its container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplicaHealth {
+    Healthy,
+    /// Restarting, crash-looping, or failing its Docker health check.
+    Unhealthy,
+    /// Exited, or the container is gone.
+    Down,
+}
+
+impl ReplicaHealth {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Unhealthy => "unhealthy",
+            Self::Down => "down",
+        }
+    }
+}
+
+/// One of the identical containers of a service.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Replica {
+    /// Stable slot number, from 0; logs and metrics are kept per index.
+    pub index: u16,
+    pub server_id: Id,
+    /// The deployment whose image it runs.
+    pub deployment_id: Option<Id>,
+    pub container: Option<ContainerInfo>,
+    pub health: ReplicaHealth,
+    /// Joined to the proxy network, so the proxy sends it requests.
+    pub routed: bool,
+    /// From the newest metrics sample, when one is recent.
+    pub cpu_percent: Option<f64>,
+    pub mem_used: Option<u64>,
+}
+
+/// Room for more replicas of a service on its server, by memory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScaleCapacity {
+    pub server_id: Id,
+    pub mem_total: u64,
+    /// Memory left for new containers, after a reserve for the system.
+    pub mem_free: u64,
+    /// Expected memory of one more replica: the largest current replica, or a floor.
+    pub per_replica: u64,
+    /// How many more replicas fit.
+    pub fits_more: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -611,10 +844,10 @@ pub struct Deployment {
 impl Deployment {
     pub fn can_cancel(&self) -> bool {
         !self.status.is_finished()
-            && !self.steps.iter().any(|step| {
-                step.kind == StepKind::Switch
-                    && matches!(step.status, StepStatus::Running | StepStatus::Done)
-            })
+            && !self
+                .steps
+                .iter()
+                .any(|step| step.kind == StepKind::Switch && step.status == StepStatus::Done)
     }
 }
 
@@ -827,6 +1060,9 @@ pub struct ServiceDetail {
     /// Each service of a compose build with its container; empty for other build methods.
     #[serde(default)]
     pub compose: Vec<ComposeService>,
+    /// The service's replicas by index; empty before the first deploy and for compose.
+    #[serde(default)]
+    pub replicas: Vec<Replica>,
 }
 
 /// How to reach a one-click database. Only set on [`ServiceDetail`] for database services.

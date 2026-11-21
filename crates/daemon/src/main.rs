@@ -1,6 +1,7 @@
 //! The control daemon: serves the HTTP API and drives Docker on every registered server.
 
 mod api;
+mod autoscale;
 mod backup_store;
 mod build;
 mod cloudflare;
@@ -20,6 +21,7 @@ mod onboarding;
 mod preflight;
 mod proxy_pages;
 mod prune;
+mod replicas;
 mod restore;
 mod secrets;
 mod services;
@@ -507,6 +509,7 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
     notify::monitor::startup(&state).await;
     notify::monitor::spawn(state.clone());
     stats::spawn_sampler(state.clone());
+    autoscale::spawn(state.clone());
     database::spawn_scheduler(state.clone());
     instance::spawn_scheduler(state.clone());
     tokio::spawn({

@@ -21,6 +21,7 @@ const COLLECTING: &str = "collecting · first samples in ~10s";
 const NOT_RUNNING: &str = "not running · no samples in this range";
 const NO_DOMAIN: &str = "no domain · requests appear once a domain routes here";
 const NO_REQUESTS: &str = "no requests in this range";
+const ALL_REPLICAS: &str = "requests are measured across all replicas";
 /// Width of the y-axis labels plus their gutter.
 const Y_LABELS: u16 = 6;
 
@@ -41,6 +42,18 @@ pub(crate) fn tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) 
 
     // A new range or container keeps showing the last answer until its own arrives.
     let data = view.metrics.data.as_ref();
+    let points = data.map_or(&[][..], |m| m.points.as_slice());
+    let show_replicas = view.compose().is_empty()
+        && view.metrics.replica.is_none()
+        && (view.replicated() || points.iter().any(|p| p.replicas > 1));
+    let (grid, replicas_area) = if show_replicas {
+        let [grid, replicas] = Layout::vertical([Constraint::Fill(1), Constraint::Length(8)])
+            .spacing(1)
+            .areas(grid);
+        (grid, Some(replicas))
+    } else {
+        (grid, None)
+    };
     let rows = Layout::vertical([Constraint::Fill(1); 3])
         .spacing(1)
         .split(grid);
@@ -54,7 +67,15 @@ pub(crate) fn tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) 
         })
         .collect();
     let empty = if running { COLLECTING } else { NOT_RUNNING };
-    let points = data.map_or(&[][..], |m| m.points.as_slice());
+    if let Some(area) = replicas_area {
+        let autoscale = view
+            .detail
+            .as_ref()
+            .map(|d| &d.service.scaling.autoscale)
+            .filter(|a| a.enabled);
+        let message = points.is_empty().then_some(empty);
+        chart_panel(frame, area, replica_count(points, autoscale), data, message);
+    }
     for (i, area) in cells.into_iter().enumerate() {
         let spec = match i {
             0 => cpu(points),
@@ -66,6 +87,7 @@ pub(crate) fn tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) 
         };
         let http_panel = i >= 4;
         let message = match data {
+            Some(_) if http_panel && view.metrics.replica.is_some() => Some(ALL_REPLICAS),
             Some(m) if http_panel && !m.http => Some(NO_DOMAIN),
             _ if points.is_empty() => Some(empty),
             _ if http_panel && spec.series.iter().all(|(_, s)| s.is_empty()) => Some(NO_REQUESTS),
@@ -127,6 +149,35 @@ fn toolbar(frame: &mut Frame, area: Rect, view: &ServiceView, running: bool) {
         }
         right.push((Span::raw("    "), None));
     }
+    let replicas = view.metric_replicas();
+    if compose.is_empty() && !replicas.is_empty() {
+        right.push((
+            Span::styled("c", theme::accent()),
+            Some(Hit::Key(KeyCode::Char('c'), KeyModifiers::NONE)),
+        ));
+        right.push((Span::styled(" replica", theme::muted()), None));
+        let names = std::iter::once("all replicas".to_string())
+            .chain(replicas.iter().map(|r| format!("#{r}")));
+        for (i, name) in names.enumerate() {
+            let picked = match view.metrics.replica {
+                None => i == 0,
+                Some(r) => i > 0 && replicas[i - 1] == r,
+            };
+            right.push((Span::raw("  "), None));
+            right.push((
+                Span::styled(
+                    name,
+                    if picked {
+                        theme::text().add_modifier(Modifier::UNDERLINED)
+                    } else {
+                        theme::muted()
+                    },
+                ),
+                Some(Hit::MetricsReplica(i)),
+            ));
+        }
+        right.push((Span::raw("    "), None));
+    }
     if running {
         right.push((Span::styled("●", theme::fg(theme::OK)), None));
         right.push((Span::styled(" live · every 10s", theme::muted()), None));
@@ -168,6 +219,8 @@ fn toolbar(frame: &mut Frame, area: Rect, view: &ServiceView, running: bool) {
 struct Spec {
     title: Vec<Span<'static>>,
     legend: Vec<(&'static str, Color)>,
+    /// Muted text at the right of the title, instead of a legend.
+    note: Option<&'static str>,
     /// Drawn in order, so the last series wins a shared cell.
     series: Vec<(Color, Vec<(TimeDelta, f64)>)>,
     y_max: f64,
@@ -301,6 +354,7 @@ fn cpu(points: &[MetricPoint]) -> Spec {
             }),
         ),
         legend: Vec::new(),
+        note: None,
         series: vec![(theme::INFO, series(points, |p| Some(p.cpu)))],
         y_max: nice_ceil(peak(points.iter().map(|p| p.cpu))).max(100.0),
         y_label: percent,
@@ -328,6 +382,7 @@ fn memory(points: &[MetricPoint]) -> Spec {
             }),
         ),
         legend: Vec::new(),
+        note: None,
         series: vec![(theme::INFO, series(points, |p| Some(p.mem as f64)))],
         y_max: if near {
             limit
@@ -362,6 +417,7 @@ fn pair(
             }),
         ),
         legend: vec![(labels[0], theme::INFO), (labels[1], theme::OK)],
+        note: None,
         series: vec![
             (theme::OK, series(points, |p| Some(pick[1](p)))),
             (theme::INFO, series(points, |p| Some(pick[0](p)))),
@@ -426,6 +482,7 @@ fn requests(points: &[MetricPoint]) -> Spec {
             ("4xx", theme::TEXT),
             ("5xx", theme::ERR),
         ],
+        note: None,
         series: vec![
             (theme::ERR, series(points, class(|h| h.s5xx))),
             (theme::TEXT, series(points, class(|h| h.s4xx))),
@@ -433,6 +490,41 @@ fn requests(points: &[MetricPoint]) -> Spec {
         ],
         y_max: nice_ceil(peak(http.iter().map(|h| h.rps))),
         y_label: |v| trim(v),
+        limit: None,
+    }
+}
+
+/// Replicas over the range as a step line, the bounds of autoscaling in the title.
+fn replica_count(points: &[MetricPoint], autoscale: Option<&common::Autoscale>) -> Spec {
+    let mut steps: Vec<(TimeDelta, f64)> = Vec::new();
+    if let Some(first) = points.first() {
+        for p in points {
+            let v = f64::from(p.replicas);
+            if let Some(&(_, prev)) = steps.last()
+                && prev != v
+            {
+                steps.push((p.at - first.at, prev));
+            }
+            steps.push((p.at - first.at, v));
+        }
+    }
+    let now = points.last().map(|p| format!("{} now", p.replicas));
+    let top = peak(steps.iter().map(|(_, v)| *v)).max(autoscale.map_or(0.0, |a| f64::from(a.max)));
+    Spec {
+        title: title(
+            "Replicas",
+            now,
+            autoscale.map_or_else(String::new, |a| format!(" · min {} · max {}", a.min, a.max)),
+        ),
+        legend: Vec::new(),
+        note: Some(if autoscale.is_some() {
+            "autoscale on"
+        } else {
+            "autoscale off"
+        }),
+        series: vec![(theme::OK, steps)],
+        y_max: top.max(2.0).ceil(),
+        y_label: |v| format!("{v:.0}"),
         limit: None,
     }
 }
@@ -457,6 +549,7 @@ fn latency(points: &[MetricPoint]) -> Spec {
             }),
         ),
         legend: vec![("p50", theme::INFO), ("p95", theme::TEXT)],
+        note: None,
         series: vec![
             (theme::TEXT, series(points, |p| p.http.as_ref()?.p95_ms)),
             (theme::INFO, series(points, |p| p.http.as_ref()?.p50_ms)),
@@ -484,6 +577,9 @@ fn chart_panel(
     data: Option<&ServiceMetrics>,
     message: Option<&str>,
 ) {
+    let note = spec
+        .note
+        .map(|n| Line::from(Span::styled(n, theme::muted())));
     let legend = (message.is_none() && !spec.legend.is_empty()).then(|| {
         let mut spans = Vec::new();
         for (i, (label, color)) in spec.legend.iter().enumerate() {
@@ -500,7 +596,7 @@ fn chart_panel(
     } else {
         spec.title
     };
-    let block = panel(title, legend, false);
+    let block = panel(title, legend.or(note), false);
     let inner = inside(&block, area);
     frame.render_widget(block, area);
     if inner.height == 0 || inner.width == 0 {
