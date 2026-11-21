@@ -10,6 +10,7 @@ pub mod api;
 pub mod brand;
 pub mod notify;
 pub mod onboarding;
+pub mod ssh;
 
 /// Default TCP port the daemon's API listens on.
 pub const DEFAULT_PORT: u16 = 7700;
