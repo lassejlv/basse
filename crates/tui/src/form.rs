@@ -255,6 +255,11 @@ pub enum FormKind {
     RollingSurge {
         service_id: Id,
     },
+    AddProvider,
+    /// Turns on a managed load balancer; submitting shows the plan first.
+    EnableLb {
+        service_id: Id,
+    },
 }
 
 pub enum FormAction {
@@ -431,6 +436,15 @@ impl Form {
                     } else {
                         unit.into()
                     };
+                }
+            }
+            return;
+        }
+        if matches!(self.kind, FormKind::EnableLb { .. }) {
+            let hetzner = self.choice("mode") == 0;
+            for f in &mut self.fields {
+                if matches!(f.key, "lb_type" | "location" | "network" | "dns") {
+                    f.visible = hetzner;
                 }
             }
             return;

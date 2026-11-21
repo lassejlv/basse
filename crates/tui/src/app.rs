@@ -144,6 +144,8 @@ pub enum Msg {
         path: String,
         result: Result<Vec<String>, String>,
     },
+    Providers(crate::providers::ProvidersMsg),
+    Lb(crate::lb::LbMsg),
 }
 
 /// Where to go after a form succeeds.
@@ -173,6 +175,8 @@ pub enum Screen {
     Storage,
     Notifications,
     Sources,
+    /// Cloud accounts for discovery and load balancers, reached from Settings.
+    Providers,
     /// The instance domain guide, reached from Settings.
     Domain,
     /// First-run setup, opened on connect until the instance is onboarded.
@@ -410,6 +414,8 @@ pub struct ServiceView {
     pub replica: Option<u16>,
     /// The Settings tab's arrows and ⏎ act on the Scaling panel instead of the settings.
     pub scaling_focus: bool,
+    /// The Settings tab shows the load balancer's status instead of its panels.
+    pub lb_open: bool,
     pub metrics: MetricsView,
 }
 
@@ -568,6 +574,7 @@ pub enum ConfirmAction {
     DeleteNotifyChannel(Id),
     DeleteNotifyRule(Id),
     DeleteSource(Id),
+    DeleteProvider(Id),
     RemoveDomain,
     InstallDocker(Id),
 }
@@ -586,7 +593,8 @@ impl ConfirmAction {
             ConfirmAction::Update { .. } => Some("downloading"),
             ConfirmAction::DeleteSecret(_)
             | ConfirmAction::DeleteStorage(_)
-            | ConfirmAction::DeleteSource(_) => Some("deleting"),
+            | ConfirmAction::DeleteSource(_)
+            | ConfirmAction::DeleteProvider(_) => Some("deleting"),
             _ => None,
         }
     }
@@ -632,6 +640,7 @@ pub enum Command {
     Storage,
     Notifications,
     Sources,
+    Providers,
     Domain,
     Setup,
     BackUpInstance,
@@ -643,7 +652,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 22] = [
+    pub const ALL: [Command; 23] = [
         Command::Deploy,
         Command::Restart,
         Command::Stop,
@@ -658,6 +667,7 @@ impl Command {
         Command::Storage,
         Command::Notifications,
         Command::Sources,
+        Command::Providers,
         Command::Domain,
         Command::Setup,
         Command::BackUpInstance,
@@ -684,6 +694,7 @@ impl Command {
             Command::Storage => "storage",
             Command::Notifications => "notifications",
             Command::Sources => "sources",
+            Command::Providers => "providers: Hetzner Cloud, Cloudflare",
             Command::Domain => "instance domain",
             Command::Setup => "setup: domain, git, backups, notifications, first app",
             Command::BackUpInstance => "back up this instance",
@@ -710,6 +721,7 @@ impl Command {
             | Command::Storage
             | Command::Notifications
             | Command::Sources
+            | Command::Providers
             | Command::Domain
             | Command::Setup
             | Command::BackUpInstance
@@ -757,6 +769,12 @@ pub enum Overlay {
     ErrorDetail(crate::problem::ErrorDetail),
     /// Sets how many replicas a service runs.
     Scale(crate::replicas::ScaleDialog),
+    /// Which servers a service's replicas run on.
+    Placement(crate::lb::PlacementDialog),
+    /// What turning a load balancer on does, before it happens.
+    LbPlan(crate::lb::PlanDialog),
+    /// Turning a load balancer off.
+    LbDisable(crate::lb::DisableDialog),
 }
 
 /// A GitHub App being created with the manifest flow.
@@ -970,6 +988,7 @@ pub struct App {
     pub storage: StorageView,
     pub notify: NotifyView,
     pub sources: SourcesView,
+    pub providers: crate::providers::ProvidersView,
     pub domain: DomainView,
     pub setup: crate::setup::SetupView,
     /// Version the daemon is restarting into after an update.
@@ -1015,6 +1034,7 @@ impl App {
             storage: StorageView::default(),
             notify: NotifyView::default(),
             sources: SourcesView::default(),
+            providers: crate::providers::ProvidersView::default(),
             domain: DomainView::default(),
             setup: crate::setup::SetupView::default(),
             updating: None,
@@ -1177,9 +1197,16 @@ impl App {
         }
         if matches!(
             self.screen,
-            Screen::Servers | Screen::Settings | Screen::Secrets | Screen::Storage
+            Screen::Servers
+                | Screen::Settings
+                | Screen::Secrets
+                | Screen::Storage
+                | Screen::Providers
         ) {
             self.load_secrets();
+        }
+        if matches!(self.screen, Screen::Settings | Screen::Providers) {
+            self.load_providers();
         }
         if matches!(self.screen, Screen::Settings | Screen::Storage)
             || self.service.as_ref().is_some_and(|v| v.database)
@@ -1210,6 +1237,7 @@ impl App {
             | Screen::Storage
             | Screen::Notifications
             | Screen::Sources
+            | Screen::Providers
             | Screen::Domain
             | Screen::Setup => Vec::new(),
         };
@@ -1359,6 +1387,8 @@ impl App {
             Msg::Stats(id, s) => {
                 self.stats.insert(id, s);
             }
+            Msg::Providers(m) => self.apply_providers(m),
+            Msg::Lb(m) => self.apply_lb(m),
             Msg::Metrics(id, range, (container, replica), m) => {
                 if let Some(view) = self.service.as_mut().filter(|v| {
                     v.id == id
@@ -1660,13 +1690,17 @@ impl App {
                     Some(Overlay::Confirm(Confirm {
                         action: ConfirmAction::DeleteSecret(_)
                             | ConfirmAction::DeleteStorage(_)
-                            | ConfirmAction::DeleteSource(_),
+                            | ConfirmAction::DeleteSource(_)
+                            | ConfirmAction::DeleteProvider(_),
                         ..
                     }))
                 ) =>
             {
                 let hint = match (self.screen, self.secrets.selected().map(|s| s.kind)) {
                     (Screen::Storage, _) => None,
+                    (Screen::Providers, _) => Some(
+                        "Turn those load balancers off first: the service, Settings, l, x disable.",
+                    ),
                     (Screen::Sources, _) => {
                         Some("Point those services at another source first, on their Settings tab.")
                     }
@@ -2298,6 +2332,7 @@ impl App {
             container: None,
             replica: None,
             scaling_focus: false,
+            lb_open: false,
             metrics: MetricsView::default(),
         });
         self.load_detail(id);
@@ -2312,6 +2347,7 @@ impl App {
         };
         view.tab = tab;
         view.row = 0;
+        view.lb_open = false;
         view.logs.searching = false;
         if tab == Tab::Logs && view.log_task.is_none() {
             self.start_service_logs();
@@ -2707,6 +2743,7 @@ impl App {
             ConfirmAction::DeleteNotifyChannel(_) => "channel deleted",
             ConfirmAction::DeleteNotifyRule(_) => "rule deleted",
             ConfirmAction::DeleteSource(_)
+            | ConfirmAction::DeleteProvider(_)
             | ConfirmAction::RemoveDomain
             | ConfirmAction::InstallDocker(_) => "",
         }
@@ -2865,6 +2902,13 @@ impl App {
                     .delete_source(&id)
                     .await
                     .map(|_| "source deleted".to_string());
+                Msg::ConfirmDone(result.map_err(|e| format!("{e:#}")))
+            }),
+            ConfirmAction::DeleteProvider(id) => self.spawn(|c| async move {
+                let result = c
+                    .delete_provider(&id)
+                    .await
+                    .map(|_| "provider removed · its token stays in Secrets".to_string());
                 Msg::ConfirmDone(result.map_err(|e| format!("{e:#}")))
             }),
             ConfirmAction::RemoveDomain => {
@@ -4392,7 +4436,8 @@ impl App {
             | PickKind::Server
             | PickKind::Dir
             | PickKind::Channel
-            | PickKind::Scope => {}
+            | PickKind::Scope
+            | PickKind::Fixed => {}
         }
     }
 
@@ -4914,6 +4959,12 @@ impl App {
             "gh_branch" => return self.pick_branch(form),
             server_pick::KEY => return self.pick_server(form),
             "gh_root" => return self.pick_root(form),
+            "token_secret" => return self.pick_token_secret(form),
+            "provider" | "lb_type" | "location" | "network" | "dns"
+                if matches!(form.kind, FormKind::EnableLb { .. }) =>
+            {
+                return self.pick_lb_field(form, key);
+            }
             _ => {}
         }
         let current = Some(form.raw(key)).filter(|v| !v.is_empty());
@@ -4937,7 +4988,8 @@ impl App {
             | PickKind::Repo
             | PickKind::Branch
             | PickKind::Server
-            | PickKind::Dir => {
+            | PickKind::Dir
+            | PickKind::Fixed => {
                 vec![Line::styled(
                     "Storage connections are managed on the Storage screen (o in Settings).",
                     theme::muted(),
@@ -5041,6 +5093,9 @@ impl App {
                     field.value = id.unwrap_or_default();
                     field.shown = name;
                     field.placeholder = detail;
+                }
+                if key == "provider" {
+                    crate::lb::provider_picked(&mut form, &self.providers);
                 }
                 form.error = None;
                 form.move_focus(1);
@@ -5739,6 +5794,8 @@ impl App {
             FormKind::DownloadBackup { .. } => return self.submit_download(),
             FormKind::NotifyKind => return self.notify_kind_chosen(),
             FormKind::NotifyChannel { .. } => return self.submit_notify_channel(),
+            FormKind::AddProvider => return self.submit_add_provider(),
+            FormKind::EnableLb { .. } => return self.submit_lb_plan(),
             _ => {}
         }
         match build_request(form, alt) {
@@ -6809,7 +6866,9 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
         | FormKind::MoveService { .. }
         | FormKind::DownloadBackup { .. }
         | FormKind::NotifyKind
-        | FormKind::NotifyChannel { .. } => {
+        | FormKind::NotifyChannel { .. }
+        | FormKind::AddProvider
+        | FormKind::EnableLb { .. } => {
             return Err("internal: this form submits separately".into());
         }
     })

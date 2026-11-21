@@ -90,6 +90,10 @@ pub enum Hit {
     SetupChoice(usize),
     /// The Overview checklist panel.
     SetupChecklist,
+    /// A server in the placement dialog; a click toggles it.
+    PlacementRow(usize),
+    /// A strategy chip in the placement dialog, by its place in `PlacementStrategy::ALL`.
+    PlacementStrategy(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +124,8 @@ pub enum List {
     InstanceBackups,
     Notify,
     Rule,
+    Providers,
+    Targets,
 }
 
 thread_local! {
@@ -366,6 +372,7 @@ pub fn paint_hover(buf: &mut Buffer, mouse: &MouseState) {
             | Hit::Item(_)
             | Hit::Record(_)
             | Hit::Container(_)
+            | Hit::PlacementRow(_)
     );
     let rect = rect.intersection(buf.area);
     for y in rect.top()..rect.bottom() {
@@ -730,6 +737,12 @@ fn click(app: &mut App, hit: Hit, double: bool) {
                     press(app, KeyCode::Enter, KeyModifiers::NONE);
                 }
             }
+            Screen::Providers => {
+                app.select_provider(i);
+                if double && app.providers.open.is_none() {
+                    press(app, KeyCode::Enter, KeyModifiers::NONE);
+                }
+            }
             _ => {}
         },
         Hit::NotifySection(section) => app.notify.section = section,
@@ -805,6 +818,19 @@ fn click(app: &mut App, hit: Hit, double: bool) {
                 .cloned()
             {
                 app.copy(&r.value, &format!("the {} record value", r.kind));
+            }
+        }
+        Hit::PlacementRow(i) => {
+            if let Some(Overlay::Placement(d)) = app.overlay.as_mut() {
+                d.row = i;
+                d.toggle(i);
+            }
+        }
+        Hit::PlacementStrategy(i) => {
+            if let Some(Overlay::Placement(d)) = app.overlay.as_mut()
+                && let Some(s) = common::PlacementStrategy::ALL.get(i)
+            {
+                d.strategy = *s;
             }
         }
         Hit::FormChoice(i, choice) => {

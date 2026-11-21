@@ -42,6 +42,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Storage => storage(frame, body, app),
         Screen::Notifications => crate::notify::render(frame, body, app),
         Screen::Sources => sources(frame, body, app),
+        Screen::Providers => crate::providers::render(frame, body, app),
         Screen::Domain => domain(frame, body, app),
         Screen::Setup => crate::setup::render(frame, body, app),
     }
@@ -102,6 +103,18 @@ pub fn render(frame: &mut Frame, app: &App) {
         Some(Overlay::Scale(d)) => {
             dim(frame, area);
             crate::replicas::render_scale(frame, area, d, app.tick);
+        }
+        Some(Overlay::Placement(d)) => {
+            dim(frame, area);
+            crate::lb::render_placement(frame, area, d, app.tick);
+        }
+        Some(Overlay::LbPlan(d)) => {
+            dim(frame, area);
+            crate::lb::render_plan(frame, area, app, d, app.tick);
+        }
+        Some(Overlay::LbDisable(d)) => {
+            dim(frame, area);
+            crate::lb::render_disable(frame, area, d, app.tick);
         }
         None => {}
     }
@@ -381,6 +394,12 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                     ("x", "remove"),
                     ("X", "remove + data"),
                 ],
+                Tab::Settings if app.service.as_ref().is_some_and(|v| v.lb_open) => vec![
+                    ("↑↓", "move"),
+                    ("s", "sync"),
+                    ("f", "force sync"),
+                    ("x", "disable"),
+                ],
                 Tab::Settings => {
                     let scalable = app
                         .service
@@ -392,6 +411,9 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                         keys.extend([("←→", "panel"), ("s", "scale"), ("a", "autoscale")]);
                     }
                     keys.push(("m", "move"));
+                    if scalable {
+                        keys.extend([("p", "placement"), ("l", "load balancer")]);
+                    }
                     keys.push(("X", "delete service"));
                     keys
                 }
@@ -501,6 +523,7 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("s", "secrets"),
             ("o", "storage"),
             ("n", "notifications"),
+            ("p", "providers"),
             ("O", "setup"),
         ],
         Screen::Settings => vec![
@@ -617,6 +640,20 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                     keys.push(("⏎", "finish setup"));
                 }
                 keys.extend([("c", "check"), ("x", "delete")]);
+            }
+            keys
+        }
+        Screen::Providers if app.providers.open.is_some() => vec![("↑↓", "move"), ("c", "check")],
+        Screen::Providers => {
+            let mut keys = vec![("a", "add")];
+            if !app.providers.list.is_empty() {
+                keys = vec![
+                    ("↑↓", "move"),
+                    ("a", "add"),
+                    ("c", "check"),
+                    ("d", "remove"),
+                    ("⏎", "details"),
+                ];
             }
             keys
         }
@@ -2817,10 +2854,15 @@ fn volumes_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
 }
 
 fn settings_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
+    if view.lb_open
+        && let Some(d) = &view.detail
+    {
+        return crate::lb::render_status(frame, area, app, d, view.row);
+    }
     let [area, scaling] = Layout::horizontal([Constraint::Percentage(47), Constraint::Fill(1)])
         .spacing(1)
         .areas(area);
-    crate::replicas::scaling_panel(frame, scaling, view);
+    crate::replicas::scaling_panel(frame, scaling, app, view);
     let focused = !view.scaling_focus;
     let block = panel(
         title("Settings", focused),
@@ -3838,10 +3880,18 @@ fn settings(frame: &mut Frame, area: Rect, app: &App) {
         .spacing(1)
         .areas(row3);
     let contexts_h = (app.settings.contexts.contexts.len() as u16 + 3).clamp(5, 9);
-    let [backups, contexts] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(contexts_h)])
+    let [left, contexts] = Layout::vertical([Constraint::Fill(1), Constraint::Length(contexts_h)])
+        .spacing(1)
+        .areas(left);
+    let backups = if left.height >= 12 {
+        let [backups, providers] = Layout::vertical([Constraint::Fill(1), Constraint::Length(5)])
             .spacing(1)
             .areas(left);
+        crate::providers::summary(frame, providers, app);
+        backups
+    } else {
+        left
+    };
     instance_backups_panel(frame, backups, app);
     contexts_panel(frame, contexts, app);
     let [secrets, storage, sources, servers] = Layout::vertical([Constraint::Fill(1); 4])

@@ -37,6 +37,8 @@ pub enum PickKind {
     Server,
     /// A folder of a repository, for a service's root directory; ⏎ opens a folder.
     Dir,
+    /// A fixed list its caller filled, such as a provider or a load balancer type.
+    Fixed,
 }
 
 /// State of the repository and branch pickers: the search line and the page.
@@ -252,7 +254,8 @@ impl Picker {
             | PickKind::Repo
             | PickKind::Branch
             | PickKind::Server
-            | PickKind::Dir => return,
+            | PickKind::Dir
+            | PickKind::Fixed => return,
             PickKind::SshKey => {
                 let (key, comment) = daemon_key.map(short_key).unwrap_or_default();
                 let mut own = PickItem::new(
@@ -464,6 +467,7 @@ impl Picker {
             lines.push(Line::styled(
                 match self.kind {
                     PickKind::Channel => "no channels yet · add one on the Channels tab",
+                    PickKind::Fixed => "nothing to pick yet",
                     _ => "nothing to pick yet · add S3 credentials on the Secrets screen",
                 },
                 theme::muted(),

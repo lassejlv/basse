@@ -555,6 +555,7 @@ fn service_tab_labels_and_list_rows_match_their_targets() {
         container: None,
         replica: None,
         scaling_focus: false,
+        lb_open: false,
         metrics: Default::default(),
     });
     app.backups.insert(
@@ -3458,4 +3459,723 @@ async fn metrics_tab_picks_replicas_and_charts_their_count() {
     press(&mut app, KeyCode::Char('c'));
     click(&mut app, Position::new(all.x, all.y));
     assert_eq!(picked(&app), None);
+}
+
+fn provider(id: &str, kind: common::lb::ProviderKind) -> common::lb::Provider {
+    common::lb::Provider {
+        id: id.into(),
+        name: id.into(),
+        kind,
+        token_secret_id: format!("{id}-token"),
+        status: common::lb::ProviderStatus::Connected,
+        problem: None,
+        account: Some(match kind {
+            common::lb::ProviderKind::Hetzner => "3 servers".into(),
+            common::lb::ProviderKind::Cloudflare => "Fixture account".into(),
+        }),
+        load_balancing: kind == common::lb::ProviderKind::Cloudflare,
+        last_checked_at: Some(Timestamp::default()),
+        created_at: Timestamp::default(),
+    }
+}
+
+fn hetzner_discovery() -> common::lb::ProviderDiscovery {
+    use common::lb::*;
+    let matched = |server: &str, ip: &str, private: &str| ServerMatch {
+        server_id: server.into(),
+        address: Some(ip.into()),
+        hetzner: Some(HetznerServer {
+            id: 1,
+            name: server.into(),
+            location: "fsn1".into(),
+            network_zone: "eu-central".into(),
+            public_ipv4: Some(ip.into()),
+            public_ipv6: None,
+            private_networks: vec![PrivateAddress {
+                network_id: 7,
+                ip: private.into(),
+            }],
+        }),
+    };
+    ProviderDiscovery {
+        servers: vec![
+            matched("fixture-node", "198.51.100.2", "10.0.0.2"),
+            matched("fixture-worker", "198.51.100.3", "10.0.0.3"),
+            ServerMatch {
+                server_id: "fixture-lab".into(),
+                address: Some("192.0.2.40".into()),
+                hetzner: None,
+            },
+        ],
+        locations: vec![HetznerLocation {
+            name: "fsn1".into(),
+            city: "Falkenstein".into(),
+            network_zone: "eu-central".into(),
+        }],
+        lb_types: vec![HetznerLbType {
+            name: "lb11".into(),
+            description: "LB11".into(),
+            max_targets: 25,
+            max_connections: 10_000,
+            prices: vec![LocationPrice {
+                location: "fsn1".into(),
+                monthly: 5.39,
+                currency: "EUR".into(),
+            }],
+        }],
+        networks: vec![HetznerNetwork {
+            id: 7,
+            name: "fixture-net".into(),
+            ip_range: "10.0.0.0/16".into(),
+        }],
+        load_balancers: vec![
+            HetznerLbSummary {
+                id: 4182733,
+                name: "fixture-lb".into(),
+                location: "fsn1".into(),
+                lb_type: "lb11".into(),
+                public_ipv4: Some("203.0.113.20".into()),
+                managed: true,
+            },
+            HetznerLbSummary {
+                id: 99,
+                name: "hand-made-lb".into(),
+                location: "nbg1".into(),
+                lb_type: "lb11".into(),
+                public_ipv4: Some("203.0.113.31".into()),
+                managed: false,
+            },
+        ],
+        zones: Vec::new(),
+    }
+}
+
+fn service_lb() -> common::lb::ServiceLb {
+    use common::lb::*;
+    let target = |server: &str, address: &str| LbTarget {
+        server_id: server.into(),
+        address: address.into(),
+        replicas: 1,
+        provider_health: Some("healthy".into()),
+    };
+    ServiceLb {
+        config: LbConfig {
+            provider_id: "fixture-hetzner".into(),
+            mode: LbMode::Hetzner,
+            domains: Vec::new(),
+            lb_type: Some("lb11".into()),
+            location: Some("fsn1".into()),
+            network_id: Some(7),
+            adopt_lb_id: None,
+            dns_provider_id: Some("fixture-cloudflare".into()),
+            proxied: None,
+            adopt_records: false,
+        },
+        state: LbSyncState::InSync,
+        targets: vec![
+            target("fixture-node", "10.0.0.2"),
+            target("fixture-worker", "10.0.0.3"),
+        ],
+        resources: vec![
+            LbResource {
+                kind: LbResourceKind::HetznerLoadBalancer,
+                id: "4182733".into(),
+                name: "fixture-lb".into(),
+                created: true,
+            },
+            LbResource {
+                kind: LbResourceKind::CloudflareDnsRecord,
+                id: "9f2c1d".into(),
+                name: "web.example.test".into(),
+                created: true,
+            },
+        ],
+        addresses: vec!["203.0.113.20".into()],
+        dns: Vec::new(),
+        drift: Vec::new(),
+        last_sync_at: Some(Timestamp::default()),
+        last_error: None,
+        next_attempt_at: None,
+    }
+}
+
+/// Three servers (one offline), a Hetzner, a Cloudflare and a broken connection, and the web
+/// service spread over two servers behind a Hetzner load balancer.
+fn lb_fixture() -> App {
+    use common::lb::ProviderKind;
+    let mut app = replicas_fixture();
+    app.servers[1].kind = ServerKind::Ssh;
+    app.servers[1].host = Some("198.51.100.3".into());
+    let mut lab = server("fixture-lab");
+    lab.kind = ServerKind::Ssh;
+    lab.host = Some("192.0.2.40".into());
+    lab.status = ServerStatus::Offline;
+    app.servers.push(lab);
+    let mut broken = provider("fixture-stale", ProviderKind::Hetzner);
+    broken.status = common::lb::ProviderStatus::Error;
+    broken.problem = Some("token rejected · 401".into());
+    broken.account = None;
+    app.providers.list = vec![
+        provider("fixture-hetzner", ProviderKind::Hetzner),
+        provider("fixture-cloudflare", ProviderKind::Cloudflare),
+        broken,
+    ];
+    app.providers.loaded = true;
+    app.providers
+        .discovery
+        .insert("fixture-hetzner".into(), Ok(hetzner_discovery()));
+    app.providers
+        .users
+        .insert("fixture-hetzner".into(), vec!["fixture-web".into()]);
+    let mut token = secret("fixture-hetzner-token", common::SecretKind::Generic, None);
+    token.id = "fixture-hetzner-token".into();
+    app.secrets.list = vec![token];
+    let placement = common::Placement {
+        servers: vec!["fixture-node".into(), "fixture-worker".into()],
+        strategy: common::PlacementStrategy::Spread,
+        volumes_per_server: true,
+    };
+    let detail = app.details.get_mut("fixture-web").expect("fixture detail");
+    detail.service.scaling.placement = placement.clone();
+    detail.replicas.truncate(2);
+    detail.replicas[1].server_id = "fixture-worker".into();
+    detail.service.replicas = 2;
+    detail.lb = Some(service_lb());
+    for node in &mut app.tree.as_mut().expect("fixture tree").projects[0].environments {
+        for s in node.services.iter_mut().filter(|s| s.id == "fixture-web") {
+            s.scaling.placement = placement.clone();
+            s.replicas = 2;
+        }
+    }
+    app
+}
+
+fn lb_plan() -> common::lb::LbPlan {
+    use common::lb::*;
+    LbPlan {
+        actions: vec![
+            LbAction {
+                verb: LbVerb::Create,
+                resource: LbResourceKind::HetznerLoadBalancer,
+                name: "fixture-lb".into(),
+                detail: "lb11 in fsn1".into(),
+            },
+            LbAction {
+                verb: LbVerb::Create,
+                resource: LbResourceKind::CloudflareDnsRecord,
+                name: "web.example.test".into(),
+                detail: "A → load balancer, via fixture-cloudflare".into(),
+            },
+        ],
+        targets: service_lb().targets,
+        monthly_cost: Some(5.39),
+        currency: "EUR".into(),
+        cost_note: "Hetzner list price for lb11 in fsn1".into(),
+        dns: Vec::new(),
+        warnings: vec!["Hetzner bills it by the hour until you turn it off.".into()],
+    }
+}
+
+#[tokio::test]
+async fn providers_rows_detail_discovery_and_key_bar_have_targets() {
+    let mut app = lb_fixture();
+    app.screen = Screen::Settings;
+    app.settings.settings = Some(InstanceSettings {
+        version: "1.0.0".into(),
+        hostname: "fixture-host".into(),
+        public_ip: None,
+        public_ip_override: None,
+        listen: "127.0.0.1:7700".into(),
+        data_dir: "/fixture".into(),
+        data_dir_size: 0,
+        manage_proxy: true,
+        proxy: ProxyStatus::Running,
+        proxy_image: "example:1".into(),
+        docker_version: None,
+        ssh_public_key: None,
+        reclaimable: None,
+        supervised: false,
+        domain: None,
+        domain_verified: false,
+    });
+    let buf = draw(&app, 160, 40);
+    label(&buf, "3  2 connected · 1 need attention");
+    let link = assert_hit(&app, label(&buf, "p open providers"), char_key('p'));
+    click(&mut app, link);
+    assert_eq!(app.screen, Screen::Providers);
+
+    let buf = draw(&app, 160, 40);
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("fixture-hetzner ", Hit::Item(0)),
+            ("fixture-cloudflare", Hit::Item(1)),
+            ("fixture-stale", Hit::Item(2)),
+        ],
+    );
+    assert_hit(
+        &app,
+        label(&buf, "LAST CHECKED"),
+        Hit::List(List::Providers),
+    );
+    label(&buf, "error token rejected · 401");
+    label(&buf, "Fixture account · load balancing");
+    label(&buf, "fixture-hetzner-token  generic secret");
+    label(
+        &buf,
+        "fixture-web load balancer  fixture-project / fixture-env",
+    );
+    let check_row = label(&buf, "reaches").y;
+    let check = label_in(&buf, check_row..check_row + 1, "c check");
+    assert_hit(&app, check, char_key('c'));
+    let y = buf.area.bottom() - 1;
+    for (text, hit) in [
+        ("a add", char_key('a')),
+        ("c check", char_key('c')),
+        ("d remove", char_key('d')),
+        ("⏎ details", key(KeyCode::Enter)),
+        ("esc back", key(KeyCode::Esc)),
+    ] {
+        assert_hit(&app, label_on(&buf, y, text).expect("key bar hint"), hit);
+    }
+
+    let stale = label(&buf, "fixture-stale");
+    click(&mut app, Position::new(stale.x, stale.y));
+    assert_eq!(app.providers.row, 2);
+    let first = label(&buf, "fixture-hetzner ");
+    click(&mut app, Position::new(first.x, first.y));
+    click(&mut app, Position::new(first.x, first.y));
+    assert_eq!(app.providers.open.as_deref(), Some("fixture-hetzner"));
+
+    let buf = draw(&app, 160, 40);
+    label(&buf, "Providers / fixture-hetzner");
+    label(&buf, "matched by public IP");
+    label(&buf, "fixture-net · 10.0.0.2");
+    label(&buf, "not in this project");
+    label(&buf, "not managed by basse");
+    let rows = label(&buf, "PRIVATE NETWORK").y;
+    for (i, name) in ["fixture-node", "fixture-worker", "fixture-lab"]
+        .into_iter()
+        .enumerate()
+    {
+        let row = label_in(&buf, rows + 1..rows + 4, name);
+        assert_hit(&app, row, Hit::Item(i));
+    }
+    let lab = label_in(&buf, rows + 1..rows + 4, "fixture-lab");
+    click(&mut app, Position::new(lab.x, lab.y));
+    assert_eq!(app.providers.detail_row, 2);
+    assert_hit(
+        &app,
+        label_on(&buf, buf.area.bottom() - 1, "c check").expect("key bar"),
+        char_key('c'),
+    );
+    let back = label_on(&buf, buf.area.bottom() - 1, "esc back").expect("key bar");
+    click(&mut app, Position::new(back.x, back.y));
+    assert!(app.providers.open.is_none());
+    assert_eq!(app.screen, Screen::Providers);
+}
+
+#[tokio::test]
+async fn add_provider_form_picks_a_secret_and_a_provider_in_use_is_refused_up_front() {
+    let mut app = lb_fixture();
+    app.screen = Screen::Providers;
+    press(&mut app, KeyCode::Char('a'));
+    let list = app.providers.list.clone();
+    app.apply(crate::app::Msg::Providers(
+        crate::providers::ProvidersMsg::List(list),
+    ));
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Form(_))),
+        "a refreshed list keeps the form open"
+    );
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Add provider", |hit| {
+        matches!(
+            hit,
+            Hit::FormField(_) | Hit::FormChoice(..) | Hit::List(List::Form) | Hit::Key(..)
+        )
+    });
+    label(&buf, "connect a cloud account");
+    label(&buf, "saved as a secret");
+    label(&buf, "Hetzner: a read & write project token.");
+    let kind_row = label(&buf, "←→ choose").y;
+    let cloudflare = label_in(&buf, kind_row..kind_row + 1, " Cloudflare ");
+    click(&mut app, Position::new(cloudflare.x + 1, cloudflare.y));
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Form(f)) if f.choice_label("kind").as_deref() == Some("Cloudflare"))
+    );
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Form(f)) if f.error.as_deref() == Some("paste the API token, or pick a secret that holds it")),
+        "nothing to connect with"
+    );
+    let buf = draw(&app, 160, 40);
+    let secret = label(&buf, "— none");
+    click(&mut app, Position::new(secret.x, secret.y));
+    let Some(Overlay::Picker(p)) = &app.overlay else {
+        panic!("secret picker");
+    };
+    assert_eq!(p.items.len(), 2);
+    let buf = draw(&app, 160, 40);
+    let token = label(&buf, "fixture-hetzner-token");
+    click(&mut app, Position::new(token.x, token.y));
+    assert_hit(&app, label(&buf, "esc cancel"), key(KeyCode::Esc));
+    press(&mut app, KeyCode::Enter);
+    let Some(Overlay::Form(form)) = &app.overlay else {
+        panic!("back on the form");
+    };
+    assert_eq!(form.raw("token_secret"), "fixture-hetzner-token");
+    app.overlay = None;
+
+    press(&mut app, KeyCode::Char('d'));
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Remove provider", |hit| {
+        hit == key(KeyCode::Esc)
+    });
+    label(
+        &buf,
+        "fixture-web in fixture-project / fixture-env uses it for its",
+    );
+    label(
+        &buf,
+        "Turn that load balancer off first: fixture-web, Settings, l, x",
+    );
+    assert!((buf.area.top()..buf.area.bottom()).all(|y| label_on(&buf, y, "y remove").is_none()));
+    let close = assert_hit(&app, label(&buf, "esc close"), key(KeyCode::Esc));
+    click(&mut app, close);
+    assert!(app.overlay.is_none());
+
+    app.providers.row = 1;
+    press(&mut app, KeyCode::Char('d'));
+    let buf = draw(&app, 160, 40);
+    label(&buf, "Remove fixture-cloudflare?");
+    assert_hit(&app, label(&buf, "y remove"), char_key('y'));
+}
+
+#[tokio::test]
+async fn scaling_panel_shows_placement_and_the_load_balancer() {
+    let mut app = lb_fixture();
+    app.open_service("fixture-web", Tab::Settings);
+    let buf = draw(&app, 160, 40);
+    label(&buf, "Scaling & placement");
+    label(&buf, "fixture-node · fixture-worker");
+    label(&buf, "spread  one replica per server before doubling up");
+    label(&buf, "● Hetzner · lb11 · in sync · 2/2 targets healthy");
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("servers ", Hit::Scaling(5)),
+            ("strategy", Hit::Scaling(6)),
+            ("volumes per server", Hit::Scaling(7)),
+            ("load balancer ", Hit::Scaling(8)),
+        ],
+    );
+    let servers_row = label(&buf, "fixture-node · fixture-worker").y;
+    assert_hit(
+        &app,
+        label_in(&buf, servers_row..servers_row + 1, "p placement"),
+        char_key('p'),
+    );
+    assert_hit(&app, label(&buf, "l manage"), char_key('l'));
+    let y = buf.area.bottom() - 1;
+    for (text, hit) in [
+        ("p placement", char_key('p')),
+        ("l load balancer", char_key('l')),
+        ("m move", char_key('m')),
+    ] {
+        assert_hit(&app, label_on(&buf, y, text).expect("key bar hint"), hit);
+    }
+
+    let lb = label(&buf, "load balancer ");
+    click(&mut app, Position::new(lb.x, lb.y));
+    click(&mut app, Position::new(lb.x, lb.y));
+    let view = app.service.as_ref().expect("service view");
+    assert!(view.lb_open, "a double-click on the row opens the status");
+    app.close_lb();
+
+    if let Some(d) = app.service.as_mut().and_then(|v| v.detail.as_mut()) {
+        d.lb = None;
+    }
+    let buf = draw(&app, 160, 40);
+    label(&buf, "○ off");
+    let enable = assert_hit(&app, label(&buf, "l enable"), char_key('l'));
+    click(&mut app, enable);
+    assert!(matches!(
+        &app.overlay,
+        Some(Overlay::Form(f)) if matches!(f.kind, FormKind::EnableLb { .. })
+    ));
+}
+
+#[tokio::test]
+async fn placement_dialog_toggles_servers_strategy_and_volumes_by_click() {
+    use crate::lb::LbMsg;
+    let mut app = lb_fixture();
+    app.open_service("fixture-web", Tab::Settings);
+    press(&mut app, KeyCode::Char('p'));
+    app.apply(crate::app::Msg::Lb(LbMsg::Capacity(
+        "fixture-web".into(),
+        Ok(common::ScaleCapacity {
+            server_id: "fixture-node".into(),
+            mem_total: 8 << 30,
+            mem_free: 5 << 30,
+            per_replica: 85 << 20,
+            fits_more: 9,
+            servers: vec![
+                common::ServerCapacity {
+                    server_id: "fixture-node".into(),
+                    mem_total: 8 << 30,
+                    mem_free: 5 << 30,
+                    fits_more: 9,
+                    replicas: 1,
+                    problem: None,
+                },
+                common::ServerCapacity {
+                    server_id: "fixture-worker".into(),
+                    mem_total: 4 << 30,
+                    mem_free: 3 << 30,
+                    fits_more: 6,
+                    replicas: 1,
+                    problem: None,
+                },
+            ],
+        }),
+    )));
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Placement", |hit| {
+        matches!(
+            hit,
+            Hit::PlacementRow(0..=2) | Hit::PlacementStrategy(0..=1) | Hit::Key(..)
+        )
+    });
+    label(&buf, "FREE MEMORY");
+    label(&buf, crate::util::bytes(5 << 30).as_str());
+    label(&buf, "offline  can't take replicas");
+    label(&buf, "fixture-data → /fixture/data is copied per server");
+    assert_hit(&app, label(&buf, "⏎ use 2 servers"), key(KeyCode::Enter));
+    for (text, hit) in [
+        ("space toggle", char_key(' ')),
+        ("s strategy", char_key('s')),
+        ("v volumes", char_key('v')),
+        ("esc cancel", key(KeyCode::Esc)),
+    ] {
+        assert_hit(&app, label(&buf, text), hit);
+    }
+    let placed = |app: &App| match &app.overlay {
+        Some(Overlay::Placement(d)) => d.chosen(),
+        _ => panic!("placement dialog"),
+    };
+    let lab = label(&buf, "[ ] fixture-lab");
+    click(&mut app, Position::new(lab.x, lab.y));
+    assert_eq!(placed(&app).len(), 2, "an offline server can't be added");
+    let worker = label(&buf, "[x] fixture-worker");
+    click(&mut app, Position::new(worker.x, worker.y));
+    assert_eq!(placed(&app), ["fixture-node"]);
+    let buf = draw(&app, 160, 40);
+    label(&buf, "⏎ use 1 server");
+    let pack = label(&buf, " pack ");
+    click(&mut app, Position::new(pack.x, pack.y));
+    assert!(matches!(
+        &app.overlay,
+        Some(Overlay::Placement(d)) if d.strategy == common::PlacementStrategy::Pack
+    ));
+    let buf = draw(&app, 160, 40);
+    label(&buf, "fill servers in order before using the next");
+    click(&mut app, Position::new(worker.x, worker.y));
+    let check = label(&buf, "[x] on");
+    click(&mut app, Position::new(check.x, check.y));
+    let buf = draw(&app, 160, 40);
+    label(
+        &buf,
+        "fixture-data → /fixture/data can't span servers: v keeps a copy per server.",
+    );
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Placement(d)) if !d.busy),
+        "volumes on two servers need a copy per server"
+    );
+    let esc = label(&buf, "esc cancel");
+    click(&mut app, Position::new(esc.x, esc.y));
+    assert!(app.overlay.is_none());
+}
+
+#[tokio::test]
+async fn load_balancer_form_plan_status_drift_and_disable_have_targets() {
+    use crate::lb::LbMsg;
+    let mut app = lb_fixture();
+    app.open_service("fixture-web", Tab::Settings);
+    let lb = app
+        .service
+        .as_mut()
+        .and_then(|v| v.detail.as_mut())
+        .and_then(|d| d.lb.take());
+    press(&mut app, KeyCode::Char('l'));
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Load balancer", |hit| {
+        matches!(
+            hit,
+            Hit::FormField(_) | Hit::FormChoice(..) | Hit::List(List::Form) | Hit::Key(..)
+        )
+    });
+    label(&buf, "fixture-web · enable");
+    label(&buf, "fixture-hetzner  Hetzner Cloud");
+    label(&buf, " Cloudflare DNS ");
+    label(
+        &buf,
+        "Targets follow healthy replicas. Basse only ever deletes what it created itself.",
+    );
+    let dns = label(&buf, "records to add by hand");
+    click(&mut app, Position::new(dns.x, dns.y));
+    let Some(Overlay::Picker(p)) = &app.overlay else {
+        panic!("dns picker");
+    };
+    assert_eq!(p.items.len(), 2, "none and the Cloudflare connection");
+    let buf = draw(&app, 160, 40);
+    let cf = label(&buf, "fixture-cloudflare");
+    click(&mut app, Position::new(cf.x, cf.y));
+    click(&mut app, Position::new(cf.x, cf.y));
+    let Some(Overlay::Form(form)) = &app.overlay else {
+        panic!("back on the form");
+    };
+    assert_eq!(form.raw("dns"), "fixture-cloudflare");
+    let buf = draw(&app, 160, 40);
+    let lb_type = label(&buf, "type ");
+    click(&mut app, Position::new(lb_type.x, lb_type.y));
+    let buf = draw(&app, 160, 40);
+    label(&buf, "25 targets · 10k connections");
+    label(&buf, "€5.39/month");
+    press(&mut app, KeyCode::Enter);
+    let buf = draw(&app, 160, 40);
+    label(&buf, "25 targets · 10k connections");
+    let network = label(&buf, "public addresses");
+    click(&mut app, Position::new(network.x, network.y));
+    let buf = draw(&app, 160, 40);
+    label(&buf, "10.0.0.0/16");
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert!(matches!(
+        &app.overlay,
+        Some(Overlay::Form(f)) if f.raw("network") == "7"
+    ));
+
+    let Some(Overlay::Form(form)) = app.overlay.as_mut() else {
+        panic!("load balancer form");
+    };
+    form.busy = true;
+    app.apply(crate::app::Msg::Lb(LbMsg::Plan(
+        "fixture-web".into(),
+        Ok(lb_plan()),
+    )));
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Load balancer", |hit| {
+        matches!(hit, Hit::Key(..))
+    });
+    label(&buf, "Basse will");
+    label(&buf, "Hetzner load balancer");
+    label(&buf, "10.0.0.2 · fixture-net");
+    label(&buf, "≈ €5.39/month");
+    label(
+        &buf,
+        "! Hetzner bills it by the hour until you turn it off.",
+    );
+    assert_hit(&app, label(&buf, "y enable"), char_key('y'));
+    assert_hit(&app, label(&buf, "esc cancel"), key(KeyCode::Esc));
+    let back = assert_hit(&app, label(&buf, "b back to edit"), char_key('b'));
+    click(&mut app, back);
+    assert!(matches!(
+        &app.overlay,
+        Some(Overlay::Form(f)) if matches!(f.kind, FormKind::EnableLb { .. }) && !f.busy
+    ));
+
+    app.overlay = None;
+    app.apply(crate::app::Msg::Lb(LbMsg::Enabled(
+        "fixture-web".into(),
+        Ok(lb.expect("fixture load balancer")),
+    )));
+    assert!(app.service.as_ref().is_some_and(|v| v.lb_open));
+    assert!(
+        app.toast
+            .take()
+            .is_some_and(|t| t.text == "Hetzner Load Balancer on · it syncs in the background")
+    );
+    let buf = draw(&app, 160, 40);
+    label(&buf, "● in sync");
+    label(
+        &buf,
+        "203.0.113.20   web.example.test → A record via fixture-cloudflare",
+    );
+    label(
+        &buf,
+        "lb11 · fsn1   fixture-net, TCP 80 and 443, health check on the proxy",
+    );
+    label(&buf, "fixture-hetzner · Hetzner Cloud");
+    label(&buf, "2 of 2 healthy");
+    label(&buf, "Created by basse");
+    label(&buf, "deleted when you disable it");
+    assert_hit(
+        &app,
+        label(&buf, "HETZNER HEALTH"),
+        Hit::List(List::Targets),
+    );
+    let rows = label(&buf, "HETZNER HEALTH").y;
+    for i in 0..2u16 {
+        let row = label_in(&buf, rows + 1 + i..rows + 2 + i, "1 of 1");
+        assert_hit(&app, row, Hit::Row(usize::from(i)));
+    }
+    let y = buf.area.bottom() - 1;
+    for (text, hit) in [
+        ("s sync", char_key('s')),
+        ("f force sync", char_key('f')),
+        ("x disable", char_key('x')),
+        ("esc back", key(KeyCode::Esc)),
+    ] {
+        assert_hit(&app, label_on(&buf, y, text).expect("key bar hint"), hit);
+    }
+    let second = label_in(&buf, rows + 2..rows + 3, "fixture-worker");
+    click(&mut app, Position::new(second.x, second.y));
+    assert_eq!(app.service.as_ref().map(|v| v.row), Some(1));
+
+    if let Some(lb) = app
+        .service
+        .as_mut()
+        .and_then(|v| v.detail.as_mut())
+        .and_then(|d| d.lb.as_mut())
+    {
+        lb.state = common::lb::LbSyncState::Drift;
+        lb.drift = vec!["targets changed outside Basse: 10.0.0.9 added".into()];
+    }
+    let buf = draw(&app, 160, 40);
+    label(&buf, "● drift");
+    label(&buf, "waiting for you");
+    label(
+        &buf,
+        "! targets changed outside Basse: 10.0.0.9 added · f force sync",
+    );
+    let drift = label(&buf, "! targets changed").y;
+    assert_hit(
+        &app,
+        label_in(&buf, drift..drift + 1, "f force sync"),
+        char_key('f'),
+    );
+
+    press(&mut app, KeyCode::Char('x'));
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Turn off load balancer", |hit| {
+        matches!(hit, Hit::Key(..))
+    });
+    label(&buf, "Delete the 2 resources Basse created?");
+    label(&buf, "lb11 in fsn1 · billed until deleted");
+    label(
+        &buf,
+        "Resources Basse adopted instead of creating are always kept.",
+    );
+    assert_hit(&app, label(&buf, "y delete 2 resources"), char_key('y'));
+    assert_hit(&app, label(&buf, "k keep them"), char_key('k'));
+    let cancel = assert_hit(&app, label(&buf, "esc cancel"), key(KeyCode::Esc));
+    click(&mut app, cancel);
+    assert!(app.overlay.is_none());
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.service.as_ref().is_some_and(|v| v.lb_open));
+    assert_eq!(app.screen, Screen::Service);
 }

@@ -73,6 +73,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         Screen::Storage => storage(app, key),
         Screen::Notifications => notifications(app, key),
         Screen::Sources => sources(app, key),
+        Screen::Providers => providers(app, key),
         Screen::Domain => domain(app, key),
         Screen::Setup => crate::setup::keys(app, key),
     }
@@ -112,6 +113,25 @@ fn sources(app: &mut App, key: KeyEvent) {
                 "delete",
             );
         }
+        _ => {}
+    }
+}
+
+fn providers(app: &mut App, key: KeyEvent) {
+    let open = app.providers.open.is_some();
+    let row = if open {
+        app.providers.detail_row
+    } else {
+        app.providers.row
+    };
+    match key.code {
+        KeyCode::Esc => app.close_providers(),
+        KeyCode::Up | KeyCode::Char('k') => app.select_provider(row.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') => app.select_provider(row + 1),
+        KeyCode::Char('c') => app.check_provider(),
+        KeyCode::Char('a') if !open => app.form_add_provider(),
+        KeyCode::Enter if !open => app.open_discovery(),
+        KeyCode::Char('d' | 'x') | KeyCode::Delete if !open => app.ask_remove_provider(),
         _ => {}
     }
 }
@@ -367,6 +387,9 @@ fn overlay(app: &mut App, key: KeyEvent) {
         Some(Overlay::ServerDetail(_)) => crate::problem::server_detail_keys(app, key),
         Some(Overlay::ErrorDetail(_)) => crate::problem::error_detail_keys(app, key),
         Some(Overlay::Scale(_)) => crate::replicas::scale_keys(app, key),
+        Some(Overlay::Placement(_)) => crate::lb::placement_keys(app, key),
+        Some(Overlay::LbPlan(_)) => crate::lb::plan_keys(app, key),
+        Some(Overlay::LbDisable(_)) => crate::lb::disable_keys(app, key),
         Some(Overlay::Form(form)) => match form.handle_key(key) {
             FormAction::None => {}
             FormAction::Cancel => {
@@ -531,6 +554,7 @@ pub fn run_command(app: &mut App, cmd: Command) {
         Command::Storage => app.open_storage(),
         Command::Notifications => app.open_notifications(),
         Command::Sources => app.open_sources(),
+        Command::Providers => app.open_providers(),
         Command::Domain => app.open_domain(),
         Command::Setup => app.open_setup(),
         Command::BackUpInstance => {
@@ -738,6 +762,14 @@ fn overview(app: &mut App, key: KeyEvent) {
 }
 
 fn service(app: &mut App, key: KeyEvent) {
+    if app
+        .service
+        .as_ref()
+        .is_some_and(|v| v.tab == Tab::Settings && v.lb_open)
+        && crate::lb::status_keys(app, key)
+    {
+        return;
+    }
     let Some(view) = app.service.as_mut() else {
         return;
     };
@@ -802,6 +834,8 @@ fn service(app: &mut App, key: KeyEvent) {
             }
             KeyCode::Char('s') => return app.open_scale(),
             KeyCode::Char('a') => return app.form_autoscale(),
+            KeyCode::Char('p') => return app.open_placement(),
+            KeyCode::Char('l') => return app.open_lb(),
             KeyCode::Enter if view.scaling_focus => {
                 let row = view.row;
                 return app.edit_scaling_row(row);
@@ -1370,6 +1404,7 @@ fn settings(app: &mut App, key: KeyEvent) {
         KeyCode::Char('n') => app.open_notifications(),
         KeyCode::Char('d') => app.open_domain(),
         KeyCode::Char('g') => app.open_sources(),
+        KeyCode::Char('p') => app.open_providers(),
         KeyCode::Char('m') => {
             let on = !s.manage_proxy;
             app.change_settings(

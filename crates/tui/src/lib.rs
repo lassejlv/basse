@@ -4,6 +4,7 @@ mod app;
 mod database;
 mod form;
 mod keys;
+mod lb;
 mod metrics;
 mod mouse;
 #[cfg(test)]
@@ -11,6 +12,7 @@ mod mouse_tests;
 mod notify;
 mod picker;
 mod problem;
+mod providers;
 mod replicas;
 mod server_pick;
 mod setup;

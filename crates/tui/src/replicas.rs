@@ -4,14 +4,15 @@
 
 use crate::app::{App, Msg, Overlay, ServiceView, Tab};
 use crate::form::{Field, Form, FormKind};
+use crate::lb;
 use crate::mouse::{self, Hit, List};
 use crate::theme;
 use crate::util::{self, truncate};
 use crate::view::{action_chip, dialog, inside, panel, rule_line, title};
 use common::api::UpdateService;
 use common::{
-    Autoscale, BuildMethod, Id, LbPolicy, MAX_REPLICAS, Replica, ReplicaHealth, ScaleCapacity,
-    Service, Source,
+    Autoscale, BuildMethod, Id, LbPolicy, MAX_REPLICAS, PlacementStrategy, Replica, ReplicaHealth,
+    ScaleCapacity, Service, Source,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -32,16 +33,20 @@ const COLUMNS: [(&str, usize); 8] = [
     ("CONTAINER", 0),
 ];
 
-/// Rows of the Scaling panel, in order.
-pub const SCALING_ROWS: [&str; 5] = [
+/// Rows of the Scaling panel, in order: scaling, then placement, then the load balancer.
+pub const SCALING_ROWS: [&str; 9] = [
     "replicas",
     "load balancing",
     "rolling surge",
     "autoscale",
     "shared volume",
+    "servers",
+    "strategy",
+    "volumes per server",
+    "load balancer",
 ];
 
-const SCALING_KEY_W: usize = 16;
+const SCALING_KEY_W: usize = 20;
 
 /// A Scaling panel row: its value and the key hint after it.
 type ScalingRow = (Vec<Span<'static>>, Option<(char, &'static str)>);
@@ -59,7 +64,7 @@ pub fn scalable(service: &Service) -> bool {
 }
 
 /// Why a service has no scaling, for the one line the Scaling panel shows instead.
-fn unsupported(service: &Service) -> &'static str {
+pub fn unsupported(service: &Service) -> &'static str {
     match service.source {
         Source::Database { .. } => "databases run one replica · scaling is not supported",
         _ => "compose services run one replica · scaling is not supported",
@@ -321,16 +326,19 @@ fn on_off(on: bool) -> Vec<Span<'static>> {
 
 /// The Scaling panel of the Settings tab. ⏎ on a row edits it; `s` and `a` open the scale
 /// dialog and the autoscale form.
-pub(crate) fn scaling_panel(frame: &mut Frame, area: Rect, view: &ServiceView) {
+pub(crate) fn scaling_panel(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
     let focused = view.scaling_focus;
     let Some(d) = &view.detail else {
-        frame.render_widget(panel(title("Scaling", false), None, false), area);
+        frame.render_widget(
+            panel(title("Scaling & placement", false), None, false),
+            area,
+        );
         return;
     };
     let s = &d.service;
     let can = scalable(s);
     let block = panel(
-        title("Scaling", focused),
+        title("Scaling & placement", focused),
         (can && focused).then(|| Line::from(Span::styled("⏎ to edit", theme::muted()))),
         focused,
     );
@@ -356,7 +364,19 @@ pub(crate) fn scaling_panel(frame: &mut Frame, area: Rect, view: &ServiceView) {
             theme::muted(),
         ));
     }
-    let rows: [ScalingRow; 5] = [
+    let server = |id: &Id| {
+        app.servers
+            .iter()
+            .find(|x| &x.id == id)
+            .map_or(id.clone(), |x| x.name.clone())
+    };
+    let placement = &sc.placement;
+    let servers: Vec<String> = placement
+        .servers_or(&s.server_id)
+        .iter()
+        .map(server)
+        .collect();
+    let rows: [ScalingRow; 9] = [
         (
             vec![Span::styled(s.replicas.to_string(), theme::text())],
             Some(('s', "scale")),
@@ -377,9 +397,31 @@ pub(crate) fn scaling_panel(frame: &mut Frame, area: Rect, view: &ServiceView) {
         ),
         (autoscale, Some(('a', "autoscale"))),
         (on_off(sc.shared_volume_ok), None),
+        (
+            vec![Span::styled(servers.join(" · "), theme::text())],
+            Some(('p', "placement")),
+        ),
+        (
+            vec![
+                Span::styled(placement.strategy.to_string(), theme::text()),
+                Span::styled(
+                    format!("  {}", lb::strategy_note(placement.strategy)),
+                    theme::muted(),
+                ),
+            ],
+            None,
+        ),
+        (on_off(placement.volumes_per_server), None),
+        (
+            lb::summary_line(d.lb.as_ref()),
+            Some(('l', if d.lb.is_some() { "manage" } else { "enable" })),
+        ),
     ];
     let mut y = inner.y;
     for (i, (value, hint)) in rows.into_iter().enumerate() {
+        if matches!(i, 5 | 8) {
+            y += 1;
+        }
         if y >= inner.bottom() {
             break;
         }
@@ -691,6 +733,23 @@ impl App {
                 self.overlay = Some(Overlay::Form(form));
             }
             3 => self.form_autoscale(),
+            5 => self.open_placement(),
+            6 => self.change_placement(|p| {
+                p.strategy = match p.strategy {
+                    PlacementStrategy::Spread => PlacementStrategy::Pack,
+                    PlacementStrategy::Pack => PlacementStrategy::Spread,
+                };
+                format!("placement strategy {} · applied", p.strategy)
+            }),
+            7 => self.change_placement(|p| {
+                p.volumes_per_server = !p.volumes_per_server;
+                if p.volumes_per_server {
+                    "volumes per server on · each server keeps its own copy".into()
+                } else {
+                    "volumes per server off".into()
+                }
+            }),
+            8 => self.open_lb(),
             _ => {
                 let on = !s.scaling.shared_volume_ok;
                 let body = UpdateService {
