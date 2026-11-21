@@ -278,8 +278,11 @@ enum SecretsCmd {
         #[arg(long)]
         kind: SecretKind,
         /// File holding the value: the private key, the S3 secret access key, or the value.
-        #[arg(long)]
+        #[arg(long, visible_alias = "from-file")]
         file: Option<PathBuf>,
+        /// Read the value from stdin (the default without --file).
+        #[arg(long, conflicts_with = "file")]
+        stdin: bool,
         /// Access key id of s3 credentials (the secret access key comes from --file or stdin).
         #[arg(long)]
         access_key_id: Option<String>,
@@ -303,8 +306,10 @@ enum SecretsCmd {
     /// Replace the value, read from --file or stdin like `add`.
     Replace {
         secret: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "from-file")]
         file: Option<PathBuf>,
+        #[arg(long, conflicts_with = "file")]
+        stdin: bool,
         #[arg(long)]
         access_key_id: Option<String>,
     },
@@ -1273,7 +1278,11 @@ async fn find_secret(c: &Client, query: &str) -> Result<Secret> {
 fn read_value(file: Option<&PathBuf>) -> Result<String> {
     use std::io::{IsTerminal as _, Read as _};
     if let Some(path) = file {
-        return std::fs::read_to_string(path)
+        let path = match (path.strip_prefix("~"), std::env::var_os("HOME")) {
+            (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
+            _ => path.clone(),
+        };
+        return std::fs::read_to_string(&path)
             .with_context(|| format!("cannot read {}", path.display()));
     }
     if std::io::stdin().is_terminal() {
@@ -1296,7 +1305,12 @@ fn secret_value(
     }
     let raw = read_value(file)?;
     Ok(match kind {
-        SecretKind::SshKey => SecretValue::SshKey { private_key: raw },
+        SecretKind::SshKey => {
+            common::ssh::inspect_private_key(&raw).map_err(anyhow::Error::msg)?;
+            SecretValue::SshKey {
+                private_key: common::ssh::normalize_private_key(&raw),
+            }
+        }
         SecretKind::S3Credentials => SecretValue::S3Credentials {
             access_key_id: access_key_id.context("s3 credentials need --access-key-id")?,
             secret_access_key: raw.trim().to_string(),
@@ -1379,6 +1393,7 @@ async fn secrets(c: &Client, cmd: SecretsCmd, json: bool) -> Result<()> {
             kind,
             file,
             access_key_id,
+            ..
         } => {
             let value = secret_value(kind, file.as_ref(), access_key_id)?;
             let s = c.create_secret(&CreateSecret { name, value }).await?;
@@ -1440,6 +1455,7 @@ async fn secrets(c: &Client, cmd: SecretsCmd, json: bool) -> Result<()> {
             secret,
             file,
             access_key_id,
+            ..
         } => {
             let s = find_secret(c, &secret).await?;
             let body = UpdateSecret {

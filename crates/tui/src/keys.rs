@@ -372,6 +372,7 @@ fn overlay(app: &mut App, key: KeyEvent) {
                 app.overlay = None;
             }
             FormAction::Pick(field) => app.pick_for_form(field),
+            FormAction::Load { path, into } => app.load_into_form(&path, into),
             FormAction::Submit { alt } => {
                 if matches!(form.kind, FormKind::EnvVar { .. }) {
                     app.submit_env_form(alt);

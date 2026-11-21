@@ -208,7 +208,7 @@ pub async fn connect_github_app(
 ) -> ApiResult<Json<GitSource>> {
     require_domain(&state)?;
     check_name(&state, &body.name).await?;
-    let private_key = format!("{}\n", body.private_key.trim());
+    let private_key = common::ssh::normalize_private_key(&body.private_key);
     github::app_jwt(body.app_id, &private_key)
         .map_err(|e| AppError::BadRequest(format!("{e:#}")))?;
     let (html_url, api_url) = github::base_urls(body.html_url.as_deref(), body.api_url.as_deref())

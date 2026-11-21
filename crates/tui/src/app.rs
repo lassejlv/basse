@@ -3043,18 +3043,17 @@ impl App {
                         .collect(),
                 ),
                 Field::text("name", "name").placeholder("github-deploy"),
-                Field::text("private_key", "private key")
-                    .masked()
-                    .hint("paste, or a file path"),
+                key_area(),
+                key_file(),
                 Field::text("access_key_id", "access key id"),
                 Field::text("secret_access_key", "secret key").masked(),
-                Field::text("value", "value").masked(),
+                value_area(),
+                value_file(),
             ],
         )
         .subtitle("create or import")
         .note(vec![
-            "Paste an OpenSSH private key without a passphrase, or type a path like".into(),
-            "~/.ssh/id_ed25519 to read it from this machine. Values stay masked.".into(),
+            "Paste the value or load it from a file. ⏎ adds a line, ctrl+s saves.".into(),
         ])
         .submit("add", None)
         .focus_on("name");
@@ -3093,17 +3092,13 @@ impl App {
             return;
         };
         let fields = match s.kind {
-            SecretKind::SshKey => vec![
-                Field::text("private_key", "private key")
-                    .masked()
-                    .hint("paste, or a file path"),
-            ],
+            SecretKind::SshKey => vec![key_area(), key_file()],
             SecretKind::S3Credentials => vec![
                 Field::text("access_key_id", "access key id")
                     .value(s.public_part.clone().unwrap_or_default()),
                 Field::text("secret_access_key", "secret key").masked(),
             ],
-            SecretKind::Generic => vec![Field::text("value", "value").masked()],
+            SecretKind::Generic => vec![value_area(), value_file()],
             SecretKind::GithubApp => return,
         };
         let users = if s.used_by.is_empty() {
@@ -3124,6 +3119,31 @@ impl App {
         .note(vec![users])
         .submit("replace", None);
         self.overlay = Some(Overlay::Form(form));
+    }
+
+    /// ⏎ on a form's "from file" row: the file is read on this machine and goes into the area
+    /// `into`, so only its contents travel to the daemon.
+    pub fn load_into_form(&mut self, path: &str, into: &'static str) {
+        let Some(Overlay::Form(form)) = &mut self.overlay else {
+            return;
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let text = match read_local_file(path, home.as_deref()) {
+            Ok(text) => common::ssh::normalize_newlines(&text),
+            Err(e) => return form.fail(e),
+        };
+        let lines = text.lines().count();
+        form.fields[form.focus].value.clear();
+        if let Some(i) = form.fields.iter().position(|f| f.key == into) {
+            form.fields[i].value = text;
+            form.focus = i;
+        }
+        form.error = None;
+        form.refresh();
+        self.toast(format!(
+            "loaded {path} · {lines} line{}",
+            if lines == 1 { "" } else { "s" }
+        ));
     }
 
     // Storage
@@ -3803,9 +3823,13 @@ impl App {
                     .value(DEFAULT_GITHUB)
                     .hint("or your Enterprise URL"),
                 Field::text("app_id", "app id").hint("from the app's page"),
-                Field::text("private_key", "private key")
+                Field::area("private_key", "private key")
                     .masked()
-                    .hint("a .pem path, or paste"),
+                    .placeholder("paste the .pem here"),
+                Field::text("pem_file", "from file")
+                    .placeholder("~/Downloads/app.private-key.pem")
+                    .hint("⏎ load")
+                    .loads("private_key"),
                 Field::text("installation", "installation")
                     .placeholder("found on its own if empty")
                     .hint("optional"),
@@ -5723,7 +5747,33 @@ fn passphrase(form: &Form) -> Result<Option<String>, String> {
     Ok(Some(p))
 }
 
-/// The value fields of a secret form. A private key that is not pasted is read from the path typed.
+/// A secret form's multi-line private key, checked as it is typed or pasted.
+fn key_area() -> Field {
+    Field::area("private_key", "private key")
+        .masked()
+        .placeholder("paste the key here")
+}
+
+/// Reads a key file on this machine into the private key area.
+fn key_file() -> Field {
+    Field::text("key_file", "from file")
+        .placeholder("~/.ssh/id_ed25519")
+        .hint("⏎ load")
+        .loads("private_key")
+}
+
+fn value_area() -> Field {
+    Field::area("value", "value").masked()
+}
+
+fn value_file() -> Field {
+    Field::text("value_file", "from file")
+        .placeholder("~/path/to/file")
+        .hint("⏎ load")
+        .loads("value")
+}
+
+/// The value fields of a secret form. A private key is checked here as the daemon will.
 fn secret_value(form: &Form, kind: SecretKind) -> Result<SecretValue, String> {
     let required = |key: &str, what: &str| {
         let v = form.raw(key);
@@ -5735,10 +5785,10 @@ fn secret_value(form: &Form, kind: SecretKind) -> Result<SecretValue, String> {
     };
     Ok(match kind {
         SecretKind::SshKey => {
-            let input = required("private_key", "the private key")?;
-            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let key = required("private_key", "the private key")?;
+            common::ssh::inspect_private_key(&key)?;
             SecretValue::SshKey {
-                private_key: read_private_key(input.trim(), home.as_deref())?,
+                private_key: common::ssh::normalize_private_key(&key),
             }
         }
         SecretKind::S3Credentials => SecretValue::S3Credentials {
@@ -5758,21 +5808,20 @@ fn secret_value(form: &Form, kind: SecretKind) -> Result<SecretValue, String> {
     })
 }
 
-/// A pasted OpenSSH private key as is, or the contents of the file at the path typed.
-pub fn read_private_key(input: &str, home: Option<&std::path::Path>) -> Result<String, String> {
-    if input.contains("PRIVATE KEY") {
-        return Ok(format!("{}\n", input.trim_end()));
+/// The text of a file on this machine, for a form's "from file" row. `~/` is the home directory.
+pub fn read_local_file(input: &str, home: Option<&std::path::Path>) -> Result<String, String> {
+    if input.is_empty() {
+        return Err("type a path, like ~/.ssh/id_ed25519".into());
     }
     let path = match (input.strip_prefix("~/"), home) {
         (Some(rest), Some(home)) => home.join(rest),
         _ => PathBuf::from(input),
     };
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    if !text.contains("PRIVATE KEY") {
-        return Err(format!("{} is not a private key", path.display()));
+    let unreadable = |e: std::io::Error| format!("cannot read {}: {e}", path.display());
+    if std::fs::metadata(&path).map_err(unreadable)?.len() > 1 << 20 {
+        return Err(format!("{} is larger than 1 MiB", path.display()));
     }
-    Ok(text)
+    std::fs::read_to_string(&path).map_err(unreadable)
 }
 
 fn port(text: &str, required: bool) -> Result<Option<u16>, String> {
@@ -6212,9 +6261,8 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                 .map_err(|_| "the app id is a number, on the app's settings page")?;
             let key = form.raw("private_key");
             if key.trim().is_empty() {
-                return Err("the private key is required, a .pem path or pasted".into());
+                return Err("the private key is required: paste it or load the .pem file".into());
             }
-            let home = std::env::var_os("HOME").map(PathBuf::from);
             let installation = form.get("installation");
             let installation_id = if installation.is_empty() {
                 None
@@ -6228,7 +6276,7 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
             Request::ConnectApp(ConnectGithubApp {
                 name: named("name")?,
                 app_id,
-                private_key: read_private_key(key.trim(), home.as_deref())?,
+                private_key: common::ssh::normalize_private_key(&key),
                 installation_id,
                 webhook_secret: Some(form.raw("webhook_secret")).filter(|s| !s.is_empty()),
                 html_url: App::github_url(form),
@@ -6274,6 +6322,259 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::form::FormAction;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn test_app() -> App {
+        let client = client::Client::new("http://localhost", "test").unwrap();
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        App::new(client, "test".into(), tx)
+    }
+
+    /// A throwaway OpenSSH key from `ssh-keygen`, as `~/.ssh/id_<kind>` holds it.
+    fn throwaway_key(dir: &std::path::Path, kind: &str) -> String {
+        let path = dir.join(format!("id_{kind}"));
+        let status = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", kind, "-N", "", "-C", "test@host", "-f"])
+            .arg(&path)
+            .status()
+            .expect("ssh-keygen runs");
+        assert!(status.success());
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    /// Whether OpenSSH itself loads `key`, the way the daemon's ssh does when it connects.
+    fn openssh_loads(dir: &std::path::Path, key: &str) -> bool {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join("sent");
+        std::fs::write(&path, key).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::process::Command::new("ssh-keygen")
+            .arg("-y")
+            .arg("-f")
+            .arg(&path)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    fn key_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("tui-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn add_secret_form(app: &mut App) -> &mut Form {
+        app.form_add_secret();
+        let Some(Overlay::Form(form)) = &mut app.overlay else {
+            panic!("expected the add secret form");
+        };
+        form.handle_key(KeyEvent::from(KeyCode::Char('k')));
+        form.focus = form
+            .fields
+            .iter()
+            .position(|f| f.key == "private_key")
+            .unwrap();
+        form
+    }
+
+    fn sent_key(form: &Form) -> String {
+        match build_request(form, false) {
+            Ok(Request::Secret(CreateSecret {
+                value: SecretValue::SshKey { private_key },
+                ..
+            })) => private_key,
+            Ok(_) => panic!("not an ssh key request"),
+            Err(e) => panic!("the form refused the key: {e}"),
+        }
+    }
+
+    #[test]
+    fn pasted_keys_reach_the_daemon_as_openssh_reads_them() {
+        let dir = key_dir("paste");
+        for kind in ["ed25519", "rsa"] {
+            let key = throwaway_key(&dir, kind);
+            assert!(openssh_loads(&dir, &key));
+            let terminal_paste = key.replace('\n', "\r");
+            let crlf = key.replace('\n', "\r\n");
+            let trimmed = key.trim_end().replace('\n', "\r");
+            for pasted in [&key, &terminal_paste, &crlf, &trimmed] {
+                let mut app = test_app();
+                let form = add_secret_form(&mut app);
+                form.paste(pasted);
+                let field = form.field_mut("private_key").unwrap();
+                assert!(!field.value.contains('\r'), "{kind}: CR kept");
+                let status = field.status.clone().unwrap();
+                let expected = if kind == "rsa" { "RSA 3072" } else { "ED25519" };
+                assert!(status.unwrap().starts_with(expected), "{kind}");
+                assert!(matches!(
+                    form.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)),
+                    FormAction::Submit { alt: false }
+                ));
+                let sent = sent_key(form);
+                assert_eq!(sent, key, "{kind}: the daemon gets the file's exact bytes");
+                assert!(openssh_loads(&dir, &sent), "{kind}: OpenSSH loads it");
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_key_typed_out_without_bracketed_paste_stays_whole() {
+        let dir = key_dir("typed");
+        let key = throwaway_key(&dir, "ed25519");
+        let mut app = test_app();
+        let form = add_secret_form(&mut app);
+        let start = Instant::now();
+        for (n, c) in key.chars().enumerate() {
+            let event = match c {
+                '\n' => KeyEvent::from(KeyCode::Enter),
+                c => KeyEvent::from(KeyCode::Char(c)),
+            };
+            let at = start + Duration::from_micros(n as u64 * 50);
+            assert!(
+                matches!(form.handle_key_at(event, at), FormAction::None),
+                "key {n} ({c:?}) did something besides typing"
+            );
+        }
+        assert!(
+            form.field_mut("private_key")
+                .unwrap()
+                .status
+                .clone()
+                .unwrap()
+                .is_ok()
+        );
+        assert_eq!(sent_key(form), key);
+        assert!(openssh_loads(&dir, &sent_key(form)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn enter_in_one_line_fields_submits_unless_it_comes_with_a_paste() {
+        let mut app = test_app();
+        app.form_add_secret();
+        let Some(Overlay::Form(form)) = &mut app.overlay else {
+            panic!()
+        };
+        let t = Instant::now();
+        form.handle_key_at(KeyEvent::from(KeyCode::Char('a')), t);
+        assert!(matches!(
+            form.handle_key_at(KeyEvent::from(KeyCode::Enter), t + Duration::from_millis(1)),
+            FormAction::None
+        ));
+        assert!(matches!(
+            form.handle_key_at(
+                KeyEvent::from(KeyCode::Enter),
+                t + Duration::from_millis(400)
+            ),
+            FormAction::Submit { alt: false }
+        ));
+        assert_eq!(form.get("name"), "a");
+    }
+
+    #[test]
+    fn broken_keys_are_refused_before_sending() {
+        let dir = key_dir("broken");
+        let key = throwaway_key(&dir, "ed25519");
+        let public = std::fs::read_to_string(dir.join("id_ed25519.pub")).unwrap();
+        let truncated: String = key.lines().take(4).map(|l| format!("{l}\r")).collect();
+        for (pasted, error) in [
+            (truncated.as_str(), "truncated key"),
+            (public.as_str(), "this looks like a public key"),
+        ] {
+            let mut app = test_app();
+            let form = add_secret_form(&mut app);
+            form.paste(pasted);
+            let status = form
+                .field_mut("private_key")
+                .unwrap()
+                .status
+                .clone()
+                .unwrap();
+            assert!(status.unwrap_err().starts_with(error));
+            let Err(refused) = build_request(form, false) else {
+                panic!("sent a broken key")
+            };
+            assert!(refused.starts_with(error), "{refused}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn from_file_loads_the_key_into_the_area() {
+        let dir = key_dir("load");
+        let key = throwaway_key(&dir, "ed25519");
+        let mut app = test_app();
+        add_secret_form(&mut app);
+        let Some(Overlay::Form(form)) = &mut app.overlay else {
+            panic!()
+        };
+        form.focus = form
+            .fields
+            .iter()
+            .position(|f| f.key == "key_file")
+            .unwrap();
+        form.paste(&dir.join("id_ed25519").display().to_string());
+        let later = Instant::now() + Duration::from_secs(1);
+        let FormAction::Load { path, into } =
+            form.handle_key_at(KeyEvent::from(KeyCode::Enter), later)
+        else {
+            panic!("⏎ on from file loads")
+        };
+        app.load_into_form(&path, into);
+        let Some(Overlay::Form(form)) = &mut app.overlay else {
+            panic!()
+        };
+        assert_eq!(form.fields[form.focus].key, "private_key");
+        assert_eq!(form.get("key_file"), "");
+        assert_eq!(sent_key(form), key);
+        assert!(app.toast.as_ref().unwrap().text.starts_with("loaded "));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_key_area_is_masked_with_a_line_count_until_revealed() {
+        let dir = key_dir("mask");
+        let key = throwaway_key(&dir, "ed25519");
+        let mut app = test_app();
+        let form = add_secret_form(&mut app);
+        form.paste(&key.replace('\n', "\r"));
+        let screen = |form: &Form| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+            crate::mouse::reset();
+            terminal
+                .draw(|frame| form.render(frame, frame.area(), 0))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let masked = screen(form);
+        assert!(masked.contains(" 7 lines"), "{masked}");
+        assert!(masked.contains("✓ ED25519 · SHA256:"), "{masked}");
+        assert!(masked.contains("ctrl+r reveal"));
+        assert!(masked.contains("ctrl+s add"));
+        assert!(!masked.contains("BEGIN OPENSSH"));
+        form.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        let revealed = screen(form);
+        assert!(
+            revealed.contains("-----BEGIN OPENSSH PRIVATE KEY-----"),
+            "{revealed}"
+        );
+        assert!(revealed.contains("-----END OPENSSH PRIVATE KEY-----"));
+        assert!(revealed.contains("ctrl+r hide"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn root_dir_is_cleaned_and_must_stay_in_the_repo() {
@@ -6410,22 +6711,21 @@ mod tests {
     }
 
     #[test]
-    fn private_keys_are_pasted_or_read_from_a_path() {
+    fn from_file_rows_read_a_file_from_this_machine() {
         let dir = std::env::temp_dir().join(format!("tui-key-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".ssh")).unwrap();
-        let key = "-----BEGIN OPENSSH PRIVATE KEY-----
-abc
------END OPENSSH PRIVATE KEY-----
-";
-        std::fs::write(dir.join(".ssh/id"), key).unwrap();
-        assert_eq!(read_private_key(key.trim(), None).unwrap(), key);
-        assert_eq!(read_private_key("~/.ssh/id", Some(&dir)).unwrap(), key);
-        assert!(read_private_key("~/.ssh/missing", Some(&dir)).is_err());
-        std::fs::write(dir.join("plain"), "hello").unwrap();
+        std::fs::write(dir.join(".ssh/id"), "key text\n").unwrap();
+        assert_eq!(
+            read_local_file("~/.ssh/id", Some(&dir)).unwrap(),
+            "key text\n"
+        );
+        let absolute = dir.join(".ssh/id").display().to_string();
+        assert_eq!(read_local_file(&absolute, None).unwrap(), "key text\n");
+        assert!(read_local_file("~/.ssh/missing", Some(&dir)).is_err());
         assert!(
-            read_private_key(&dir.join("plain").display().to_string(), None)
+            read_local_file("", Some(&dir))
                 .unwrap_err()
-                .contains("not a private key")
+                .starts_with("type a path")
         );
         std::fs::remove_dir_all(dir).unwrap();
     }

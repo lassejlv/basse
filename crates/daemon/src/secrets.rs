@@ -213,10 +213,11 @@ pub fn validate(value: &SecretValue) -> std::result::Result<Option<String>, Stri
 }
 
 /// Trims what a pasted value picks up around it, so keys copied from a terminal still work.
+/// A key gets LF line endings and one trailing newline: OpenSSH refuses anything else.
 pub fn normalize(value: SecretValue) -> SecretValue {
     match value {
         SecretValue::SshKey { private_key } => SecretValue::SshKey {
-            private_key: format!("{}\n", private_key.trim()),
+            private_key: common::ssh::normalize_private_key(&private_key),
         },
         SecretValue::S3Credentials {
             access_key_id,
@@ -229,21 +230,9 @@ pub fn normalize(value: SecretValue) -> SecretValue {
     }
 }
 
-/// The OpenSSH public key of an unencrypted OpenSSH private key.
+/// The OpenSSH public key of an unencrypted OpenSSH private key; the same check the clients run.
 pub fn public_key(private_key: &str) -> std::result::Result<String, String> {
-    let key = ssh_key::PrivateKey::from_openssh(private_key.trim()).map_err(|_| {
-        "not an OpenSSH private key: expected a '-----BEGIN OPENSSH PRIVATE KEY-----' block \
-         (convert older PEM keys with `ssh-keygen -p -f <file>`)"
-            .to_string()
-    })?;
-    if key.is_encrypted() {
-        return Err(
-            "the key is protected by a passphrase; remove it with `ssh-keygen -p -f <file>`".into(),
-        );
-    }
-    key.public_key()
-        .to_openssh()
-        .map_err(|e| format!("cannot encode the public key: {e}"))
+    common::ssh::inspect_private_key(private_key).map(|k| k.public_key)
 }
 
 /// A new ed25519 key pair as an OpenSSH private key.
@@ -294,6 +283,30 @@ mod tests {
         }
         std::fs::write(&path, b"short").unwrap();
         assert!(MasterKey::load(&path).is_err());
+    }
+
+    #[test]
+    fn keys_pasted_with_terminal_line_breaks_are_stored_with_lf() {
+        let private = generate_ssh_key("test@host").unwrap();
+        for pasted in [private.replace('\n', "\r"), private.replace('\n', "\r\n")] {
+            let value = normalize(SecretValue::SshKey {
+                private_key: pasted,
+            });
+            assert_eq!(
+                validate(&value).unwrap(),
+                Some(public_key(&private).unwrap())
+            );
+            let SecretValue::SshKey { private_key } = value else {
+                unreachable!()
+            };
+            assert_eq!(private_key, private.as_str());
+        }
+        let truncated: String = private.lines().take(3).collect::<Vec<_>>().join("\r");
+        let err = validate(&normalize(SecretValue::SshKey {
+            private_key: truncated,
+        }))
+        .unwrap_err();
+        assert!(err.starts_with("truncated key"), "{err}");
     }
 
     #[test]
