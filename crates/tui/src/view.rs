@@ -2,7 +2,7 @@
 
 use crate::app::*;
 use crate::database;
-use crate::mouse::{self, Hit, List};
+use crate::mouse::{self, HeaderLink, Hit, List};
 use crate::picker::short_key;
 use crate::theme;
 use crate::util::{self, truncate};
@@ -138,6 +138,37 @@ pub(crate) fn inside(block: &Block, area: Rect) -> Rect {
     block.inner(area).inner(Margin::new(1, 0))
 }
 
+fn header_link<'a>(spans: &mut Vec<Span<'a>>, area: Rect, link: HeaderLink, label: Span<'a>) {
+    mouse::span_target(
+        area,
+        spans.iter().map(Span::width).sum(),
+        label.width(),
+        Hit::Header(link),
+    );
+    spans.push(label);
+}
+
+fn breadcrumbs<'a>(
+    spans: &mut Vec<Span<'a>>,
+    area: Rect,
+    project: &'a Project,
+    environment: &'a Environment,
+) {
+    header_link(
+        spans,
+        area,
+        HeaderLink::Project,
+        Span::styled(&project.name, theme::muted()),
+    );
+    spans.push(Span::styled(" / ", theme::muted()));
+    header_link(
+        spans,
+        area,
+        HeaderLink::Environment,
+        Span::styled(&environment.name, theme::muted()),
+    );
+}
+
 fn top_bar(frame: &mut Frame, area: Rect, app: &App) {
     let mut left = vec![
         Span::styled(brand::NAME.to_lowercase(), theme::accent()),
@@ -264,14 +295,24 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                     ("e", "errors only"),
                     ("d", "deploy"),
                 ],
-                Tab::Deployments => vec![
-                    ("tab", "next tab"),
-                    ("↑↓", "move"),
-                    ("⏎", "build log"),
-                    ("R", "rollback"),
-                    ("c", "cancel"),
-                    ("d", "deploy"),
-                ],
+                Tab::Deployments => {
+                    let mut keys = vec![
+                        ("tab", "next tab"),
+                        ("↑↓", "move"),
+                        ("⏎", "build log"),
+                        ("R", "rollback"),
+                    ];
+                    if app
+                        .service
+                        .as_ref()
+                        .and_then(|v| v.deployments.get(v.row))
+                        .is_some_and(Deployment::can_cancel)
+                    {
+                        keys.push(("c", "cancel"));
+                    }
+                    keys.push(("d", "deploy"));
+                    keys
+                }
                 Tab::Env => vec![
                     ("tab", "next tab"),
                     ("a", "add"),
@@ -332,13 +373,19 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                 ],
             }
         }
-        Screen::Deploy => vec![
-            ("f", "follow"),
-            ("↑↓", "scroll"),
-            ("w", "wrap"),
-            ("c", "cancel deploy"),
-            ("esc", "back · keeps running"),
-        ],
+        Screen::Deploy => {
+            let mut keys = vec![("f", "follow"), ("↑↓", "scroll"), ("w", "wrap")];
+            if app
+                .deploy
+                .as_ref()
+                .is_some_and(|v| v.deployment.can_cancel())
+            {
+                keys.extend([("c", "cancel deploy"), ("esc", "back · keeps running")]);
+            } else {
+                keys.push(("esc", "back"));
+            }
+            keys
+        }
         Screen::Servers => vec![
             ("↑↓", "move"),
             ("a", "add server"),
@@ -760,19 +807,6 @@ pub(crate) fn scroll_offset(selected: usize, height: usize) -> usize {
 
 fn services_table(frame: &mut Frame, area: Rect, app: &App, services: &[&Service]) {
     let focused = app.overview.pane == Pane::Services;
-    let mut heading = Vec::new();
-    if let Some((p, e)) = app.current_env() {
-        heading.push(Span::styled(
-            format!("{} / ", p.project.name),
-            theme::muted(),
-        ));
-        heading.push(Span::styled(e.environment.name.clone(), theme::text()));
-        let n = e.services.len();
-        heading.push(Span::styled(
-            format!(" · {n} service{}", if n == 1 { "" } else { "s" }),
-            theme::muted(),
-        ));
-    }
     let right = if app.overview.filtering || !app.overview.filter.is_empty() {
         let mut spans = vec![
             Span::styled("/ ", theme::accent()),
@@ -786,10 +820,25 @@ fn services_table(frame: &mut Frame, area: Rect, app: &App, services: &[&Service
         Line::styled("filter: all", theme::muted())
     };
     let filter_width = right.width();
+    mouse::hit(area, Hit::Pane(Pane::Services));
+    let mut heading = Vec::new();
+    if let Some((p, e)) = app.current_env() {
+        let title_area = Rect::new(
+            area.x + 2,
+            area.y,
+            area.width.saturating_sub(filter_width as u16 + 4),
+            area.height.min(1),
+        );
+        breadcrumbs(&mut heading, title_area, &p.project, &e.environment);
+        let n = e.services.len();
+        heading.push(Span::styled(
+            format!(" · {n} service{}", if n == 1 { "" } else { "s" }),
+            theme::muted(),
+        ));
+    }
     let block = panel(heading, Some(right), focused);
     let inner = inside(&block, area);
     frame.render_widget(block, area);
-    mouse::hit(area, Hit::Pane(Pane::Services));
     if filter_width + 4 <= area.width as usize {
         mouse::span_target(
             area,
@@ -1211,47 +1260,49 @@ fn activity_panel(frame: &mut Frame, area: Rect, app: &App) {
 
 fn service(frame: &mut Frame, area: Rect, app: &App) {
     let Some(view) = &app.service else { return };
-    let service = view
-        .detail
-        .as_ref()
-        .map(|d| &d.service)
-        .or_else(|| app.all_services().find(|s| s.id == view.id));
-    let [head, tabs, body] = Layout::vertical([
+    let [mut head, tabs, body] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Fill(1),
     ])
     .spacing(1)
     .areas(area);
-    let mut spans = Vec::new();
-    if let Some(d) = &view.detail {
-        spans.push(Span::styled(
-            format!(" {} / {} / ", d.project.name, d.environment.name),
-            theme::muted(),
-        ));
+    let active = view.active_deployment();
+    if active.is_some_and(Deployment::can_cancel) {
+        let hints = [("ctrl+x", "cancel deploy")];
+        let width = mouse::hints_width(&hints) as u16;
+        if head.width >= width + 12 {
+            mouse::hints(frame, head, &hints, Alignment::Right);
+            head.width -= width + 2;
+        }
     }
-    if let Some(s) = service {
-        spans.push(Span::styled(s.name.clone(), theme::text()));
+    let mut spans = vec![Span::raw(" ")];
+    if let Some((project, env, s)) = app.service_path(&view.id) {
+        breadcrumbs(&mut spans, head, project, env);
+        spans.push(Span::styled(" / ", theme::muted()));
+        header_link(
+            &mut spans,
+            head,
+            HeaderLink::Service,
+            Span::styled(&s.name, theme::text()),
+        );
         spans.push(Span::raw("  "));
         spans.push(util::state_glyph(s.state, app.tick));
         spans.push(Span::styled(
             format!(" {}", s.state.as_str()),
             util::state_style(s.state),
         ));
-        let live = view
-            .deployments
-            .iter()
-            .find(|d| d.status == DeploymentStatus::Live);
+        let live = view.deployments.iter().find(|d| {
+            s.live_deployment_id
+                .as_ref()
+                .map_or(d.status == DeploymentStatus::Live, |id| id == &d.id)
+        });
         let mut meta = Vec::new();
         let info = view.info();
         if let Some(info) = info {
             meta.push(format!("{} {}", info.kind, info.version));
-        } else if let Some(d) = live {
-            meta.push(
-                d.commit
-                    .as_deref()
-                    .map_or(format!("#{}", d.number), |c| util::short_sha(c).to_string()),
-            );
+        } else if let Some(commit) = live.and_then(|d| d.commit.as_deref()) {
+            meta.push(util::short_sha(commit).to_string());
         }
         if let Some(c) = view.detail.as_ref().and_then(|d| d.container.as_ref())
             && let Some(at) = c.started_at
@@ -1265,18 +1316,41 @@ fn service(frame: &mut Frame, area: Rect, app: &App) {
                 None => "internal only".into(),
             });
         }
-        if !meta.is_empty() {
+        let live_link = (live.is_some() || s.live_deployment_id.is_some()).then(|| {
+            let text = live.map_or_else(
+                || "live deploy".to_string(),
+                |d| format!("live #{}", d.number),
+            );
+            Span::styled(text, util::deployment_style(DeploymentStatus::Live))
+        });
+        let active_link = active.map(|d| {
+            Span::styled(
+                format!("{} #{}", d.status.as_str(), d.number),
+                util::deployment_style(d.status),
+            )
+        });
+        let url = view
+            .detail
+            .as_ref()
+            .filter(|d| d.database.is_none())
+            .and_then(|d| d.domains.first())
+            .map(|domain| Span::styled(crate::keys::domain_url(domain), theme::muted()));
+        let mut remaining = (head.width as usize).saturating_sub(
+            spans.iter().map(Span::width).sum::<usize>()
+                + live_link.as_ref().map_or(0, |link| 3 + link.width())
+                + active_link.as_ref().map_or(0, |link| 3 + link.width()),
+        );
+        let metadata = Span::styled(format!("   {}", meta.join(" · ")), theme::muted());
+        let meta_shown = !meta.is_empty() && metadata.width() <= remaining;
+        if meta_shown {
+            remaining -= metadata.width();
+            spans.push(metadata);
+        }
+        if let Some(url) = url.filter(|url| 3 + url.width() <= remaining) {
             spans.push(Span::styled(
-                format!("   {}", meta.join(" · ")),
+                if meta_shown { " · " } else { "   " },
                 theme::muted(),
             ));
-        }
-        if info.is_none()
-            && let Some(domain) = view.detail.as_ref().and_then(|d| d.domains.first())
-        {
-            let separator = if meta.is_empty() { "   " } else { " · " };
-            spans.push(Span::styled(separator, theme::muted()));
-            let url = Span::styled(crate::keys::domain_url(domain), theme::muted());
             mouse::span_target(
                 head,
                 spans.iter().map(Span::width).sum(),
@@ -1284,6 +1358,18 @@ fn service(frame: &mut Frame, area: Rect, app: &App) {
                 Hit::Domain(0),
             );
             spans.push(url);
+        }
+        let show_live = live_link.is_some();
+        if let Some(link) = live_link {
+            spans.push(Span::raw("   "));
+            header_link(&mut spans, head, HeaderLink::Deployment, link);
+        }
+        if let Some(link) = active_link {
+            spans.push(Span::styled(
+                if show_live { " · " } else { "   " },
+                theme::muted(),
+            ));
+            header_link(&mut spans, head, HeaderLink::ActiveDeployment, link);
         }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), head);
@@ -2427,7 +2513,7 @@ fn settings_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
 fn deploy(frame: &mut Frame, area: Rect, app: &App) {
     let Some(view) = &app.deploy else { return };
     let d = &view.deployment;
-    let detail = app.service.as_ref().and_then(|v| v.detail.as_ref());
+    let path = app.service_path(&d.service_id);
     let [head, sub, body] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -2439,13 +2525,16 @@ fn deploy(frame: &mut Frame, area: Rect, app: &App) {
         height: body.height.saturating_sub(1),
         ..body
     };
-    let mut spans = Vec::new();
-    if let Some(det) = detail {
-        spans.push(Span::styled(
-            format!(" {} / {} / ", det.project.name, det.environment.name),
-            theme::muted(),
-        ));
-        spans.push(Span::styled(det.service.name.clone(), theme::text()));
+    let mut spans = vec![Span::raw(" ")];
+    if let Some((project, env, svc)) = path {
+        breadcrumbs(&mut spans, head, project, env);
+        spans.push(Span::styled(" / ", theme::muted()));
+        header_link(
+            &mut spans,
+            head,
+            HeaderLink::Service,
+            Span::styled(&svc.name, theme::text()),
+        );
         spans.push(Span::raw("  "));
     }
     spans.push(util::deployment_glyph(d.status, app.tick));
@@ -2454,15 +2543,21 @@ fn deploy(frame: &mut Frame, area: Rect, app: &App) {
         DeploymentStatus::Building | DeploymentStatus::Starting => "deploying".to_string(),
         s => s.as_str().to_string(),
     };
-    spans.push(Span::styled(
-        format!(" {verb} #{}", d.number),
-        util::deployment_style(d.status),
-    ));
+    spans.push(Span::raw(" "));
+    header_link(
+        &mut spans,
+        head,
+        HeaderLink::Deployment,
+        Span::styled(
+            format!("{verb} #{}", d.number),
+            util::deployment_style(d.status),
+        ),
+    );
     frame.render_widget(Paragraph::new(Line::from(spans)), head);
     let mut meta = vec![Span::raw(" ")];
-    if let Some(det) = detail {
+    if let Some((_, _, svc)) = path {
         meta.push(Span::styled(
-            format!("{}   ", det.service.source.label()),
+            format!("{}   ", svc.source.label()),
             theme::muted(),
         ));
     }
@@ -2824,7 +2919,12 @@ pub(crate) fn dialog(
 }
 
 fn confirm(frame: &mut Frame, area: Rect, c: &Confirm, tick: usize) {
-    let width = 72u16.min(area.width.saturating_sub(4));
+    let width = if matches!(c.action, ConfirmAction::CancelDeploy(_)) {
+        66u16
+    } else {
+        72u16
+    }
+    .min(area.width.saturating_sub(4));
     let message = Paragraph::new(c.message.clone())
         .style(theme::text())
         .wrap(Wrap { trim: true });
@@ -3071,6 +3171,14 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
         ]),
         Screen::Service => {
             screen_keys.push(("⇧tab", "previous tab"));
+            if app
+                .service
+                .as_ref()
+                .and_then(ServiceView::active_deployment)
+                .is_some_and(Deployment::can_cancel)
+            {
+                screen_keys.push(("ctrl+x", "cancel deploy"));
+            }
             if app.service.as_ref().is_some_and(|v| v.tab == Tab::Logs) {
                 screen_keys.extend([
                     ("n", "next match"),

@@ -314,6 +314,8 @@ pub async fn delete(
             tracing::warn!("cannot cancel deployment {}: {e:?}", d.id);
         }
     }
+    let service_lock = state.deploys.lock_for(&svc.id);
+    let _guard = service_lock.lock().await;
     let volumes = state.db.volumes(&svc.id).await?;
     for server_id in state.db.deployment_servers(&svc.id).await? {
         let Ok((_, docker)) = state.docker_for(&server_id).await else {

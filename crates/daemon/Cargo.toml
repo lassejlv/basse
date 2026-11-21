@@ -31,6 +31,7 @@ bollard = { version = "0.21", features = ["chrono"] }
 rusqlite = { version = "0.37", features = ["bundled", "chrono", "backup"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "chrono", "json", "migrate", "macros"] }
 tar = "0.4"
+rustix = { version = "1", features = ["process"] }
 rand = "0.9"
 sha2 = "0.10"
 hex = "0.4"

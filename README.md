@@ -96,6 +96,7 @@ The mouse works too: click rows, tabs, dialog fields and the key hints in the bo
 | Servers | `a` add (pick an SSH key or generate one), `K` change a server's key, `c` check, `p` set up the proxy, `x` remove, `X` remove and clean up everything the daemon put there |
 | Secrets (`s` in Settings, or the palette) | `a` add or import, `g` generate an SSH key, `v` reveal (logged), `c` copy the public key, `n` rename, `e` replace the value, `x` delete |
 | Storage (`o` in Settings) | `a` add, `⏎` edit, `t` test, `x` remove |
+| Notifications (`n` in Settings, or the palette) | `tab` switch between Channels, Rules and Delivery log. Channels: `a` add (kind, fields, test, save), `⏎` edit, `t` test, `e` enable or disable, `x` delete. Rules: `a` add (channel, scope, dedupe and rate limit, a preset, then toggle events with `space`), `⏎` edit, `e` enable or disable, `x` delete. Delivery log: `r` refresh, `f` failures only, `c` this channel only |
 | Settings (`,` anywhere) | The instance (version and updates, public IP, data dir, Docker), the proxy, the API token and SSH key, pruning old images, and the daemon contexts saved on this machine. `u` update, `i` public IP, `m` auto-manage the proxy, `r` restart the proxy, `t` rotate the token, `k` copy the SSH key, `c` prune, `⏎` switch to the selected context, `x` forget it. With `tab` on Instance backups: `b` back up now, `e` schedule, `D` download, `x` delete |
 
 ## CLI

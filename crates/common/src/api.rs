@@ -38,7 +38,7 @@
 //! | GET | `/services/{id}/deployments?limit=20` | | `Vec<Deployment>`, newest first |
 //! | GET | `/deployments/{id}` | | `Deployment` |
 //! | GET | `/deployments/{id}/logs?follow=true` | | NDJSON `LogLine` stream, ends when the deployment finishes |
-//! | POST | `/deployments/{id}/cancel` | | `Deployment` |
+//! | POST | `/deployments/{id}/cancel` | | `Deployment` (cancelled after cleanup; 409 once live cutover starts) |
 //! | POST | `/deployments/{id}/rollback` | | `Deployment` (new deployment reusing that image) |
 //! | GET | `/settings` | | `InstanceSettings` |
 //! | PATCH | `/settings` | `UpdateSettings` | `InstanceSettings` (persisted in the daemon's config.toml) |

@@ -26,6 +26,17 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         }
         return app.toast("refreshed");
     }
+    if (ctrl && key.code == KeyCode::Char('x') && app.screen == Screen::Service)
+        || (key.code == KeyCode::Char('c')
+            && (app.screen == Screen::Deploy
+                || app.screen == Screen::Service
+                    && app
+                        .service
+                        .as_ref()
+                        .is_some_and(|v| v.tab == Tab::Deployments)))
+    {
+        return cancel_deploy(app, key);
+    }
     if text_input_active(app) {
         return text_input(app, key);
     }
@@ -416,6 +427,39 @@ fn ask_stop(app: &mut App, s: &Service) {
     );
 }
 
+fn cancel_deploy(app: &mut App, key: KeyEvent) {
+    let deployment = match app.screen {
+        Screen::Deploy => app.deploy.as_ref().map(|v| &v.deployment),
+        _ => app.service.as_ref().and_then(|v| {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                v.active_deployment()
+            } else {
+                v.deployments.get(v.row)
+            }
+        }),
+    };
+    let Some(d) = deployment.filter(|d| !d.status.is_finished()) else {
+        return app.error("no running deployment to cancel");
+    };
+    if !d.can_cancel() {
+        return app.error("traffic is already switching · deployment can no longer be cancelled");
+    }
+    let (number, id) = (d.number, d.id.clone());
+    let note = if app.service.as_ref().is_some_and(|view| view.database) {
+        "If the previous database container was stopped, it will be restarted."
+    } else {
+        "The live deployment keeps serving."
+    };
+    ask_to(
+        app,
+        "Cancel deployment",
+        format!("Cancel deployment #{number}? {note}"),
+        true,
+        ConfirmAction::CancelDeploy(id),
+        "cancel deploy",
+    );
+}
+
 fn stop_or_start(app: &mut App, s: &Service) {
     match s.state {
         ServiceState::Stopped | ServiceState::Failed => app.start_service(s),
@@ -678,29 +722,6 @@ fn service(app: &mut App, key: KeyEvent) {
                 ConfirmAction::Rollback(d.id),
             );
         }
-        (Tab::Deployments, KeyCode::Char('c')) => {
-            let Some(d) = app
-                .service
-                .as_ref()
-                .and_then(|v| v.deployments.get(row))
-                .cloned()
-            else {
-                return;
-            };
-            if d.status.is_finished() {
-                return app.error("that deployment already finished");
-            }
-            ask(
-                app,
-                "Cancel deployment",
-                format!(
-                    "Cancel deployment #{}? The live container keeps running.",
-                    d.number
-                ),
-                true,
-                ConfirmAction::CancelDeploy(d.id),
-            );
-        }
         (Tab::Env, KeyCode::Char('a')) => app.form_env(None),
         (Tab::Env, KeyCode::Enter) => {
             if let Some(v) = detail.env.get(row).cloned() {
@@ -894,20 +915,6 @@ fn deploy(app: &mut App, key: KeyEvent) {
         KeyCode::PageDown => logs.scroll(2 - viewport as isize, viewport),
         KeyCode::Char('g') => logs.scroll(isize::MAX / 2, viewport),
         KeyCode::Char('G') => logs.scroll(isize::MIN / 2, viewport),
-        KeyCode::Char('c') => {
-            let d = &view.deployment;
-            if d.status.is_finished() {
-                return app.error("this deployment already finished");
-            }
-            let (n, id) = (d.number, d.id.clone());
-            ask(
-                app,
-                "Cancel deployment",
-                format!("Cancel deployment #{n}? The live container keeps running."),
-                true,
-                ConfirmAction::CancelDeploy(id),
-            );
-        }
         KeyCode::Char('d') => {
             let id = view.deployment.service_id.clone();
             app.deploy_service(&id);
