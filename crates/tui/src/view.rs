@@ -1094,7 +1094,7 @@ fn build_summary(source: &Source, detail: Option<&ServiceDetail>) -> Option<Vec<
         BuildMethod::Compose => build
             .compose_file
             .clone()
-            .unwrap_or_else(|| "compose file found on its own".into()),
+            .unwrap_or_else(|| "file found on its own".into()),
         BuildMethod::Railpack => "detects the language".to_string(),
     };
     let services = detail.map_or(0, |d| d.compose.len());
