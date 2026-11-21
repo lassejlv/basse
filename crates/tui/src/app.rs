@@ -3,6 +3,7 @@
 use crate::form::{Field, Form, FormKind};
 use crate::notify::{self, NotifyView, RuleDialog};
 use crate::picker::{GitPick, PickFor, PickItem, PickKind, Picker, repo_item};
+use crate::server_pick;
 use crate::theme;
 use client::{Client, Config};
 use common::api::*;
@@ -3884,6 +3885,7 @@ impl App {
             PickKind::GitSource
             | PickKind::Repo
             | PickKind::Branch
+            | PickKind::Server
             | PickKind::Channel
             | PickKind::Scope => {}
         }
@@ -4183,6 +4185,55 @@ impl App {
         }
     }
 
+    /// ⏎ on the server field of a create form: every server, offline ones last and disabled.
+    fn pick_server(&mut self, form: Form) {
+        let blocked = None;
+        let items = server_pick::items(&self.servers, |s| self.server_address(s), blocked);
+        let current = Some(form.raw(server_pick::KEY)).filter(|v| !v.is_empty());
+        let row = current
+            .as_ref()
+            .and_then(|c| {
+                items
+                    .iter()
+                    .position(|i| i.id.as_ref() == Some(c) && !i.disabled)
+            })
+            .or_else(|| items.iter().position(|i| !i.disabled))
+            .unwrap_or(0);
+        let note = server_pick::picker_note(&self.servers, blocked);
+        self.open_picker(Picker {
+            title: "Server".into(),
+            subtitle: form.subtitle.clone(),
+            kind: PickKind::Server,
+            items,
+            row,
+            target: PickFor::Field(Box::new(form), server_pick::KEY),
+            current,
+            note: vec![Line::styled(note, theme::muted())],
+            busy: false,
+            git: None,
+        });
+    }
+
+    /// A server picked for a create form; a disabled row leaves the form as it was.
+    fn accept_server(&mut self, p: Picker) {
+        let PickFor::Field(mut form, key) = p.target else {
+            return;
+        };
+        let server = p
+            .items
+            .get(p.row)
+            .filter(|i| !i.disabled)
+            .and_then(|i| self.servers.iter().find(|s| i.id.as_ref() == Some(&s.id)));
+        if let Some(server) = server
+            && let Some(field) = form.field_mut(key)
+        {
+            server_pick::set(field, server, &self.server_address(server));
+            form.error = None;
+            form.move_focus(1);
+        }
+        self.overlay = Some(Overlay::Form(*form));
+    }
+
     /// "k" on the Servers screen: the key a server connects with.
     pub fn pick_server_key(&mut self, server: &Server) {
         if server.kind == ServerKind::Local {
@@ -4226,6 +4277,7 @@ impl App {
             "git_source" => return self.pick_git_source(form),
             "gh_repo" => return self.pick_repo(form),
             "gh_branch" => return self.pick_branch(form),
+            server_pick::KEY => return self.pick_server(form),
             _ => {}
         }
         let current = Some(form.raw(key)).filter(|v| !v.is_empty());
@@ -4244,7 +4296,11 @@ impl App {
                 "S3 credentials secrets; add them on the Secrets screen.",
                 theme::muted(),
             )],
-            PickKind::Store | PickKind::GitSource | PickKind::Repo | PickKind::Branch => {
+            PickKind::Store
+            | PickKind::GitSource
+            | PickKind::Repo
+            | PickKind::Branch
+            | PickKind::Server => {
                 vec![Line::styled(
                     "Storage connections are managed on the Storage screen (o in Settings).",
                     theme::muted(),
@@ -4299,6 +4355,12 @@ impl App {
         ) {
             if let Some(Overlay::Picker(p)) = self.overlay.take() {
                 self.accept_git_pick(p);
+            }
+            return;
+        }
+        if p.kind == PickKind::Server {
+            if let Some(Overlay::Picker(p)) = self.overlay.take() {
+                self.accept_server(p);
             }
             return;
         }
@@ -4422,11 +4484,6 @@ impl App {
         let Some((project, env)) = self.current_env() else {
             return self.error("create a project first (N)");
         };
-        let servers: Vec<String> = if self.servers.is_empty() {
-            vec!["local".into()]
-        } else {
-            self.servers.iter().map(|s| s.name.clone()).collect()
-        };
         let engines = DatabaseKind::ALL
             .iter()
             .map(|k| k.image().to_string())
@@ -4460,6 +4517,7 @@ impl App {
                 ],
             )
             .selected(if github { 0 } else { 1 }),
+            server_pick::field(&self.servers, |s| self.server_address(s)),
             source,
             gh_repo,
             gh_branch,
@@ -4482,9 +4540,6 @@ impl App {
                 .hint("optional · https"),
             Field::toggle("auto_deploy", "auto-deploy", true),
         ]);
-        if servers.len() > 1 {
-            fields.push(Field::choice("server", "server", servers));
-        }
         let form = Form::new(
             FormKind::NewService {
                 environment_id: env.environment.id.clone(),
@@ -4497,6 +4552,7 @@ impl App {
             project.project.name, env.environment.name
         ))
         .submit("create & deploy", Some("create only"))
+        .note(server_pick::note(&self.servers).into_iter().collect())
         .focus_on(match (github, only) {
             (false, _) => "repo",
             (true, None) => "git_source",
@@ -5593,7 +5649,7 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
             let port = port(&form.get("port"), !domain.is_empty())?;
             Request::Service(Box::new(CreateService {
                 environment_id: environment_id.clone(),
-                server_id: None,
+                server_id: Some(form.raw(server_pick::KEY)).filter(|id| !id.is_empty()),
                 name,
                 source,
                 port,
@@ -5870,6 +5926,35 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_service_sends_the_picked_server() {
+        let form = |server: &str| {
+            Form::new(
+                FormKind::NewService {
+                    environment_id: "e".into(),
+                },
+                "New service",
+                vec![
+                    Field::choice(
+                        "source",
+                        "source",
+                        vec!["GitHub".into(), "Git URL".into(), "Docker image".into()],
+                    )
+                    .selected(2),
+                    Field::pick(server_pick::KEY, "server", server, server),
+                    Field::text("image", "image").value("nginx:1"),
+                    Field::text("name", "name"),
+                ],
+            )
+        };
+        let server_id = |form: &Form| match build_request(form, false) {
+            Ok(Request::Service(body)) => body.server_id,
+            _ => panic!("a create request"),
+        };
+        assert_eq!(server_id(&form("edge")).as_deref(), Some("edge"));
+        assert_eq!(server_id(&form("")), None);
+    }
 
     #[test]
     fn new_service_sends_the_build_method_and_its_fields() {

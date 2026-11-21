@@ -418,6 +418,7 @@ impl Form {
                 "image" => source == 2,
                 "engine" | "version" => source == 3,
                 "port" | "domain" => source != 3,
+                crate::server_pick::KEY => f.visible,
                 _ => true,
             };
         }

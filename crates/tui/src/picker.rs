@@ -33,6 +33,8 @@ pub enum PickKind {
     Repo,
     /// A branch of a repository, filtered here.
     Branch,
+    /// The server a new service or database runs on.
+    Server,
 }
 
 /// State of the repository and branch pickers: the search line and the page.
@@ -81,6 +83,8 @@ pub struct PickItem {
     pub copy: Option<String>,
     /// The "generate new key" entry.
     pub generate: bool,
+    /// Shown muted and skipped by ↑↓ and clicks; `note` says why.
+    pub disabled: bool,
 }
 
 impl PickItem {
@@ -95,6 +99,7 @@ impl PickItem {
             glyph: None,
             copy: None,
             generate: false,
+            disabled: false,
         }
     }
 }
@@ -203,7 +208,7 @@ impl Picker {
         let selected = self.items.get(self.row).map(|i| (i.id.clone(), i.generate));
         let mut items = Vec::new();
         match self.kind {
-            PickKind::GitSource | PickKind::Repo | PickKind::Branch => return,
+            PickKind::GitSource | PickKind::Repo | PickKind::Branch | PickKind::Server => return,
             PickKind::SshKey => {
                 let (key, comment) = daemon_key.map(short_key).unwrap_or_default();
                 let mut own = PickItem::new(
@@ -319,6 +324,21 @@ impl Picker {
         self.items.get(self.row)
     }
 
+    /// Move the selection by `step` rows, over disabled ones.
+    pub fn step(&mut self, step: isize) {
+        let mut row = self.row;
+        loop {
+            match row
+                .checked_add_signed(step)
+                .filter(|r| *r < self.items.len())
+            {
+                Some(next) if self.items[next].disabled => row = next,
+                Some(next) => return self.row = next,
+                None => return,
+            }
+        }
+    }
+
     /// Draw the dialog frame with its title, centered in `area`; returns the padded inside.
     fn open(&self, frame: &mut Frame, area: Rect, width: u16, height: u16) -> Rect {
         let rect = area.centered(
@@ -405,7 +425,7 @@ impl Picker {
         for (i, item) in self.items.iter().enumerate().skip(offset) {
             let selected = i == self.row;
             let (glyph, glyph_style) = item.glyph.unwrap_or((" ", theme::muted()));
-            let detail_style = if item.generate {
+            let detail_style = if item.generate || item.disabled {
                 theme::muted()
             } else {
                 theme::text()
@@ -414,12 +434,25 @@ impl Picker {
                 Line::from(vec![
                     Span::styled(format!("{glyph} "), glyph_style),
                     Span::styled(
-                        format!("{:<name_w$}", truncate(&item.name, name_w - 1)),
-                        if selected {
-                            theme::accent()
-                        } else {
-                            theme::text()
+                        truncate(&item.name, name_w - 1),
+                        match (selected, item.disabled) {
+                            (_, true) => theme::muted(),
+                            (true, false) => theme::accent(),
+                            (false, false) => theme::text(),
                         },
+                    ),
+                    Span::styled(
+                        {
+                            let used = truncate(&item.name, name_w - 1).chars().count();
+                            let badge = if item.badge.is_empty() {
+                                String::new()
+                            } else {
+                                format!("  {}", item.badge)
+                            };
+                            let badge = truncate(&badge, (name_w - 1).saturating_sub(used));
+                            format!("{badge:<w$}", w = name_w - used)
+                        },
+                        theme::muted(),
                     ),
                     Span::styled(
                         format!(

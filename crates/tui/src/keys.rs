@@ -446,10 +446,8 @@ fn overlay(app: &mut App, key: KeyEvent) {
             KeyCode::Esc => app.picker_cancel(),
             KeyCode::Enter => app.picker_accept(),
             KeyCode::Char('c') => app.picker_copy(),
-            KeyCode::Up | KeyCode::Char('k') => p.row = p.row.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => {
-                p.row = (p.row + 1).min(p.items.len().saturating_sub(1))
-            }
+            KeyCode::Up | KeyCode::Char('k') => p.step(-1),
+            KeyCode::Down | KeyCode::Char('j') => p.step(1),
             _ => {}
         },
         Some(Overlay::Rule(d)) => match d.handle_key(key) {
