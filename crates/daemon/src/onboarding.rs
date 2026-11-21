@@ -148,7 +148,10 @@ pub async fn facts(state: &AppState) -> Result<Facts> {
             .await?
             .iter()
             .any(|r| r.source.status == GitSourceStatus::Ready),
-        backups: state.db.instance_backup_schedule().await?.0.enabled,
+        backups: {
+            let schedule = state.db.instance_backup_schedule().await?.0;
+            schedule.enabled && schedule.storage_id.is_some()
+        },
         notifications: channels.iter().filter(|c| c.enabled).any(|c| {
             rules
                 .iter()

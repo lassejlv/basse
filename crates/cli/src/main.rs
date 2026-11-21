@@ -876,11 +876,22 @@ async fn login(
         brand::DAEMON_BIN,
         info.version
     ));
-    println!(
-        "{} run {} to open the dashboard",
-        muted("next:"),
-        paint(brand::CLI_BIN, Tone::Accent)
-    );
+    let client = Client::new(&url, config.contexts[&name].token.as_str())?;
+    let pending = client.onboarding().await.is_ok_and(|o| o.open_on_connect());
+    if pending {
+        println!(
+            "{} run {} to set up this instance, or {} without the dashboard",
+            muted("next:"),
+            paint(brand::CLI_BIN, Tone::Accent),
+            paint(format!("{} setup", brand::CLI_BIN), Tone::Accent)
+        );
+    } else {
+        println!(
+            "{} run {} to open the dashboard",
+            muted("next:"),
+            paint(brand::CLI_BIN, Tone::Accent)
+        );
+    }
     Ok(())
 }
 

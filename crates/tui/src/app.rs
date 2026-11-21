@@ -1637,6 +1637,9 @@ impl App {
                 self.load_notify();
             }
             Msg::NotifyStepTested(id, result) => {
+                if self.screen == Screen::Setup && self.setup.channel.as_ref() == Some(&id) {
+                    self.setup.test = Some(result.clone());
+                }
                 if let Some(Overlay::ChannelTest(step)) = &mut self.overlay
                     && step.channel.id == id
                 {
@@ -3335,6 +3338,11 @@ impl App {
             return self.load_notify();
         }
         step.saving = true;
+        let next = if self.screen == Screen::Setup {
+            "the Essentials events go to it"
+        } else {
+            "add a rule to choose its events"
+        };
         self.spawn(move |c| async move {
             let body = UpdateNotifyChannel {
                 enabled: Some(true),
@@ -3343,7 +3351,7 @@ impl App {
             Msg::NotifyDialogDone(
                 c.update_notify_channel(&id, &body)
                     .await
-                    .map(|_| format!("{name} added · add a rule to choose its events"))
+                    .map(|_| format!("{name} added · {next}"))
                     .map_err(|e| format!("{e:#}")),
             )
         });

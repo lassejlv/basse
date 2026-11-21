@@ -603,6 +603,7 @@ fn glyph(state: StepState, current: bool) -> Span<'static> {
 /// Welcome and Done count as done once the flow is past them.
 fn rail_state(app: &App, step: Step) -> StepState {
     match step {
+        Step::Welcome if app.setup.step == Step::Welcome => StepState::Todo,
         Step::Welcome => StepState::Done,
         Step::Done if app.setup.step == Step::Done => StepState::Done,
         Step::Done => StepState::Todo,
@@ -837,7 +838,7 @@ fn task_row(
     match value {
         Some((value, detail)) => spans.extend([
             Span::styled("✓ ", theme::fg(theme::OK)),
-            Span::styled(format!("{value:<13}"), theme::text()),
+            Span::styled(format!("{:<13}", format!("{value}  ")), theme::text()),
             Span::styled(detail, theme::muted()),
         ]),
         None => spans.extend([
@@ -890,14 +891,23 @@ fn backups(frame: &mut Frame, area: Rect, app: &App) {
                 format!("daily · keep {} · {store} · encrypted", s.keep),
             )
         });
+    let current = app.settings.schedule.clone().unwrap_or_default();
+    let hint = if schedule.is_some() {
+        "edit"
+    } else {
+        "turn on"
+    };
     task_row(
         frame,
         rows[4],
         2,
         "Schedule",
         schedule,
-        "daily 03:00 UTC · keep 7 · encrypted",
-        Some(("e", "turn on")),
+        &format!(
+            "daily {:02}:00 UTC · keep {} · encrypted",
+            current.hour_utc, current.keep
+        ),
+        Some(("e", hint)),
     );
 }
 
@@ -921,7 +931,11 @@ fn notifications(frame: &mut Frame, area: Rect, app: &App) {
         2,
         "Rule",
         rule.map(|r| {
-            let label = crate::notify::preset_label(r.preset.as_deref(), &r.events).0;
+            let label = r
+                .preset
+                .as_deref()
+                .and_then(preset)
+                .map_or_else(|| "custom".to_string(), |p| p.label.to_string());
             let events: Vec<&str> = r.events.iter().take(5).map(|e| e.label()).collect();
             (label, events.join(", ").to_lowercase())
         }),
@@ -1065,7 +1079,7 @@ fn server_slot(frame: &mut Frame, area: Rect, app: &App) {
     let name = app.local_server().map_or("local", |s| s.name.as_str());
     let line = Line::from(vec![
         Span::styled(format!(" {name}"), theme::text()),
-        Span::styled("  local", theme::muted()),
+        Span::styled("  this server", theme::muted()),
     ]);
     frame.render_widget(Paragraph::new(line).style(theme::selected()), area);
 }

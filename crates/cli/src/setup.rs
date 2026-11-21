@@ -85,6 +85,11 @@ impl<'a> Prompt<'a> {
     }
 }
 
+/// "  ✓ message", indented under the step's heading.
+fn ok(message: impl AsRef<str>) {
+    println!("  {} {}", paint("✓", Tone::Ok), message.as_ref());
+}
+
 fn glyph(state: StepState, current: bool) -> String {
     match state {
         StepState::Done => paint("✓", Tone::Ok),
@@ -191,7 +196,7 @@ pub async fn run(c: &Client, p: &mut Prompt<'_>) -> Result<Onboarding> {
     ] {
         println!(
             "  {}  {}",
-            paint(format!("{cmd:<22}"), Tone::Accent),
+            paint(format!("{cmd:<24}"), Tone::Accent),
             muted(what)
         );
     }
@@ -221,7 +226,7 @@ async fn domain(c: &Client, p: &mut Prompt<'_>) -> Result<bool> {
     loop {
         if d.verified {
             println!();
-            output::ok(format!("{name} is verified"));
+            ok(format!("{name} is verified"));
             return Ok(true);
         }
         println!();
@@ -272,7 +277,7 @@ async fn source(c: &Client, p: &mut Prompt<'_>, info: &DaemonInfo) -> Result<boo
                 println!("  {}", paint(&setup.setup_url, Tone::Accent));
                 sources::open_browser(&setup.setup_url);
                 let s = sources::wait_for_install(c, &setup.source).await?;
-                output::ok(format!("source {} is ready", s.name));
+                ok(format!("source {} is ready", s.name));
                 return Ok(true);
             }
             1 => {
@@ -288,7 +293,7 @@ async fn source(c: &Client, p: &mut Prompt<'_>, info: &DaemonInfo) -> Result<boo
                         api_url: None,
                     })
                     .await?;
-                output::ok(format!("source {} is {}", s.name, s.status.as_str()));
+                ok(format!("source {} is {}", s.name, s.status.as_str()));
                 return Ok(s.status == GitSourceStatus::Ready);
             }
             _ => return Ok(false),
@@ -353,7 +358,7 @@ async fn backups(c: &Client, p: &mut Prompt<'_>) -> Result<bool> {
         ));
         return Ok(false);
     }
-    output::ok(format!("{} works", storage.name));
+    ok(format!("{} works", storage.name));
     println!(
         "  {}",
         muted("Backups are encrypted with a passphrase. Restores need it; keep it safe.")
@@ -376,7 +381,7 @@ async fn backups(c: &Client, p: &mut Prompt<'_>) -> Result<bool> {
             passphrase: Some(passphrase),
         })
         .await?;
-    output::ok(format!(
+    ok(format!(
         "daily instance backups at {:02}:00 UTC, keeping {}",
         schedule.hour_utc, schedule.keep
     ));
@@ -454,13 +459,13 @@ async fn notifications(c: &Client, p: &mut Prompt<'_>) -> Result<bool> {
         max_per_hour: None,
     })
     .await?;
-    output::ok(format!(
+    ok(format!(
         "{} gets the {} events",
         channel.name, essentials.label
     ));
     let delivery = c.test_notify_channel(&channel.id).await?;
     match delivery.error {
-        None => output::ok(format!("test message {}", delivery.status.as_str())),
+        None => ok(format!("test message {}", delivery.status.as_str())),
         Some(e) => println!("  {} {e}", paint("✕ the test message failed:", Tone::Err)),
     }
     Ok(true)
@@ -606,7 +611,7 @@ async fn first_app(c: &Client, p: &mut Prompt<'_>, info: &DaemonInfo) -> Result<
             deploy: true,
         })
         .await?;
-    output::ok(format!(
+    ok(format!(
         "created {}/{}/{}",
         project.name, environment.name, detail.service.name
     ));
