@@ -44,6 +44,12 @@ pub fn supports_replicas(source: &Source) -> bool {
     }
 }
 
+/// Whether a deployed service routes through a route container (see [`docker::route_labels`]);
+/// compose groups label their own containers.
+pub fn has_route(source: &Source) -> bool {
+    !matches!(source, Source::Git { build, .. } if build.method == BuildMethod::Compose)
+}
+
 /// The name metrics keep a replica's samples under.
 pub fn metrics_key(index: u16) -> String {
     format!("#{index}")
@@ -251,7 +257,7 @@ fn is_gone(e: &anyhow::Error) -> bool {
 /// Brings the service's route container in line with its domains, port, policy and health
 /// path (see [`docker::route_labels`]). Compose groups route themselves.
 pub async fn apply_route(state: &AppState, docker: &Docker, svc: &Service) -> Result<()> {
-    if !supports_replicas(&svc.source) && !matches!(svc.source, Source::Database { .. }) {
+    if !has_route(&svc.source) {
         return Ok(());
     }
     let domains = state.db.domains(&svc.id).await?;

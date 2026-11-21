@@ -7,6 +7,7 @@ Self-hosted deploys from the terminal. A control daemon runs on your server and 
 - **Zero-downtime deploys.** A new container must pass its health check before the proxy sends it traffic. Then the old one stops. Rollback redeploys an earlier image without rebuilding.
 - **Replicas and autoscaling.** Run several identical containers of a service behind Caddy's load balancer, roll deploys over them one batch at a time, and let the daemon scale them on CPU, memory or requests.
 - **Domains with automatic HTTPS.** Caddy runs as the reverse proxy on each server and gets certificates on its own.
+- **Proxy pages.** When the proxy has nothing to answer with, visitors get a short page instead of a bare error: nothing here (unknown host, 404), starting up (first deploy, 503 that reloads itself), no server available (stopped or not deployed, 503), timed out (504) and something went wrong. Non-browser clients get a JSON `{"error": …}`. Errors your app returns itself pass through untouched.
 - **Logs, env vars and volumes.** Stream container and build logs, manage variables and secrets, and mount named volumes that survive redeploys.
 - **Metrics.** CPU, memory, network, disk I/O and, for services with a domain, requests, status codes and latency, sampled every 10 seconds and kept for 30 days, with each deploy marked on the charts.
 - **Database backups and access.** Back up one-click databases on demand or daily with retention, download and restore dumps, rotate passwords in place, and publish a database on a server port when you need to reach it from outside.

@@ -317,6 +317,7 @@ pub async fn enqueue(
             health_skipped: false,
             build_tag: None,
             moving: None,
+            held: Vec::new(),
         },
         plan,
         state.deploys.lock_for(&service.id),
@@ -464,6 +465,9 @@ struct Job {
     build_tag: Option<String>,
     /// The old server of a move, and what the move did there and on the target.
     moving: Option<Moving>,
+    /// Servers whose proxy answers for the service's domains while no container does there,
+    /// refreshed when the deploy starts and once it has finished.
+    held: Vec<Id>,
 }
 
 impl Job {
@@ -474,6 +478,7 @@ impl Job {
             .service(&self.d.service_id)
             .await?
             .context("the service was deleted")?;
+        let unserved = rec.live_container.is_none() || rec.stopped;
         // A move starts every replica fresh on the target; the old server's go once it is live.
         let old = if matches!(plan, Plan::Move(_)) {
             Vec::new()
@@ -496,6 +501,14 @@ impl Job {
         let docker = interruptible(&self.phase, self.state.docker.get(&server)).await?;
         self.service = Some(svc.clone());
         self.docker = Some(docker.clone());
+        self.held = match &plan {
+            Plan::Move(_) => vec![current.id.clone(), server.id.clone()],
+            _ if unserved => vec![server.id.clone()],
+            _ => Vec::new(),
+        };
+        for server_id in &self.held {
+            self.state.refresh_proxy_pages(server_id).await;
+        }
         if let Plan::Move(m) = &plan {
             let from = interruptible(&self.phase, self.state.docker.get(&current))
                 .await
@@ -1090,6 +1103,9 @@ impl Job {
                     None => self.state.activity(level, activity, detail).await,
                 }
             }
+        }
+        for server_id in &self.held {
+            self.state.refresh_proxy_pages(server_id).await;
         }
     }
 

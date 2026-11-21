@@ -435,6 +435,7 @@ pub async fn delete(
     state.db.delete_service(&svc.id).await?;
     state.deploys.forget_service(&svc.id);
     state.db_locks.forget_service(&svc.id);
+    state.refresh_proxy_pages(&svc.server_id).await;
     state
         .service_activity(svc, ActivityLevel::Info, "Service deleted".into(), None)
         .await;
@@ -497,6 +498,9 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
     };
     match action {
         Power::Stop => {
+            if !compose {
+                replicas::apply_route(state, &docker, svc).await?;
+            }
             state.db.set_stopped(id, true).await?;
             for container in &targets {
                 let options = StopContainerOptions {
@@ -570,6 +574,7 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
             state.notify_service(svc, Event::new(kind)).await;
         }
     }
+    state.refresh_proxy_pages(&svc.server_id).await;
     Ok(())
 }
 

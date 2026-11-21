@@ -1,7 +1,7 @@
 //! Replicas through the real proxy: scaling, a rolling deploy and a killed replica must not
 //! fail a single request.
 
-use super::{docker_ok, strings, wait_finished};
+use super::{docker_ok, strings, wait_finished, wait_status};
 use crate::support::Daemon;
 use client::Client;
 use common::api::{CreateDomain, CreateProject, CreateService, UpdateService};
@@ -316,31 +316,22 @@ async fn replicas_scale_roll_and_survive_a_killed_replica() {
     traffic.stop().await;
     assert!(served > 200, "only {served} requests went through");
 
-    println!("== stopped: the route alone answers 503");
-    api.stop(&sid).await.unwrap();
+    println!("== every replica down: the route answers with the no-server page");
     let http = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let status = http
-            .get("http://127.0.0.1/")
-            .header("Host", HOST)
-            .send()
-            .await
-            .map(|r| r.status().as_u16())
-            .ok();
-        if status == Some(503) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "stopped service answered {status:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(300)).await;
+    for r in api.service(&sid).await.unwrap().replicas {
+        docker_ok(&strings(&["kill", &r.container.unwrap().id])).unwrap();
     }
+    let (_, page) = wait_status(&http, HOST, "text/html", 503).await;
+    assert!(page.contains("No server available."), "{page}");
+
+    println!("== stopped: the same page");
+    api.stop(&sid).await.unwrap();
+    let (_, page) = wait_status(&http, HOST, "text/html", 503).await;
+    assert!(page.contains("No server available."), "{page}");
 
     api.delete_service(&sid, false).await.unwrap();
     assert_eq!(
