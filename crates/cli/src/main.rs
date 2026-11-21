@@ -4,6 +4,7 @@ mod instance;
 mod notify;
 mod output;
 mod resolve;
+mod setup;
 mod sources;
 
 use anyhow::{Context as _, Result, bail};
@@ -93,6 +94,13 @@ enum Cmd {
     },
     /// Daemon, host and server health.
     Status,
+    /// Walk through setting up this instance: domain, git source, backups, notifications and a
+    /// first app. Picks up where the TUI or an earlier run left off.
+    Setup {
+        /// Only show the checklist.
+        #[arg(long)]
+        status: bool,
+    },
     /// Servers the daemon deploys to.
     #[command(subcommand)]
     Server(ServerCmd),
@@ -690,6 +698,23 @@ async fn run(cli: Cli) -> Result<()> {
             instance::update_daemon(&c, &name, tag, force, json).await
         }
         Cmd::Status => status(&c, &name, json).await,
+        Cmd::Setup { status } => {
+            use std::io::IsTerminal;
+            if status || json {
+                let o = c.onboarding().await?;
+                if json {
+                    return output::json(&o);
+                }
+                setup::print_status(&o);
+                return Ok(());
+            }
+            if !std::io::stdin().is_terminal() {
+                bail!("setup asks questions; run it in a terminal, or use --status");
+            }
+            let mut stdin = std::io::stdin().lock();
+            setup::run(&c, &mut setup::Prompt::new(&mut stdin, true)).await?;
+            Ok(())
+        }
         Cmd::Server(cmd) => server(&c, cmd, json).await,
         Cmd::Project(cmd) => project(&c, cmd, json).await,
         Cmd::Environment(cmd) => environment(&c, cmd, json).await,

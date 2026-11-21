@@ -655,7 +655,10 @@ async fn serve_imports_a_sqlite_store_from_v0_1_0() {
     assert_eq!(detail.volumes.len(), 1);
 
     let onboarding = api.onboarding().await.unwrap();
-    assert!(onboarding.automatic, "an upgrade with projects skips the flow");
+    assert!(
+        onboarding.automatic,
+        "an upgrade with projects skips the flow"
+    );
     assert_eq!(onboarding.status, OnboardingStatus::Finished);
     assert_eq!(onboarding.state(Step::FirstApp), StepState::Done);
     assert!(!onboarding.show_checklist());

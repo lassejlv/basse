@@ -87,6 +87,7 @@ jobs:
           sudo sh ./install.sh --archive "dist/$CLI_BIN-x86_64-unknown-linux-musl.tar.gz" --no-firewall
           $CLI_BIN status
           sudo basse status
+          $CLI_BIN setup --status
           curl -fsS http://127.0.0.1:7700/healthz
           docker ps
       - name: Instance backup and restore under systemd

@@ -88,12 +88,7 @@ impl Stored {
     }
 
     pub fn apply(&mut self, body: &UpdateOnboarding) -> Result<(), String> {
-        if let Some(step) = body
-            .skip
-            .iter()
-            .chain(&body.unskip)
-            .find(|s| !s.is_task())
-        {
+        if let Some(step) = body.skip.iter().chain(&body.unskip).find(|s| !s.is_task()) {
             return Err(format!("{} cannot be skipped", step.label()));
         }
         for step in &body.skip {
@@ -195,7 +190,10 @@ mod tests {
         assert!(o.automatic);
         assert_eq!(o.status, OnboardingStatus::Finished);
         assert!(!o.open_on_connect());
-        assert!(!o.show_checklist(), "no checklist on top of real work either");
+        assert!(
+            !o.show_checklist(),
+            "no checklist on top of real work either"
+        );
     }
 
     #[test]
@@ -219,7 +217,10 @@ mod tests {
             .unwrap();
         let o = stored.view(facts);
         assert!(!o.open_on_connect());
-        assert!(o.show_checklist(), "first app is recommended and still open");
+        assert!(
+            o.show_checklist(),
+            "first app is recommended and still open"
+        );
         assert_eq!(o.current, Step::Source);
 
         // Work done anywhere counts, even for a skipped step.
@@ -251,7 +252,11 @@ mod tests {
             let err = stored.apply(&patch(|b| b.skip = vec![step])).unwrap_err();
             assert!(err.contains("cannot be skipped"), "{err}");
         }
-        assert_eq!(stored, Stored::default(), "a rejected patch changes nothing");
+        assert_eq!(
+            stored,
+            Stored::default(),
+            "a rejected patch changes nothing"
+        );
     }
 
     #[test]

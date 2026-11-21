@@ -191,7 +191,10 @@ pub const SAMPLE_SERVICE: &str = "whoami";
 /// `whoami-5-75-12-4.sslip.io`. `None` when `ip` is not an IPv4 address.
 pub fn sslip_domain(name: &str, ip: &str) -> Option<String> {
     let addr: std::net::Ipv4Addr = ip.parse().ok()?;
-    Some(format!("{name}-{}.sslip.io", addr.to_string().replace('.', "-")))
+    Some(format!(
+        "{name}-{}.sslip.io",
+        addr.to_string().replace('.', "-")
+    ))
 }
 
 #[cfg(test)]
@@ -232,7 +235,10 @@ mod tests {
         assert!(pending.open_on_connect());
         assert!(!pending.show_checklist());
 
-        let mut o = onboarding(OnboardingStatus::Dismissed, [Done, Todo, Todo, Skipped, Todo]);
+        let mut o = onboarding(
+            OnboardingStatus::Dismissed,
+            [Done, Todo, Todo, Skipped, Todo],
+        );
         assert!(!o.open_on_connect());
         assert!(o.show_checklist());
         assert_eq!((o.done(), o.total()), (1, 5));
