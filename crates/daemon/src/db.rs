@@ -787,8 +787,14 @@ impl Db {
     }
 
     /// Marks `deployment` live and the previously live one superseded, and makes `replicas` the
-    /// service's replica set, atomically.
-    pub async fn switch_live(&self, d: &Deployment, replicas: &[ReplicaRow]) -> Result<()> {
+    /// service's replica set, atomically. A move passes the server the deployment runs on,
+    /// which the service moves to in the same step.
+    pub async fn switch_live(
+        &self,
+        d: &Deployment,
+        moved_to: Option<&str>,
+        replicas: &[ReplicaRow],
+    ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("DELETE FROM replicas WHERE service_id = $1")
             .bind(&d.service_id)
@@ -812,8 +818,9 @@ impl Db {
         .bind(d.finished_at)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("UPDATE services SET stopped = FALSE WHERE id = $1")
+        sqlx::query("UPDATE services SET stopped = FALSE, server_id = COALESCE($2, server_id) WHERE id = $1")
             .bind(&d.service_id)
+            .bind(moved_to)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -2668,9 +2675,9 @@ pub mod tests {
         assert_eq!(rec.service.port, Some(80));
 
         first.finished_at = Some(Utc::now());
-        db.switch_live(&first, &[]).await.unwrap();
+        db.switch_live(&first, None, &[]).await.unwrap();
         second.finished_at = Some(Utc::now());
-        db.switch_live(&second, &[]).await.unwrap();
+        db.switch_live(&second, None, &[]).await.unwrap();
         let first = db.deployment(&first.id).await.unwrap().unwrap();
         assert_eq!(first.status, DeploymentStatus::Superseded);
         let rec = db.service(&svc.id).await.unwrap().unwrap();

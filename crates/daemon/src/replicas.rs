@@ -25,8 +25,6 @@ pub const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 pub const STABLE_FOR: Duration = Duration::from_secs(5);
 /// Pause after attaching replicas to the proxy, so it has reloaded before others leave it.
 pub const PROXY_SETTLE: Duration = Duration::from_secs(2);
-/// Pause between taking replicas out of the proxy and stopping them, for requests in flight.
-pub const DRAIN: Duration = Duration::from_secs(3);
 /// Seconds a drained replica gets to shut down.
 const STOP_SECS: i32 = 10;
 /// The least memory one more replica is expected to need.
@@ -229,16 +227,12 @@ pub async fn route(docker: &Docker, service_id: &str, container: &str) -> Result
     docker::connect_to_proxy(docker, container, &docker::proxy_alias(service_id)).await
 }
 
-/// Takes replicas out of the proxy, waits for requests in flight, then stops them. Containers
-/// that are already gone are skipped.
+/// Stops replicas gracefully while they are still behind the proxy. They get SIGTERM and
+/// `STOP_SECS` to finish requests in flight; new requests that reach one meanwhile are refused
+/// at once and the proxy retries them on another replica. Leaving the proxy network first
+/// would be worse: the requests in flight would lose their connection without a reset and hang
+/// until the visitor gave up. Containers that are already gone are skipped.
 pub async fn drain(docker: &Docker, containers: &[String]) -> Result<()> {
-    if containers.is_empty() {
-        return Ok(());
-    }
-    for id in containers {
-        docker::disconnect_from_proxy(docker, id).await?;
-    }
-    tokio::time::sleep(DRAIN).await;
     for id in containers {
         match docker::stop_container(docker, id, STOP_SECS).await {
             Ok(()) => {}

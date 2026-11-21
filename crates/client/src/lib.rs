@@ -382,6 +382,11 @@ impl Client {
         self.post(&format!("/services/{id}/deploy"), &body).await
     }
 
+    /// Moves a service to another server; follow the returned deployment like a deploy.
+    pub async fn move_service(&self, id: &str, body: &MoveService) -> Result<Deployment> {
+        self.post(&format!("/services/{id}/move"), body).await
+    }
+
     pub async fn restart(&self, id: &str) -> Result<ServiceDetail> {
         self.post_empty(&format!("/services/{id}/restart")).await
     }

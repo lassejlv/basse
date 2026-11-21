@@ -11,7 +11,7 @@ use common::metrics::{MetricsRange, ServiceMetrics};
 use common::notify as notify_types;
 use common::*;
 use futures_util::StreamExt;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -40,8 +40,12 @@ pub enum Msg {
     Servers(Vec<Server>),
     Detail(Box<ServiceDetail>),
     Stats(Id, ServiceStats),
-    /// Metrics of a service for the range and container they were asked for.
-    Metrics(Id, MetricsRange, Option<String>, Box<ServiceMetrics>),
+    /// Metrics of a service for the range, container and replica they were asked for.
+    Metrics(Id, MetricsRange, MetricsPick, Box<ServiceMetrics>),
+    /// Room for more replicas, for the scale dialog of a service.
+    Capacity(Id, Result<ScaleCapacity, String>),
+    /// The scale dialog's request finished: close it and show the outcome.
+    Scaled(Result<String, String>),
     Deployments(Id, Vec<Deployment>),
     Deployment(Box<Deployment>),
     OpenLinkedDeployment(Id, Result<Box<Deployment>, String>),
@@ -52,6 +56,8 @@ pub enum Msg {
     DeployLogEnd(Id),
     /// A deploy request was accepted: follow it on the deploy screen.
     Deployed(Box<Deployment>),
+    /// A move was accepted: follow it like a deploy, naming the server it goes to.
+    MoveStarted(Box<Deployment>, String),
     FormDone {
         toast: String,
         then: Then,
@@ -400,8 +406,15 @@ pub struct ServiceView {
     pub database: bool,
     /// The compose service whose logs the Logs tab shows.
     pub container: Option<String>,
+    /// The replica whose logs the Logs tab shows.
+    pub replica: Option<u16>,
+    /// The Settings tab's arrows and ⏎ act on the Scaling panel instead of the settings.
+    pub scaling_focus: bool,
     pub metrics: MetricsView,
 }
+
+/// What the Metrics tab sums: a compose service, a replica, or with neither the whole service.
+pub type MetricsPick = (Option<String>, Option<u16>);
 
 /// What the Metrics tab shows: a range, optionally one compose service, and the last answer.
 #[derive(Debug, Default)]
@@ -409,6 +422,8 @@ pub struct MetricsView {
     pub range: MetricsRange,
     /// The compose service picked; `None` sums the whole service.
     pub container: Option<String>,
+    /// The replica picked; `None` sums every replica.
+    pub replica: Option<u16>,
     pub data: Option<ServiceMetrics>,
 }
 
@@ -425,6 +440,50 @@ impl ServiceView {
             .as_deref()
             .filter(|c| compose.iter().any(|s| s.name == *c))
             .or(compose.first().map(|s| s.name.as_str()))
+    }
+
+    /// The replicas of the service by index; empty for compose services.
+    pub fn replicas(&self) -> &[Replica] {
+        self.detail.as_ref().map_or(&[], |d| d.replicas.as_slice())
+    }
+
+    /// Runs, or is set to run, more than one replica: the replica views apply.
+    pub fn replicated(&self) -> bool {
+        self.detail.as_ref().is_some_and(|d| {
+            d.compose.is_empty() && (d.service.replicas > 1 || d.replicas.len() > 1)
+        })
+    }
+
+    /// The replica the Logs tab follows: the one picked, else the first.
+    pub fn log_replica(&self) -> Option<u16> {
+        if !self.replicated() {
+            return None;
+        }
+        let replicas = self.replicas();
+        self.replica
+            .filter(|r| replicas.iter().any(|x| x.index == *r))
+            .or(replicas.first().map(|r| r.index))
+    }
+
+    /// Replicas the Metrics tab can pick: those that reported in the range and those running.
+    pub fn metric_replicas(&self) -> Vec<u16> {
+        if !self.compose().is_empty() {
+            return Vec::new();
+        }
+        let mut all: Vec<u16> = self
+            .metrics
+            .data
+            .iter()
+            .flat_map(|m| m.replicas.iter().copied())
+            .chain(self.replicas().iter().map(|r| r.index))
+            .collect();
+        all.sort_unstable();
+        all.dedup();
+        if all.len() > 1 || self.replicated() {
+            all
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn tabs(&self) -> Vec<Tab> {
@@ -460,6 +519,15 @@ pub struct DeployView {
     pub back: Screen,
     pub announced: bool,
     pub pipeline_offset: usize,
+    /// Name of the server a move goes to, when this screen started the move.
+    pub moving_to: Option<String>,
+}
+
+impl DeployView {
+    /// A deployment that moves the service to another server.
+    pub fn is_move(&self) -> bool {
+        self.deployment.trigger == "move"
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -480,6 +548,13 @@ pub enum ConfirmAction {
         server: bool,
     },
     Rollback(Id),
+    MoveService {
+        service_id: Id,
+        server_id: Id,
+        /// The target's name, for the deploy screen.
+        to: String,
+        copy_volumes: bool,
+    },
     CancelDeploy(Id),
     Stop(Id),
     /// Publish a database service on a host port, or make it internal with `None`.
@@ -680,6 +755,8 @@ pub enum Overlay {
     ServerDetail(crate::problem::ServerDetail),
     /// The full text of an error the key bar cut short.
     ErrorDetail(crate::problem::ErrorDetail),
+    /// Sets how many replicas a service runs.
+    Scale(crate::replicas::ScaleDialog),
 }
 
 /// A GitHub App being created with the manifest flow.
@@ -971,7 +1048,7 @@ impl App {
     }
 
     /// Run a request and report its outcome as a toast, refreshing afterwards.
-    fn act<T, F>(&self, ok: String, f: impl FnOnce(Client) -> F)
+    pub(crate) fn act<T, F>(&self, ok: String, f: impl FnOnce(Client) -> F)
     where
         F: Future<Output = anyhow::Result<T>> + Send + 'static,
         T: Send + 'static,
@@ -1282,12 +1359,32 @@ impl App {
             Msg::Stats(id, s) => {
                 self.stats.insert(id, s);
             }
-            Msg::Metrics(id, range, container, m) => {
+            Msg::Metrics(id, range, (container, replica), m) => {
                 if let Some(view) = self.service.as_mut().filter(|v| {
-                    v.id == id && v.metrics.range == range && v.metrics.container == container
+                    v.id == id
+                        && v.metrics.range == range
+                        && v.metrics.container == container
+                        && v.metrics.replica == replica
                 }) {
                     view.metrics.data = Some(*m);
                 }
+            }
+            Msg::Capacity(id, capacity) => {
+                if let Some(Overlay::Scale(d)) = self.overlay.as_mut()
+                    && d.service_id == id
+                {
+                    d.capacity = Some(capacity);
+                }
+            }
+            Msg::Scaled(result) => {
+                if matches!(self.overlay, Some(Overlay::Scale(_))) {
+                    self.overlay = None;
+                }
+                match result {
+                    Ok(t) => self.toast(t),
+                    Err(e) => self.error(e),
+                }
+                self.refresh();
             }
             Msg::Deployments(id, d) => {
                 if let Some(view) = self.service.as_mut().filter(|v| v.id == id) {
@@ -1377,6 +1474,13 @@ impl App {
             Msg::Deployed(d) => {
                 self.toast(format!("deployment #{} started", d.number));
                 self.open_deploy(*d);
+            }
+            Msg::MoveStarted(d, to) => {
+                self.toast(format!("moving to {to} as deployment #{}", d.number));
+                self.open_deploy(*d);
+                if let Some(view) = &mut self.deploy {
+                    view.moving_to = Some(to);
+                }
             }
             Msg::FormDone { toast, then } => {
                 self.overlay = None;
@@ -2192,6 +2296,8 @@ impl App {
                 || self.details.get(id).is_some_and(|d| d.database.is_some())
                 || self.all_services().any(|s| s.id == id && is_database(s)),
             container: None,
+            replica: None,
+            scaling_focus: false,
             metrics: MetricsView::default(),
         });
         self.load_detail(id);
@@ -2218,14 +2324,19 @@ impl App {
     /// Asks for the open service's metrics with the Metrics tab's range and container.
     pub fn load_metrics(&self) {
         let Some(view) = &self.service else { return };
-        let (id, range, container) = (
+        let (id, range, container, replica) = (
             view.id.clone(),
             view.metrics.range,
             view.metrics.container.clone(),
+            view.metrics.replica,
         );
         self.spawn(move |c| async move {
-            match c.service_metrics(&id, range, container.as_deref()).await {
-                Ok(m) => Msg::Metrics(id, range, container, Box::new(m)),
+            let metrics = match replica {
+                Some(r) => c.replica_metrics(&id, range, r).await,
+                None => c.service_metrics(&id, range, container.as_deref()).await,
+            };
+            match metrics {
+                Ok(m) => Msg::Metrics(id, range, (container, replica), Box::new(m)),
                 Err(e) => Msg::Error(format!("{e:#}")),
             }
         });
@@ -2289,6 +2400,40 @@ impl App {
         self.pick_metrics_container((at + 1) % (compose.len() + 1));
     }
 
+    /// Picks what the Metrics tab of a replicated service shows: 0 is all replicas summed, then
+    /// each replica in `ServiceView::metric_replicas` order.
+    pub fn pick_metrics_replica(&mut self, i: usize) {
+        let Some(view) = self.service.as_mut() else {
+            return;
+        };
+        let replica = match i {
+            0 => None,
+            i => match view.metric_replicas().get(i - 1) {
+                Some(r) => Some(*r),
+                None => return,
+            },
+        };
+        if view.metrics.replica != replica {
+            view.metrics.replica = replica;
+            self.load_metrics();
+        }
+    }
+
+    /// "c" on the Metrics tab of a replicated service: all, then each replica in turn.
+    pub fn next_metrics_replica(&mut self) {
+        let Some(view) = &self.service else { return };
+        let replicas = view.metric_replicas();
+        if replicas.is_empty() {
+            return;
+        }
+        let at = view
+            .metrics
+            .replica
+            .and_then(|r| replicas.iter().position(|x| *x == r))
+            .map_or(0, |i| i + 1);
+        self.pick_metrics_replica((at + 1) % (replicas.len() + 1));
+    }
+
     pub fn open_service_overview(&mut self) {
         self.leave_deploy();
         self.screen = Screen::Service;
@@ -2331,11 +2476,17 @@ impl App {
         view.logs = LogBuffer::new();
         let id = view.id.clone();
         let container = view.log_container().map(str::to_string);
+        let replica = view.log_replica();
         let handle = tokio::spawn(async move {
-            match client
-                .service_logs(&id, 500, true, container.as_deref())
-                .await
-            {
+            let stream = match replica {
+                Some(r) => client.replica_logs(&id, r, 500, true).await,
+                None => {
+                    client
+                        .service_logs(&id, 500, true, container.as_deref())
+                        .await
+                }
+            };
+            match stream {
                 Ok(mut stream) => {
                     while let Some(item) = stream.next().await {
                         match item {
@@ -2378,6 +2529,38 @@ impl App {
         } else {
             self.set_tab(Tab::Logs);
         }
+    }
+
+    /// Follow the logs of replica `i` of the service, by its place in the replica list.
+    pub fn pick_replica(&mut self, i: usize) {
+        let Some(view) = self.service.as_mut() else {
+            return;
+        };
+        let Some(index) = view.replicas().get(i).map(|r| r.index) else {
+            return;
+        };
+        view.replica = Some(index);
+        if view.tab == Tab::Logs {
+            self.start_service_logs();
+        } else {
+            self.set_tab(Tab::Logs);
+        }
+    }
+
+    /// "c" on the Logs tab of a replicated service: the next replica.
+    pub fn next_replica(&mut self) {
+        let Some(view) = self.service.as_ref() else {
+            return;
+        };
+        let replicas = view.replicas();
+        if replicas.is_empty() {
+            return;
+        }
+        let at = view
+            .log_replica()
+            .and_then(|r| replicas.iter().position(|x| x.index == r))
+            .unwrap_or(0);
+        self.pick_replica((at + 1) % replicas.len());
     }
 
     /// "c" on the Logs tab of a compose service: the next container.
@@ -2437,6 +2620,7 @@ impl App {
             task: Some(handle.abort_handle()),
             back,
             pipeline_offset: 0,
+            moving_to: None,
         });
         self.screen = Screen::Deploy;
     }
@@ -2510,7 +2694,7 @@ impl App {
             | ConfirmAction::RotateToken
             | ConfirmAction::Prune
             | ConfirmAction::Update { .. } => "",
-            ConfirmAction::Rollback(_) => "",
+            ConfirmAction::Rollback(_) | ConfirmAction::MoveService { .. } => "",
             ConfirmAction::CancelDeploy(_) => "",
             ConfirmAction::Stop(_) => "service stopped",
             ConfirmAction::DeleteBackup(_) => "backup deleted",
@@ -2613,6 +2797,21 @@ impl App {
             ConfirmAction::Rollback(id) => self.spawn(|c| async move {
                 match c.rollback(&id).await {
                     Ok(d) => Msg::Deployed(Box::new(d)),
+                    Err(e) => Msg::Error(format!("{e:#}")),
+                }
+            }),
+            ConfirmAction::MoveService {
+                service_id,
+                server_id,
+                to,
+                copy_volumes,
+            } => self.spawn(move |c| async move {
+                let body = common::api::MoveService {
+                    server_id,
+                    copy_volumes,
+                };
+                match c.move_service(&service_id, &body).await {
+                    Ok(d) => Msg::MoveStarted(Box::new(d), to),
                     Err(e) => Msg::Error(format!("{e:#}")),
                 }
             }),
@@ -4591,8 +4790,18 @@ impl App {
     }
 
     /// ⏎ on the server field of a create form: every server, offline ones last and disabled.
+    /// A move form also disables the server the service runs on.
     fn pick_server(&mut self, form: Form) {
-        let items = server_pick::items(&self.servers, |s| self.server_address(s));
+        let moving = match &form.kind {
+            FormKind::MoveService { from, .. } => Some(from.clone()),
+            _ => None,
+        };
+        let items = match &moving {
+            Some(from) => server_pick::move_items(&self.servers, from, &form.subtitle, |s| {
+                self.server_address(s)
+            }),
+            None => server_pick::items(&self.servers, |s| self.server_address(s)),
+        };
         let current = Some(form.raw(server_pick::KEY)).filter(|v| !v.is_empty());
         let row = current
             .as_ref()
@@ -4603,13 +4812,32 @@ impl App {
             })
             .or_else(|| items.iter().position(|i| !i.disabled))
             .unwrap_or(0);
-        let note = vec![Line::styled(
-            server_pick::picker_note(&self.servers),
-            theme::muted(),
-        )];
+        let all_online = self
+            .servers
+            .iter()
+            .all(|s| s.status != ServerStatus::Offline);
+        let note = if moving.is_some() && all_online {
+            Vec::new()
+        } else {
+            vec![Line::styled(
+                server_pick::picker_note(&self.servers),
+                theme::muted(),
+            )]
+        };
+        let subtitle = match &moving {
+            Some(from) => format!(
+                "move {} from {}",
+                form.subtitle,
+                self.servers
+                    .iter()
+                    .find(|s| s.id == *from)
+                    .map_or(from.as_str(), |s| s.name.as_str())
+            ),
+            None => format!("new service in {}", form.subtitle),
+        };
         self.open_picker(Picker {
             title: "Server".into(),
-            subtitle: format!("new service in {}", form.subtitle),
+            subtitle,
             kind: PickKind::Server,
             items,
             row,
@@ -5218,6 +5446,138 @@ impl App {
         self.overlay = Some(Overlay::Form(form));
     }
 
+    /// "m" on a service's Settings tab: where to move it and whether its volumes come along.
+    pub fn form_move_service(&mut self) {
+        let Some(detail) = self.service.as_ref().and_then(|v| v.detail.as_ref()) else {
+            return;
+        };
+        let s = &detail.service;
+        let Some(target) = server_pick::move_default(&self.servers, &s.server_id) else {
+            return self
+                .error("there is no other server to move to; add one on the Servers screen");
+        };
+        let mut server = Field::pick(server_pick::KEY, "server", "", "");
+        server_pick::set(&mut server, target, &self.server_address(target));
+        let database = matches!(s.source, Source::Database { .. });
+        let volumes: Vec<&str> = detail
+            .volumes
+            .iter()
+            .filter(|v| !matches!(v.compose, Some(common::ComposeVolume::Files { .. })))
+            .map(|v| v.name.as_str())
+            .collect();
+        let (copy, hint) = if database {
+            (true, "databases always copy".to_string())
+        } else if volumes.is_empty() {
+            (false, "no volumes".to_string())
+        } else {
+            (true, volumes.join(", "))
+        };
+        let mut from = vec![
+            Span::styled("from ", theme::muted()),
+            Span::styled(detail.server.name.clone(), theme::text()),
+            Span::styled(
+                format!(
+                    "  {}",
+                    server_pick::summary(&detail.server, &self.server_address(&detail.server))
+                ),
+                theme::muted(),
+            ),
+        ];
+        let live = self
+            .service
+            .as_ref()
+            .and_then(|v| {
+                v.deployments
+                    .iter()
+                    .find(|d| d.status == DeploymentStatus::Live)
+            })
+            .map(|d| d.number);
+        if let Some(n) = live {
+            from.push(Span::styled(format!(" · live #{n}"), theme::muted()));
+        }
+        let mut note = vec![
+            format!(
+                "{} keeps serving until the new server passes its health check.",
+                detail.server.name
+            ),
+            format!(
+                "With copy volumes, {} stops while they copy, then starts there.",
+                s.name
+            ),
+        ];
+        if let Some(domain) = detail.domains.first() {
+            note.push(format!(
+                "Point {} at the new server once it is live.",
+                domain.host
+            ));
+        }
+        let form = Form::new(
+            FormKind::MoveService {
+                service_id: s.id.clone(),
+                from: s.server_id.clone(),
+            },
+            "Move",
+            vec![
+                server,
+                Field::toggle("copy_volumes", "copy volumes", copy).hint(hint),
+            ],
+        )
+        .subtitle(s.name.clone())
+        .header(Line::from(from))
+        .note(note)
+        .submit("move", None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    fn submit_move(&mut self) {
+        let Some(Overlay::Form(form)) = &mut self.overlay else {
+            return;
+        };
+        let FormKind::MoveService { service_id, from } = form.kind.clone() else {
+            return;
+        };
+        let server_id = form.raw(server_pick::KEY);
+        let Some(to) = self.servers.iter().find(|s| s.id == server_id) else {
+            return form.fail("pick a server to move to");
+        };
+        if to.id == from {
+            return form.fail(format!("{} already runs on {}", form.subtitle, to.name));
+        }
+        let name = form.subtitle.clone();
+        let from_name = self
+            .servers
+            .iter()
+            .find(|s| s.id == from)
+            .map_or(from.clone(), |s| s.name.clone());
+        let database = self
+            .service
+            .as_ref()
+            .and_then(|v| v.detail.as_ref())
+            .is_some_and(|d| matches!(d.service.source, Source::Database { .. }));
+        let copy_volumes = form.on("copy_volumes") || database;
+        let mut message = format!(
+            "Move {name} to {}? {from_name} keeps serving until {} passes its health check.",
+            to.name, to.name
+        );
+        if copy_volumes {
+            message.push_str(&format!(" {name} stops while its volumes copy."));
+        }
+        self.overlay = Some(Overlay::Confirm(Confirm {
+            title: "Move service".into(),
+            message,
+            danger: false,
+            action: ConfirmAction::MoveService {
+                service_id,
+                server_id: to.id.clone(),
+                to: to.name.clone(),
+                copy_volumes,
+            },
+            verb: "move",
+            busy: None,
+            error: Vec::new(),
+        }));
+    }
+
     /// The address a published port is reachable on.
     pub fn server_address(&self, server: &Server) -> String {
         match server.kind {
@@ -5375,6 +5735,7 @@ impl App {
         };
         match form.kind {
             FormKind::ExposeDatabase { .. } => return self.submit_expose(),
+            FormKind::MoveService { .. } => return self.submit_move(),
             FormKind::DownloadBackup { .. } => return self.submit_download(),
             FormKind::NotifyKind => return self.notify_kind_chosen(),
             FormKind::NotifyChannel { .. } => return self.submit_notify_channel(),
@@ -5623,6 +5984,9 @@ enum Request {
     GithubApp(CreateGithubApp),
     ConnectApp(ConnectGithubApp),
     Token(ConnectGithubToken),
+    Autoscale(Id, Autoscale),
+    /// A scaling setting that needs no deploy; carries the toast to show.
+    Scaling(Id, UpdateService, String),
 }
 
 /// "acme-github is ready", or what is wrong with a source that was just connected.
@@ -5818,6 +6182,20 @@ impl Request {
                 (connected(&c.connect_github_app(&body).await?), Then::Stay)
             }
             Request::Token(body) => (connected(&c.connect_github_token(&body).await?), Then::Stay),
+            Request::Autoscale(id, body) => {
+                let d = c.set_autoscale(&id, &body).await?;
+                let a = &d.service.scaling.autoscale;
+                let toast = if a.enabled {
+                    format!("{} autoscales {}", d.service.name, a.summary())
+                } else {
+                    format!("autoscaling off for {}", d.service.name)
+                };
+                (toast, Then::Stay)
+            }
+            Request::Scaling(id, body, toast) => {
+                c.update_service(&id, &body).await?;
+                (toast, Then::Stay)
+            }
             Request::Schedule(id, body) => {
                 let s = c.set_backup_schedule(&id, &body).await?;
                 (
@@ -6285,6 +6663,20 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
             })
         }
         FormKind::GenerateKey => Request::GenerateKey(named("name")?),
+        FormKind::Autoscale { service_id } => {
+            Request::Autoscale(service_id.clone(), crate::replicas::autoscale_from(form)?)
+        }
+        FormKind::RollingSurge { service_id } => {
+            let surge = crate::replicas::count(&form.get("surge"), "rolling surge")?;
+            Request::Scaling(
+                service_id.clone(),
+                UpdateService {
+                    max_surge: Some(surge),
+                    ..Default::default()
+                },
+                format!("rolling surge {surge} · used by the next deploy"),
+            )
+        }
         FormKind::InstanceBackup => Request::InstanceBackup(CreateInstanceBackup {
             storage_id: Some(form.get("store")).filter(|s| !s.is_empty()),
             passphrase: passphrase(form)?.ok_or("enter a passphrase")?,
@@ -6414,6 +6806,7 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
         ),
         FormKind::EnvVar { .. }
         | FormKind::ExposeDatabase { .. }
+        | FormKind::MoveService { .. }
         | FormKind::DownloadBackup { .. }
         | FormKind::NotifyKind
         | FormKind::NotifyChannel { .. } => {

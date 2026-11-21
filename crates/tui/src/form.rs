@@ -194,6 +194,12 @@ pub enum FormKind {
     AddVolume {
         service_id: Id,
     },
+    /// Picks the server and whether volumes come along; submitting opens a confirm dialog.
+    MoveService {
+        service_id: Id,
+        /// The server the service runs on now.
+        from: Id,
+    },
     AddServer,
     PublicIp,
     PurgeServer {
@@ -243,6 +249,12 @@ pub enum FormKind {
     CreateGithubApp,
     ConnectGithubApp,
     AddGithubToken,
+    Autoscale {
+        service_id: Id,
+    },
+    RollingSurge {
+        service_id: Id,
+    },
 }
 
 pub enum FormAction {
@@ -404,6 +416,22 @@ impl Form {
             let organization = self.choice("owner") == 1;
             if let Some(f) = self.field_mut("organization") {
                 f.visible = organization;
+            }
+            return;
+        }
+        if matches!(self.kind, FormKind::Autoscale { .. }) {
+            for (key, unit) in [
+                ("cpu", "% of one core"),
+                ("memory", "% of its limit"),
+                ("rps", "per second"),
+            ] {
+                if let Some(f) = self.field_mut(key) {
+                    f.hint = if f.value.trim().is_empty() {
+                        "off".into()
+                    } else {
+                        unit.into()
+                    };
+                }
             }
             return;
         }
@@ -809,7 +837,14 @@ impl Form {
         }
 
         let hint_w: u16 = if inner.width >= 76 { 24 } else { 0 };
-        let label_w = 16.min(inner.width / 2);
+        let longest = self
+            .fields
+            .iter()
+            .filter(|f| f.visible)
+            .map(|f| f.label.chars().count() as u16 + 2)
+            .max()
+            .unwrap_or(0);
+        let label_w = longest.max(16).min(inner.width / 2);
         let mut y = inner.y + head as u16;
         let limit = y + room as u16;
         for (i, field) in visible.into_iter().skip(start) {

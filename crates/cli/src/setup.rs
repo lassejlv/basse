@@ -132,8 +132,17 @@ pub fn print_status(o: &Onboarding) {
     }
 }
 
+/// Answers for the first-app step given as flags instead of prompts.
+#[derive(Debug, Default)]
+pub struct FirstApp {
+    /// Server name or id the app runs on.
+    pub server: Option<String>,
+    /// Directory of a GitHub app inside its repository, for monorepos.
+    pub root: Option<String>,
+}
+
 /// Walks every step that is not done yet. Returns the final state.
-pub async fn run(c: &Client, p: &mut Prompt<'_>) -> Result<Onboarding> {
+pub async fn run(c: &Client, p: &mut Prompt<'_>, flags: &FirstApp) -> Result<Onboarding> {
     let info = c.info().await?;
     println!();
     println!("Setting up {}", paint(&info.hostname, Tone::Accent));
@@ -166,7 +175,7 @@ pub async fn run(c: &Client, p: &mut Prompt<'_>) -> Result<Onboarding> {
             Step::Source => source(c, p, &info).await?,
             Step::Backups => backups(c, p).await?,
             Step::Notifications => notifications(c, p).await?,
-            Step::FirstApp => first_app(c, p, &info).await?,
+            Step::FirstApp => first_app(c, p, &info, flags).await?,
             Step::Welcome | Step::Done => true,
         };
         let mut body = UpdateOnboarding::default();
@@ -471,7 +480,12 @@ async fn notifications(c: &Client, p: &mut Prompt<'_>) -> Result<bool> {
     Ok(true)
 }
 
-async fn first_app(c: &Client, p: &mut Prompt<'_>, info: &DaemonInfo) -> Result<bool> {
+async fn first_app(
+    c: &Client,
+    p: &mut Prompt<'_>,
+    info: &DaemonInfo,
+    flags: &FirstApp,
+) -> Result<bool> {
     let ready: Vec<GitSource> = c
         .sources()
         .await?
@@ -487,8 +501,18 @@ async fn first_app(c: &Client, p: &mut Prompt<'_>, info: &DaemonInfo) -> Result<
     if pick == options.len() - 1 {
         return Ok(false);
     }
+    if pick == 0 && flags.root.is_some() {
+        output::note("  --root is for apps from GitHub; the sample app has none");
+    }
     let servers = c.servers().await?;
-    let server_id = if servers.len() > 1 {
+    let server_id = if let Some(wanted) = &flags.server {
+        let server = servers
+            .iter()
+            .find(|s| s.name == *wanted || s.id == *wanted)
+            .with_context(|| format!("no server '{wanted}'"))?;
+        println!("  {}  {}", muted("server"), server.name);
+        Some(server.id.clone())
+    } else if servers.len() > 1 {
         let labels: Vec<(String, String)> = servers
             .iter()
             .map(|s| (s.name.clone(), format!("{:?}", s.kind).to_lowercase()))
@@ -534,7 +558,16 @@ async fn first_app(c: &Client, p: &mut Prompt<'_>, info: &DaemonInfo) -> Result<
         let branches = c.source_branches(&git.id, &repo).await?;
         let default = branches.first().map(|b| b.name.clone());
         let branch = p.ask("branch:", default.as_deref())?;
-        let detected = c.detect_build(&git.id, &repo, &branch, "").await?;
+        let root = flags
+            .root
+            .as_deref()
+            .unwrap_or_default()
+            .trim_matches('/')
+            .to_string();
+        if !root.is_empty() {
+            println!("  {}  {root}", muted("root"));
+        }
+        let detected = c.detect_build(&git.id, &repo, &branch, &root).await?;
         println!(
             "  {} {}",
             muted("builds with"),
@@ -561,7 +594,7 @@ async fn first_app(c: &Client, p: &mut Prompt<'_>, info: &DaemonInfo) -> Result<
                     .filter(|_| detected.method == BuildMethod::Dockerfile)
                     .unwrap_or_else(|| "Dockerfile".into()),
                 context: ".".into(),
-                root: String::new(),
+                root,
                 watch_paths: true,
                 source_id: Some(git.id.clone()),
                 auto_deploy: true,
@@ -676,6 +709,8 @@ mod tests {
         onboarding: Option<Onboarding>,
         domain_checks: usize,
         sources: Vec<GitSource>,
+        /// Answered on `/servers`; empty means the one local server.
+        servers: Vec<Server>,
     }
 
     type Shared = Arc<Mutex<Mock>>;
@@ -910,7 +945,23 @@ mod tests {
                 error: None,
                 latency_ms: Some(12),
             }),
-            ("GET", "/servers") => ok(vec![server()]),
+            ("GET", "/servers") if m.servers.is_empty() => ok(vec![server()]),
+            ("GET", "/servers") => ok(&m.servers),
+            ("GET", "/sources/g1/branches") => ok(vec![GitBranch {
+                name: "main".into(),
+                default: true,
+            }]),
+            ("GET", "/sources/g1/detect") => {
+                let in_root = uri.query().is_some_and(|q| q.contains("root=apps%2Fweb"));
+                ok(BuildDetection {
+                    method: if in_root {
+                        BuildMethod::Dockerfile
+                    } else {
+                        BuildMethod::Railpack
+                    },
+                    file: in_root.then(|| "Dockerfile".to_string()),
+                })
+            }
             ("POST", "/projects") => ok(project()),
             ("GET", "/tree") => ok(Tree {
                 projects: vec![ProjectNode {
@@ -980,7 +1031,9 @@ mod tests {
     async fn walk(c: &Client, answers: &[&str]) -> Onboarding {
         let text = answers.iter().map(|a| format!("{a}\n")).collect::<String>();
         let mut input = std::io::Cursor::new(text.into_bytes());
-        run(c, &mut Prompt::new(&mut input, false)).await.unwrap()
+        run(c, &mut Prompt::new(&mut input, false), &FirstApp::default())
+            .await
+            .unwrap()
     }
 
     fn writes(mock: &Shared, path: &str) -> Vec<Value> {
@@ -1074,6 +1127,65 @@ mod tests {
         assert_eq!(rule.events, preset("essentials").unwrap().events());
         assert_eq!(writes(&mock, "/notify/channels/ch1/test").len(), 1);
         assert!(writes(&mock, "/services").is_empty());
+    }
+
+    #[tokio::test]
+    async fn first_app_flags_pick_the_server_and_root() {
+        let (c, mock) = daemon().await;
+        {
+            let mut m = mock.lock().unwrap();
+            m.sources = vec![source()];
+            let mut edge = server();
+            edge.id = "srv2".into();
+            edge.name = "edge".into();
+            edge.kind = ServerKind::Ssh;
+            m.servers = vec![server(), edge];
+            for s in &mut m.onboarding.as_mut().unwrap().steps {
+                if s.step != Step::FirstApp {
+                    s.state = StepState::Done;
+                }
+            }
+        }
+        let text = "2\nacme/web\n\n\n";
+        let mut input = std::io::Cursor::new(text.as_bytes().to_vec());
+        let flags = FirstApp {
+            server: Some("edge".into()),
+            root: Some("/apps/web/".into()),
+        };
+        let o = run(&c, &mut Prompt::new(&mut input, false), &flags)
+            .await
+            .unwrap();
+
+        assert_eq!(o.state(Step::FirstApp), StepState::Done);
+        let s: CreateService = parse(&writes(&mock, "/services")[0]);
+        assert_eq!(s.server_id.as_deref(), Some("srv2"));
+        let Source::Git {
+            repo, root, build, ..
+        } = s.source
+        else {
+            panic!("not a git service: {:?}", s.source);
+        };
+        assert_eq!((repo.as_str(), root.as_str()), ("acme/web", "apps/web"));
+        assert_eq!(
+            build.method,
+            BuildMethod::Dockerfile,
+            "detected inside the root"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_first_app_server_is_an_error() {
+        let (c, _) = daemon().await;
+        let text = "\n3\n\n8\n\n";
+        let mut input = std::io::Cursor::new(text.as_bytes().to_vec());
+        let flags = FirstApp {
+            server: Some("nowhere".into()),
+            root: None,
+        };
+        let err = run(&c, &mut Prompt::new(&mut input, false), &flags)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no server 'nowhere'"), "{err:#}");
     }
 
     #[test]

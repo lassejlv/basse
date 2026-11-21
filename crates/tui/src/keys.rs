@@ -366,6 +366,7 @@ fn overlay(app: &mut App, key: KeyEvent) {
     match app.overlay.as_mut() {
         Some(Overlay::ServerDetail(_)) => crate::problem::server_detail_keys(app, key),
         Some(Overlay::ErrorDetail(_)) => crate::problem::error_detail_keys(app, key),
+        Some(Overlay::Scale(_)) => crate::replicas::scale_keys(app, key),
         Some(Overlay::Form(form)) => match form.handle_key(key) {
             FormAction::None => {}
             FormAction::Cancel => {
@@ -747,6 +748,7 @@ fn service(app: &mut App, key: KeyEvent) {
     let at = tabs.iter().position(|t| *t == tab).unwrap_or(0);
     if tab == Tab::Metrics {
         let compose = !view.compose().is_empty();
+        let replicas = !view.metric_replicas().is_empty();
         match key.code {
             KeyCode::Char(c @ '1'..='4') => {
                 return app.set_metrics_range(MetricsRange::ALL[c as usize - '1' as usize]);
@@ -754,6 +756,7 @@ fn service(app: &mut App, key: KeyEvent) {
             KeyCode::Left => return app.step_metrics_range(-1),
             KeyCode::Right => return app.step_metrics_range(1),
             KeyCode::Char('c') if compose => return app.next_metrics_container(),
+            KeyCode::Char('c') if replicas => return app.next_metrics_replica(),
             _ => {}
         }
     }
@@ -777,10 +780,38 @@ fn service(app: &mut App, key: KeyEvent) {
         (Tab::Env, Some(d)) => d.env.len(),
         (Tab::Domains, Some(d)) => d.domains.len(),
         (Tab::Volumes, Some(d)) => d.volumes.len(),
+        (Tab::Overview, Some(d)) if view.replicated() => d.replicas.len(),
+        (Tab::Settings, _) if view.scaling_focus => crate::replicas::SCALING_ROWS.len(),
         _ => 0,
     };
     if tab == Tab::Logs && key.code == KeyCode::Char('c') && !view.compose().is_empty() {
         return app.next_container();
+    }
+    if tab == Tab::Logs && key.code == KeyCode::Char('c') && view.replicated() {
+        return app.next_replica();
+    }
+    let scalable = detail
+        .as_ref()
+        .is_some_and(|d| crate::replicas::scalable(&d.service));
+    if tab == Tab::Settings && scalable {
+        match key.code {
+            KeyCode::Left | KeyCode::Right => {
+                view.scaling_focus = !view.scaling_focus;
+                view.row = 0;
+                return;
+            }
+            KeyCode::Char('s') => return app.open_scale(),
+            KeyCode::Char('a') => return app.form_autoscale(),
+            KeyCode::Enter if view.scaling_focus => {
+                let row = view.row;
+                return app.edit_scaling_row(row);
+            }
+            _ => {}
+        }
+    }
+    if tab == Tab::Overview && key.code == KeyCode::Enter && view.replicated() {
+        let row = view.row;
+        return app.pick_replica(row);
     }
     if tab == Tab::Logs {
         let logs = &mut view.logs;
@@ -1090,6 +1121,7 @@ fn service(app: &mut App, key: KeyEvent) {
         }
         (Tab::Settings, KeyCode::Enter | KeyCode::Char('e')) => app.form_edit_service(),
         (Tab::Settings, KeyCode::Char('X')) => ask_delete_service(app, &s),
+        (Tab::Settings, KeyCode::Char('m')) => app.form_move_service(),
         _ => {}
     }
 }

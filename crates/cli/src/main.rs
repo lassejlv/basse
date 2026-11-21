@@ -107,6 +107,12 @@ enum Cmd {
         /// Only show the checklist.
         #[arg(long)]
         status: bool,
+        /// Server the first app runs on, instead of asking.
+        #[arg(long)]
+        server: Option<String>,
+        /// Directory of the first app inside its GitHub repository, for monorepos, e.g. apps/web.
+        #[arg(long)]
+        root: Option<String>,
     },
     /// Servers the daemon deploys to.
     #[command(subcommand)]
@@ -533,6 +539,21 @@ enum ServiceCmd {
         #[arg(long)]
         watch_paths: Option<bool>,
     },
+    /// Run a service on another server. The old server keeps serving until the new one is
+    /// healthy; a failed move leaves everything as it was.
+    Move {
+        service: String,
+        /// Server to move to.
+        #[arg(long)]
+        server: String,
+        /// Copy the named volumes too. The old containers stop while they copy. Databases
+        /// always copy their data.
+        #[arg(long)]
+        copy_volumes: bool,
+        /// Return right away instead of streaming the move.
+        #[arg(long, short)]
+        detach: bool,
+    },
     Delete {
         service: String,
         /// Also delete the service's volumes and their data.
@@ -840,7 +861,11 @@ async fn dispatch(c: Client, name: String, command: Cmd, json: bool) -> Result<(
         Cmd::Proxy(ProxyCmd::Restart) => instance::restart_proxy(&c, json).await,
         Cmd::Prune => instance::prune(&c, json).await,
         Cmd::Status => status(&c, &name, json).await,
-        Cmd::Setup { status } => {
+        Cmd::Setup {
+            status,
+            server,
+            root,
+        } => {
             use std::io::IsTerminal;
             if status || json {
                 let o = c.onboarding().await?;
@@ -854,7 +879,12 @@ async fn dispatch(c: Client, name: String, command: Cmd, json: bool) -> Result<(
                 bail!("setup asks questions; run it in a terminal, or use --status");
             }
             let mut stdin = std::io::stdin().lock();
-            setup::run(&c, &mut setup::Prompt::new(&mut stdin, true)).await?;
+            setup::run(
+                &c,
+                &mut setup::Prompt::new(&mut stdin, true),
+                &setup::FirstApp { server, root },
+            )
+            .await?;
             Ok(())
         }
         Cmd::Server(cmd) => server(&c, cmd, json).await,
@@ -2743,6 +2773,36 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
                 println!("{}", build_label(&d.service.source, build));
             }
         }
+        ServiceCmd::Move {
+            service,
+            server,
+            copy_volumes,
+            detach,
+        } => {
+            let (_, _, s) = find(c, &service).await?;
+            let to = find_server(c, &server).await?;
+            let d = c
+                .move_service(
+                    &s.id,
+                    &MoveService {
+                        server_id: to.id.clone(),
+                        copy_volumes,
+                    },
+                )
+                .await?;
+            if json {
+                return output::json(&d);
+            }
+            if detach {
+                output::ok(format!(
+                    "moving {} to {} as deployment #{}",
+                    s.name, to.name, d.number
+                ));
+                return Ok(());
+            }
+            follow_deployment(c, d).await?;
+            output::ok(format!("{} runs on {} now", s.name, to.name));
+        }
         ServiceCmd::Delete {
             service,
             volumes,
@@ -3543,6 +3603,43 @@ mod tests {
             .to_string();
         assert!(help.contains("--cli") && help.contains("--server"));
         assert!(!help.contains("--self"), "--self stays a hidden alias");
+    }
+
+    #[test]
+    fn service_move_and_setup_flags_parse() {
+        match parse(&[
+            "service",
+            "move",
+            "web",
+            "--server",
+            "edge",
+            "--copy-volumes",
+        ]) {
+            Some(Cmd::Service(ServiceCmd::Move {
+                service,
+                server,
+                copy_volumes,
+                detach,
+            })) => {
+                assert_eq!((service.as_str(), server.as_str()), ("web", "edge"));
+                assert!(copy_volumes && !detach);
+            }
+            _ => panic!("not a service move"),
+        }
+        let argv = [brand::CLI_BIN, "service", "move", "web"];
+        assert!(Cli::try_parse_from(argv).is_err(), "--server is required");
+        match parse(&["setup", "--server", "edge", "--root", "apps/web"]) {
+            Some(Cmd::Setup {
+                status,
+                server,
+                root,
+            }) => {
+                assert!(!status);
+                assert_eq!(server.as_deref(), Some("edge"));
+                assert_eq!(root.as_deref(), Some("apps/web"));
+            }
+            _ => panic!("not setup"),
+        }
     }
 
     #[test]

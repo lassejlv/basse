@@ -5,6 +5,7 @@ Self-hosted deploys from the terminal. A control daemon runs on your server and 
 - **Projects and environments.** Group services into projects, each with `production`, `staging` or any other environment. Services in one environment reach each other by name.
 - **Three kinds of source.** Build a git repository with its Dockerfile, run a registry image, or start a one-click database (Postgres, MySQL, MariaDB, Redis, Mongo) with generated credentials, a data volume and a `DATABASE_URL`.
 - **Zero-downtime deploys.** A new container must pass its health check before the proxy sends it traffic. Then the old one stops. Rollback redeploys an earlier image without rebuilding.
+- **Replicas and autoscaling.** Run several identical containers of a service behind Caddy's load balancer, roll deploys over them one batch at a time, and let the daemon scale them on CPU, memory or requests.
 - **Domains with automatic HTTPS.** Caddy runs as the reverse proxy on each server and gets certificates on its own.
 - **Logs, env vars and volumes.** Stream container and build logs, manage variables and secrets, and mount named volumes that survive redeploys.
 - **Metrics.** CPU, memory, network, disk I/O and, for services with a domain, requests, status codes and latency, sampled every 10 seconds and kept for 30 days, with each deploy marked on the charts.
@@ -111,7 +112,8 @@ The mouse works too: click rows, tabs, dialog fields and the key hints in the bo
 | Database | `v` reveal the password, `c`/`C` copy the internal or public URL, `p` expose on a server port or make internal again, `R` rotate the password |
 | Backups | `b` back up now (asks where when storage connections exist), `R` restore, `D` download to a local file, `x` delete, `e` edit the daily schedule and its store |
 | Logs | `f` follow, `/` search, `n`/`N` next or previous match, `e` errors only, `t` timestamps, `w` wrap |
-| Metrics | `1`–`4` or `←→` range (1h, 24h, 7d, 30d), `c` next container of a compose service |
+| Metrics | `1`–`4` or `←→` range (1h, 24h, 7d, 30d), `c` next container of a compose service or next replica |
+| Replicas (service Overview and Settings) | Overview: `↑↓` pick a replica, `⏎` its logs. Settings: `←→` switch to the Scaling panel, `s` scale, `a` autoscale, `⏎` edit the row (load balancing, rolling surge, shared volume) |
 | Deploy | Live pipeline and build output, `c` cancel, `esc` back (the deploy keeps running) |
 | Servers | `a` add (pick an SSH key or generate one), `K` change a server's key, `c` check, `p` set up the proxy, `x` remove, `X` remove and clean up everything the daemon put there |
 | Secrets (`s` in Settings, or the palette) | `a` add or import, `g` generate an SSH key, `v` reveal (logged), `c` copy the public key, `n` rename, `e` replace the value, `x` delete |
@@ -131,6 +133,9 @@ basse db backup postgres
 basse db schedule postgres --hour 3 --keep 7
 basse logs web -f
 basse service metrics web --range 24h
+basse service scale web 3
+basse service autoscale web --min 2 --max 6 --cpu 70 --rps 50
+basse service ps web
 basse deploy web
 basse rollback web
 basse status
@@ -221,6 +226,28 @@ basse service build web --root apps/site
 ```
 
 Without a source, `--repo` still takes any clone URL: public repositories clone anonymously, and `git@github.com:` URLs use the daemon's SSH key, which you can add to a repository as a deploy key (`basse server key` prints it).
+
+## Replicas and autoscaling
+
+A service can run several identical containers, its replicas, on its server. Caddy balances requests over every running replica; other services in the environment reach them by the service's name, which resolves to all of them.
+
+```sh
+basse service scale web 3                     # adds two replicas; no redeploy
+basse service scale web --lb ip_hash          # least_conn (default), round_robin, or ip_hash for sticky sessions
+basse service scale web --surge 2             # a rolling deploy starts 2 new replicas at a time
+basse service ps web                          # each replica's health, CPU, memory, restarts and container
+basse logs web --replica 1
+basse service metrics web --replica 1
+basse service autoscale web --min 2 --max 6 --cpu 70 --rps 50 --down-cooldown 5m
+basse service autoscale web --off
+```
+
+- **Load balancing.** Each replica joins the proxy's upstreams for the service's domains. With a health path, Caddy probes every replica every 5 seconds; a replica that fails a request is skipped for 30 seconds, and a request that cannot reach its replica is retried on up to three others. With no replica left, the proxy answers 503.
+- **Rolling deploys.** A deploy starts `--surge` new replicas (default 1), waits for their health checks, puts them behind the proxy, then drains the old replicas with the same index: out of the proxy, a pause for requests in flight, then a graceful stop. Old replicas are only removed once the whole new set is live, so a failed health check or a cancel at any point starts them again and the old set keeps serving.
+- **Scaling** adds replicas from the live image, each health-checked before it gets traffic, or drains the highest indexes. It never redeploys. Replicas keep their index (`#0`, `#1`, …) for logs and metrics, and every replica gets `BASSE_REPLICA` with its index.
+- **Volumes.** A named volume is shared by every replica, so they all write the same files at once. More than one replica on a service with a volume is refused unless you allow it with `--shared-volume-ok true`; the deploy log then warns about it.
+- **Autoscaling** checks every 15 seconds against the last minute of metrics: CPU in percent of one core, memory in percent of the limit, and requests per second, each averaged per replica. The service gets `ceil(replicas × observed ÷ target)` replicas for its busiest target, within `--min` and `--max`. Values within 10% of their target change nothing; scaling up waits `--up-cooldown` (60s) after any scaling, scaling down waits `--down-cooldown` (5m) and follows the highest need of the last `--stabilization` (5m), so a short dip doesn't remove replicas. It never adds more replicas than the server's free memory fits. Scaling is recorded in the activity feed and sends `service.scaled`; hitting `--max` or the memory limit sends `service.scale_limit_reached` once.
+- **Limits.** Replicas run on the service's server for now. Databases always run one replica, and compose services aren't scaled yet. Requests in flight on a replica when it crashes are lost; the rest of the traffic moves to the other replicas.
 
 ## Secrets
 
@@ -349,7 +376,7 @@ basse notify events                                                         # th
 | `pushover` | `--user` | app token |
 | `webhook` | `--url`, `--header "Name: value"` | HMAC secret, optional (`--secret-file`) |
 
-**Events.** Deploys (queued, started, succeeded, failed, cancelled, rolled back, health check failed), services (started, stopped, restarted, crashed, killed out of memory, restart loop), databases (created, backup succeeded or failed, restore done or failed, password rotated), instance backups, S3 storage unreachable, TLS certificates (issued or renewed, expiring soon, invalid), servers (connected, unreachable, disk or memory above 90% on the daemon's machine), the daemon (started, update available, update installed) and security (API token rotated, secret changed, secret revealed). Each has a stable id such as `deploy.failed` and a severity that colors the message.
+**Events.** Deploys (queued, started, succeeded, failed, cancelled, rolled back, health check failed), services (started, stopped, restarted, crashed, killed out of memory, restart loop, scaled, scale limit reached), databases (created, backup succeeded or failed, restore done or failed, password rotated), instance backups, S3 storage unreachable, TLS certificates (issued or renewed, expiring soon, invalid), servers (connected, unreachable, disk or memory above 90% on the daemon's machine), the daemon (started, update available, update installed) and security (API token rotated, secret changed, secret revealed). Each has a stable id such as `deploy.failed` and a severity that colors the message.
 
 **Presets** fill a rule's events in one pick and can be adjusted afterwards: *Essentials* (every critical event: failures and outages), *Deploys* (the whole deploy lifecycle), *Databases & backups* (databases, instance backups and storage) and *Everything*. A rule without a preset is a custom pick.
 
