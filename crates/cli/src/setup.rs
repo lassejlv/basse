@@ -643,7 +643,7 @@ fn unique<'a>(base: &str, taken: impl Iterator<Item = &'a String>) -> String {
                 format!("{base}-{n}")
             }
         })
-        .find(|name| !taken.iter().any(|t| *t == name))
+        .find(|name| !taken.contains(&name))
         .unwrap_or_default()
 }
 
