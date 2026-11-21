@@ -53,6 +53,9 @@ pub struct Server {
     pub host: Option<String>,
     pub user: Option<String>,
     pub port: Option<u16>,
+    /// The `ssh_key` secret the daemon connects with; `None` uses the daemon's own key.
+    #[serde(default)]
+    pub ssh_key_secret_id: Option<Id>,
     #[serde(default)]
     pub status: ServerStatus,
     #[serde(default)]
@@ -674,6 +677,18 @@ pub enum BackupStorage {
     /// The daemon's data directory: `<data dir>/backups/<service id>/<file>`.
     #[default]
     Local,
+    /// An S3-compatible storage connection, named by `storage_id`:
+    /// `<path prefix>/<service id>/<file>` in its bucket.
+    S3,
+}
+
+impl BackupStorage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::S3 => "s3",
+        }
+    }
 }
 
 /// A dump of a database service, gzip-compressed.
@@ -698,13 +713,17 @@ pub struct Backup {
 }
 
 /// Daily automatic backups of a database service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupSchedule {
     pub enabled: bool,
     /// Hour of the day (UTC, 0-23) the backup runs.
     pub hour_utc: u8,
-    /// Scheduled backups to keep; older ones are deleted. Manual backups are never pruned.
+    /// Scheduled backups to keep per store; older ones are deleted. Manual backups are never
+    /// pruned.
     pub keep: u32,
+    /// Storage connection scheduled backups go to; `None` keeps them in the data directory.
+    #[serde(default)]
+    pub storage_id: Option<Id>,
 }
 
 impl Default for BackupSchedule {
@@ -713,6 +732,221 @@ impl Default for BackupSchedule {
             enabled: false,
             hour_utc: 3,
             keep: 7,
+            storage_id: None,
+        }
+    }
+}
+
+/// What a secret holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretKind {
+    /// An SSH private key; its public key is derived and shown.
+    SshKey,
+    /// An access key id and secret for S3-compatible storage.
+    S3Credentials,
+    /// An opaque value.
+    Generic,
+}
+
+impl SecretKind {
+    pub const ALL: [Self; 3] = [Self::SshKey, Self::S3Credentials, Self::Generic];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SshKey => "ssh_key",
+            Self::S3Credentials => "s3_credentials",
+            Self::Generic => "generic",
+        }
+    }
+
+    /// Short human label: `ssh key`, `s3 credentials`, `generic`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SshKey => "ssh key",
+            Self::S3Credentials => "s3 credentials",
+            Self::Generic => "generic",
+        }
+    }
+}
+
+impl fmt::Display for SecretKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for SecretKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.replace('-', "_").as_str() {
+            "ssh_key" | "ssh" => Ok(Self::SshKey),
+            "s3_credentials" | "s3" => Ok(Self::S3Credentials),
+            "generic" => Ok(Self::Generic),
+            _ => Err(format!(
+                "unknown secret kind '{s}', expected one of ssh-key, s3, generic"
+            )),
+        }
+    }
+}
+
+/// The plaintext of a secret. Clients send it when creating or replacing a secret, and only
+/// `POST /secrets/{id}/reveal` returns it. `Debug` never prints it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SecretValue {
+    /// An OpenSSH private key (`-----BEGIN OPENSSH PRIVATE KEY-----`) without a passphrase.
+    SshKey {
+        private_key: String,
+    },
+    S3Credentials {
+        access_key_id: String,
+        secret_access_key: String,
+    },
+    Generic {
+        value: String,
+    },
+}
+
+impl SecretValue {
+    pub fn kind(&self) -> SecretKind {
+        match self {
+            Self::SshKey { .. } => SecretKind::SshKey,
+            Self::S3Credentials { .. } => SecretKind::S3Credentials,
+            Self::Generic { .. } => SecretKind::Generic,
+        }
+    }
+}
+
+impl fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SecretValue({}, redacted)", self.kind())
+    }
+}
+
+/// A stored secret. The value itself is encrypted at rest and never part of this type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Secret {
+    pub id: Id,
+    pub name: String,
+    pub kind: SecretKind,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+    /// The non-secret half: the OpenSSH public key of an `ssh_key`, the access key id of
+    /// `s3_credentials`; `None` for `generic`.
+    pub public_part: Option<String>,
+    /// What references the secret; it cannot be deleted while this is not empty.
+    #[serde(default)]
+    pub used_by: Vec<Usage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageKind {
+    Server,
+    Storage,
+}
+
+/// One thing that uses a secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    pub kind: UsageKind,
+    pub id: Id,
+    pub name: String,
+}
+
+impl fmt::Display for Usage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self.kind {
+            UsageKind::Server => "server",
+            UsageKind::Storage => "storage",
+        };
+        write!(f, "{kind} {}", self.name)
+    }
+}
+
+/// Response of `POST /secrets/{id}/reveal`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevealedSecret {
+    pub secret: Secret,
+    pub value: SecretValue,
+}
+
+/// An S3-compatible bucket backups can be kept in: AWS S3, Cloudflare R2, Backblaze B2, MinIO
+/// and others.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageConnection {
+    pub id: Id,
+    pub name: String,
+    /// Base URL of the S3 API, e.g. `https://s3.eu-west-1.amazonaws.com` or
+    /// `https://<account>.r2.cloudflarestorage.com`.
+    pub endpoint: String,
+    /// Signing region; `auto` for R2.
+    pub region: String,
+    pub bucket: String,
+    /// Key prefix inside the bucket, without leading or trailing slashes; may be empty.
+    pub path_prefix: String,
+    /// Address the bucket as `<endpoint>/<bucket>` instead of `<bucket>.<endpoint>`
+    /// (MinIO and most self-hosted stores need this).
+    pub path_style: bool,
+    /// The `s3_credentials` secret used to sign requests.
+    pub credentials_secret_id: Id,
+    pub created_at: Timestamp,
+    pub last_test: Option<StorageTest>,
+}
+
+/// Outcome of `POST /storage/{id}/test`: put, get and delete of a small probe object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageTest {
+    pub ok: bool,
+    pub at: Timestamp,
+    pub error: Option<String>,
+    /// Time the three requests took together.
+    pub latency_ms: Option<u64>,
+}
+
+/// An encrypted archive of the daemon itself: its store, `config.toml`, `master.key` and
+/// SSH directory. Restoring one is `<daemon> restore`, not an API call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceBackup {
+    pub id: Id,
+    pub created_at: Timestamp,
+    pub status: BackupStatus,
+    pub trigger: BackupTrigger,
+    /// `instance-<timestamp>-<n>.tar.gz.enc`; also the download name.
+    pub file_name: String,
+    /// Encrypted size; 0 while running or after a failure.
+    pub size_bytes: u64,
+    pub storage: BackupStorage,
+    pub storage_id: Option<Id>,
+    pub error: Option<String>,
+    pub finished_at: Option<Timestamp>,
+}
+
+/// Daily automatic instance backups.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceBackupSchedule {
+    pub enabled: bool,
+    /// Hour of the day (UTC, 0-23) the backup runs.
+    pub hour_utc: u8,
+    /// Scheduled instance backups to keep per store.
+    pub keep: u32,
+    /// Where scheduled backups go; `None` is the data directory.
+    pub storage_id: Option<Id>,
+    /// Whether a passphrase is stored for scheduled runs. The passphrase itself is never
+    /// returned.
+    pub has_passphrase: bool,
+}
+
+impl Default for InstanceBackupSchedule {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hour_utc: 2,
+            keep: 7,
+            storage_id: None,
+            has_passphrase: false,
         }
     }
 }

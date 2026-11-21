@@ -102,6 +102,10 @@ impl Client {
         Self::json(self.req(Method::POST, path).json(body)).await
     }
 
+    async fn patch<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+        Self::json(self.req(Method::PATCH, path).json(body)).await
+    }
+
     async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         Self::json(self.req(Method::POST, path)).await
     }
@@ -187,6 +191,120 @@ impl Client {
 
     pub async fn setup_proxy(&self, id: &str) -> Result<Server> {
         self.post_empty(&format!("/servers/{id}/proxy")).await
+    }
+
+    /// Changes the key a server connects with; the daemon reconnects and checks it.
+    pub async fn update_server(&self, id: &str, body: &UpdateServer) -> Result<Server> {
+        self.patch(&format!("/servers/{id}"), body).await
+    }
+
+    // Storage connections
+
+    pub async fn storages(&self) -> Result<Vec<StorageConnection>> {
+        self.get("/storage").await
+    }
+
+    pub async fn storage(&self, id: &str) -> Result<StorageConnection> {
+        self.get(&format!("/storage/{id}")).await
+    }
+
+    pub async fn create_storage(&self, body: &CreateStorage) -> Result<StorageConnection> {
+        self.post("/storage", body).await
+    }
+
+    pub async fn update_storage(
+        &self,
+        id: &str,
+        body: &UpdateStorage,
+    ) -> Result<StorageConnection> {
+        self.patch(&format!("/storage/{id}"), body).await
+    }
+
+    pub async fn delete_storage(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/storage/{id}")).await
+    }
+
+    /// Writes, reads back and deletes a probe object; the result is also saved on the connection.
+    pub async fn test_storage(&self, id: &str) -> Result<StorageTest> {
+        self.post_empty(&format!("/storage/{id}/test")).await
+    }
+
+    // Instance backups
+
+    pub async fn instance_backups(&self) -> Result<Vec<InstanceBackup>> {
+        self.get("/instance/backups").await
+    }
+
+    /// Starts an instance backup; poll [`Self::instance_backups`] until it finishes.
+    pub async fn create_instance_backup(
+        &self,
+        body: &CreateInstanceBackup,
+    ) -> Result<InstanceBackup> {
+        self.post("/instance/backups", body).await
+    }
+
+    /// The encrypted archive of a finished instance backup.
+    pub async fn download_instance_backup(&self, id: &str) -> Result<ByteStreamBox> {
+        let res =
+            Self::send(self.req(Method::GET, &format!("/instance/backups/{id}/download"))).await?;
+        Ok(Box::pin(res.bytes_stream().map(|chunk| {
+            chunk.map(|c| c.to_vec()).map_err(anyhow::Error::from)
+        })))
+    }
+
+    pub async fn delete_instance_backup(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/instance/backups/{id}")).await
+    }
+
+    pub async fn instance_backup_schedule(&self) -> Result<InstanceBackupSchedule> {
+        self.get("/instance/backups/schedule").await
+    }
+
+    pub async fn set_instance_backup_schedule(
+        &self,
+        body: &UpdateInstanceBackupSchedule,
+    ) -> Result<InstanceBackupSchedule> {
+        Self::json(
+            self.req(Method::PUT, "/instance/backups/schedule")
+                .json(body),
+        )
+        .await
+    }
+
+    // Secrets
+
+    pub async fn secrets(&self) -> Result<Vec<Secret>> {
+        self.get("/secrets").await
+    }
+
+    pub async fn secret(&self, id: &str) -> Result<Secret> {
+        self.get(&format!("/secrets/{id}")).await
+    }
+
+    pub async fn create_secret(&self, body: &CreateSecret) -> Result<Secret> {
+        self.post("/secrets", body).await
+    }
+
+    /// Has the daemon generate an ed25519 key; the result carries its public key.
+    pub async fn generate_ssh_key(&self, name: &str) -> Result<Secret> {
+        self.post(
+            "/secrets/generate-ssh-key",
+            &GenerateSshKey { name: name.into() },
+        )
+        .await
+    }
+
+    pub async fn update_secret(&self, id: &str, body: &UpdateSecret) -> Result<Secret> {
+        self.patch(&format!("/secrets/{id}"), body).await
+    }
+
+    pub async fn delete_secret(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/secrets/{id}")).await
+    }
+
+    /// The decrypted value. The daemon records every reveal in the activity feed.
+    pub async fn reveal_secret(&self, id: &str) -> Result<RevealedSecret> {
+        self.post_empty(&format!("/secrets/{id}/reveal")).await
     }
 
     // Projects and environments
@@ -349,10 +467,20 @@ impl Client {
         self.get(&format!("/services/{service_id}/backups")).await
     }
 
-    /// Starts a backup; poll [`Self::backup`] until it is no longer running.
-    pub async fn create_backup(&self, service_id: &str) -> Result<Backup> {
-        self.post_empty(&format!("/services/{service_id}/backups"))
-            .await
+    /// Starts a backup into a storage connection, or the data directory when `storage_id` is
+    /// `None`; poll [`Self::backup`] until it is no longer running.
+    pub async fn create_backup(
+        &self,
+        service_id: &str,
+        storage_id: Option<&str>,
+    ) -> Result<Backup> {
+        self.post(
+            &format!("/services/{service_id}/backups"),
+            &CreateBackup {
+                storage_id: storage_id.map(str::to_string),
+            },
+        )
+        .await
     }
 
     pub async fn backup(&self, id: &str) -> Result<Backup> {

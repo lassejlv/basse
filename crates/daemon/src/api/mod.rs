@@ -2,10 +2,13 @@
 
 mod databases;
 mod deployments;
+mod instance;
 mod projects;
+mod secrets;
 mod servers;
 mod services;
 mod settings;
+mod storage;
 mod system;
 
 use crate::error::{AppError, json_rejection, query_rejection};
@@ -31,7 +34,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/tree", get(system::tree))
         .route("/activity", get(system::activity))
         .route("/servers", get(servers::list).post(servers::create))
-        .route("/servers/{id}", delete(servers::delete))
+        .route(
+            "/servers/{id}",
+            patch(servers::update).delete(servers::delete),
+        )
         .route("/servers/{id}/check", post(servers::check))
         .route("/servers/{id}/proxy", post(servers::proxy))
         .route("/projects", get(projects::list).post(projects::create))
@@ -78,6 +84,33 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/backups/{id}/download", get(databases::download_backup))
         .route("/backups/{id}/restore", post(databases::restore_backup))
+        .route("/secrets", get(secrets::list).post(secrets::create))
+        .route("/secrets/generate-ssh-key", post(secrets::generate_ssh_key))
+        .route(
+            "/secrets/{id}",
+            get(secrets::get)
+                .patch(secrets::update)
+                .delete(secrets::delete),
+        )
+        .route("/secrets/{id}/reveal", post(secrets::reveal))
+        .route("/storage", get(storage::list).post(storage::create))
+        .route(
+            "/storage/{id}",
+            get(storage::get)
+                .patch(storage::update)
+                .delete(storage::delete),
+        )
+        .route("/storage/{id}/test", post(storage::test))
+        .route(
+            "/instance/backups",
+            get(instance::list).post(instance::create),
+        )
+        .route(
+            "/instance/backups/schedule",
+            get(instance::get_schedule).put(instance::set_schedule),
+        )
+        .route("/instance/backups/{id}", delete(instance::delete))
+        .route("/instance/backups/{id}/download", get(instance::download))
         .route("/services/{id}/deployments", get(deployments::list))
         .route("/deployments/{id}", get(deployments::get))
         .route("/deployments/{id}/logs", get(deployments::logs))

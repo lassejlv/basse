@@ -76,21 +76,31 @@ jobs:
         with:
           name: x86_64-unknown-linux-musl
           path: dist
-      - name: Install a server from the built archive
+      # Release first, then the build: a build that adds migrations cannot be downgraded to a
+      # release that does not know them, but the release must upgrade to it in place.
+      - name: Install a server from the latest published release
+        run: |
+          sudo sh ./install.sh --no-firewall
+          $CLI_BIN status
+      - name: Upgrade it in place to the built archive
         run: |
           sudo sh ./install.sh --archive "dist/$CLI_BIN-x86_64-unknown-linux-musl.tar.gz" --no-firewall
           $CLI_BIN status
           sudo basse status
           curl -fsS http://127.0.0.1:7700/healthz
           docker ps
-      - name: Re-run upgrades in place from the latest published release
+      - name: Instance backup and restore under systemd
         run: |
-          sudo sh ./install.sh --no-firewall
-          $CLI_BIN status
-      - name: Upgrade back to the built archive
-        run: |
-          sudo sh ./install.sh --archive "dist/$CLI_BIN-x86_64-unknown-linux-musl.tar.gz" --no-firewall
-          $CLI_BIN status
+          set -eux
+          $CLI_BIN project create disaster
+          printf 'correct horse battery staple' > pass.txt
+          $CLI_BIN instance backup --passphrase-file pass.txt
+          $CLI_BIN instance download -o instance.enc
+          $CLI_BIN project delete disaster --yes
+          sudo "$DAEMON_BIN" restore instance.enc --passphrase-file pass.txt
+          systemctl is-active "$DAEMON_BIN"
+          $CLI_BIN project list | grep disaster
+          $CLI_BIN project delete disaster --yes
       - name: Self-update under systemd from a local release
         run: |
           set -eux

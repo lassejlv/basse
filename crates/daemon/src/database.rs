@@ -4,7 +4,7 @@
 //! Every operation that touches the database itself runs a command inside its live container
 //! over the server's Docker connection, so local and SSH servers behave the same.
 
-use crate::backup_store::backup_key;
+use crate::backup_store::{BackupStore, backup_key};
 use crate::db::{ScheduleRecord, ServiceRecord, new_id};
 use crate::deploy;
 use crate::docker::{self, RunState};
@@ -564,7 +564,9 @@ pub async fn start_backup(
     state: &Arc<AppState>,
     rec: &ServiceRecord,
     trigger: BackupTrigger,
+    storage_id: Option<&str>,
 ) -> ApiResult<Backup> {
+    let (storage, conn) = state.storage_target(storage_id).await?;
     let t = target(state, rec).await?;
     let guard = state.db_locks.try_acquire(&t.service)?;
     let (extension, script) = dump_script(t.kind);
@@ -577,8 +579,8 @@ pub async fn start_backup(
         trigger,
         file_name: String::new(),
         error: None,
-        storage: BackupStorage::Local,
-        storage_id: None,
+        storage,
+        storage_id: conn.map(|c| c.id),
         finished_at: None,
     };
     state.db.insert_backup(&mut backup, extension).await?;
@@ -652,7 +654,8 @@ async fn dump(state: &AppState, t: &Target, backup: &Backup, script: &str) -> Re
             .context("cannot finish the backup file")?;
         outcome.check("the dump command")?;
         state
-            .backup_store(backup.storage)
+            .backup_store(backup.storage, backup.storage_id.as_deref())
+            .await?
             .put(&backup_key(&backup.service_id, &backup.file_name), &path)
             .await
     }
@@ -684,7 +687,8 @@ pub async fn open_backup(
     backup: &Backup,
 ) -> Result<std::pin::Pin<Box<dyn AsyncRead + Send>>> {
     state
-        .backup_store(backup.storage)
+        .backup_store(backup.storage, backup.storage_id.as_deref())
+        .await?
         .get(&backup_key(&backup.service_id, &backup.file_name))
         .await
 }
@@ -769,6 +773,7 @@ async fn restore_redis(
                 docker::volume_name(&t.service.id, &data.name),
                 data.mount_path
             )],
+            None,
         )
         .await?;
         let outcome = docker::exec_stream(
@@ -795,16 +800,36 @@ pub async fn delete_backup(state: &AppState, backup: &Backup) -> ApiResult<()> {
         conflict!("backup {} is still running", backup.file_name);
     }
     state
-        .backup_store(backup.storage)
+        .backup_store(backup.storage, backup.storage_id.as_deref())
+        .await?
         .delete(&backup_key(&backup.service_id, &backup.file_name))
         .await?;
     state.db.delete_backup(&backup.id).await?;
     Ok(())
 }
 
-/// Deletes every stored backup file of a service that is being deleted.
+/// Deletes every stored backup file of a service that is being deleted: each backup from its
+/// own store, then anything else left in the local directory.
 pub async fn delete_backup_files(state: &AppState, service_id: &str) {
-    let store = state.backup_store(BackupStorage::Local);
+    for backup in state.db.backups(service_id).await.unwrap_or_default() {
+        if backup.storage == BackupStorage::Local {
+            continue;
+        }
+        let deleted = async {
+            state
+                .backup_store(backup.storage, backup.storage_id.as_deref())
+                .await?
+                .delete(&backup_key(&backup.service_id, &backup.file_name))
+                .await
+        }
+        .await;
+        if let Err(e) = deleted {
+            tracing::warn!("cannot delete backup {}: {e:#}", backup.file_name);
+        }
+    }
+    let store = BackupStore::Local {
+        root: state.dirs.backups_dir(),
+    };
     let files = match store.list(service_id).await {
         Ok(files) => files,
         Err(e) => {
@@ -834,18 +859,25 @@ pub async fn set_schedule(
     if schedule.keep == 0 {
         bad_request!("keep must be at least 1");
     }
+    let schedule = BackupSchedule {
+        storage_id: schedule.storage_id.filter(|id| !id.is_empty()),
+        ..schedule
+    };
+    let (_, conn) = state.storage_target(schedule.storage_id.as_deref()).await?;
     let mut record = state.db.backup_schedule(&svc.id).await?;
     let restarts = schedule.enabled
         && (!record.schedule.enabled || record.schedule.hour_utc != schedule.hour_utc);
     if restarts {
         record.last_run_at = Some(Utc::now());
     }
-    record.schedule = schedule;
+    record.schedule = schedule.clone();
     state.db.save_backup_schedule(&record).await?;
     let detail = if schedule.enabled {
         format!(
-            "daily at {:02}:00 UTC, keeping {}",
-            schedule.hour_utc, schedule.keep
+            "daily at {:02}:00 UTC to {}, keeping {}",
+            schedule.hour_utc,
+            conn.map_or("local storage".into(), |c| c.name),
+            schedule.keep
         )
     } else {
         "off".into()
@@ -876,7 +908,7 @@ fn latest_slot(hour: u8, now: Timestamp) -> Option<Timestamp> {
 
 /// Whether a schedule's latest slot passed without a run. A missed slot (daemon down) runs as
 /// soon as the daemon is back.
-fn is_due(schedule: &BackupSchedule, last_run_at: Option<Timestamp>, now: Timestamp) -> bool {
+pub fn is_due(schedule: &BackupSchedule, last_run_at: Option<Timestamp>, now: Timestamp) -> bool {
     if !schedule.enabled {
         return false;
     }
@@ -909,15 +941,35 @@ fn prune_candidates(backups: &[Backup], keep: u32) -> Vec<&Backup> {
         .collect()
 }
 
+/// Applies retention to each store separately, so moving a schedule to another store never
+/// deletes the backups kept in the old one.
 async fn prune(state: &AppState, service_id: &str) -> Result<()> {
     let keep = state.db.backup_schedule(service_id).await?.schedule.keep;
     let backups = state.db.backups(service_id).await?;
-    for backup in prune_candidates(&backups, keep) {
-        state
-            .backup_store(backup.storage)
-            .delete(&backup_key(&backup.service_id, &backup.file_name))
-            .await?;
-        state.db.delete_backup(&backup.id).await?;
+    let mut stores: Vec<(BackupStorage, Option<&str>)> = Vec::new();
+    for b in &backups {
+        let store = (b.storage, b.storage_id.as_deref());
+        if !stores.contains(&store) {
+            stores.push(store);
+        }
+    }
+    for (storage, storage_id) in stores {
+        let in_store: Vec<Backup> = backups
+            .iter()
+            .filter(|b| b.storage == storage && b.storage_id.as_deref() == storage_id)
+            .cloned()
+            .collect();
+        let candidates = prune_candidates(&in_store, keep);
+        if candidates.is_empty() {
+            continue;
+        }
+        let store = state.backup_store(storage, storage_id).await?;
+        for backup in candidates {
+            store
+                .delete(&backup_key(&backup.service_id, &backup.file_name))
+                .await?;
+            state.db.delete_backup(&backup.id).await?;
+        }
     }
     Ok(())
 }
@@ -949,7 +1001,14 @@ async fn run_due_backups(state: &Arc<AppState>) {
         let Ok(Some(rec)) = state.db.service(&record.service_id).await else {
             continue;
         };
-        match start_backup(state, &rec, BackupTrigger::Schedule).await {
+        match start_backup(
+            state,
+            &rec,
+            BackupTrigger::Schedule,
+            record.schedule.storage_id.as_deref(),
+        )
+        .await
+        {
             Ok(_) => {}
             // Another backup or a deploy holds the database: try again on the next tick.
             Err(AppError::Conflict(_)) => continue,
@@ -1072,6 +1131,7 @@ mod tests {
             host: Some("203.0.113.7".into()),
             user: None,
             port: None,
+            ssh_key_secret_id: None,
             status: ServerStatus::Online,
             proxy: ProxyStatus::Running,
             docker_version: None,
@@ -1100,6 +1160,7 @@ mod tests {
             enabled: true,
             hour_utc: 3,
             keep: 7,
+            storage_id: None,
         };
         let now = at("2026-11-20T03:10:00Z");
         assert!(is_due(&schedule, None, now));

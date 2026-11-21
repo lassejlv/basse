@@ -1,7 +1,7 @@
 //! Pure helpers for the database and backups tabs: masking, schedule input and download paths.
 
 use chrono::{DateTime, Datelike, FixedOffset, Local, Offset, Utc};
-use common::{Backup, BackupSchedule, BackupStatus, DatabaseKind};
+use common::{Backup, BackupSchedule, BackupStatus, DatabaseKind, Id};
 use std::path::{Path, PathBuf};
 
 pub const MASK: &str = "••••";
@@ -42,8 +42,13 @@ pub fn hour_hint(text: &str) -> String {
     }
 }
 
-/// Validate the schedule form.
-pub fn parse_schedule(enabled: bool, hour: &str, keep: &str) -> Result<BackupSchedule, String> {
+/// Validate the schedule form; `storage_id` is the store picked, `None` for local.
+pub fn parse_schedule(
+    enabled: bool,
+    hour: &str,
+    keep: &str,
+    storage_id: Option<Id>,
+) -> Result<BackupSchedule, String> {
     let hour_utc = hour
         .trim()
         .parse::<u8>()
@@ -60,6 +65,7 @@ pub fn parse_schedule(enabled: bool, hour: &str, keep: &str) -> Result<BackupSch
         enabled,
         hour_utc,
         keep,
+        storage_id,
     })
 }
 
@@ -174,17 +180,18 @@ mod tests {
     #[test]
     fn schedule_input_is_validated() {
         assert_eq!(
-            parse_schedule(true, " 3 ", "7"),
+            parse_schedule(true, " 3 ", "7", None),
             Ok(BackupSchedule {
                 enabled: true,
                 hour_utc: 3,
-                keep: 7
+                keep: 7,
+                storage_id: None,
             })
         );
-        assert!(parse_schedule(true, "24", "7").is_err());
-        assert!(parse_schedule(true, "x", "7").is_err());
-        assert!(parse_schedule(false, "3", "0").is_err());
-        assert!(parse_schedule(false, "3", "-1").is_err());
+        assert!(parse_schedule(true, "24", "7", None).is_err());
+        assert!(parse_schedule(true, "x", "7", None).is_err());
+        assert!(parse_schedule(false, "3", "0", None).is_err());
+        assert!(parse_schedule(false, "3", "-1", None).is_err());
     }
 
     #[test]
@@ -217,6 +224,7 @@ mod tests {
             enabled: true,
             hour_utc: 3,
             keep: 7,
+            storage_id: None,
         };
         let now = Utc.with_ymd_and_hms(2026, 11, 20, 15, 0, 0).unwrap();
         assert_eq!(next_run(&s, now).as_deref(), Some("in 12h"));
@@ -224,7 +232,7 @@ mod tests {
         assert_eq!(next_run(&s, now).as_deref(), Some("in 40m"));
         let off = BackupSchedule {
             enabled: false,
-            ..s
+            ..s.clone()
         };
         assert_eq!(next_run(&off, now), None);
         assert_eq!(schedule_summary(&off), "no schedule");

@@ -3,6 +3,7 @@
 use crate::app::*;
 use crate::database;
 use crate::mouse::{self, Hit, List};
+use crate::picker::short_key;
 use crate::theme;
 use crate::util::{self, truncate};
 use common::*;
@@ -37,6 +38,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Deploy => deploy(frame, body, app),
         Screen::Servers => servers(frame, body, app),
         Screen::Settings => settings(frame, body, app),
+        Screen::Secrets => secrets(frame, body, app),
+        Screen::Storage => storage(frame, body, app),
     }
     key_bar(frame, keys, app);
     if app.overlay.is_some() {
@@ -59,6 +62,10 @@ pub fn render(frame: &mut Frame, app: &App) {
         Some(Overlay::Reveal(r)) => {
             dim(frame, area);
             reveal(frame, area, r);
+        }
+        Some(Overlay::Picker(p)) => {
+            dim(frame, area);
+            p.render(frame, area, app.tick);
         }
         Some(Overlay::Help) => {
             dim(frame, area);
@@ -327,6 +334,7 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("↑↓", "move"),
             ("a", "add server"),
             ("c", "check"),
+            ("K", "change key"),
             ("p", "set up proxy"),
             ("x", "remove"),
             ("X", "remove + clean up"),
@@ -335,7 +343,18 @@ fn keys_for(app: &App) -> (Keys, Keys) {
         Screen::Settings if app.settings.settings.is_none() => {
             vec![("↑↓", "context"), ("⏎", "switch"), ("x", "remove")]
         }
+        Screen::Settings if app.settings.focus == SettingsFocus::Backups => vec![
+            ("tab", "contexts"),
+            ("↑↓", "move"),
+            ("b", "back up now"),
+            ("e", "schedule"),
+            ("D", "download"),
+            ("x", "delete"),
+            ("s", "secrets"),
+            ("o", "storage"),
+        ],
         Screen::Settings => vec![
+            ("tab", "backups"),
             ("↑↓", "context"),
             ("⏎", "switch"),
             ("x", "remove"),
@@ -346,6 +365,24 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("t", "rotate token"),
             ("k", "copy key"),
             ("c", "prune"),
+        ],
+        Screen::Secrets => {
+            let revealed = app.secrets.value().is_some();
+            let mut keys = vec![("↑↓", "move"), ("a", "add"), ("g", "generate key")];
+            if revealed {
+                keys.extend([("v", "hide"), ("C", "copy value")]);
+            } else {
+                keys.extend([("v", "reveal"), ("c", "copy public key")]);
+            }
+            keys.extend([("n", "rename"), ("e", "replace value"), ("x", "delete")]);
+            keys
+        }
+        Screen::Storage => vec![
+            ("↑↓", "move"),
+            ("a", "add"),
+            ("⏎", "edit"),
+            ("t", "test"),
+            ("x", "delete"),
         ],
     };
     let right = match app.screen {
@@ -1596,8 +1633,23 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         .map(Vec::as_slice)
         .unwrap_or_default();
     let total: u64 = backups.iter().map(|b| b.size_bytes).sum();
+    let where_of = |b: &Backup| match &b.storage_id {
+        None => "local".to_string(),
+        Some(id) => app.storage.name(id).unwrap_or("s3").to_string(),
+    };
+    let mut places: Vec<String> = backups.iter().map(where_of).collect();
+    places.sort();
+    places.dedup();
+    let places = match places.as_slice() {
+        [] => "local".to_string(),
+        [one] => one.clone(),
+        many => {
+            let (last, rest) = many.split_last().unwrap_or((&many[0], &[]));
+            format!("{} and {last}", rest.join(", "))
+        }
+    };
     let note = format!(
-        "{} backup{} · {} · local storage",
+        "{} backup{} · {} · {places}",
         backups.len(),
         if backups.len() == 1 { "" } else { "s" },
         util::bytes(total)
@@ -1648,6 +1700,14 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
                 ])),
                 Cell::from(Span::styled(b.trigger.as_str(), theme::muted())),
                 Cell::from(size),
+                Cell::from(Span::styled(
+                    where_of(b),
+                    if b.storage_id.is_some() {
+                        theme::text()
+                    } else {
+                        theme::muted()
+                    },
+                )),
                 Cell::from(file),
             ])
             .style(if selected {
@@ -1660,12 +1720,13 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
     ListPanel {
         heading: "Backups",
         note: &note,
-        header: Row::new(["", "CREATED", "TRIGGER", "SIZE", "FILE"]),
+        header: Row::new(["", "CREATED", "TRIGGER", "SIZE", "WHERE", "FILE"]),
         widths: vec![
             Constraint::Length(2),
-            Constraint::Length(26),
-            Constraint::Length(10),
+            Constraint::Length(22),
+            Constraint::Length(8),
             Constraint::Length(6),
+            Constraint::Length(12),
             Constraint::Fill(1),
         ],
         empty: ("b", "back up now"),
@@ -1673,7 +1734,7 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
     .render(frame, main, rows, view.row);
 
     let [sched_a, _] =
-        Layout::vertical([Constraint::Length(10), Constraint::Fill(1)]).areas(rail_area);
+        Layout::vertical([Constraint::Length(11), Constraint::Fill(1)]).areas(rail_area);
     let block = panel(title("Schedule", false), None, false);
     let inner = inside(&block, sched_a);
     frame.render_widget(block, sched_a);
@@ -1712,8 +1773,19 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
             "keep",
             vec![
                 Span::styled(s.keep.to_string(), theme::text()),
-                Span::styled("  scheduled backups", theme::muted()),
+                Span::styled("  per store", theme::muted()),
             ],
+            w,
+        ),
+        kv(
+            "store",
+            vec![match &s.storage_id {
+                None => Span::styled("local", theme::muted()),
+                Some(id) => Span::styled(
+                    app.storage.name(id).unwrap_or("s3").to_string(),
+                    theme::text(),
+                ),
+            }],
             w,
         ),
         kv(
@@ -1729,8 +1801,8 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         Line::styled("manual backups are never pruned", theme::muted()),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
-    if inner.height >= 6 {
-        hint_at(frame, inner, 0, 5, "e", "edit schedule");
+    if inner.height >= 7 {
+        hint_at(frame, inner, 0, 6, "e", "edit schedule");
     }
 }
 
@@ -2518,8 +2590,10 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
     let inner = inside(&block, list);
     frame.render_widget(block, list);
     mouse::hit(list, Hit::List(List::Servers));
-    let header =
-        Row::new(["", "NAME", "KIND", "HOST", "DOCKER", "PROXY", "CHECKED"]).style(theme::muted());
+    let header = Row::new([
+        "", "NAME", "KIND", "HOST", "KEY", "DOCKER", "PROXY", "CHECKED",
+    ])
+    .style(theme::muted());
     let rows: Vec<Row> = app
         .servers
         .iter()
@@ -2538,6 +2612,14 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
                     s.user.as_deref().unwrap_or("root"),
                     s.host.as_deref().unwrap_or("?"),
                     s.port.unwrap_or(22)
+                ),
+            };
+            let key = match (s.kind, &s.ssh_key_secret_id) {
+                (ServerKind::Local, _) => Span::styled("—", theme::muted()),
+                (_, None) => Span::styled("daemon key", theme::muted()),
+                (_, Some(id)) => Span::styled(
+                    app.secrets.name(id).unwrap_or("secret").to_string(),
+                    theme::text(),
                 ),
             };
             let (proxy, pstyle) = match s.proxy {
@@ -2564,6 +2646,7 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
                     theme::muted(),
                 )),
                 Cell::from(host),
+                Cell::from(key),
                 Cell::from(Span::styled(
                     s.docker_version.clone().unwrap_or("—".into()),
                     theme::muted(),
@@ -2587,6 +2670,7 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(16),
         Constraint::Length(6),
         Constraint::Fill(1),
+        Constraint::Length(16),
         Constraint::Length(10),
         Constraint::Length(15),
         Constraint::Length(10),
@@ -2601,7 +2685,7 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
         .take(inner.height.saturating_sub(1) as usize)
     {
         if server.proxy == ProxyStatus::Missing {
-            let proxy = columns[5];
+            let proxy = columns[6];
             let row = Rect::new(proxy.x, inner.y + 1 + (i - offset) as u16, proxy.width, 1);
             mouse::span_target(row, 0, "not set up · p".chars().count(), Hit::SetupProxy(i));
         }
@@ -2623,8 +2707,10 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
         ])
         .areas(inner);
         frame.render_widget(
-            Paragraph::new("Add this key to ~/.ssh/authorized_keys on a server before adding it:")
-                .style(theme::muted()),
+            Paragraph::new(
+                "Add this key to ~/.ssh/authorized_keys on a server before adding it, or pick your own key:",
+            )
+            .style(theme::muted()),
             description,
         );
         frame.render_widget(
@@ -2634,7 +2720,12 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
             value,
         );
         mouse::key_target(value, "ctrl+k");
-        mouse::hints(frame, hints, &[("ctrl+k", "copy key")], Alignment::Right);
+        mouse::hints(
+            frame,
+            hints,
+            &[("K", "change key"), ("ctrl+k", "copy key")],
+            Alignment::Right,
+        );
     }
 }
 
@@ -2673,20 +2764,52 @@ fn confirm(frame: &mut Frame, area: Rect, c: &Confirm, tick: usize) {
         .style(theme::text())
         .wrap(Wrap { trim: true });
     let msg_h = message.line_count(width.saturating_sub(6)) as u16;
+    let error: Vec<Line> = c
+        .error
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if i == 0 {
+                Line::from(vec![
+                    Span::styled("✕ ", theme::fg(theme::ERR)),
+                    Span::styled(l.clone(), theme::text()),
+                ])
+            } else {
+                Line::styled(l.clone(), theme::muted())
+            }
+        })
+        .collect();
+    let error = Paragraph::new(error).wrap(Wrap { trim: true });
+    let err_h = if c.error.is_empty() {
+        0
+    } else {
+        error.line_count(width.saturating_sub(6)) as u16 + 1
+    };
     let inner = dialog(
         frame,
         area,
         width,
-        msg_h + 6,
+        msg_h + err_h + 6,
         vec![Span::styled(c.title.clone(), theme::text())],
     );
-    let [msg, rule, keys] = Layout::vertical([
+    let [msg, err, rule, keys] = Layout::vertical([
         Constraint::Fill(1),
+        Constraint::Length(err_h),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(inner);
     frame.render_widget(message, msg);
+    if err_h > 0 {
+        frame.render_widget(
+            error,
+            Rect {
+                y: err.y + 1,
+                height: err.height - 1,
+                ..err
+            },
+        );
+    }
     frame.render_widget(Paragraph::new(rule_line(rule.width)), rule);
     let style = if c.danger {
         Style::new().fg(theme::BG).bg(theme::ERR)
@@ -2708,6 +2831,10 @@ fn confirm(frame: &mut Frame, area: Rect, c: &Confirm, tick: usize) {
             Paragraph::new(Span::styled(chip, style)).right_aligned(),
             keys,
         );
+        return;
+    }
+    if !c.error.is_empty() {
+        mouse::hints(frame, keys, &[("esc", "close")], Alignment::Left);
         return;
     }
     let remaining = action_chip(frame, keys, "y", c.verb, style);
@@ -3020,11 +3147,110 @@ fn settings(frame: &mut Frame, area: Rect, app: &App) {
         };
         frame.render_widget(Paragraph::new(status).style(theme::muted()), inner);
     }
-    let [contexts, servers] = Layout::horizontal([Constraint::Fill(2), Constraint::Fill(1)])
+    let [left, servers] = Layout::horizontal([Constraint::Fill(2), Constraint::Fill(1)])
         .spacing(1)
         .areas(row3);
+    let contexts_h = (app.settings.contexts.contexts.len() as u16 + 3).clamp(5, 9);
+    let [backups, contexts] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(contexts_h)])
+            .spacing(1)
+            .areas(left);
+    instance_backups_panel(frame, backups, app);
     contexts_panel(frame, contexts, app);
+    let [secrets, storage, servers] = Layout::vertical([Constraint::Fill(1); 3])
+        .spacing(1)
+        .areas(servers);
+    secrets_summary(frame, secrets, app);
+    storage_summary(frame, storage, app);
     servers_summary(frame, servers, app);
+}
+
+/// A key hint on the last line of a summary panel, e.g. "s open secrets".
+fn panel_link(frame: &mut Frame, inner: Rect, key: &'static str, label: &str) {
+    if inner.height < 3 {
+        return;
+    }
+    hint_at(frame, inner, 0, inner.height - 1, key, label);
+}
+
+fn storage_summary(frame: &mut Frame, area: Rect, app: &App) {
+    let block = panel(title("Storage", false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let list = &app.storage.list;
+    let room = inner.height.saturating_sub(2) as usize;
+    let rows = lines_of(inner, room as u16);
+    if list.is_empty()
+        && let Some(row) = rows.first()
+    {
+        setting_row(
+            frame,
+            *row,
+            "none yet",
+            vec![Span::styled(
+                "backups stay in the data directory",
+                theme::muted(),
+            )],
+            None,
+        );
+    }
+    for (row, s) in rows.iter().zip(list) {
+        let (glyph, label, style) = crate::picker::test_state(s);
+        let detail = match &s.last_test {
+            Some(t) if !t.ok => t.error.clone().unwrap_or_default(),
+            _ => String::new(),
+        };
+        setting_row(
+            frame,
+            *row,
+            &truncate(&s.name, SETTING_KEY_W - 1),
+            vec![
+                Span::styled(format!("{glyph} "), style),
+                Span::styled(label, theme::text()),
+                Span::styled(format!("  {detail}"), theme::muted()),
+            ],
+            None,
+        );
+    }
+    panel_link(frame, inner, "o", "open storage");
+}
+
+fn secrets_summary(frame: &mut Frame, area: Rect, app: &App) {
+    let block = panel(title("Secrets", false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let list = &app.secrets.list;
+    let count = |k: SecretKind| list.iter().filter(|s| s.kind == k).count();
+    let in_use = list.iter().filter(|s| !s.used_by.is_empty()).count();
+    let rows = lines_of(inner, 2);
+    setting_row(
+        frame,
+        rows[0],
+        "secrets",
+        vec![
+            Span::styled(list.len().to_string(), theme::text()),
+            Span::styled(
+                format!(
+                    "  {} ssh keys · {} s3 · {} generic",
+                    count(SecretKind::SshKey),
+                    count(SecretKind::S3Credentials),
+                    count(SecretKind::Generic)
+                ),
+                theme::muted(),
+            ),
+        ],
+        None,
+    );
+    if let Some(row) = rows.get(1) {
+        setting_row(
+            frame,
+            *row,
+            "in use",
+            vec![Span::styled(in_use.to_string(), theme::text())],
+            None,
+        );
+    }
+    panel_link(frame, inner, "s", "open secrets");
 }
 
 fn instance_panel(frame: &mut Frame, area: Rect, app: &App, s: &InstanceSettings) {
@@ -3167,23 +3393,6 @@ fn proxy_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
     mouse::key_target(toggle, "m");
 }
 
-/// `ssh-ed25519 AAAAC3Nz…q9Lk` and the key's comment.
-fn short_key(key: &str) -> (String, String) {
-    let mut parts = key.split_whitespace();
-    let kind = parts.next().unwrap_or_default();
-    let body = parts.next().unwrap_or_default();
-    let comment = parts.collect::<Vec<_>>().join(" ");
-    let n = body.chars().count();
-    let body = if n > 12 {
-        let head: String = body.chars().take(8).collect();
-        let tail: String = body.chars().skip(n - 4).collect();
-        format!("{head}…{tail}")
-    } else {
-        body.to_string()
-    };
-    (format!("{kind} {body}"), comment)
-}
-
 fn security_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
     let block = panel(title("Security", false), None, false);
     let inner = inside(&block, area);
@@ -3277,7 +3486,8 @@ fn maintenance_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
 }
 
 fn contexts_panel(frame: &mut Frame, area: Rect, app: &App) {
-    let block = panel(title("Contexts", true), None, true);
+    let focused = app.settings.focus == SettingsFocus::Contexts;
+    let block = panel(title("Contexts", focused), None, focused);
     let inner = inside(&block, area);
     frame.render_widget(block, area);
     mouse::hit(area, Hit::List(List::Contexts));
@@ -3403,6 +3613,682 @@ fn servers_summary(frame: &mut Frame, area: Rect, app: &App) {
             line,
             &[("S", "open the servers screen")],
             Alignment::Left,
+        );
+    }
+}
+
+// Secrets
+
+/// The non-secret half shortened for the list: a short SSH key, or the access key id.
+fn public_short(s: &Secret) -> String {
+    match (&s.public_part, s.kind) {
+        (None, _) => "—".into(),
+        (Some(k), SecretKind::SshKey) => short_key(k).0,
+        (Some(id), _) if id.chars().count() > 14 => {
+            let n = id.chars().count();
+            let head: String = id.chars().take(6).collect();
+            let tail: String = id.chars().skip(n - 4).collect();
+            format!("{head}…{tail}")
+        }
+        (Some(id), _) => id.clone(),
+    }
+}
+
+fn secrets(frame: &mut Frame, area: Rect, app: &App) {
+    let view = &app.secrets;
+    let [list, detail] = Layout::vertical([Constraint::Fill(1), Constraint::Length(10)])
+        .spacing(1)
+        .areas(area);
+    let note = format!(
+        "sealed with the master key · {} secret{}",
+        view.list.len(),
+        if view.list.len() == 1 { "" } else { "s" }
+    );
+    let block = panel(
+        title("Secrets", true),
+        Some(Line::styled(note, theme::muted())),
+        true,
+    );
+    let inner = inside(&block, list);
+    frame.render_widget(block, list);
+    mouse::hit(inner, Hit::List(List::Secrets));
+    if view.list.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("no secrets yet · ", theme::muted()),
+                Span::styled("a", theme::accent()),
+                Span::styled(" to add or import one, ", theme::muted()),
+                Span::styled("g", theme::accent()),
+                Span::styled(" to generate an ssh key", theme::muted()),
+            ])),
+            inner,
+        );
+    } else {
+        let rows: Vec<Row> = view
+            .list
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let selected = i == view.row;
+                let users: Vec<String> = s.used_by.iter().map(ToString::to_string).collect();
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        s.name.clone(),
+                        if selected {
+                            theme::accent()
+                        } else {
+                            theme::text()
+                        },
+                    )),
+                    Cell::from(Span::styled(s.kind.label(), theme::muted())),
+                    Cell::from(Span::styled(
+                        public_short(s),
+                        if s.public_part.is_some() {
+                            theme::text()
+                        } else {
+                            theme::muted()
+                        },
+                    )),
+                    if users.is_empty() {
+                        Cell::from(Span::styled("—", theme::muted()))
+                    } else {
+                        Cell::from(Span::styled(users.join(", "), theme::text()))
+                    },
+                    Cell::from(Span::styled(util::ago(s.updated_at), theme::muted())),
+                ])
+                .style(if selected {
+                    theme::selected()
+                } else {
+                    Style::new()
+                })
+            })
+            .collect();
+        let offset = scroll_offset(view.row, inner.height.saturating_sub(1) as usize);
+        row_hits(inner, rows.len(), offset, Hit::Item);
+        frame.render_widget(
+            Table::new(
+                rows.into_iter().skip(offset),
+                [
+                    Constraint::Length(22),
+                    Constraint::Length(16),
+                    Constraint::Length(30),
+                    Constraint::Fill(1),
+                    Constraint::Length(10),
+                ],
+            )
+            .header(
+                Row::new(["NAME", "KIND", "PUBLIC PART", "USED BY", "UPDATED"])
+                    .style(theme::muted()),
+            )
+            .column_spacing(2),
+            inner,
+        );
+    }
+    secret_detail(frame, detail, app);
+}
+
+fn secret_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let view = &app.secrets;
+    let Some(s) = view.selected() else {
+        let block = panel(title("secret", false), None, false);
+        frame.render_widget(block, area);
+        return;
+    };
+    let block = panel(title(&s.name, false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let [left, right] = Layout::horizontal([Constraint::Fill(2), Constraint::Fill(3)])
+        .spacing(4)
+        .areas(inner);
+    let text = |t: String| vec![Span::styled(t, theme::text())];
+    let rows = lines_of(left, left.height);
+    let mut info: Vec<(&str, Vec<Span<'static>>)> = vec![
+        ("kind", text(s.kind.label().to_string())),
+        (
+            "created",
+            text(database::created(s.created_at, chrono::Utc::now())),
+        ),
+        ("updated", text(util::ago(s.updated_at))),
+    ];
+    if s.used_by.is_empty() {
+        info.push(("used by", vec![Span::styled("nothing", theme::muted())]));
+    }
+    for (i, u) in s.used_by.iter().enumerate() {
+        info.push((if i == 0 { "used by" } else { "" }, text(u.to_string())));
+    }
+    info.push(("id", vec![Span::styled(s.id.clone(), theme::muted())]));
+    for (row, (k, v)) in rows.iter().zip(info) {
+        setting_row(frame, *row, k, v, None);
+    }
+
+    let rows = lines_of(right, right.height);
+    let mut i = 0;
+    let mut row = |frame: &mut Frame,
+                   k: &str,
+                   v: Vec<Span<'static>>,
+                   hint: Option<(&'static str, &'static str)>| {
+        if let Some(r) = rows.get(i) {
+            let value = setting_row(frame, *r, k, v, hint);
+            if let Some((key, _)) = hint {
+                mouse::key_target(value, key);
+            }
+        }
+        i += 1;
+    };
+    let value_w = (right.width as usize).saturating_sub(SETTING_KEY_W + 20);
+    match s.kind {
+        SecretKind::SshKey => {
+            let key = s.public_part.clone().unwrap_or_default();
+            let mut parts = key.split_whitespace();
+            let body = format!(
+                "{} {}",
+                parts.next().unwrap_or_default(),
+                parts.next().unwrap_or_default()
+            );
+            let comment = parts.collect::<Vec<_>>().join(" ");
+            row(
+                frame,
+                "public key",
+                text(truncate(&body, value_w)),
+                Some(("c", "copy")),
+            );
+            row(frame, "", vec![Span::styled(comment, theme::muted())], None);
+        }
+        SecretKind::S3Credentials => row(
+            frame,
+            "access key id",
+            text(s.public_part.clone().unwrap_or_default()),
+            Some(("c", "copy")),
+        ),
+        SecretKind::Generic => {}
+    }
+    let label = match s.kind {
+        SecretKind::SshKey => "private key",
+        SecretKind::S3Credentials => "secret key",
+        SecretKind::Generic => "value",
+    };
+    let revealed_at = view.revealed.as_ref().map(|(_, at)| *at);
+    match view.value() {
+        Some(value) => {
+            let value = crate::app::secret_text(value);
+            let mut lines = value.lines().filter(|l| !l.is_empty());
+            let first = lines.next().unwrap_or_default().to_string();
+            row(
+                frame,
+                label,
+                text(truncate(&first, value_w)),
+                Some(("C", "copy value")),
+            );
+            let more = lines.count();
+            if more > 0 {
+                row(
+                    frame,
+                    "",
+                    vec![Span::styled(
+                        format!("+ {more} more lines · C copies all"),
+                        theme::muted(),
+                    )],
+                    None,
+                );
+            }
+            row(
+                frame,
+                "",
+                vec![Span::styled(
+                    format!(
+                        "● revealed {} · recorded in the activity feed",
+                        revealed_at.map(util::clock).unwrap_or_default()
+                    ),
+                    theme::fg(theme::INFO),
+                )],
+                Some(("v", "hide")),
+            );
+            row(frame, "", Vec::new(), None);
+            row(
+                frame,
+                "",
+                vec![Span::styled(
+                    "Hidden again when you move to another secret or leave this screen.",
+                    theme::muted(),
+                )],
+                None,
+            );
+        }
+        None => {
+            row(
+                frame,
+                label,
+                vec![Span::styled("••••••••••••••••", theme::muted())],
+                Some(("v", "reveal")),
+            );
+            row(frame, "", Vec::new(), None);
+            if s.kind == SecretKind::SshKey {
+                row(
+                    frame,
+                    "",
+                    vec![Span::styled(
+                        "Add it to ~/.ssh/authorized_keys, then pick it on Servers (K).",
+                        theme::muted(),
+                    )],
+                    None,
+                );
+            }
+            row(
+                frame,
+                "",
+                vec![Span::styled(
+                    "Revealing a value is recorded in the activity feed.",
+                    theme::muted(),
+                )],
+                None,
+            );
+        }
+    }
+}
+
+// Storage
+
+fn storage(frame: &mut Frame, area: Rect, app: &App) {
+    let view = &app.storage;
+    let [list, detail] = Layout::vertical([Constraint::Fill(1), Constraint::Length(9)])
+        .spacing(1)
+        .areas(area);
+    let block = panel(
+        title("Storage", true),
+        Some(Line::styled(
+            "S3-compatible buckets for backups",
+            theme::muted(),
+        )),
+        true,
+    );
+    let inner = inside(&block, list);
+    frame.render_widget(block, list);
+    mouse::hit(inner, Hit::List(List::Storage));
+    if view.list.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("no storage connections yet · ", theme::muted()),
+                Span::styled("a", theme::accent()),
+                Span::styled(
+                    " to add an S3, R2, B2 or MinIO bucket; backups stay in the data directory until then",
+                    theme::muted(),
+                ),
+            ])),
+            inner,
+        );
+    } else {
+        let rows: Vec<Row> = view
+            .list
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let selected = i == view.row;
+                let (glyph, label, style) = crate::picker::test_state(s);
+                let test = if view.testing.contains(&s.id) {
+                    Line::from(Span::styled(
+                        format!("{} testing…", util::spinner(app.tick)),
+                        theme::fg(theme::INFO),
+                    ))
+                } else {
+                    match &s.last_test {
+                        Some(t) if !t.ok => Line::from(vec![
+                            Span::styled("failed ", theme::fg(theme::ERR)),
+                            Span::styled(
+                                format!(
+                                    "{} · {}",
+                                    t.error.as_deref().unwrap_or("no reason given"),
+                                    util::ago(t.at)
+                                ),
+                                theme::muted(),
+                            ),
+                        ]),
+                        _ => Line::styled(label, theme::muted()),
+                    }
+                };
+                Row::new(vec![
+                    Cell::from(Span::styled(glyph, style)),
+                    Cell::from(Span::styled(
+                        s.name.clone(),
+                        if selected {
+                            theme::accent()
+                        } else {
+                            theme::text()
+                        },
+                    )),
+                    Cell::from(Span::styled(s.endpoint.clone(), theme::muted())),
+                    Cell::from(Span::styled(crate::picker::bucket_path(s), theme::text())),
+                    Cell::from(test),
+                ])
+                .style(if selected {
+                    theme::selected()
+                } else {
+                    Style::new()
+                })
+            })
+            .collect();
+        let offset = scroll_offset(view.row, inner.height.saturating_sub(1) as usize);
+        row_hits(inner, rows.len(), offset, Hit::Item);
+        frame.render_widget(
+            Table::new(
+                rows.into_iter().skip(offset),
+                [
+                    Constraint::Length(2),
+                    Constraint::Length(18),
+                    Constraint::Fill(1),
+                    Constraint::Length(28),
+                    Constraint::Length(40),
+                ],
+            )
+            .header(
+                Row::new(["", "NAME", "ENDPOINT", "BUCKET / PREFIX", "LAST TEST"])
+                    .style(theme::muted()),
+            )
+            .column_spacing(2),
+            inner,
+        );
+    }
+    storage_detail(frame, detail, app);
+}
+
+fn storage_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(s) = app.storage.selected() else {
+        frame.render_widget(panel(title("storage", false), None, false), area);
+        return;
+    };
+    let block = panel(title(&s.name, false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let [left, right] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)])
+        .spacing(4)
+        .areas(inner);
+    let text = |t: String| vec![Span::styled(t, theme::text())];
+    let creds = app
+        .secrets
+        .list
+        .iter()
+        .find(|c| c.id == s.credentials_secret_id);
+    let prefix = if s.path_prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", s.path_prefix)
+    };
+    let rows = lines_of(left, 6);
+    let lines: [(&str, Vec<Span<'static>>); 6] = [
+        ("endpoint", text(s.endpoint.clone())),
+        ("region", text(s.region.clone())),
+        ("bucket", text(s.bucket.clone())),
+        (
+            "path prefix",
+            vec![
+                Span::styled(
+                    if s.path_prefix.is_empty() {
+                        "none".to_string()
+                    } else {
+                        s.path_prefix.clone()
+                    },
+                    theme::text(),
+                ),
+                Span::styled(
+                    format!("  files go to {prefix}<service id>/<file>"),
+                    theme::muted(),
+                ),
+            ],
+        ),
+        (
+            "addressing",
+            vec![
+                Span::styled(
+                    if s.path_style {
+                        "path-style"
+                    } else {
+                        "virtual-hosted"
+                    },
+                    theme::text(),
+                ),
+                Span::styled(
+                    if s.path_style {
+                        "  <endpoint>/<bucket>"
+                    } else {
+                        "  <bucket>.<endpoint>"
+                    },
+                    theme::muted(),
+                ),
+            ],
+        ),
+        (
+            "credentials",
+            match creds {
+                Some(c) => vec![
+                    Span::styled(c.name.clone(), theme::text()),
+                    Span::styled(
+                        format!("  {}", c.public_part.clone().unwrap_or_default()),
+                        theme::muted(),
+                    ),
+                ],
+                None => vec![Span::styled("unknown secret", theme::fg(theme::ERR))],
+            },
+        ),
+    ];
+    for (row, (k, v)) in rows.iter().zip(lines) {
+        setting_row(frame, *row, k, v, None);
+    }
+    let rows = lines_of(right, 4);
+    let test = match &s.last_test {
+        _ if app.storage.testing.contains(&s.id) => vec![Span::styled(
+            format!("{} testing…", util::spinner(app.tick)),
+            theme::fg(theme::INFO),
+        )],
+        None => vec![Span::styled("never tested", theme::muted())],
+        Some(t) if t.ok => vec![
+            Span::styled("● ", theme::fg(theme::OK)),
+            Span::styled("ok", theme::text()),
+            Span::styled(
+                format!(
+                    "  put, get and delete in {}ms · {}",
+                    t.latency_ms.unwrap_or_default(),
+                    util::ago(t.at)
+                ),
+                theme::muted(),
+            ),
+        ],
+        Some(t) => vec![
+            Span::styled("✕ ", theme::fg(theme::ERR)),
+            Span::styled("failed", theme::text()),
+            Span::styled(format!("  {}", util::ago(t.at)), theme::muted()),
+        ],
+    };
+    if let Some(r) = rows.first() {
+        setting_row(frame, *r, "last test", test, Some(("t", "test")));
+    }
+    if let (Some(r), Some(err)) = (
+        rows.get(1),
+        s.last_test.as_ref().and_then(|t| t.error.clone()),
+    ) {
+        setting_row(
+            frame,
+            *r,
+            "",
+            vec![Span::styled(err, theme::fg(theme::ERR))],
+            None,
+        );
+    }
+    if let Some(r) = rows.get(2) {
+        setting_row(
+            frame,
+            *r,
+            "created",
+            text(database::created(s.created_at, chrono::Utc::now())),
+            None,
+        );
+    }
+}
+
+// Instance backups
+
+fn instance_backups_panel(frame: &mut Frame, area: Rect, app: &App) {
+    let view = &app.settings;
+    let focused = view.focus == SettingsFocus::Backups;
+    let total: u64 = view.backups.iter().map(|b| b.size_bytes).sum();
+    let note = format!(
+        "{} archive{} · {}",
+        view.backups.len(),
+        if view.backups.len() == 1 { "" } else { "s" },
+        util::bytes(total)
+    );
+    let block = panel(
+        title("Instance backups", focused),
+        Some(Line::styled(note, theme::muted())),
+        focused,
+    );
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    mouse::hit(inner, Hit::List(List::InstanceBackups));
+    let [list, _, footer] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(u16::from(inner.height > 4)),
+        Constraint::Length(2.min(inner.height.saturating_sub(1))),
+    ])
+    .areas(inner);
+    let store_name = |id: &Option<Id>| match id {
+        None => "local".to_string(),
+        Some(id) => app.storage.name(id).unwrap_or("s3").to_string(),
+    };
+    if view.backups.is_empty() {
+        frame.render_widget(
+            Paragraph::new("no instance backups yet").style(theme::muted()),
+            list,
+        );
+        hint_at(frame, list, 24, 0, "b", "back up now");
+    } else {
+        let now = chrono::Utc::now();
+        let rows: Vec<Row> = view
+            .backups
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let selected = i == view.backup_row;
+                let (glyph, age, file) = match b.status {
+                    BackupStatus::Running => (
+                        Span::styled(util::spinner(app.tick), theme::fg(theme::INFO)),
+                        util::duration((now - b.created_at).num_seconds()),
+                        Span::styled("backing up…", theme::fg(theme::INFO)),
+                    ),
+                    BackupStatus::Done => (
+                        Span::styled("●", theme::fg(theme::OK)),
+                        util::ago(b.created_at),
+                        Span::styled(b.file_name.clone(), theme::text()),
+                    ),
+                    BackupStatus::Failed => (
+                        Span::styled("✕", theme::fg(theme::ERR)),
+                        util::ago(b.created_at),
+                        Span::styled(
+                            b.error.clone().unwrap_or_else(|| "failed".into()),
+                            theme::fg(theme::ERR),
+                        ),
+                    ),
+                };
+                let size = if b.status == BackupStatus::Done {
+                    Span::styled(util::bytes(b.size_bytes), theme::text())
+                } else {
+                    Span::styled("—", theme::muted())
+                };
+                Row::new(vec![
+                    Cell::from(glyph),
+                    Cell::from(Line::from(vec![
+                        Span::styled(
+                            database::created(b.created_at, now),
+                            if selected && focused {
+                                theme::accent()
+                            } else {
+                                theme::text()
+                            },
+                        ),
+                        Span::styled(format!("  {age}"), theme::muted()),
+                    ])),
+                    Cell::from(Span::styled(b.trigger.as_str(), theme::muted())),
+                    Cell::from(size),
+                    Cell::from(Span::styled(
+                        store_name(&b.storage_id),
+                        if b.storage_id.is_some() {
+                            theme::text()
+                        } else {
+                            theme::muted()
+                        },
+                    )),
+                    Cell::from(file),
+                ])
+                .style(if selected {
+                    theme::selected()
+                } else {
+                    Style::new()
+                })
+            })
+            .collect();
+        let offset = scroll_offset(view.backup_row, list.height.saturating_sub(1) as usize);
+        row_hits(list, rows.len(), offset, Hit::Item);
+        frame.render_widget(
+            Table::new(
+                rows.into_iter().skip(offset),
+                [
+                    Constraint::Length(2),
+                    Constraint::Length(22),
+                    Constraint::Length(8),
+                    Constraint::Length(6),
+                    Constraint::Length(14),
+                    Constraint::Fill(1),
+                ],
+            )
+            .header(
+                Row::new(["", "CREATED", "TRIGGER", "SIZE", "WHERE", "FILE"]).style(theme::muted()),
+            )
+            .column_spacing(2),
+            list,
+        );
+    }
+    let lines = lines_of(footer, footer.height);
+    let schedule = match &view.schedule {
+        Some(s) if s.enabled => vec![
+            Span::styled(format!("daily {:02}:00 UTC", s.hour_utc), theme::text()),
+            Span::styled(
+                format!(
+                    "  keep {} · to {} · {}",
+                    s.keep,
+                    store_name(&s.storage_id),
+                    if s.has_passphrase {
+                        "passphrase stored"
+                    } else {
+                        "no passphrase stored"
+                    }
+                ),
+                theme::muted(),
+            ),
+        ],
+        Some(_) => vec![Span::styled("off", theme::muted())],
+        None => vec![Span::styled(
+            format!("{} loading", util::spinner(app.tick)),
+            theme::muted(),
+        )],
+    };
+    if let Some(line) = lines.first() {
+        let value = setting_row(frame, *line, "schedule", schedule, Some(("e", "edit")));
+        mouse::key_target(value, "e");
+    }
+    if let Some(line) = lines.get(1) {
+        setting_row(
+            frame,
+            *line,
+            "restore",
+            vec![
+                Span::styled(
+                    format!(
+                        "{} restore <file|s3://bucket/key> --passphrase-file <file>",
+                        brand::DAEMON_BIN
+                    ),
+                    theme::text(),
+                ),
+                Span::styled("  on a new machine", theme::muted()),
+            ],
+            None,
         );
     }
 }

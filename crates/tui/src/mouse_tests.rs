@@ -30,6 +30,7 @@ fn server(name: &str) -> Server {
         host: None,
         user: None,
         port: None,
+        ssh_key_secret_id: None,
         status: ServerStatus::Online,
         proxy: ProxyStatus::Running,
         docker_version: None,
@@ -614,6 +615,7 @@ fn confirmation() -> Confirm {
         action: ConfirmAction::Prune,
         verb: "prune",
         busy: None,
+        error: Vec::new(),
     }
 }
 
@@ -863,4 +865,376 @@ async fn double_click_opens_the_rendered_service_and_click_switches_tabs() {
         buf[(tab.x, tab.y)].modifier.contains(Modifier::UNDERLINED),
         "selected tab should be underlined"
     );
+}
+
+fn secret(name: &str, kind: common::SecretKind, public: Option<&str>) -> common::Secret {
+    common::Secret {
+        id: name.into(),
+        name: name.into(),
+        kind,
+        created_at: Timestamp::default(),
+        updated_at: Timestamp::default(),
+        public_part: public.map(Into::into),
+        used_by: Vec::new(),
+    }
+}
+
+fn secrets_fixture() -> App {
+    let mut app = fixture();
+    let mut deploy = secret(
+        "fixture-key",
+        common::SecretKind::SshKey,
+        Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureKeyBody fixture@host"),
+    );
+    deploy.used_by = vec![common::Usage {
+        kind: common::UsageKind::Server,
+        id: "fixture-node".into(),
+        name: "fixture-node".into(),
+    }];
+    app.secrets.list = vec![
+        deploy,
+        secret(
+            "fixture-creds",
+            common::SecretKind::S3Credentials,
+            Some("FIXTUREACCESSKEY"),
+        ),
+    ];
+    app.storage.list = vec![common::StorageConnection {
+        id: "fixture-store".into(),
+        name: "fixture-store".into(),
+        endpoint: "http://127.0.0.1:9000".into(),
+        region: "us-east-1".into(),
+        bucket: "fixture-bucket".into(),
+        path_prefix: "prod".into(),
+        path_style: true,
+        credentials_secret_id: "fixture-creds".into(),
+        created_at: Timestamp::default(),
+        last_test: Some(common::StorageTest {
+            ok: true,
+            at: Timestamp::default(),
+            error: None,
+            latency_ms: Some(12),
+        }),
+    }];
+    app
+}
+
+#[test]
+fn secrets_rows_detail_actions_and_key_bar_have_targets() {
+    let mut app = secrets_fixture();
+    app.screen = Screen::Secrets;
+    let buf = draw(&app, 160, 40);
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("fixture-key", Hit::Item(0)),
+            ("fixture-creds", Hit::Item(1)),
+        ],
+    );
+    assert_hit(&app, label(&buf, "PUBLIC PART"), Hit::List(List::Secrets));
+    assert_hit(&app, label(&buf, "c copy"), char_key('c'));
+    assert_hit(&app, label(&buf, "v reveal"), char_key('v'));
+    assert_hit(&app, label(&buf, "••••••••"), char_key('v'));
+    let y = buf.area.bottom() - 1;
+    for (text, c) in [
+        ("a add", 'a'),
+        ("g generate key", 'g'),
+        ("n rename", 'n'),
+        ("e replace value", 'e'),
+        ("x delete", 'x'),
+    ] {
+        let rect = label_on(&buf, y, text).unwrap_or_else(|| panic!("key bar {text:?}"));
+        assert_hit(&app, rect, char_key(c));
+    }
+    let row = label(&buf, "fixture-creds");
+    click(&mut app, Position::new(row.x, row.y));
+    assert_eq!(app.secrets.row, 1, "click selects the secret");
+
+    app.secrets.revealed = Some((
+        common::RevealedSecret {
+            secret: app.secrets.list[1].clone(),
+            value: common::SecretValue::S3Credentials {
+                access_key_id: "FIXTUREACCESSKEY".into(),
+                secret_access_key: "fixture-secret-value".into(),
+            },
+        },
+        Timestamp::default(),
+    ));
+    let buf = draw(&app, 160, 40);
+    assert_hit(&app, label(&buf, "fixture-secret-value"), char_key('C'));
+    assert_hit(&app, label(&buf, "C copy value"), char_key('C'));
+    assert_hit(&app, label(&buf, "v hide"), char_key('v'));
+}
+
+#[test]
+fn storage_rows_detail_and_settings_links_have_targets() {
+    let mut app = secrets_fixture();
+    app.screen = Screen::Storage;
+    let buf = draw(&app, 160, 40);
+    assert_rows(&app, &buf, &[("http://127.0.0.1:9000", Hit::Item(0))]);
+    assert_hit(
+        &app,
+        label(&buf, "BUCKET / PREFIX"),
+        Hit::List(List::Storage),
+    );
+    let test_row = label(&buf, "last test").y;
+    let hint = (buf.area.left()..=buf.area.right() - 6)
+        .rev()
+        .map(|x| Rect::new(x, test_row, 6, 1))
+        .find(|r| {
+            r.positions()
+                .zip("t test".chars())
+                .all(|(p, c)| buf[p].symbol().chars().eq([c]))
+        })
+        .expect("detail test hint at the right edge");
+    assert_hit(&app, hint, char_key('t'));
+    let y = buf.area.bottom() - 1;
+    for (text, hit) in [
+        ("t test", char_key('t')),
+        ("a add", char_key('a')),
+        ("⏎ edit", key(KeyCode::Enter)),
+        ("x delete", char_key('x')),
+    ] {
+        let rect = label_on(&buf, y, text).unwrap_or_else(|| panic!("key bar {text:?}"));
+        assert_hit(&app, rect, hit);
+    }
+
+    app.screen = Screen::Settings;
+    app.settings.settings = Some(InstanceSettings {
+        version: "1.0.0".into(),
+        hostname: "fixture-host".into(),
+        public_ip: None,
+        public_ip_override: None,
+        listen: "127.0.0.1:7700".into(),
+        data_dir: "/fixture".into(),
+        data_dir_size: 0,
+        manage_proxy: true,
+        proxy: ProxyStatus::Running,
+        proxy_image: "example:1".into(),
+        docker_version: None,
+        ssh_public_key: None,
+        reclaimable: None,
+        supervised: false,
+    });
+    let buf = draw(&app, 160, 40);
+    assert_hit(&app, label(&buf, "s open secrets"), char_key('s'));
+    assert_hit(&app, label(&buf, "o open storage"), char_key('o'));
+}
+
+#[tokio::test]
+async fn key_picker_registers_rows_copy_and_choice_inside_the_dialog() {
+    let mut app = secrets_fixture();
+    app.screen = Screen::Servers;
+    let mut server = server("fixture-edge");
+    server.kind = ServerKind::Ssh;
+    server.ssh_key_secret_id = Some("fixture-key".into());
+    app.pick_server_key(&server);
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "SSH key", |hit| {
+        matches!(
+            hit,
+            Hit::PickRow(0..=2) | Hit::List(List::Picker) | Hit::Key(..)
+        )
+    });
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("daemon's own key", Hit::PickRow(0)),
+            ("fixture-key", Hit::PickRow(1)),
+            ("+ generate new key", Hit::PickRow(2)),
+        ],
+    );
+    assert_hit(&app, label(&buf, "c copy public key"), char_key('c'));
+    assert_hit(&app, label(&buf, "esc cancel"), key(KeyCode::Esc));
+    assert_hit(&app, label(&buf, "⏎ use fixture-key"), key(KeyCode::Enter));
+    let row = label(&buf, "+ generate new key");
+    click(&mut app, Position::new(row.x, row.y));
+    assert!(matches!(&app.overlay, Some(Overlay::Picker(p)) if p.row == 2));
+    let buf = draw(&app, 160, 40);
+    assert_hit(&app, label(&buf, "⏎ generate"), key(KeyCode::Enter));
+}
+
+#[tokio::test]
+async fn pick_field_click_opens_the_picker_and_a_refused_delete_only_offers_close() {
+    let mut app = secrets_fixture();
+    app.screen = Screen::Servers;
+    app.form_server();
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Add server", |hit| {
+        matches!(
+            hit,
+            Hit::FormField(_) | Hit::List(List::Form) | Hit::Key(..)
+        )
+    });
+    let field = label(&buf, "daemon's own key");
+    click(&mut app, Position::new(field.x, field.y));
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Picker(_))),
+        "a click on a pick field opens the picker"
+    );
+    app.picker_cancel();
+    assert!(
+        matches!(&app.overlay, Some(Overlay::Form(f)) if f.fields[f.focus].key == "ssh_key"),
+        "cancel returns to the form on that field"
+    );
+
+    app.screen = Screen::Secrets;
+    app.overlay = Some(Overlay::Confirm(Confirm {
+        title: "Delete secret · fixture-key".into(),
+        message: "Delete fixture-key?".into(),
+        danger: true,
+        action: ConfirmAction::DeleteSecret("fixture-key".into()),
+        verb: "delete",
+        busy: None,
+        error: vec!["secret is used by server fixture-node".into()],
+    }));
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Delete secret", |hit| hit == key(KeyCode::Esc));
+    assert!((buf.area.top()..buf.area.bottom()).all(|y| label_on(&buf, y, "y delete").is_none()));
+    let close = assert_hit(&app, label(&buf, "esc close"), key(KeyCode::Esc));
+    click(&mut app, close);
+    assert!(app.overlay.is_none());
+}
+
+fn instance_backup(
+    id: &str,
+    status: BackupStatus,
+    storage_id: Option<&str>,
+) -> common::InstanceBackup {
+    common::InstanceBackup {
+        id: id.into(),
+        created_at: Timestamp::default(),
+        status,
+        trigger: BackupTrigger::Manual,
+        file_name: format!("instance-{id}.tar.gz.enc"),
+        size_bytes: if status == BackupStatus::Done {
+            4096
+        } else {
+            0
+        },
+        storage: Default::default(),
+        storage_id: storage_id.map(Into::into),
+        error: (status == BackupStatus::Failed).then(|| "fixture upload failed".into()),
+        finished_at: None,
+    }
+}
+
+#[test]
+fn instance_backups_panel_rows_schedule_and_focus_follow_clicks() {
+    let mut app = secrets_fixture();
+    app.screen = Screen::Settings;
+    app.settings.settings = Some(InstanceSettings {
+        version: "1.0.0".into(),
+        hostname: "fixture-host".into(),
+        public_ip: None,
+        public_ip_override: None,
+        listen: "127.0.0.1:7700".into(),
+        data_dir: "/fixture".into(),
+        data_dir_size: 0,
+        manage_proxy: true,
+        proxy: ProxyStatus::Running,
+        proxy_image: "example:1".into(),
+        docker_version: None,
+        ssh_public_key: None,
+        reclaimable: None,
+        supervised: false,
+    });
+    app.settings.contexts.contexts.insert(
+        "fixture-primary".into(),
+        Context {
+            url: "https://fixture-primary.test".into(),
+            token: "test".into(),
+        },
+    );
+    app.settings.backups = vec![
+        instance_backup("one", BackupStatus::Done, Some("fixture-store")),
+        instance_backup("two", BackupStatus::Failed, None),
+    ];
+    app.settings.schedule = Some(common::InstanceBackupSchedule {
+        enabled: true,
+        has_passphrase: true,
+        storage_id: Some("fixture-store".into()),
+        ..Default::default()
+    });
+    let buf = draw(&app, 160, 40);
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("instance-one.tar.gz.enc", Hit::Item(0)),
+            ("fixture upload failed", Hit::Item(1)),
+        ],
+    );
+    assert_hit(
+        &app,
+        label(&buf, "TRIGGER"),
+        Hit::List(List::InstanceBackups),
+    );
+    assert_hit(&app, label(&buf, "daily 02:00 UTC"), char_key('e'));
+    assert_hit(&app, label(&buf, "e edit"), char_key('e'));
+    let y = buf.area.bottom() - 1;
+    for (text, hit) in [
+        ("tab contexts", key(KeyCode::Tab)),
+        ("b back up now", char_key('b')),
+        ("e schedule", char_key('e')),
+        ("D download", char_key('D')),
+        ("x delete", char_key('x')),
+        ("s secrets", char_key('s')),
+        ("o storage", char_key('o')),
+    ] {
+        let rect = label_on(&buf, y, text).unwrap_or_else(|| panic!("key bar {text:?}"));
+        assert_hit(&app, rect, hit);
+    }
+    let row = label(&buf, "fixture upload failed");
+    click(&mut app, Position::new(row.x, row.y));
+    assert_eq!(app.settings.backup_row, 1);
+    let context = label(&buf, "fixture-primary");
+    click(&mut app, Position::new(context.x, context.y));
+    assert_eq!(app.settings.focus, crate::app::SettingsFocus::Contexts);
+    let buf = draw(&app, 160, 40);
+    let y = buf.area.bottom() - 1;
+    assert_hit(
+        &app,
+        label_on(&buf, y, "tab backups").expect("contexts key bar"),
+        key(KeyCode::Tab),
+    );
+    click(&mut app, Position::new(row.x, row.y));
+    assert_eq!(app.settings.focus, crate::app::SettingsFocus::Backups);
+}
+
+#[test]
+fn instance_backup_dialog_masks_the_passphrase_and_registers_its_controls() {
+    let mut app = secrets_fixture();
+    app.screen = Screen::Settings;
+    app.form_instance_backup();
+    if let Some(Overlay::Form(form)) = &mut app.overlay {
+        form.paste("correct horse battery");
+    }
+    let buf = draw(&app, 160, 40);
+    assert_modal_targets(&app, &buf, "Back up instance", |hit| {
+        matches!(
+            hit,
+            Hit::FormField(_) | Hit::List(List::Form) | Hit::Key(..)
+        )
+    });
+    assert!(
+        (buf.area.top()..buf.area.bottom()).all(|y| label_on(&buf, y, "correct horse").is_none())
+    );
+    label(&buf, "•••••••••••••••••••••");
+    label(&buf, "✓ 21 characters");
+    assert_hit(&app, label(&buf, "⏎ back up"), key(KeyCode::Enter));
+    label(
+        &buf,
+        &format!(
+            "{} restore <file|s3://bucket/key> --passphrase-file <file>",
+            common::brand::DAEMON_BIN
+        ),
+    );
+    let store = label(&buf, "local");
+    assert!(matches!(
+        mouse::hit_at(&app.mouse, store.x, store.y),
+        Some(Hit::FormField(0))
+    ));
 }

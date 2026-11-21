@@ -42,6 +42,70 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         Screen::Deploy => deploy(app, key),
         Screen::Servers => servers(app, key),
         Screen::Settings => settings(app, key),
+        Screen::Secrets => secrets(app, key),
+        Screen::Storage => storage(app, key),
+    }
+}
+
+fn storage(app: &mut App, key: KeyEvent) {
+    let row = app.storage.row;
+    match key.code {
+        KeyCode::Esc => app.close_storage(),
+        KeyCode::Up | KeyCode::Char('k') => app.select_storage(row.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') => app.select_storage(row + 1),
+        KeyCode::Char('a') => app.form_storage(false),
+        KeyCode::Enter | KeyCode::Char('e') => app.form_storage(true),
+        KeyCode::Char('t') => app.test_storage(),
+        KeyCode::Char('x') | KeyCode::Delete => {
+            let Some(s) = app.storage.selected().cloned() else {
+                return;
+            };
+            ask_to(
+                app,
+                &format!("Delete storage · {}", s.name),
+                format!(
+                    "Delete the connection {}? The daemon refuses while backups or schedules still use it.",
+                    s.name
+                ),
+                true,
+                ConfirmAction::DeleteStorage(s.id),
+                "delete",
+            );
+        }
+        _ => {}
+    }
+}
+
+fn secrets(app: &mut App, key: KeyEvent) {
+    let row = app.secrets.row;
+    match key.code {
+        KeyCode::Esc => app.close_secrets(),
+        KeyCode::Up | KeyCode::Char('k') => app.select_secret(row.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') => app.select_secret(row + 1),
+        KeyCode::Char('a') => app.form_add_secret(),
+        KeyCode::Char('g') => app.form_generate_key(),
+        KeyCode::Char('v') => app.toggle_reveal(),
+        KeyCode::Char('c') => app.copy_public_part(),
+        KeyCode::Char('C') => app.copy_secret_value(),
+        KeyCode::Char('n') => app.form_rename_secret(),
+        KeyCode::Char('e') => app.form_replace_secret(),
+        KeyCode::Char('x') | KeyCode::Delete => {
+            let Some(s) = app.secrets.selected().cloned() else {
+                return;
+            };
+            ask_to(
+                app,
+                &format!("Delete secret · {}", s.name),
+                format!(
+                    "Delete {}? Its value is destroyed and cannot be recovered.",
+                    s.name
+                ),
+                true,
+                ConfirmAction::DeleteSecret(s.id),
+                "delete",
+            );
+        }
+        _ => {}
     }
 }
 
@@ -101,6 +165,7 @@ fn overlay(app: &mut App, key: KeyEvent) {
         Some(Overlay::Form(form)) => match form.handle_key(key) {
             FormAction::None => {}
             FormAction::Cancel => app.overlay = None,
+            FormAction::Pick(field) => app.pick_for_form(field),
             FormAction::Submit { alt } => {
                 if matches!(form.kind, FormKind::EnvVar { .. }) {
                     app.submit_env_form(alt);
@@ -111,6 +176,10 @@ fn overlay(app: &mut App, key: KeyEvent) {
         },
         Some(Overlay::Confirm(c)) => match key.code {
             _ if c.busy.is_some() => {}
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') if !c.error.is_empty() => {
+                app.overlay = None
+            }
+            _ if !c.error.is_empty() => {}
             KeyCode::Char('y') | KeyCode::Enter => app.accept_confirm(),
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => app.overlay = None,
             _ => {}
@@ -144,8 +213,30 @@ fn overlay(app: &mut App, key: KeyEvent) {
             }
             _ => {}
         },
+        Some(Overlay::Picker(p)) => match key.code {
+            KeyCode::Esc => app.picker_cancel(),
+            KeyCode::Enter => app.picker_accept(),
+            KeyCode::Char('c') => app.picker_copy(),
+            KeyCode::Up | KeyCode::Char('k') => p.row = p.row.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                p.row = (p.row + 1).min(p.items.len().saturating_sub(1))
+            }
+            _ => {}
+        },
         Some(Overlay::Help) => app.overlay = None,
         None => {}
+    }
+}
+
+/// Bracketed paste: the whole text goes into the focused field at once.
+pub fn paste(app: &mut App, text: &str) {
+    match app.overlay.as_mut() {
+        Some(Overlay::Form(form)) => form.paste(text),
+        Some(Overlay::Palette(p)) => {
+            p.input.push_str(text.lines().next().unwrap_or_default());
+            p.row = 0;
+        }
+        _ => {}
     }
 }
 
@@ -169,6 +260,12 @@ pub fn run_command(app: &mut App, cmd: Command) {
         Command::NewEnvironment => app.form_new_environment(),
         Command::Servers => app.open_servers(),
         Command::Settings => app.open_settings(),
+        Command::Secrets => app.open_secrets(),
+        Command::Storage => app.open_storage(),
+        Command::BackUpInstance => {
+            app.open_settings();
+            app.form_instance_backup();
+        }
         Command::AddServer => app.form_server(),
         Command::SetupProxy => match app.local_server().cloned() {
             Some(s) => app.setup_proxy(&s),
@@ -199,6 +296,7 @@ fn ask_to(
         action,
         verb,
         busy: None,
+        error: Vec::new(),
     }));
 }
 
@@ -734,6 +832,11 @@ fn servers(app: &mut App, key: KeyEvent) {
             app.server_row = (app.server_row + 1).min(n.saturating_sub(1))
         }
         KeyCode::Char('a') => app.form_server(),
+        KeyCode::Char('K') => {
+            if let Some(s) = selected {
+                app.pick_server_key(&s);
+            }
+        }
         KeyCode::Enter | KeyCode::Char('c') => {
             if let Some(s) = selected {
                 app.check_server(&s);
@@ -776,7 +879,43 @@ fn servers(app: &mut App, key: KeyEvent) {
 fn settings(app: &mut App, key: KeyEvent) {
     let names = app.settings.context_names();
     let selected = names.get(app.settings.row).cloned();
+    if app.settings.focus == SettingsFocus::Backups {
+        let row = app.settings.backup_row;
+        match key.code {
+            KeyCode::Up => return app.select_instance_backup(row.saturating_sub(1)),
+            KeyCode::Down => return app.select_instance_backup(row + 1),
+            KeyCode::Enter => return,
+            KeyCode::Char('D') => return app.form_instance_download(),
+            KeyCode::Char('x') | KeyCode::Delete => {
+                let Some(b) = app.settings.selected_backup().cloned() else {
+                    return;
+                };
+                let when = crate::database::created(b.created_at, chrono::Utc::now());
+                return ask_to(
+                    app,
+                    "Delete instance backup",
+                    format!(
+                        "Delete {} ({when})? The archive is removed from its store.",
+                        b.file_name
+                    ),
+                    true,
+                    ConfirmAction::DeleteInstanceBackup(b.id),
+                    "delete",
+                );
+            }
+            _ => {}
+        }
+    }
     match key.code {
+        KeyCode::Tab | KeyCode::BackTab => {
+            app.settings.focus = match app.settings.focus {
+                SettingsFocus::Backups => SettingsFocus::Contexts,
+                SettingsFocus::Contexts => SettingsFocus::Backups,
+            };
+            return;
+        }
+        KeyCode::Char('b') => return app.form_instance_backup(),
+        KeyCode::Char('e') => return app.form_instance_schedule(),
         KeyCode::Esc => return app.close_settings(),
         KeyCode::Up => {
             app.settings.row = app.settings.row.saturating_sub(1);
@@ -845,6 +984,8 @@ fn settings(app: &mut App, key: KeyEvent) {
             );
         }
         KeyCode::Char('i') => app.form_public_ip(),
+        KeyCode::Char('s') => app.open_secrets(),
+        KeyCode::Char('o') => app.open_storage(),
         KeyCode::Char('m') => {
             let on = !s.manage_proxy;
             app.change_settings(

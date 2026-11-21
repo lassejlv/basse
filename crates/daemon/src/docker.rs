@@ -1,5 +1,6 @@
 //! Docker access: a client per server plus container, network, image and proxy helpers.
 
+use crate::secrets::Secrets;
 use crate::ssh::{SshPaths, Tunnel};
 use anyhow::{Context as _, Result, bail};
 use bollard::container::LogOutput;
@@ -35,15 +36,17 @@ pub struct DockerPool {
     tunnels: Mutex<HashMap<Id, Tunnel>>,
     connecting: tokio::sync::Mutex<()>,
     ssh: SshPaths,
+    secrets: Secrets,
 }
 
 impl DockerPool {
-    pub fn new(ssh: SshPaths) -> Self {
+    pub fn new(ssh: SshPaths, secrets: Secrets) -> Self {
         Self {
             clients: RwLock::new(HashMap::new()),
             tunnels: Mutex::new(HashMap::new()),
             connecting: tokio::sync::Mutex::new(()),
             ssh,
+            secrets,
         }
     }
 
@@ -59,7 +62,13 @@ impl DockerPool {
                 if let Some(docker) = self.cached(server) {
                     return Ok(docker);
                 }
-                let tunnel = Tunnel::open(&self.ssh, server).await?;
+                let private_key = match &server.ssh_key_secret_id {
+                    Some(id) => Some(self.secrets.ssh_private_key(id).await?),
+                    None => None,
+                };
+                let tunnel =
+                    Tunnel::open(&self.ssh, server, private_key.as_ref().map(|k| k.as_str()))
+                        .await?;
                 let docker = Docker::connect_with_unix(
                     &tunnel.socket.to_string_lossy(),
                     DOCKER_TIMEOUT_SECS,
@@ -601,6 +610,7 @@ pub async fn start_helper(
     name: &str,
     image: &str,
     binds: Vec<String>,
+    network_mode: Option<&str>,
 ) -> Result<String> {
     remove_container(docker, name).await?;
     let body = ContainerCreateBody {
@@ -613,6 +623,7 @@ pub async fn start_helper(
         )])),
         host_config: Some(HostConfig {
             binds: Some(binds),
+            network_mode: network_mode.map(str::to_string),
             ..Default::default()
         }),
         ..Default::default()

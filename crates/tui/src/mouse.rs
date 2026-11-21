@@ -54,6 +54,9 @@ pub enum Hit {
     PaletteRow(usize),
     PaletteInput,
     List(List),
+    PickRow(usize),
+    /// A row of the list on a full-screen list such as Secrets.
+    Item(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +69,10 @@ pub enum List {
     Contexts,
     Palette,
     Form,
+    Picker,
+    Secrets,
+    Storage,
+    InstanceBackups,
 }
 
 thread_local! {
@@ -301,6 +308,8 @@ pub fn paint_hover(buf: &mut Buffer, mouse: &MouseState) {
             | Hit::SidebarServer(_)
             | Hit::Context(_)
             | Hit::PaletteRow(_)
+            | Hit::PickRow(_)
+            | Hit::Item(_)
     );
     let rect = rect.intersection(buf.area);
     for y in rect.top()..rect.bottom() {
@@ -552,6 +561,7 @@ fn click(app: &mut App, hit: Hit, double: bool) {
             }
         }
         Hit::Context(i) => {
+            app.settings.focus = SettingsFocus::Contexts;
             app.settings.row = i;
             if double {
                 press(app, KeyCode::Enter, KeyModifiers::NONE);
@@ -578,8 +588,30 @@ fn click(app: &mut App, hit: Hit, double: bool) {
         Hit::FormField(i) => {
             if let Some(Overlay::Form(form)) = app.overlay.as_mut() {
                 form.click(i, None);
+                if form.fields[i].kind == crate::form::FieldKind::Pick && form.focus == i {
+                    press(app, KeyCode::Enter, KeyModifiers::NONE);
+                }
             }
         }
+        Hit::PickRow(i) => {
+            if let Some(Overlay::Picker(p)) = app.overlay.as_mut() {
+                p.row = i;
+            }
+            if double {
+                press(app, KeyCode::Enter, KeyModifiers::NONE);
+            }
+        }
+        Hit::Item(i) => match app.screen {
+            Screen::Secrets => app.select_secret(i),
+            Screen::Storage => {
+                app.select_storage(i);
+                if double {
+                    press(app, KeyCode::Enter, KeyModifiers::NONE);
+                }
+            }
+            Screen::Settings => app.select_instance_backup(i),
+            _ => {}
+        },
         Hit::FormChoice(i, choice) => {
             if let Some(Overlay::Form(form)) = app.overlay.as_mut() {
                 form.click(i, Some(choice));
@@ -639,7 +671,12 @@ fn scroll(app: &mut App, hit: Option<Hit>, dir: isize) {
                     .min(view.deployments.len().saturating_sub(1));
             }
         }
-        Some(Hit::List(_)) => {
+        Some(Hit::List(list)) => {
+            match list {
+                List::InstanceBackups => app.settings.focus = SettingsFocus::Backups,
+                List::Contexts => app.settings.focus = SettingsFocus::Contexts,
+                _ => {}
+            }
             let code = if dir < 0 { KeyCode::Up } else { KeyCode::Down };
             press(app, code, KeyModifiers::NONE);
         }

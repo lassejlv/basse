@@ -7,6 +7,7 @@ mod keys;
 mod mouse;
 #[cfg(test)]
 mod mouse_tests;
+mod picker;
 mod theme;
 mod util;
 mod view;
@@ -15,7 +16,8 @@ use anyhow::Result;
 use app::{App, Msg};
 use client::Client;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind, MouseEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyEventKind, MouseEventKind,
 };
 use crossterm::execute;
 use futures_util::StreamExt;
@@ -27,14 +29,22 @@ const HOVER_FRAME_DELAY: Duration = Duration::from_millis(50);
 /// Run the TUI against `client` until the user quits. `context` is shown in the top bar.
 pub async fn run(client: Client, context: String) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
-    execute!(std::io::stdout(), EnableMouseCapture)?;
+    execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        let _ = execute!(
+            std::io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
         hook(info);
     }));
     let result = event_loop(&mut terminal, client, context).await;
-    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
     ratatui::restore();
     result
 }
@@ -92,6 +102,7 @@ async fn event_loop(
                     redraw = false;
                 }
                 Some(Ok(Event::Mouse(ev))) => redraw = mouse::handle(&mut app, ev),
+                Some(Ok(Event::Paste(text))) => keys::paste(&mut app, &text),
                 Some(Ok(_)) => {}
                 Some(Err(e)) => return Err(e.into()),
                 None => return Ok(()),

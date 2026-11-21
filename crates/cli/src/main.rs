@@ -148,6 +148,145 @@ enum Cmd {
     /// Connection details, public access, backups and passwords of database services.
     #[command(subcommand, alias = "database")]
     Db(DbCmd),
+    /// Encrypted secrets: SSH keys for servers, S3 credentials and other values.
+    #[command(subcommand, alias = "secret")]
+    Secrets(SecretsCmd),
+    /// S3-compatible storage connections for backups (AWS S3, R2, B2, MinIO, ...).
+    #[command(subcommand)]
+    Storage(StorageCmd),
+    /// Encrypted backups of the daemon itself, for disaster recovery.
+    #[command(subcommand)]
+    Instance(InstanceCmd),
+}
+
+#[derive(Subcommand)]
+enum InstanceCmd {
+    /// Back up the daemon (store, config, master key, SSH keys) and wait for the result.
+    /// The passphrase comes from --passphrase-file or stdin and is never stored.
+    Backup {
+        /// Storage connection to write to; defaults to the daemon's data directory.
+        #[arg(long)]
+        storage: Option<String>,
+        #[arg(long)]
+        passphrase_file: Option<PathBuf>,
+    },
+    /// Instance backups, newest first.
+    Backups,
+    /// Save an instance backup's encrypted archive.
+    Download {
+        /// Backup id or file name; defaults to the newest finished one.
+        backup: Option<String>,
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Delete an instance backup.
+    #[command(alias = "remove")]
+    Rm {
+        backup: String,
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Show or change daily instance backups, e.g. "instance schedule --hour 2 --keep 7
+    /// --storage offsite --passphrase-file pass.txt". The passphrase is stored encrypted under
+    /// the master key so scheduled runs can use it.
+    Schedule {
+        #[arg(long, conflicts_with = "off")]
+        hour: Option<u8>,
+        #[arg(long, conflicts_with = "off")]
+        keep: Option<u32>,
+        /// A storage connection, or "local".
+        #[arg(long, conflicts_with = "off")]
+        storage: Option<String>,
+        #[arg(long, conflicts_with = "off")]
+        passphrase_file: Option<PathBuf>,
+        #[arg(long)]
+        off: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum StorageCmd {
+    List,
+    /// Add a connection and test it. Credentials are an s3 secret (see "secrets add --kind s3").
+    Add {
+        name: String,
+        /// S3 API base URL, e.g. https://s3.eu-west-1.amazonaws.com.
+        #[arg(long)]
+        endpoint: String,
+        /// Signing region; "auto" for Cloudflare R2.
+        #[arg(long, default_value = "us-east-1")]
+        region: String,
+        #[arg(long)]
+        bucket: String,
+        /// Key prefix inside the bucket.
+        #[arg(long, default_value = "")]
+        prefix: String,
+        /// Address the bucket as <endpoint>/<bucket> (MinIO and most self-hosted stores).
+        #[arg(long)]
+        path_style: bool,
+        /// The s3 credentials secret.
+        #[arg(long)]
+        credentials: String,
+    },
+    /// Put, read back and delete a probe object.
+    Test {
+        storage: String,
+    },
+    #[command(alias = "remove")]
+    Rm {
+        storage: String,
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretsCmd {
+    List,
+    /// Import a secret. The value is read from --file, or from stdin, never from arguments.
+    Add {
+        name: String,
+        /// ssh-key, s3 or generic.
+        #[arg(long)]
+        kind: SecretKind,
+        /// File holding the value: the private key, the S3 secret access key, or the value.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Access key id of s3 credentials (the secret access key comes from --file or stdin).
+        #[arg(long)]
+        access_key_id: Option<String>,
+    },
+    /// Generate a new ed25519 key in the daemon and print its public key.
+    GenerateSshKey {
+        name: String,
+    },
+    /// Kind, public part and users of a secret; never its value.
+    Show {
+        secret: String,
+    },
+    /// Print the decrypted value. Every reveal is recorded in the activity feed.
+    Reveal {
+        secret: String,
+    },
+    Rename {
+        secret: String,
+        new_name: String,
+    },
+    /// Replace the value, read from --file or stdin like `add`.
+    Replace {
+        secret: String,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        access_key_id: Option<String>,
+    },
+    /// Delete a secret that nothing uses any more.
+    #[command(alias = "remove")]
+    Rm {
+        secret: String,
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -173,7 +312,7 @@ enum ProxyCmd {
 #[derive(Subcommand)]
 enum ServerCmd {
     List,
-    /// Add a server reached over SSH with the daemon's key (see "server key").
+    /// Add a server reached over SSH with the daemon's key (see "server key") or --key.
     Add {
         name: String,
         host: String,
@@ -181,6 +320,14 @@ enum ServerCmd {
         user: String,
         #[arg(long, default_value_t = 22)]
         port: u16,
+        /// An ssh-key secret to connect with instead of the daemon's key.
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Connect with an ssh-key secret, or with the daemon's own key when none is given.
+    SetKey {
+        name: String,
+        secret: Option<String>,
     },
     Check {
         name: String,
@@ -394,7 +541,12 @@ enum DbCmd {
     /// Make the database reachable only from its environment again.
     Unexpose { service: String },
     /// Back up now and wait for the result.
-    Backup { service: String },
+    Backup {
+        service: String,
+        /// Storage connection to write to (see "storage list"); defaults to the data directory.
+        #[arg(long)]
+        storage: Option<String>,
+    },
     /// Backups of a database, newest first.
     Backups { service: String },
     /// Replace the database's data with a backup.
@@ -426,6 +578,9 @@ enum DbCmd {
         /// Turn scheduled backups off.
         #[arg(long)]
         off: bool,
+        /// Where scheduled backups go: a storage connection, or "local" for the data directory.
+        #[arg(long, conflicts_with = "off")]
+        storage: Option<String>,
     },
     /// Set a new password inside the database and in its stored connection URL.
     RotatePassword {
@@ -582,6 +737,9 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Vars(cmd) => vars(&c, cmd, json).await,
         Cmd::Volume(cmd) => volume(&c, cmd, json).await,
         Cmd::Db(cmd) => db(&c, cmd, json).await,
+        Cmd::Secrets(cmd) => secrets(&c, cmd, json).await,
+        Cmd::Storage(cmd) => storage(&c, cmd, json).await,
+        Cmd::Instance(cmd) => instance(&c, cmd, json).await,
     }
 }
 
@@ -788,31 +946,35 @@ async fn server(c: &Client, cmd: ServerCmd, json: bool) -> Result<()> {
             host,
             user,
             port,
+            key,
         } => {
+            let key = match key {
+                Some(key) => Some(find_secret(c, &key).await?),
+                None => None,
+            };
             let s = c
                 .create_server(&CreateServer {
                     name,
                     host,
                     user,
                     port,
+                    ssh_key_secret_id: key.as_ref().map(|k| k.id.clone()),
                 })
                 .await?;
             let s = c.check_server(&s.id).await?;
-            if s.status == ServerStatus::Online {
-                output::ok(format!(
-                    "{} is online (docker {})",
-                    s.name,
-                    s.docker_version.unwrap_or_default()
-                ));
-            } else {
-                output::note(format!("{} was added but is not reachable yet.", s.name));
-                println!(
-                    "{} trust the key from {} on it, then run {}",
-                    muted("next:"),
-                    hint("server key"),
-                    hint(&format!("server check {}", s.name))
-                );
-            }
+            report_server_check(&s, key.as_ref());
+        }
+        ServerCmd::SetKey { name, secret } => {
+            let server = find_server(c, &name).await?;
+            let key = match secret {
+                Some(secret) => Some(find_secret(c, &secret).await?),
+                None => None,
+            };
+            let body = UpdateServer {
+                ssh_key_secret_id: Some(key.as_ref().map(|k| k.id.clone()).unwrap_or_default()),
+            };
+            let s = c.update_server(&server.id, &body).await?;
+            report_server_check(&s, key.as_ref());
         }
         ServerCmd::Check { name } => {
             let s = c.check_server(&find_server(c, &name).await?.id).await?;
@@ -833,6 +995,220 @@ async fn server(c: &Client, cmd: ServerCmd, json: bool) -> Result<()> {
             Some(key) => println!("{key}"),
             None => bail!("the daemon has no SSH key"),
         },
+    }
+    Ok(())
+}
+
+/// Prints whether a newly added or re-keyed server answers, and what to do when it does not.
+fn report_server_check(s: &Server, key: Option<&Secret>) {
+    if s.status == ServerStatus::Online {
+        output::ok(format!(
+            "{} is online (docker {})",
+            s.name,
+            s.docker_version.clone().unwrap_or_default()
+        ));
+        return;
+    }
+    output::note(format!("{} is not reachable yet.", s.name));
+    let source = match key {
+        Some(k) => hint(&format!("secrets show {}", k.name)),
+        None => hint("server key"),
+    };
+    println!(
+        "{} add the public key from {source} to ~/.ssh/authorized_keys on it, then run {}",
+        muted("next:"),
+        hint(&format!("server check {}", s.name))
+    );
+}
+
+async fn find_secret(c: &Client, query: &str) -> Result<Secret> {
+    c.secrets()
+        .await?
+        .into_iter()
+        .find(|s| s.name == query || s.id == query)
+        .with_context(|| format!("no secret '{query}'"))
+}
+
+/// Reads a secret value from `file`, or from stdin when no file is given.
+fn read_value(file: Option<&PathBuf>) -> Result<String> {
+    use std::io::{IsTerminal as _, Read as _};
+    if let Some(path) = file {
+        return std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read {}", path.display()));
+    }
+    if std::io::stdin().is_terminal() {
+        eprintln!("{}", muted("Paste the value, then press Ctrl-D:"));
+    }
+    let mut value = String::new();
+    std::io::stdin()
+        .read_to_string(&mut value)
+        .context("cannot read the value from stdin")?;
+    Ok(value)
+}
+
+fn secret_value(
+    kind: SecretKind,
+    file: Option<&PathBuf>,
+    access_key_id: Option<String>,
+) -> Result<SecretValue> {
+    if kind != SecretKind::S3Credentials && access_key_id.is_some() {
+        bail!("--access-key-id only applies to s3 credentials");
+    }
+    let raw = read_value(file)?;
+    Ok(match kind {
+        SecretKind::SshKey => SecretValue::SshKey { private_key: raw },
+        SecretKind::S3Credentials => SecretValue::S3Credentials {
+            access_key_id: access_key_id.context("s3 credentials need --access-key-id")?,
+            secret_access_key: raw.trim().to_string(),
+        },
+        SecretKind::Generic => SecretValue::Generic {
+            value: raw.strip_suffix('\n').unwrap_or(&raw).to_string(),
+        },
+    })
+}
+
+fn used_by(secret: &Secret) -> String {
+    if secret.used_by.is_empty() {
+        return "—".into();
+    }
+    secret
+        .used_by
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn print_secret(s: &Secret) {
+    let row = |label: &str, value: String| println!("{:<10} {value}", muted(label));
+    row("name", s.name.clone());
+    row("kind", s.kind.label().into());
+    match s.kind {
+        SecretKind::SshKey => row("public key", s.public_part.clone().unwrap_or_default()),
+        SecretKind::S3Credentials => row("access key", s.public_part.clone().unwrap_or_default()),
+        SecretKind::Generic => {}
+    }
+    row("used by", used_by(s));
+    row("updated", output::ago(s.updated_at));
+}
+
+async fn secrets(c: &Client, cmd: SecretsCmd, json: bool) -> Result<()> {
+    match cmd {
+        SecretsCmd::List => {
+            let list = c.secrets().await?;
+            if json {
+                return output::json(&list);
+            }
+            if list.is_empty() {
+                output::note(format!(
+                    "no secrets yet; add one with {} or {}",
+                    hint("secrets add <name> --kind ssh-key --file <key>"),
+                    hint("secrets generate-ssh-key <name>")
+                ));
+            }
+            output::table(
+                &["SECRET", "KIND", "PUBLIC", "USED BY", "UPDATED"],
+                list.iter()
+                    .map(|s| {
+                        let public = s.public_part.as_deref().map_or("—".into(), |p| {
+                            let short: String = p.chars().take(32).collect();
+                            if short.len() < p.len() {
+                                format!("{short}…")
+                            } else {
+                                short
+                            }
+                        });
+                        vec![
+                            Cell::from(s.name.clone()),
+                            Cell(s.kind.label().into(), Tone::Muted),
+                            Cell(public, Tone::Muted),
+                            Cell::from(used_by(s)),
+                            Cell(output::ago(s.updated_at), Tone::Muted),
+                        ]
+                    })
+                    .collect(),
+            );
+        }
+        SecretsCmd::Add {
+            name,
+            kind,
+            file,
+            access_key_id,
+        } => {
+            let value = secret_value(kind, file.as_ref(), access_key_id)?;
+            let s = c.create_secret(&CreateSecret { name, value }).await?;
+            if json {
+                return output::json(&s);
+            }
+            output::ok(format!("added {} ({})", s.name, s.kind.label()));
+            if let (SecretKind::SshKey, Some(public)) = (s.kind, &s.public_part) {
+                println!("{public}");
+            }
+        }
+        SecretsCmd::GenerateSshKey { name } => {
+            let s = c.generate_ssh_key(&name).await?;
+            if json {
+                return output::json(&s);
+            }
+            output::ok(format!(
+                "generated {}; add this public key to ~/.ssh/authorized_keys on your servers:",
+                s.name
+            ));
+            println!("{}", s.public_part.unwrap_or_default());
+        }
+        SecretsCmd::Show { secret } => {
+            let s = find_secret(c, &secret).await?;
+            if json {
+                return output::json(&s);
+            }
+            print_secret(&s);
+        }
+        SecretsCmd::Reveal { secret } => {
+            let s = find_secret(c, &secret).await?;
+            let revealed = c.reveal_secret(&s.id).await?;
+            if json {
+                return output::json(&revealed);
+            }
+            match revealed.value {
+                SecretValue::SshKey { private_key } => print!("{private_key}"),
+                SecretValue::S3Credentials {
+                    access_key_id,
+                    secret_access_key,
+                } => {
+                    println!("{:<18} {access_key_id}", muted("access key id"));
+                    println!("{:<18} {secret_access_key}", muted("secret access key"));
+                }
+                SecretValue::Generic { value } => println!("{value}"),
+            }
+        }
+        SecretsCmd::Rename { secret, new_name } => {
+            let s = find_secret(c, &secret).await?;
+            let body = UpdateSecret {
+                name: Some(new_name),
+                value: None,
+            };
+            let s = c.update_secret(&s.id, &body).await?;
+            output::ok(format!("renamed to {}", s.name));
+        }
+        SecretsCmd::Replace {
+            secret,
+            file,
+            access_key_id,
+        } => {
+            let s = find_secret(c, &secret).await?;
+            let body = UpdateSecret {
+                name: None,
+                value: Some(secret_value(s.kind, file.as_ref(), access_key_id)?),
+            };
+            let s = c.update_secret(&s.id, &body).await?;
+            output::ok(format!("replaced the value of {}", s.name));
+        }
+        SecretsCmd::Rm { secret, yes } => {
+            let s = find_secret(c, &secret).await?;
+            confirm(&format!("Delete secret {}?", s.name), yes)?;
+            c.delete_secret(&s.id).await?;
+            output::ok(format!("deleted {}", s.name));
+        }
     }
     Ok(())
 }
@@ -922,6 +1298,338 @@ fn manual_cleanup(s: &Server, volumes: bool) -> String {
         s.user.as_deref().unwrap_or("root"),
         s.host.as_deref().unwrap_or("<host>")
     )
+}
+
+async fn find_storage(c: &Client, query: &str) -> Result<StorageConnection> {
+    c.storages()
+        .await?
+        .into_iter()
+        .find(|s| s.name == query || s.id == query)
+        .with_context(|| format!("no storage connection '{query}'"))
+}
+
+/// `local` or the storage connection's name.
+fn storage_label(storages: &[StorageConnection], storage_id: Option<&str>) -> String {
+    match storage_id {
+        None => "local".into(),
+        Some(id) => storages
+            .iter()
+            .find(|s| s.id == id)
+            .map_or_else(|| id.to_string(), |s| format!("s3:{}", s.name)),
+    }
+}
+
+fn print_storage_test(name: &str, t: &StorageTest) {
+    if t.ok {
+        output::ok(format!(
+            "{name} works: put, get and delete took {} ms",
+            t.latency_ms.unwrap_or_default()
+        ));
+    } else {
+        eprintln!(
+            "{} {name}: {}",
+            paint("✕", Tone::Err),
+            t.error.as_deref().unwrap_or("test failed")
+        );
+    }
+}
+
+async fn storage(c: &Client, cmd: StorageCmd, json: bool) -> Result<()> {
+    match cmd {
+        StorageCmd::List => {
+            let list = c.storages().await?;
+            if json {
+                return output::json(&list);
+            }
+            if list.is_empty() {
+                output::note(format!(
+                    "no storage connections yet; add one with {}",
+                    hint("storage add <name> --endpoint <url> --bucket <b> --credentials <secret>")
+                ));
+            }
+            output::table(
+                &["STORAGE", "ENDPOINT", "BUCKET", "PREFIX", "LAST TEST"],
+                list.iter()
+                    .map(|s| {
+                        let test = match &s.last_test {
+                            None => Cell("never tested".into(), Tone::Muted),
+                            Some(t) if t.ok => Cell(
+                                format!(
+                                    "ok, {} ms, {}",
+                                    t.latency_ms.unwrap_or_default(),
+                                    output::ago(t.at)
+                                ),
+                                Tone::Ok,
+                            ),
+                            Some(t) => Cell(
+                                format!(
+                                    "failed {}: {}",
+                                    output::ago(t.at),
+                                    t.error.as_deref().unwrap_or_default()
+                                ),
+                                Tone::Err,
+                            ),
+                        };
+                        vec![
+                            Cell::from(s.name.clone()),
+                            Cell(s.endpoint.clone(), Tone::Muted),
+                            Cell::from(s.bucket.clone()),
+                            Cell(
+                                if s.path_prefix.is_empty() {
+                                    "—".into()
+                                } else {
+                                    s.path_prefix.clone()
+                                },
+                                Tone::Muted,
+                            ),
+                            test,
+                        ]
+                    })
+                    .collect(),
+            );
+        }
+        StorageCmd::Add {
+            name,
+            endpoint,
+            region,
+            bucket,
+            prefix,
+            path_style,
+            credentials,
+        } => {
+            let secret = find_secret(c, &credentials).await?;
+            let s = c
+                .create_storage(&CreateStorage {
+                    name,
+                    endpoint,
+                    region,
+                    bucket,
+                    path_prefix: prefix,
+                    path_style,
+                    credentials_secret_id: secret.id,
+                })
+                .await?;
+            let t = c.test_storage(&s.id).await?;
+            if json {
+                return output::json(&c.storage(&s.id).await?);
+            }
+            output::ok(format!("added {}", s.name));
+            print_storage_test(&s.name, &t);
+        }
+        StorageCmd::Test { storage } => {
+            let s = find_storage(c, &storage).await?;
+            let t = c.test_storage(&s.id).await?;
+            if json {
+                return output::json(&t);
+            }
+            print_storage_test(&s.name, &t);
+            if !t.ok {
+                std::process::exit(1);
+            }
+        }
+        StorageCmd::Rm { storage, yes } => {
+            let s = find_storage(c, &storage).await?;
+            confirm(&format!("Remove storage connection {}?", s.name), yes)?;
+            c.delete_storage(&s.id).await?;
+            output::ok(format!("removed {}", s.name));
+        }
+    }
+    Ok(())
+}
+
+/// The passphrase from a file, or from stdin when it is piped in. Typing it on a terminal would
+/// echo it, so that is refused.
+fn read_passphrase(file: Option<&PathBuf>) -> Result<String> {
+    use std::io::IsTerminal as _;
+    if file.is_none() && std::io::stdin().is_terminal() {
+        bail!("pass --passphrase-file, or pipe the passphrase in on stdin");
+    }
+    let raw = read_value(file)?;
+    let passphrase = raw.trim_end_matches(['\r', '\n']).to_string();
+    if passphrase.chars().count() < MIN_PASSPHRASE_LEN {
+        bail!("the passphrase must be at least {MIN_PASSPHRASE_LEN} characters");
+    }
+    Ok(passphrase)
+}
+
+fn print_instance_backups(list: &[InstanceBackup], storages: &[StorageConnection]) {
+    output::table(
+        &[
+            "ID", "STATUS", "FILE", "SIZE", "WHERE", "TRIGGER", "CREATED",
+        ],
+        list.iter()
+            .map(|b| {
+                vec![
+                    Cell::from(b.id.clone()),
+                    backup_status(b.status),
+                    Cell::from(b.file_name.clone()),
+                    Cell(output::size(b.size_bytes), Tone::Muted),
+                    Cell(
+                        storage_label(storages, b.storage_id.as_deref()),
+                        Tone::Muted,
+                    ),
+                    Cell(b.trigger.as_str().to_string(), Tone::Muted),
+                    Cell(
+                        b.error.clone().unwrap_or_else(|| output::ago(b.created_at)),
+                        if b.error.is_some() {
+                            Tone::Err
+                        } else {
+                            Tone::Muted
+                        },
+                    ),
+                ]
+            })
+            .collect(),
+    );
+}
+
+async fn instance(c: &Client, cmd: InstanceCmd, json: bool) -> Result<()> {
+    match cmd {
+        InstanceCmd::Backup {
+            storage,
+            passphrase_file,
+        } => {
+            let passphrase = read_passphrase(passphrase_file.as_ref())?;
+            let storage_id = match storage {
+                Some(name) => Some(find_storage(c, &name).await?.id),
+                None => None,
+            };
+            let started = c
+                .create_instance_backup(&CreateInstanceBackup {
+                    storage_id,
+                    passphrase,
+                })
+                .await?;
+            output::note(format!("backing up the instance to {}", started.file_name));
+            let b = loop {
+                let b = c
+                    .instance_backups()
+                    .await?
+                    .into_iter()
+                    .find(|b| b.id == started.id)
+                    .context("the instance backup disappeared")?;
+                if b.status != BackupStatus::Running {
+                    break b;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            };
+            if json {
+                return output::json(&b);
+            }
+            match b.status {
+                BackupStatus::Done => output::ok(format!(
+                    "instance backup {} done ({}, {})",
+                    b.id,
+                    b.file_name,
+                    output::size(b.size_bytes)
+                )),
+                _ => bail!("instance backup failed: {}", b.error.unwrap_or_default()),
+            }
+        }
+        InstanceCmd::Backups => {
+            let list = c.instance_backups().await?;
+            if json {
+                return output::json(&list);
+            }
+            if list.is_empty() {
+                println!(
+                    "{} {}",
+                    muted("no instance backups yet:"),
+                    hint("instance backup --passphrase-file <file>")
+                );
+            }
+            print_instance_backups(&list, &c.storages().await?);
+        }
+        InstanceCmd::Download { backup, output } => {
+            use tokio::io::AsyncWriteExt as _;
+            let list = c.instance_backups().await?;
+            let b = match &backup {
+                Some(q) => list.iter().find(|b| b.id == *q || b.file_name == *q),
+                None => list.iter().find(|b| b.status == BackupStatus::Done),
+            }
+            .with_context(|| match &backup {
+                Some(q) => format!("no instance backup '{q}'"),
+                None => "no finished instance backup yet".into(),
+            })?;
+            let path = output.unwrap_or_else(|| PathBuf::from(&b.file_name));
+            let mut stream = c.download_instance_backup(&b.id).await?;
+            let mut file = tokio::fs::File::create(&path)
+                .await
+                .with_context(|| format!("cannot create {}", path.display()))?;
+            while let Some(chunk) = stream.next().await {
+                file.write_all(&chunk?).await?;
+            }
+            file.flush().await?;
+            output::ok(format!(
+                "saved {} ({}); restore it on a new machine with {} restore {} --passphrase-file <file>",
+                path.display(),
+                output::size(b.size_bytes),
+                brand::DAEMON_BIN,
+                path.display()
+            ));
+        }
+        InstanceCmd::Rm { backup, yes } => {
+            let b = c
+                .instance_backups()
+                .await?
+                .into_iter()
+                .find(|b| b.id == backup || b.file_name == backup)
+                .with_context(|| format!("no instance backup '{backup}'"))?;
+            confirm(&format!("Delete instance backup {}?", b.file_name), yes)?;
+            c.delete_instance_backup(&b.id).await?;
+            output::ok(format!("deleted {}", b.file_name));
+        }
+        InstanceCmd::Schedule {
+            hour,
+            keep,
+            storage,
+            passphrase_file,
+            off,
+        } => {
+            let current = c.instance_backup_schedule().await?;
+            let changes =
+                hour.is_some() || keep.is_some() || storage.is_some() || passphrase_file.is_some();
+            let schedule = if off || changes {
+                let storage_id = match storage.as_deref() {
+                    None => current.storage_id.clone(),
+                    Some("local") => None,
+                    Some(name) => Some(find_storage(c, name).await?.id),
+                };
+                let passphrase = match &passphrase_file {
+                    Some(file) => Some(read_passphrase(Some(file))?),
+                    None => None,
+                };
+                c.set_instance_backup_schedule(&UpdateInstanceBackupSchedule {
+                    enabled: !off,
+                    hour_utc: hour.unwrap_or(current.hour_utc),
+                    keep: keep.unwrap_or(current.keep),
+                    storage_id,
+                    passphrase,
+                })
+                .await?
+            } else {
+                current
+            };
+            if json {
+                return output::json(&schedule);
+            }
+            if schedule.enabled {
+                output::ok(format!(
+                    "the instance is backed up daily at {:02}:00 UTC to {}, keeping the last {}",
+                    schedule.hour_utc,
+                    storage_label(&c.storages().await?, schedule.storage_id.as_deref()),
+                    schedule.keep
+                ));
+            } else {
+                println!(
+                    "{} {}",
+                    muted("scheduled instance backups are off:"),
+                    hint("instance schedule --hour 2 --keep 7 --passphrase-file <file>")
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn confirm(prompt: &str, yes: bool) -> Result<()> {
@@ -1617,10 +2325,21 @@ async fn db(c: &Client, cmd: DbCmd, json: bool) -> Result<()> {
             output::ok(format!("{} is internal-only", s.name));
             follow_reconfigure(c, &s).await?;
         }
-        DbCmd::Backup { service } => {
+        DbCmd::Backup { service, storage } => {
             let s = find_database(c, &service).await?;
-            let mut b = c.create_backup(&s.id).await?;
-            output::note(format!("backing up {} to {}", s.name, b.file_name));
+            let target = match storage {
+                Some(name) => Some(find_storage(c, &name).await?),
+                None => None,
+            };
+            let mut b = c
+                .create_backup(&s.id, target.as_ref().map(|t| t.id.as_str()))
+                .await?;
+            output::note(format!(
+                "backing up {} to {} in {}",
+                s.name,
+                b.file_name,
+                target.map_or("local storage".into(), |t| t.name)
+            ));
             while b.status == BackupStatus::Running {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 b = c.backup(&b.id).await?;
@@ -1644,6 +2363,7 @@ async fn db(c: &Client, cmd: DbCmd, json: bool) -> Result<()> {
             if json {
                 return output::json(&list);
             }
+            let storages = c.storages().await?;
             if list.is_empty() {
                 println!(
                     "{} {}",
@@ -1652,7 +2372,9 @@ async fn db(c: &Client, cmd: DbCmd, json: bool) -> Result<()> {
                 );
             }
             output::table(
-                &["ID", "STATUS", "FILE", "SIZE", "TRIGGER", "CREATED"],
+                &[
+                    "ID", "STATUS", "FILE", "SIZE", "WHERE", "TRIGGER", "CREATED",
+                ],
                 list.iter()
                     .map(|b| {
                         vec![
@@ -1660,6 +2382,10 @@ async fn db(c: &Client, cmd: DbCmd, json: bool) -> Result<()> {
                             backup_status(b.status),
                             Cell::from(b.file_name.clone()),
                             Cell(output::size(b.size_bytes), Tone::Muted),
+                            Cell(
+                                storage_label(&storages, b.storage_id.as_deref()),
+                                Tone::Muted,
+                            ),
                             Cell(b.trigger.as_str().to_string(), Tone::Muted),
                             Cell(
                                 b.error.clone().unwrap_or_else(|| output::ago(b.created_at)),
@@ -1720,26 +2446,37 @@ async fn db(c: &Client, cmd: DbCmd, json: bool) -> Result<()> {
             hour,
             keep,
             off,
+            storage,
         } => {
             let s = find_database(c, &service).await?;
             let mut schedule = c.backup_schedule(&s.id).await?;
+            let changes = hour.is_some() || keep.is_some() || storage.is_some();
             if off {
                 schedule.enabled = false;
-            } else if hour.is_some() || keep.is_some() {
+            } else if changes {
                 schedule.enabled = true;
                 schedule.hour_utc = hour.unwrap_or(schedule.hour_utc);
                 schedule.keep = keep.unwrap_or(schedule.keep);
+                schedule.storage_id = match storage.as_deref() {
+                    None => schedule.storage_id,
+                    Some("local") => None,
+                    Some(name) => Some(find_storage(c, name).await?.id),
+                };
             }
-            if off || hour.is_some() || keep.is_some() {
+            if off || changes {
                 schedule = c.set_backup_schedule(&s.id, &schedule).await?;
             }
             if json {
                 return output::json(&schedule);
             }
             if schedule.enabled {
+                let storages = c.storages().await?;
                 output::ok(format!(
-                    "{} is backed up daily at {:02}:00 UTC, keeping the last {}",
-                    s.name, schedule.hour_utc, schedule.keep
+                    "{} is backed up daily at {:02}:00 UTC to {}, keeping the last {}",
+                    s.name,
+                    schedule.hour_utc,
+                    storage_label(&storages, schedule.storage_id.as_deref()),
+                    schedule.keep
                 ));
             } else {
                 println!(

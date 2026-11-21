@@ -138,8 +138,8 @@ impl Db {
 
     pub async fn insert_server(&self, s: &Server) -> Result<()> {
         sqlx::query(
-            r#"INSERT INTO servers (id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+            r#"INSERT INTO servers (id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at, ssh_key_secret_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
         )
         .bind(&s.id)
         .bind(&s.name)
@@ -152,8 +152,18 @@ impl Db {
         .bind(&s.docker_version)
         .bind(s.last_checked_at)
         .bind(s.created_at)
+        .bind(&s.ssh_key_secret_id)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn set_server_key(&self, id: &str, secret_id: Option<&str>) -> Result<()> {
+        sqlx::query("UPDATE servers SET ssh_key_secret_id = $2 WHERE id = $1")
+            .bind(id)
+            .bind(secret_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -871,7 +881,7 @@ impl Db {
     async fn schedule_query(&self, tail: &str, binds: &[&str]) -> Result<Vec<ScheduleRecord>> {
         self.fetch(
             format!(
-                "SELECT service_id, enabled, hour_utc, keep, last_run_at FROM backup_schedules {tail}"
+                "SELECT service_id, enabled, hour_utc, keep, last_run_at, storage_id FROM backup_schedules {tail}"
             ),
             binds,
             |row| {
@@ -883,6 +893,7 @@ impl Db {
                         enabled: row.try_get(1)?,
                         hour_utc: u8::try_from(hour).map_err(|e| decode_error(2, e))?,
                         keep: u32::try_from(keep).map_err(|e| decode_error(3, e))?,
+                        storage_id: row.try_get(5)?,
                     },
                     last_run_at: row.try_get(4)?,
                 })
@@ -893,15 +904,340 @@ impl Db {
 
     pub async fn save_backup_schedule(&self, r: &ScheduleRecord) -> Result<()> {
         sqlx::query(
-            "INSERT INTO backup_schedules (service_id, enabled, hour_utc, keep, last_run_at)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (service_id) DO UPDATE SET enabled = $2, hour_utc = $3, keep = $4, last_run_at = $5",
+            "INSERT INTO backup_schedules (service_id, enabled, hour_utc, keep, last_run_at, storage_id)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (service_id) DO UPDATE SET enabled = $2, hour_utc = $3, keep = $4, last_run_at = $5,
+                    storage_id = $6",
         )
         .bind(&r.service_id)
         .bind(r.schedule.enabled)
         .bind(i32::from(r.schedule.hour_utc))
         .bind(i64::from(r.schedule.keep))
         .bind(r.last_run_at)
+        .bind(&r.schedule.storage_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // Secrets
+
+    /// Every secret, oldest first, with what uses it.
+    pub async fn secrets(&self) -> Result<Vec<Secret>> {
+        let mut secrets = self
+            .fetch(
+                format!("{SECRET_SELECT} ORDER BY created_at, seq"),
+                &[],
+                secret_from_row,
+            )
+            .await?;
+        let usages = self.secret_usages().await?;
+        for secret in &mut secrets {
+            secret.used_by = usages
+                .iter()
+                .filter(|(id, _)| *id == secret.id)
+                .map(|(_, usage)| usage.clone())
+                .collect();
+        }
+        Ok(secrets)
+    }
+
+    pub async fn secret(&self, id: &str) -> Result<Option<Secret>> {
+        let Some(mut secret) = self
+            .fetch_one(
+                format!("{SECRET_SELECT} WHERE id = $1"),
+                &[id],
+                secret_from_row,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        secret.used_by = self
+            .secret_usages()
+            .await?
+            .into_iter()
+            .filter(|(owner, _)| *owner == secret.id)
+            .map(|(_, usage)| usage)
+            .collect();
+        Ok(Some(secret))
+    }
+
+    /// `(secret id, usage)` for everything that references a secret.
+    async fn secret_usages(&self) -> Result<Vec<(Id, Usage)>> {
+        let rows = sqlx::query(SECRET_USAGES).fetch_all(&self.pool).await?;
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    row.try_get(0)?,
+                    Usage {
+                        kind: col_enum(row, 1)?,
+                        id: row.try_get(2)?,
+                        name: row.try_get(3)?,
+                    },
+                ))
+            })
+            .collect::<sqlx::Result<_>>()
+            .map_err(Into::into)
+    }
+
+    pub async fn secret_name_taken(&self, name: &str) -> Result<bool> {
+        self.exists("SELECT 1 FROM secrets WHERE name = $1", &[name])
+            .await
+    }
+
+    pub async fn secret_ciphertext(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        Ok(
+            sqlx::query_scalar("SELECT ciphertext FROM secrets WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    pub async fn insert_secret(&self, s: &Secret, ciphertext: &[u8]) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO secrets (id, name, kind, public_part, ciphertext, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&s.id)
+        .bind(&s.name)
+        .bind(enum_str(&s.kind))
+        .bind(&s.public_part)
+        .bind(ciphertext)
+        .bind(s.created_at)
+        .bind(s.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Saves a renamed secret, and a new value when `ciphertext` is set.
+    pub async fn update_secret(&self, s: &Secret, ciphertext: Option<&[u8]>) -> Result<()> {
+        sqlx::query(
+            "UPDATE secrets SET name = $2, public_part = $3, updated_at = $4,
+                    ciphertext = COALESCE($5, ciphertext)
+             WHERE id = $1",
+        )
+        .bind(&s.id)
+        .bind(&s.name)
+        .bind(&s.public_part)
+        .bind(s.updated_at)
+        .bind(ciphertext)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_secret(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM secrets WHERE id = $1", id).await
+    }
+
+    // Storage connections
+
+    pub async fn storages(&self) -> Result<Vec<StorageConnection>> {
+        self.fetch(
+            format!("{STORAGE_SELECT} ORDER BY created_at, seq"),
+            &[],
+            storage_from_row,
+        )
+        .await
+    }
+
+    pub async fn storage(&self, id: &str) -> Result<Option<StorageConnection>> {
+        self.fetch_one(
+            format!("{STORAGE_SELECT} WHERE id = $1"),
+            &[id],
+            storage_from_row,
+        )
+        .await
+    }
+
+    pub async fn storage_name_taken(&self, name: &str) -> Result<bool> {
+        self.exists("SELECT 1 FROM storage_connections WHERE name = $1", &[name])
+            .await
+    }
+
+    /// Inserts or updates a connection, `last_test` included.
+    pub async fn save_storage(&self, s: &StorageConnection) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO storage_connections (id, name, endpoint, region, bucket, path_prefix,
+                    path_style, credentials_secret_id, created_at, last_test)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (id) DO UPDATE SET name = $2, endpoint = $3, region = $4, bucket = $5,
+                    path_prefix = $6, path_style = $7, credentials_secret_id = $8, last_test = $10",
+        )
+        .bind(&s.id)
+        .bind(&s.name)
+        .bind(&s.endpoint)
+        .bind(&s.region)
+        .bind(&s.bucket)
+        .bind(&s.path_prefix)
+        .bind(s.path_style)
+        .bind(&s.credentials_secret_id)
+        .bind(s.created_at)
+        .bind(s.last_test.as_ref().map(Json))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// How many backups (of databases and of the instance) live in a connection and how many
+    /// schedules write to it.
+    pub async fn storage_usage(&self, id: &str) -> Result<(i64, i64)> {
+        Ok(sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM backups WHERE storage_id = $1)
+                  + (SELECT COUNT(*) FROM instance_backups WHERE storage_id = $1),
+                    (SELECT COUNT(*) FROM backup_schedules WHERE storage_id = $1)
+                  + (SELECT COUNT(*) FROM instance_backup_schedule WHERE storage_id = $1)",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    pub async fn delete_storage(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM storage_connections WHERE id = $1", id)
+            .await
+    }
+
+    // Instance backups
+
+    /// Inserts an instance backup, numbering it and naming its file
+    /// `instance-<created_at>-<number>.tar.gz.enc`.
+    pub async fn insert_instance_backup(&self, b: &mut InstanceBackup) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("LOCK TABLE instance_backups IN EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await?;
+        let number: i64 =
+            sqlx::query_scalar("SELECT COALESCE(MAX(number), 0) + 1 FROM instance_backups")
+                .fetch_one(&mut *tx)
+                .await?;
+        b.file_name = format!(
+            "instance-{}-{number}.tar.gz.enc",
+            b.created_at.format("%Y%m%d-%H%M%S")
+        );
+        sqlx::query(
+            "INSERT INTO instance_backups (id, number, status, trigger, file_name, size_bytes, storage,
+                    storage_id, error, created_at, finished_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(&b.id)
+        .bind(number)
+        .bind(enum_str(&b.status))
+        .bind(enum_str(&b.trigger))
+        .bind(&b.file_name)
+        .bind(i64::try_from(b.size_bytes).unwrap_or(i64::MAX))
+        .bind(enum_str(&b.storage))
+        .bind(&b.storage_id)
+        .bind(&b.error)
+        .bind(b.created_at)
+        .bind(b.finished_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn update_instance_backup(&self, b: &InstanceBackup) -> Result<()> {
+        sqlx::query(
+            "UPDATE instance_backups SET status = $2, size_bytes = $3, error = $4, finished_at = $5
+             WHERE id = $1",
+        )
+        .bind(&b.id)
+        .bind(enum_str(&b.status))
+        .bind(i64::try_from(b.size_bytes).unwrap_or(i64::MAX))
+        .bind(&b.error)
+        .bind(b.finished_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Instance backups, newest first.
+    pub async fn instance_backups(&self) -> Result<Vec<InstanceBackup>> {
+        self.fetch(
+            format!("{INSTANCE_BACKUP_SELECT} ORDER BY number DESC"),
+            &[],
+            instance_backup_from_row,
+        )
+        .await
+    }
+
+    pub async fn instance_backup(&self, id: &str) -> Result<Option<InstanceBackup>> {
+        self.fetch_one(
+            format!("{INSTANCE_BACKUP_SELECT} WHERE id = $1"),
+            &[id],
+            instance_backup_from_row,
+        )
+        .await
+    }
+
+    pub async fn delete_instance_backup(&self, id: &str) -> Result<()> {
+        self.execute("DELETE FROM instance_backups WHERE id = $1", id)
+            .await
+    }
+
+    /// Fails instance backups a previous daemon process left running. Returns how many.
+    pub async fn fail_interrupted_instance_backups(&self) -> Result<usize> {
+        let done = sqlx::query(
+            "UPDATE instance_backups SET status = 'failed', error = 'daemon restarted', finished_at = $1
+             WHERE status = 'running'",
+        )
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(usize::try_from(done.rows_affected()).unwrap_or(usize::MAX))
+    }
+
+    /// The schedule, the sealed passphrase and when the scheduler last ran it.
+    pub async fn instance_backup_schedule(
+        &self,
+    ) -> Result<(InstanceBackupSchedule, Option<Vec<u8>>, Option<Timestamp>)> {
+        let row = sqlx::query(
+            "SELECT enabled, hour_utc, keep, storage_id, passphrase, last_run_at
+             FROM instance_backup_schedule WHERE id = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok((InstanceBackupSchedule::default(), None, None));
+        };
+        let hour: i32 = row.try_get(1)?;
+        let keep: i64 = row.try_get(2)?;
+        let passphrase: Option<Vec<u8>> = row.try_get(4)?;
+        Ok((
+            InstanceBackupSchedule {
+                enabled: row.try_get(0)?,
+                hour_utc: u8::try_from(hour)?,
+                keep: u32::try_from(keep)?,
+                storage_id: row.try_get(3)?,
+                has_passphrase: passphrase.is_some(),
+            },
+            passphrase,
+            row.try_get(5)?,
+        ))
+    }
+
+    pub async fn save_instance_backup_schedule(
+        &self,
+        s: &InstanceBackupSchedule,
+        passphrase: Option<&[u8]>,
+        last_run_at: Option<Timestamp>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO instance_backup_schedule (id, enabled, hour_utc, keep, storage_id, passphrase, last_run_at)
+             VALUES (1, $1, $2, $3, $4, $5, $6)
+             ON CONFLICT (id) DO UPDATE SET enabled = $1, hour_utc = $2, keep = $3, storage_id = $4,
+                    passphrase = $5, last_run_at = $6",
+        )
+        .bind(s.enabled)
+        .bind(i32::from(s.hour_utc))
+        .bind(i64::from(s.keep))
+        .bind(&s.storage_id)
+        .bind(passphrase)
+        .bind(last_run_at)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -989,7 +1325,67 @@ impl Db {
     }
 }
 
-const SERVER_SELECT: &str = r#"SELECT id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at FROM servers"#;
+const SERVER_SELECT: &str = r#"SELECT id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at, ssh_key_secret_id FROM servers"#;
+
+const SECRET_SELECT: &str =
+    "SELECT id, name, kind, public_part, created_at, updated_at FROM secrets";
+
+const SECRET_USAGES: &str = "SELECT ssh_key_secret_id, 'server', id, name FROM servers
+     WHERE ssh_key_secret_id IS NOT NULL
+     UNION ALL
+     SELECT credentials_secret_id, 'storage', id, name FROM storage_connections
+     ORDER BY 1, 2, 4";
+
+const INSTANCE_BACKUP_SELECT: &str = "SELECT id, status, trigger, file_name, size_bytes, storage,
+        storage_id, error, created_at, finished_at FROM instance_backups";
+
+fn instance_backup_from_row(row: &PgRow) -> sqlx::Result<InstanceBackup> {
+    let size: i64 = row.try_get(4)?;
+    Ok(InstanceBackup {
+        id: row.try_get(0)?,
+        status: col_enum(row, 1)?,
+        trigger: col_enum(row, 2)?,
+        file_name: row.try_get(3)?,
+        size_bytes: u64::try_from(size).unwrap_or_default(),
+        storage: col_enum(row, 5)?,
+        storage_id: row.try_get(6)?,
+        error: row.try_get(7)?,
+        created_at: row.try_get(8)?,
+        finished_at: row.try_get(9)?,
+    })
+}
+
+const STORAGE_SELECT: &str = "SELECT id, name, endpoint, region, bucket, path_prefix, path_style,
+        credentials_secret_id, created_at, last_test FROM storage_connections";
+
+fn storage_from_row(row: &PgRow) -> sqlx::Result<StorageConnection> {
+    Ok(StorageConnection {
+        id: row.try_get(0)?,
+        name: row.try_get(1)?,
+        endpoint: row.try_get(2)?,
+        region: row.try_get(3)?,
+        bucket: row.try_get(4)?,
+        path_prefix: row.try_get(5)?,
+        path_style: row.try_get(6)?,
+        credentials_secret_id: row.try_get(7)?,
+        created_at: row.try_get(8)?,
+        last_test: row
+            .try_get::<Option<Json<StorageTest>>, _>(9)?
+            .map(|Json(t)| t),
+    })
+}
+
+fn secret_from_row(row: &PgRow) -> sqlx::Result<Secret> {
+    Ok(Secret {
+        id: row.try_get(0)?,
+        name: row.try_get(1)?,
+        kind: col_enum(row, 2)?,
+        public_part: row.try_get(3)?,
+        created_at: row.try_get(4)?,
+        updated_at: row.try_get(5)?,
+        used_by: Vec::new(),
+    })
+}
 
 const DEPLOYMENT_SELECT: &str = "SELECT id, service_id, number, status, trigger, commit_sha, commit_message, image, container_id,
         steps, error, created_at, finished_at FROM deployments";
@@ -1007,6 +1403,7 @@ fn server_from_row(row: &PgRow) -> sqlx::Result<Server> {
         docker_version: row.try_get(8)?,
         last_checked_at: row.try_get(9)?,
         created_at: row.try_get(10)?,
+        ssh_key_secret_id: row.try_get(11)?,
     })
 }
 
@@ -1194,6 +1591,7 @@ pub mod tests {
             host: None,
             user: None,
             port: None,
+            ssh_key_secret_id: None,
             status: ServerStatus::Unknown,
             proxy: ProxyStatus::Missing,
             docker_version: None,
@@ -1437,6 +1835,7 @@ pub mod tests {
                 enabled: true,
                 hour_utc: 5,
                 keep: 3,
+                storage_id: None,
             },
             last_run_at: Some(Utc::now()),
         };

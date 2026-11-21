@@ -648,6 +648,7 @@ async fn ssh_server_end_to_end() {
             host: "127.0.0.1".into(),
             user: user.trim().into(),
             port: sshd.port,
+            ssh_key_secret_id: None,
         })
         .await
         .unwrap();
@@ -975,7 +976,7 @@ async fn exercise_database(
     assert_eq!(exec_in(&container, &p.read).unwrap(), "kept");
 
     println!("== {name}: backup");
-    let started = api.create_backup(&sid).await.unwrap();
+    let started = api.create_backup(&sid, None).await.unwrap();
     assert_eq!(started.status, BackupStatus::Running);
     let backup = wait_backup(api, &started.id).await;
     assert_eq!(backup.status, BackupStatus::Done, "{backup:?}");
@@ -1164,4 +1165,62 @@ async fn other_databases_backup_restore_rotate() {
         left.is_empty(),
         "backup files survived the project: {left:?}"
     );
+}
+
+#[tokio::test]
+#[ignore = "needs Docker and an sshd binary"]
+async fn ssh_server_with_a_secret_key() {
+    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let api = daemon.client();
+    let key = api.generate_ssh_key("edge-key").await.unwrap();
+    let public = daemon.dir.path().join("edge-key.pub");
+    std::fs::write(&public, key.public_part.clone().unwrap()).unwrap();
+    let sshd = Sshd::start(&public);
+    let user = String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout).unwrap();
+
+    let server = api
+        .create_server(&CreateServer {
+            name: "keyed".into(),
+            host: "127.0.0.1".into(),
+            user: user.trim().into(),
+            port: sshd.port,
+            ssh_key_secret_id: Some(key.id.clone()),
+        })
+        .await
+        .unwrap();
+    let checked = api.check_server(&server.id).await.unwrap();
+    assert_eq!(checked.status, ServerStatus::Online, "{checked:?}");
+    let keys_dir = daemon.dir.path().join("ssh/keys");
+    let leftovers: Vec<_> = std::fs::read_dir(&keys_dir)
+        .map(|d| d.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    assert!(
+        leftovers.is_empty(),
+        "temporary keys left behind: {leftovers:?}"
+    );
+
+    let own_key = api
+        .update_server(
+            &server.id,
+            &UpdateServer {
+                ssh_key_secret_id: Some(String::new()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        own_key.status,
+        ServerStatus::Offline,
+        "sshd only trusts edge-key"
+    );
+    let back = api
+        .update_server(
+            &server.id,
+            &UpdateServer {
+                ssh_key_secret_id: Some(key.id.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(back.status, ServerStatus::Online, "{back:?}");
 }

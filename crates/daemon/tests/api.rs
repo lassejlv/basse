@@ -316,7 +316,7 @@ async fn projects_environments_and_services_crud() {
     );
     assert_eq!(info.public_url, None);
     assert!(api.backups(&db.service.id).await.unwrap().is_empty());
-    let err = api.create_backup(&db.service.id).await.unwrap_err();
+    let err = api.create_backup(&db.service.id, None).await.unwrap_err();
     assert!(err.to_string().contains("not been deployed"), "{err}");
     assert_eq!(
         api.backup_schedule(&db.service.id).await.unwrap(),
@@ -326,6 +326,7 @@ async fn projects_environments_and_services_crud() {
         enabled: true,
         hour_utc: 4,
         keep: 3,
+        storage_id: None,
     };
     assert_eq!(
         api.set_backup_schedule(&db.service.id, &schedule)
@@ -410,6 +411,7 @@ async fn ssh_servers_can_be_registered_and_local_is_protected() {
             host: "203.0.113.7".into(),
             user: "deploy".into(),
             port: 2222,
+            ssh_key_secret_id: None,
         })
         .await
         .unwrap();
@@ -420,7 +422,8 @@ async fn ssh_servers_can_be_registered_and_local_is_protected() {
             name: "edge".into(),
             host: "x".into(),
             user: "root".into(),
-            port: 22
+            port: 22,
+            ssh_key_secret_id: None,
         })
         .await
         .is_err()
@@ -606,4 +609,210 @@ async fn serve_imports_a_sqlite_store_from_v0_1_0() {
         .filter(|name| name.contains(".db.migrated-") && name.ends_with(".bak"))
         .collect();
     assert_eq!(kept.len(), 1, "{kept:?}");
+}
+
+#[tokio::test]
+async fn secrets_are_encrypted_masked_and_protected_while_in_use() {
+    let Some(daemon) = Daemon::start().await else {
+        return;
+    };
+    let api = daemon.client();
+    let key_path = daemon.dir.path().join("master.key");
+    assert_eq!(std::fs::read(&key_path).unwrap().len(), 32);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&key_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    let token = api
+        .create_secret(&CreateSecret {
+            name: "api-token".into(),
+            value: SecretValue::Generic {
+                value: "hunter2-very-secret".into(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(token.kind, SecretKind::Generic);
+    assert_eq!(token.public_part, None);
+    let s3 = api
+        .create_secret(&CreateSecret {
+            name: "r2".into(),
+            value: SecretValue::S3Credentials {
+                access_key_id: " AKIAEXAMPLE ".into(),
+                secret_access_key: "s3-secret-value".into(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(s3.public_part.as_deref(), Some("AKIAEXAMPLE"));
+    let key = api.generate_ssh_key("deploy-key").await.unwrap();
+    let public = key.public_part.clone().unwrap();
+    assert!(public.starts_with("ssh-ed25519 "), "{public}");
+
+    let err = api
+        .create_secret(&CreateSecret {
+            name: "bad-key".into(),
+            value: SecretValue::SshKey {
+                private_key: "definitely-not-a-key".into(),
+            },
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("OpenSSH private key"), "{err}");
+    assert!(!err.contains("definitely-not-a-key"), "{err}");
+    let err = api
+        .create_secret(&CreateSecret {
+            name: "api-token".into(),
+            value: SecretValue::Generic { value: "x".into() },
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("already exists"), "{err}");
+
+    let http = reqwest::Client::new();
+    let listed = http
+        .get(format!("{}{API_PREFIX}/secrets", daemon.url))
+        .bearer_auth(&daemon.token)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    for plaintext in ["hunter2-very-secret", "s3-secret-value", "PRIVATE KEY"] {
+        assert!(
+            !listed.contains(plaintext),
+            "list leaked {plaintext}: {listed}"
+        );
+    }
+    let one = http
+        .get(format!("{}{API_PREFIX}/secrets/{}", daemon.url, token.id))
+        .bearer_auth(&daemon.token)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!one.contains("hunter2"), "{one}");
+
+    let revealed = api.reveal_secret(&token.id).await.unwrap();
+    assert_eq!(
+        revealed.value,
+        SecretValue::Generic {
+            value: "hunter2-very-secret".into()
+        }
+    );
+    let SecretValue::SshKey { private_key } = api.reveal_secret(&key.id).await.unwrap().value
+    else {
+        panic!("not an ssh key");
+    };
+    assert!(private_key.contains("BEGIN OPENSSH PRIVATE KEY"));
+
+    let renamed = api
+        .update_secret(
+            &token.id,
+            &UpdateSecret {
+                name: Some("api-key".into()),
+                value: Some(SecretValue::Generic {
+                    value: "replaced-value".into(),
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed.name, "api-key");
+    assert!(renamed.updated_at > token.updated_at);
+    assert_eq!(
+        api.reveal_secret(&token.id).await.unwrap().value,
+        SecretValue::Generic {
+            value: "replaced-value".into()
+        }
+    );
+    let err = api
+        .update_secret(
+            &token.id,
+            &UpdateSecret {
+                name: None,
+                value: Some(SecretValue::S3Credentials {
+                    access_key_id: "a".into(),
+                    secret_access_key: "b".into(),
+                }),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("same kind"), "{err}");
+
+    let server = api
+        .create_server(&CreateServer {
+            name: "edge".into(),
+            host: "203.0.113.7".into(),
+            user: "root".into(),
+            port: 22,
+            ssh_key_secret_id: Some(key.id.clone()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(server.ssh_key_secret_id.as_deref(), Some(key.id.as_str()));
+    let err = api
+        .create_server(&CreateServer {
+            name: "edge2".into(),
+            host: "203.0.113.8".into(),
+            user: "root".into(),
+            port: 22,
+            ssh_key_secret_id: Some(token.id.clone()),
+        })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("expected ssh key"), "{err}");
+
+    let used = api.secret(&key.id).await.unwrap();
+    assert_eq!(used.used_by.len(), 1);
+    assert_eq!(used.used_by[0].kind, UsageKind::Server);
+    assert_eq!(used.used_by[0].name, "edge");
+    let res = http
+        .delete(format!("{}{API_PREFIX}/secrets/{}", daemon.url, key.id))
+        .bearer_auth(&daemon.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let body: ApiError = res.json().await.unwrap();
+    assert!(body.error.contains("server edge"), "{}", body.error);
+
+    let server = api
+        .update_server(
+            &server.id,
+            &UpdateServer {
+                ssh_key_secret_id: Some(String::new()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(server.ssh_key_secret_id, None);
+    assert!(api.secret(&key.id).await.unwrap().used_by.is_empty());
+    api.delete_secret(&key.id).await.unwrap();
+    assert!(api.secret(&key.id).await.is_err());
+    assert_eq!(api.secrets().await.unwrap().len(), 2);
+
+    let activity = api.activity(50).await.unwrap();
+    assert!(
+        activity
+            .iter()
+            .any(|a| a.message == "Secret api-token revealed")
+    );
+    let feed = serde_json::to_string(&activity).unwrap();
+    for plaintext in [
+        "hunter2",
+        "replaced-value",
+        "s3-secret-value",
+        "PRIVATE KEY",
+    ] {
+        assert!(!feed.contains(plaintext), "activity leaked {plaintext}");
+    }
 }

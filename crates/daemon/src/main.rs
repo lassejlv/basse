@@ -9,13 +9,19 @@ mod deploy;
 mod docker;
 mod error;
 mod host;
+mod instance;
 mod prune;
+mod restore;
+mod secrets;
 mod services;
 mod sqlite_import;
 mod ssh;
 mod state;
 mod stats;
 mod store;
+#[cfg(test)]
+#[path = "../tests/support/minio.rs"]
+mod testminio;
 #[cfg(test)]
 #[path = "../tests/support/pg.rs"]
 mod testpg;
@@ -72,6 +78,31 @@ enum Command {
     },
     /// Serve the API (the default).
     Serve,
+    /// Disaster recovery: restore an instance backup onto this (freshly installed) machine.
+    /// Stops the service, restores the store, config, master key and SSH keys, starts the
+    /// service again and checks every server. S3 sources read AWS_ACCESS_KEY_ID and
+    /// AWS_SECRET_ACCESS_KEY.
+    Restore {
+        /// The encrypted archive: a local file or s3://<bucket>/<key>.
+        source: String,
+        /// File holding the backup's passphrase.
+        #[arg(long)]
+        passphrase_file: PathBuf,
+        /// S3 endpoint of an s3:// source, e.g. https://<account>.r2.cloudflarestorage.com.
+        #[arg(long, default_value = "https://s3.amazonaws.com")]
+        s3_endpoint: String,
+        #[arg(long, default_value = "us-east-1")]
+        s3_region: String,
+        /// Address the bucket as <endpoint>/<bucket> (MinIO and most self-hosted stores).
+        #[arg(long)]
+        s3_path_style: bool,
+        /// Keep the restored store in this Postgres instead of where the backup's config says.
+        #[arg(long)]
+        database_url: Option<String>,
+        /// Don't stop and start the systemd service.
+        #[arg(long)]
+        no_service: bool,
+    },
     /// Manage the API token.
     Token {
         #[command(subcommand)]
@@ -121,6 +152,26 @@ fn main() -> Result<()> {
             listen,
         )),
         Command::Serve => tokio::runtime::Runtime::new()?.block_on(serve(dirs, listen)),
+        Command::Restore {
+            source,
+            passphrase_file,
+            s3_endpoint,
+            s3_region,
+            s3_path_style,
+            database_url,
+            no_service,
+        } => tokio::runtime::Runtime::new()?.block_on(restore::run(
+            &dirs,
+            restore::Options {
+                source,
+                passphrase_file,
+                s3_endpoint,
+                s3_region,
+                s3_path_style,
+                database_url,
+                no_service,
+            },
+        )),
         Command::MigrateFromSqlite { path } => {
             tokio::runtime::Runtime::new()?.block_on(migrate_from_sqlite(&dirs, &path))
         }
@@ -173,6 +224,7 @@ async fn init(dirs: &DataDir, opts: InitOptions, listen: Option<String>) -> Resu
         );
     }
     dirs.create()?;
+    secrets::MasterKey::load_or_create(&dirs.master_key())?;
     if !dirs.ssh_key().exists() {
         let status = std::process::Command::new("ssh-keygen")
             .args(["-q", "-t", "ed25519", "-N", "", "-C"])
@@ -332,6 +384,7 @@ async fn ensure_local_server(db: &Db) -> Result<()> {
         host: None,
         user: None,
         port: None,
+        ssh_key_secret_id: None,
         status: ServerStatus::Unknown,
         proxy: ProxyStatus::Missing,
         docker_version: None,
@@ -410,6 +463,8 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
     require_initialized(&dirs)?;
     let mut config = Config::load(&dirs)?;
     dirs.create()?;
+    secrets::MasterKey::load_or_create(&dirs.master_key())?;
+    ssh::clear_temp_keys(&ssh::paths(&dirs.ssh_dir()));
     if let Ok(entries) = std::fs::read_dir(dirs.builds_dir()) {
         for entry in entries.flatten() {
             let _ = std::fs::remove_dir_all(entry.path());
@@ -424,11 +479,16 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
     if interrupted > 0 {
         tracing::warn!("marked {interrupted} interrupted backup(s) as failed");
     }
+    let interrupted = db.fail_interrupted_instance_backups().await?;
+    if interrupted > 0 {
+        tracing::warn!("marked {interrupted} interrupted instance backup(s) as failed");
+    }
     let _ = std::fs::remove_dir_all(dirs.backups_dir().join(".staging"));
     let listen = listen.unwrap_or_else(|| config.listen.clone());
     let state = Arc::new(AppState::new(db, dirs, &config, listen.clone())?);
     stats::spawn_sampler(state.clone());
     database::spawn_scheduler(state.clone());
+    instance::spawn_scheduler(state.clone());
     tokio::spawn({
         let state = state.clone();
         let manage_proxy = config.manage_proxy;

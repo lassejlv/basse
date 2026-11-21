@@ -1,7 +1,15 @@
-//! SSH access to remote servers through the system `ssh` binary and the daemon's own key.
+//! SSH access to remote servers through the system `ssh` binary, with the daemon's own key or
+//! a server's `ssh_key` secret.
 //!
 //! Each remote server gets one long-lived `ssh -L` process that forwards a local Unix socket to
 //! the remote Docker socket; the Docker client then talks to that socket.
+//!
+//! A secret key is handed to `ssh` as a file that exists only while the connection is being
+//! set up: it is created with mode 0600 in `<data dir>/ssh/keys` (itself 0700) and deleted as
+//! soon as the tunnel is up or has failed, since `ssh` reads its identity only during
+//! authentication. An ssh-agent would avoid the file, but it means a second long-lived process
+//! holding every key in memory behind a socket any process of the daemon's user can use, and it
+//! has to be supervised and restarted; the file lives for the seconds of one handshake.
 
 use anyhow::{Context as _, Result, bail};
 use common::Server;
@@ -20,17 +28,24 @@ pub struct SshPaths {
     pub key: PathBuf,
     pub known_hosts: PathBuf,
     pub sockets: PathBuf,
+    /// Where secret keys are written for the duration of a handshake.
+    pub keys: PathBuf,
 }
 
 impl SshPaths {
-    /// Options shared by every ssh invocation: our key only, no prompts, trust-on-first-use
-    /// host keys recorded in the data directory, and no user ssh config.
+    /// Options shared by every ssh invocation with the daemon's own key.
     pub fn options(&self) -> Vec<String> {
+        self.options_with_key(&self.key)
+    }
+
+    /// Options shared by every ssh invocation: `key` only, no prompts, trust-on-first-use
+    /// host keys recorded in the data directory, and no user ssh config.
+    fn options_with_key(&self, key: &Path) -> Vec<String> {
         [
             "-F",
             "/dev/null",
             "-i",
-            &self.key.to_string_lossy(),
+            &key.to_string_lossy(),
             "-o",
             "IdentitiesOnly=yes",
             "-o",
@@ -67,8 +82,41 @@ pub struct Tunnel {
     pub socket: PathBuf,
 }
 
+/// A private key file that is deleted when dropped.
+struct TempKey(PathBuf);
+
+impl TempKey {
+    fn write(dir: &Path, server_id: &str, private_key: &str) -> Result<Self> {
+        std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        crate::config::set_mode(dir, 0o700)?;
+        let path = dir.join(format!("{server_id}-{}.key", crate::db::new_id()));
+        crate::secrets::write_private(&path, private_key.as_bytes())?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for TempKey {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Removes key files a crashed daemon may have left behind.
+pub fn clear_temp_keys(paths: &SshPaths) {
+    if let Ok(entries) = std::fs::read_dir(&paths.keys) {
+        for entry in entries.flatten() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 impl Tunnel {
-    pub async fn open(paths: &SshPaths, server: &Server) -> Result<Self> {
+    /// Connects with `private_key` when set, otherwise with the daemon's own key.
+    pub async fn open(
+        paths: &SshPaths,
+        server: &Server,
+        private_key: Option<&str>,
+    ) -> Result<Self> {
         let host = server.host.as_deref().context("SSH server has no host")?;
         let user = server.user.as_deref().unwrap_or("root");
         let port = server.port.unwrap_or(22);
@@ -76,8 +124,15 @@ impl Tunnel {
             .with_context(|| format!("cannot create {}", paths.sockets.display()))?;
         let socket = paths.sockets.join(format!("{}.sock", server.id));
         let _ = std::fs::remove_file(&socket);
+        let temp_key = private_key
+            .map(|key| TempKey::write(&paths.keys, &server.id, key))
+            .transpose()?;
+        let options = match &temp_key {
+            Some(key) => paths.options_with_key(&key.0),
+            None => paths.options(),
+        };
         let mut child = Command::new("ssh")
-            .args(paths.options())
+            .args(options)
             .args(["-N", "-T", "-p", &port.to_string()])
             .args([
                 "-o",
@@ -115,6 +170,7 @@ impl Tunnel {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        drop(temp_key);
         if let Some(stderr) = child.stderr.take() {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
@@ -144,6 +200,7 @@ pub fn paths(ssh_dir: &Path) -> SshPaths {
         key: ssh_dir.join("id_ed25519"),
         known_hosts: ssh_dir.join("known_hosts"),
         sockets: ssh_dir.join("sockets"),
+        keys: ssh_dir.join("keys"),
     }
 }
 

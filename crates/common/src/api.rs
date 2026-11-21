@@ -11,6 +11,7 @@
 //! | GET | `/activity?limit=50` | | `Vec<Activity>` |
 //! | GET | `/servers` | | `Vec<Server>` |
 //! | POST | `/servers` | `CreateServer` | `Server` |
+//! | PATCH | `/servers/{id}` | `UpdateServer` | `Server` (reconnects with the new key and checks it) |
 //! | DELETE | `/servers/{id}?purge=true&volumes=true` | | 204, or `ServerCleanup` with `purge` (removes what the daemon put there, its services included, then forgets it) |
 //! | POST | `/servers/{id}/check` | | `Server` |
 //! | POST | `/servers/{id}/proxy` | | `Server` (installs or restarts the proxy) |
@@ -55,7 +56,7 @@
 //! | PATCH | `/services/{id}/database` | `UpdateDatabase` | `DatabaseInfo` (publishing changes redeploy the live image) |
 //! | POST | `/services/{id}/database/rotate-password` | | `DatabaseInfo` with the new password |
 //! | GET | `/services/{id}/backups` | | `Vec<Backup>`, newest first |
-//! | POST | `/services/{id}/backups` | | `Backup` with status `running` (returns at once, runs in background) |
+//! | POST | `/services/{id}/backups` |  | `Backup` with status `running` (returns at once, runs in background) |
 //! | GET | `/services/{id}/backups/schedule` | | `BackupSchedule` |
 //! | PUT | `/services/{id}/backups/schedule` | `BackupSchedule` | `BackupSchedule` |
 //! | GET | `/backups/{id}` | | `Backup` |
@@ -65,9 +66,47 @@
 //!
 //! Backups, restores and password rotations of one service run one at a time; a second one
 //! while another is in progress gets 409. Restore and rotation also need a running container.
+//! Download and restore read from whichever store the backup lives in, local or S3.
+//!
+//! Secrets are encrypted at rest with the daemon's master key. No route but `reveal` returns a
+//! value, and every reveal is recorded in the activity feed.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | GET | `/secrets` | | `Vec<Secret>` |
+//! | POST | `/secrets` | `CreateSecret` | `Secret` (create or import) |
+//! | POST | `/secrets/generate-ssh-key` | `GenerateSshKey` | `Secret` with the new ed25519 public key |
+//! | GET | `/secrets/{id}` | | `Secret` |
+//! | PATCH | `/secrets/{id}` | `UpdateSecret` | `Secret` (rename, or replace the value with one of the same kind) |
+//! | DELETE | `/secrets/{id}` | | 204; 409 naming its users while it is in use |
+//! | POST | `/secrets/{id}/reveal` | | `RevealedSecret` |
+//!
+//! Storage connections are S3-compatible buckets for backups.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | GET | `/storage` | | `Vec<StorageConnection>` |
+//! | POST | `/storage` | `CreateStorage` | `StorageConnection` |
+//! | GET | `/storage/{id}` | | `StorageConnection` |
+//! | PATCH | `/storage/{id}` | `UpdateStorage` | `StorageConnection` |
+//! | DELETE | `/storage/{id}` | | 204; 409 while backups or schedules use it |
+//! | POST | `/storage/{id}/test` | | `StorageTest` (puts, reads and deletes a probe object) |
+//!
+//! Instance backups are encrypted archives of the daemon itself. Restoring one is the
+//! `<daemon> restore` command on the new machine, not an API call.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | GET | `/instance/backups` | | `Vec<InstanceBackup>`, newest first |
+//! | POST | `/instance/backups` | `CreateInstanceBackup` | `InstanceBackup` with status `running` (runs in background) |
+//! | GET | `/instance/backups/schedule` | | `InstanceBackupSchedule` |
+//! | PUT | `/instance/backups/schedule` | `UpdateInstanceBackupSchedule` | `InstanceBackupSchedule` |
+//! | GET | `/instance/backups/{id}/download` | | the encrypted archive as `application/octet-stream` |
+//! | DELETE | `/instance/backups/{id}` | | 204 |
 
-use crate::{EnvVar, Id, RestartPolicy, Source};
+use crate::{EnvVar, Id, RestartPolicy, SecretValue, Source};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateServer {
@@ -77,6 +116,34 @@ pub struct CreateServer {
     pub user: String,
     #[serde(default = "default_ssh_port")]
     pub port: u16,
+    /// An `ssh_key` secret to connect with instead of the daemon's own key.
+    #[serde(default)]
+    pub ssh_key_secret_id: Option<Id>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateServer {
+    /// An `ssh_key` secret id, or an empty string to go back to the daemon's own key.
+    /// `None` keeps the current key.
+    pub ssh_key_secret_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSecret {
+    pub name: String,
+    pub value: SecretValue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerateSshKey {
+    pub name: String,
+}
+
+/// Fields left as `None` keep their value. A new `value` must be of the secret's kind.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateSecret {
+    pub name: Option<String>,
+    pub value: Option<SecretValue>,
 }
 
 fn default_ssh_user() -> String {
@@ -193,3 +260,86 @@ pub struct CreateVolume {
     pub name: String,
     pub mount_path: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateStorage {
+    pub name: String,
+    pub endpoint: String,
+    #[serde(default = "default_region")]
+    pub region: String,
+    pub bucket: String,
+    #[serde(default)]
+    pub path_prefix: String,
+    #[serde(default)]
+    pub path_style: bool,
+    pub credentials_secret_id: Id,
+}
+
+fn default_region() -> String {
+    "us-east-1".into()
+}
+
+/// Fields left as `None` keep their value.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateStorage {
+    pub name: Option<String>,
+    pub endpoint: Option<String>,
+    pub region: Option<String>,
+    pub bucket: Option<String>,
+    pub path_prefix: Option<String>,
+    pub path_style: Option<bool>,
+    pub credentials_secret_id: Option<Id>,
+}
+
+/// Body of a manual database backup.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateBackup {
+    /// Storage connection to write to; `None` keeps the backup in the data directory.
+    pub storage_id: Option<Id>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CreateInstanceBackup {
+    /// Storage connection to write to; `None` keeps the archive in the data directory.
+    #[serde(default)]
+    pub storage_id: Option<Id>,
+    /// Encrypts the archive. Required, at least 12 characters, and never stored.
+    pub passphrase: String,
+}
+
+impl fmt::Debug for CreateInstanceBackup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CreateInstanceBackup")
+            .field("storage_id", &self.storage_id)
+            .field("passphrase", &"redacted")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct UpdateInstanceBackupSchedule {
+    pub enabled: bool,
+    pub hour_utc: u8,
+    pub keep: u32,
+    #[serde(default)]
+    pub storage_id: Option<Id>,
+    /// Passphrase for scheduled runs, stored encrypted under the master key. Required when no
+    /// passphrase is stored yet and `enabled` is true; `None` keeps the stored one.
+    #[serde(default)]
+    pub passphrase: Option<String>,
+}
+
+impl fmt::Debug for UpdateInstanceBackupSchedule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpdateInstanceBackupSchedule")
+            .field("enabled", &self.enabled)
+            .field("hour_utc", &self.hour_utc)
+            .field("keep", &self.keep)
+            .field("storage_id", &self.storage_id)
+            .field("passphrase", &self.passphrase.as_ref().map(|_| "redacted"))
+            .finish()
+    }
+}
+
+/// Shortest passphrase an instance backup accepts.
+pub const MIN_PASSPHRASE_LEN: usize = 12;

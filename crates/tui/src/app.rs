@@ -1,10 +1,13 @@
 //! Application state, background requests and the actions keys trigger.
 
 use crate::form::{Field, Form, FormKind};
+use crate::picker::{PickFor, PickKind, Picker};
+use crate::theme;
 use client::{Client, Config};
 use common::api::*;
 use common::*;
 use futures_util::StreamExt;
+use ratatui::text::Line;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
@@ -57,6 +60,16 @@ pub enum Msg {
     Rotated(Box<DatabaseInfo>),
     /// Progress of a running download, shown as a busy toast.
     Progress(String),
+    Secrets(Vec<Secret>),
+    /// A secret's value, asked for with reveal.
+    Revealed(Box<RevealedSecret>),
+    /// A key generated from the picker.
+    PickerKey(Result<Box<Secret>, String>),
+    Storages(Vec<StorageConnection>),
+    /// A storage test finished.
+    StorageTested(Id, Result<StorageTest, String>),
+    InstanceBackups(Vec<InstanceBackup>),
+    InstanceSchedule(InstanceBackupSchedule),
 }
 
 /// Where to go after a form succeeds.
@@ -66,6 +79,9 @@ pub enum Then {
     Settings(Box<InstanceSettings>),
     OpenService(Id, Tab),
     OpenDeploy(Box<Deployment>),
+    /// Show the public key of a key the daemon just generated.
+    ShowKey(Box<Secret>),
+    InstanceSchedule(InstanceBackupSchedule),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +91,8 @@ pub enum Screen {
     Deploy,
     Servers,
     Settings,
+    Secrets,
+    Storage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -344,6 +362,9 @@ pub enum ConfirmAction {
     RotatePassword(Id),
     RestoreBackup(Id, String),
     DeleteBackup(Id),
+    DeleteSecret(Id),
+    DeleteStorage(Id),
+    DeleteInstanceBackup(Id),
 }
 
 impl ConfirmAction {
@@ -356,6 +377,7 @@ impl ConfirmAction {
             ConfirmAction::RotateToken => Some("rotating"),
             ConfirmAction::Prune => Some("pruning"),
             ConfirmAction::Update { .. } => Some("downloading"),
+            ConfirmAction::DeleteSecret(_) | ConfirmAction::DeleteStorage(_) => Some("deleting"),
             _ => None,
         }
     }
@@ -370,6 +392,8 @@ pub struct Confirm {
     pub verb: &'static str,
     /// Set while a blocking action runs.
     pub busy: Option<(Instant, &'static str)>,
+    /// Why the daemon refused, with what to do about it; the dialog stays open to show it.
+    pub error: Vec<String>,
 }
 
 /// A secret shown once, e.g. the URL after a password rotation.
@@ -395,6 +419,9 @@ pub enum Command {
     NewEnvironment,
     Servers,
     Settings,
+    Secrets,
+    Storage,
+    BackUpInstance,
     AddServer,
     SetupProxy,
     Refresh,
@@ -403,7 +430,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 15] = [
+    pub const ALL: [Command; 18] = [
         Command::Deploy,
         Command::Restart,
         Command::Stop,
@@ -414,6 +441,9 @@ impl Command {
         Command::NewEnvironment,
         Command::Servers,
         Command::Settings,
+        Command::Secrets,
+        Command::Storage,
+        Command::BackUpInstance,
         Command::AddServer,
         Command::SetupProxy,
         Command::Refresh,
@@ -433,6 +463,9 @@ impl Command {
             Command::NewEnvironment => "new environment",
             Command::Servers => "servers",
             Command::Settings => "settings",
+            Command::Secrets => "secrets",
+            Command::Storage => "storage",
+            Command::BackUpInstance => "back up this instance",
             Command::AddServer => "add server",
             Command::SetupProxy => "set up proxy on this server",
             Command::Refresh => "refresh",
@@ -452,8 +485,11 @@ impl Command {
             Command::NewEnvironment => "E",
             Command::Servers => "S",
             Command::Settings => ",",
-            Command::AddServer => "",
-            Command::SetupProxy => "",
+            Command::Secrets
+            | Command::Storage
+            | Command::BackUpInstance
+            | Command::AddServer
+            | Command::SetupProxy => "",
             Command::Refresh => "ctrl+r",
             Command::Help => "?",
             Command::Quit => "q",
@@ -482,6 +518,7 @@ pub enum Overlay {
     Confirm(Confirm),
     Palette(Palette),
     Reveal(Reveal),
+    Picker(Picker),
     Help,
 }
 
@@ -507,9 +544,23 @@ impl Sender {
     }
 }
 
-/// The Settings screen: the instance, its release, and the contexts saved on this machine.
+/// Which list on the Settings screen the arrows and ⏎ act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsFocus {
+    #[default]
+    Backups,
+    Contexts,
+}
+
+/// The Settings screen: the instance, its backups, its release, and the contexts saved on this
+/// machine.
 #[derive(Default)]
 pub struct SettingsView {
+    pub focus: SettingsFocus,
+    /// Instance backups, newest first.
+    pub backups: Vec<InstanceBackup>,
+    pub backup_row: usize,
+    pub schedule: Option<InstanceBackupSchedule>,
     pub settings: Option<InstanceSettings>,
     pub release: Option<VersionCheck>,
     pub contexts: Config,
@@ -522,6 +573,64 @@ pub struct SettingsView {
 impl SettingsView {
     pub fn context_names(&self) -> Vec<String> {
         self.contexts.contexts.keys().cloned().collect()
+    }
+
+    pub fn selected_backup(&self) -> Option<&InstanceBackup> {
+        self.backups.get(self.backup_row)
+    }
+}
+
+/// The Secrets screen. A revealed value is dropped as soon as another secret is selected.
+#[derive(Default)]
+pub struct SecretsView {
+    pub list: Vec<Secret>,
+    pub row: usize,
+    /// The value asked for with reveal, and when it arrived.
+    pub revealed: Option<(RevealedSecret, chrono::DateTime<chrono::Utc>)>,
+    /// Screen to return to on esc.
+    pub back: Option<Screen>,
+}
+
+impl SecretsView {
+    pub fn selected(&self) -> Option<&Secret> {
+        self.list.get(self.row)
+    }
+
+    /// The revealed value of the selected secret.
+    pub fn value(&self) -> Option<&SecretValue> {
+        let (r, _) = self.revealed.as_ref()?;
+        (Some(&r.secret.id) == self.selected().map(|s| &s.id)).then_some(&r.value)
+    }
+
+    pub fn name(&self, id: &str) -> Option<&str> {
+        self.list
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.name.as_str())
+    }
+}
+
+/// The Storage screen: S3-compatible buckets for backups.
+#[derive(Default)]
+pub struct StorageView {
+    pub list: Vec<StorageConnection>,
+    pub row: usize,
+    /// Connections being tested right now.
+    pub testing: HashSet<Id>,
+    /// Screen to return to on esc.
+    pub back: Option<Screen>,
+}
+
+impl StorageView {
+    pub fn selected(&self) -> Option<&StorageConnection> {
+        self.list.get(self.row)
+    }
+
+    pub fn name(&self, id: &str) -> Option<&str> {
+        self.list
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.name.as_str())
     }
 }
 
@@ -549,6 +658,8 @@ pub struct App {
     pub server_row: usize,
     servers_back: Screen,
     pub settings: SettingsView,
+    pub secrets: SecretsView,
+    pub storage: StorageView,
     /// Version the daemon is restarting into after an update.
     pub updating: Option<String>,
     /// No new requests while the token is being rotated: the old one is about to stop working.
@@ -586,6 +697,8 @@ impl App {
             server_row: 0,
             servers_back: Screen::Overview,
             settings: SettingsView::default(),
+            secrets: SecretsView::default(),
+            storage: StorageView::default(),
             updating: None,
             rotating: false,
             overlay: None,
@@ -678,6 +791,15 @@ impl App {
         }
         if self.tick.is_multiple_of(8) {
             self.poll_running_backups();
+            if self.screen == Screen::Settings
+                && self
+                    .settings
+                    .backups
+                    .iter()
+                    .any(|b| b.status == BackupStatus::Running)
+            {
+                self.load_instance_backups();
+            }
         }
     }
 
@@ -723,10 +845,24 @@ impl App {
         if matches!(self.screen, Screen::Servers | Screen::Settings) || self.servers.is_empty() {
             self.spawn(|c| async move { Msg::Servers(c.servers().await.unwrap_or_default()) });
         }
+        if matches!(
+            self.screen,
+            Screen::Servers | Screen::Settings | Screen::Secrets | Screen::Storage
+        ) {
+            self.load_secrets();
+        }
+        if matches!(self.screen, Screen::Settings | Screen::Storage)
+            || self.service.as_ref().is_some_and(|v| v.database)
+        {
+            self.load_storages();
+        }
+        if self.screen == Screen::Settings {
+            self.load_instance_backups();
+        }
         let ids: Vec<Id> = match self.screen {
             Screen::Overview => self.env_services().iter().map(|s| s.id.clone()).collect(),
             Screen::Service | Screen::Deploy => self.service.iter().map(|s| s.id.clone()).collect(),
-            Screen::Servers | Screen::Settings => Vec::new(),
+            Screen::Servers | Screen::Settings | Screen::Secrets | Screen::Storage => Vec::new(),
         };
         for id in ids {
             self.load_stats(&id);
@@ -746,6 +882,24 @@ impl App {
                 self.load_backups(&id);
             }
         }
+    }
+
+    pub fn load_storages(&self) {
+        self.spawn(|c| async move {
+            match c.storages().await {
+                Ok(s) => Msg::Storages(s),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
+    }
+
+    pub fn load_secrets(&self) {
+        self.spawn(|c| async move {
+            match c.secrets().await {
+                Ok(s) => Msg::Secrets(s),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
     }
 
     /// Backups and the schedule of a database service.
@@ -917,6 +1071,8 @@ impl App {
                     Then::Settings(s) => self.apply(Msg::Settings(s)),
                     Then::OpenService(id, tab) => self.open_service(&id, tab),
                     Then::OpenDeploy(d) => self.open_deploy(*d),
+                    Then::ShowKey(s) => self.show_key(&s),
+                    Then::InstanceSchedule(s) => self.settings.schedule = Some(s),
                 }
             }
             Msg::FormError(e) => {
@@ -1000,6 +1156,27 @@ impl App {
                     self.announce(&b);
                 }
             }
+            Msg::ConfirmDone(Err(e))
+                if matches!(
+                    &self.overlay,
+                    Some(Overlay::Confirm(Confirm {
+                        action: ConfirmAction::DeleteSecret(_) | ConfirmAction::DeleteStorage(_),
+                        ..
+                    }))
+                ) =>
+            {
+                let hint = match (self.screen, self.secrets.selected().map(|s| s.kind)) {
+                    (Screen::Storage, _) => None,
+                    (_, Some(SecretKind::SshKey)) => Some(
+                        "Pick another key for those servers first: Servers, select the server, K change key.",
+                    ),
+                    _ => Some("Point those at other credentials first, on the Storage screen."),
+                };
+                if let Some(Overlay::Confirm(c)) = &mut self.overlay {
+                    c.busy = None;
+                    c.error = std::iter::once(e).chain(hint.map(String::from)).collect();
+                }
+            }
             Msg::ConfirmDone(result) => {
                 if matches!(self.overlay, Some(Overlay::Confirm(_))) {
                     self.overlay = None;
@@ -1029,6 +1206,103 @@ impl App {
                 self.refresh();
             }
             Msg::Progress(text) => self.progress(text),
+            Msg::Secrets(list) => {
+                let view = &mut self.secrets;
+                let selected = view.selected().map(|s| s.id.clone());
+                view.list = list;
+                view.row = selected
+                    .and_then(|id| view.list.iter().position(|s| s.id == id))
+                    .unwrap_or(view.row)
+                    .min(view.list.len().saturating_sub(1));
+                self.refill_picker();
+            }
+            Msg::Revealed(r) => {
+                if self.secrets.selected().map(|s| &s.id) == Some(&r.secret.id) {
+                    self.secrets.revealed = Some((*r, chrono::Utc::now()));
+                }
+            }
+            Msg::PickerKey(Err(e)) => {
+                if let Some(Overlay::Picker(p)) = &mut self.overlay {
+                    p.busy = false;
+                }
+                self.error(e);
+            }
+            Msg::PickerKey(Ok(s)) => {
+                let name = s.name.clone();
+                self.secrets.list.push((*s).clone());
+                self.refill_picker();
+                if let Some(Overlay::Picker(p)) = &mut self.overlay {
+                    p.busy = false;
+                    p.select(&s.id);
+                }
+                self.toast(format!("generated {name} · c copies its public key"));
+                self.load_secrets();
+            }
+            Msg::Storages(list) => {
+                let view = &mut self.storage;
+                let selected = view.selected().map(|s| s.id.clone());
+                view.list = list;
+                view.row = selected
+                    .and_then(|id| view.list.iter().position(|s| s.id == id))
+                    .unwrap_or(view.row)
+                    .min(view.list.len().saturating_sub(1));
+                self.refill_picker();
+            }
+            Msg::InstanceBackups(list) => {
+                let finished: Vec<InstanceBackup> =
+                    list.iter()
+                        .filter(|b| {
+                            b.status != BackupStatus::Running
+                                && self.settings.backups.iter().any(|old| {
+                                    old.id == b.id && old.status == BackupStatus::Running
+                                })
+                        })
+                        .cloned()
+                        .collect();
+                self.settings.backups = list;
+                self.settings.backup_row = self
+                    .settings
+                    .backup_row
+                    .min(self.settings.backups.len().saturating_sub(1));
+                for b in finished {
+                    match b.status {
+                        BackupStatus::Done => self.toast(format!(
+                            "instance backup done · {} · {}",
+                            crate::util::bytes(b.size_bytes),
+                            b.file_name
+                        )),
+                        _ => self.error(format!(
+                            "instance backup failed: {}",
+                            b.error.as_deref().unwrap_or("see the daemon log")
+                        )),
+                    }
+                }
+            }
+            Msg::InstanceSchedule(s) => self.settings.schedule = Some(s),
+            Msg::StorageTested(id, result) => {
+                self.storage.testing.remove(&id);
+                let name = self.storage.name(&id).unwrap_or("storage").to_string();
+                match result {
+                    Ok(t) if t.ok => self.toast(format!(
+                        "{name} ok · put, get and delete in {}ms",
+                        t.latency_ms.unwrap_or_default()
+                    )),
+                    Ok(t) => self.error(format!(
+                        "{name} failed: {}",
+                        t.error.as_deref().unwrap_or("no reason given")
+                    )),
+                    Err(e) => self.error(e),
+                }
+                self.load_storages();
+            }
+        }
+    }
+
+    /// Rebuild an open picker's list from the latest secrets and storages.
+    fn refill_picker(&mut self) {
+        let key = self.daemon_key();
+        if let Some(Overlay::Picker(p)) = &mut self.overlay {
+            p.fill(&self.secrets.list, &self.storage.list, key.as_deref());
         }
     }
 
@@ -1373,7 +1647,10 @@ impl App {
             ConfirmAction::DeleteBackup(_) => "backup deleted",
             ConfirmAction::PublicPort(..)
             | ConfirmAction::RotatePassword(_)
-            | ConfirmAction::RestoreBackup(..) => "",
+            | ConfirmAction::RestoreBackup(..)
+            | ConfirmAction::DeleteSecret(_)
+            | ConfirmAction::DeleteStorage(_) => "",
+            ConfirmAction::DeleteInstanceBackup(_) => "instance backup deleted",
         }
         .to_string();
         match action {
@@ -1471,6 +1748,23 @@ impl App {
                     Err(e) => Msg::ConfirmDone(Err(format!("{e:#}"))),
                 }
             }),
+            ConfirmAction::DeleteSecret(id) => self.spawn(|c| async move {
+                let result = c
+                    .delete_secret(&id)
+                    .await
+                    .map(|_| "secret deleted".to_string());
+                Msg::ConfirmDone(result.map_err(|e| format!("{e:#}")))
+            }),
+            ConfirmAction::DeleteInstanceBackup(id) => {
+                self.act(ok, |c| async move { c.delete_instance_backup(&id).await })
+            }
+            ConfirmAction::DeleteStorage(id) => self.spawn(|c| async move {
+                let result = c
+                    .delete_storage(&id)
+                    .await
+                    .map(|_| "storage deleted".to_string());
+                Msg::ConfirmDone(result.map_err(|e| format!("{e:#}")))
+            }),
             ConfirmAction::RestoreBackup(id, file) => self.spawn(|c| async move {
                 let result = c
                     .restore_backup(&id)
@@ -1505,11 +1799,45 @@ impl App {
         self.toast(format!("copied {what}"));
     }
 
+    /// "b" on the Backups tab: straight to the data directory, or ask where when there are
+    /// storage connections.
     pub fn backup_now(&mut self, id: &str, name: &str) {
-        self.progress(format!("backing up {name}…"));
+        if self.storage.list.is_empty() {
+            return self.start_backup(id, name, None);
+        }
+        let scheduled = self.schedules.get(id).and_then(|s| s.storage_id.clone());
+        self.open_picker(Picker {
+            title: "Back up now".into(),
+            subtitle: name.to_string(),
+            kind: PickKind::Store,
+            items: Vec::new(),
+            row: 0,
+            target: PickFor::BackupNow {
+                service_id: id.to_string(),
+                name: name.to_string(),
+            },
+            current: None,
+            note: vec![Line::styled(
+                "Files go to <prefix>/<service id>/<file> in the bucket. Restore and download work from any store.",
+                theme::muted(),
+            )],
+            busy: false,
+        });
+        if let (Some(Overlay::Picker(p)), Some(s)) = (&mut self.overlay, scheduled) {
+            p.select(&s);
+        }
+    }
+
+    fn start_backup(&mut self, id: &str, name: &str, storage: Option<Id>) {
+        let place = storage
+            .as_deref()
+            .and_then(|s| self.storage.name(s))
+            .map(|s| format!(" to {s}"))
+            .unwrap_or_default();
+        self.progress(format!("backing up {name}{place}…"));
         let id = id.to_string();
         self.spawn(|c| async move {
-            match c.create_backup(&id).await {
+            match c.create_backup(&id, storage.as_deref()).await {
                 Ok(b) => Msg::Backup(Box::new(b)),
                 Err(e) => Msg::Error(format!("{e:#}")),
             }
@@ -1589,7 +1917,23 @@ impl App {
         self.refresh();
     }
 
+    fn load_instance_backups(&self) {
+        self.spawn(|c| async move {
+            match c.instance_backups().await {
+                Ok(b) => Msg::InstanceBackups(b),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
+    }
+
     fn load_settings(&mut self) {
+        self.load_instance_backups();
+        self.spawn(|c| async move {
+            match c.instance_backup_schedule().await {
+                Ok(s) => Msg::InstanceSchedule(s),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
         self.settings.loaded_at = Some(Instant::now());
         self.spawn(|c| async move {
             match c.settings().await {
@@ -1679,6 +2023,11 @@ impl App {
         self.rotating = false;
         self.settings.settings = None;
         self.settings.release = None;
+        self.settings.backups.clear();
+        self.settings.backup_row = 0;
+        self.settings.schedule = None;
+        self.secrets = SecretsView::default();
+        self.storage = StorageView::default();
         self.settings.back = Some(Screen::Overview);
         self.open_settings();
         self.toast(format!("connected to {name}"));
@@ -1757,6 +2106,590 @@ impl App {
         ])
         .submit("remove & clean up", None);
         self.overlay = Some(Overlay::Form(form));
+    }
+
+    // Secrets
+
+    pub fn open_secrets(&mut self) {
+        if self.screen != Screen::Secrets {
+            self.secrets.back = Some(self.screen);
+        }
+        self.screen = Screen::Secrets;
+        self.secrets.revealed = None;
+        self.refresh();
+    }
+
+    pub fn close_secrets(&mut self) {
+        self.secrets.revealed = None;
+        self.screen = match self.secrets.back.take() {
+            Some(Screen::Service) if self.service.is_some() => Screen::Service,
+            Some(back @ (Screen::Servers | Screen::Settings)) => back,
+            _ => Screen::Overview,
+        };
+        self.refresh();
+    }
+
+    pub fn select_secret(&mut self, row: usize) {
+        let n = self.secrets.list.len();
+        if n == 0 {
+            return;
+        }
+        let row = row.min(n - 1);
+        if row != self.secrets.row {
+            self.secrets.row = row;
+            self.secrets.revealed = None;
+        }
+    }
+
+    /// Asks the daemon for the selected value, or hides it again. The daemon records each reveal.
+    pub fn toggle_reveal(&mut self) {
+        if self.secrets.value().is_some() {
+            self.secrets.revealed = None;
+            return;
+        }
+        let Some(id) = self.secrets.selected().map(|s| s.id.clone()) else {
+            return;
+        };
+        self.spawn(|c| async move {
+            match c.reveal_secret(&id).await {
+                Ok(r) => Msg::Revealed(Box::new(r)),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
+    }
+
+    pub fn copy_public_part(&mut self) {
+        let Some(s) = self.secrets.selected() else {
+            return;
+        };
+        let what = match s.kind {
+            SecretKind::SshKey => "the public key",
+            SecretKind::S3Credentials => "the access key id",
+            SecretKind::Generic => return self.error("a generic secret has no public part"),
+        };
+        match s.public_part.clone() {
+            Some(p) => self.copy(&p, what),
+            None => self.error("no public part"),
+        }
+    }
+
+    pub fn copy_secret_value(&mut self) {
+        match self.secrets.value().map(secret_text) {
+            Some(v) => self.copy(&v, "the value"),
+            None => self.error("reveal it first (v)"),
+        }
+    }
+
+    fn show_key(&mut self, s: &Secret) {
+        self.overlay = Some(Overlay::Reveal(Reveal {
+            title: "SSH key generated".into(),
+            subtitle: s.name.clone(),
+            message: "The daemon generated an ed25519 key. Only the public key leaves it; the private key is sealed with the master key.".into(),
+            value: s.public_part.clone().unwrap_or_default(),
+            note: format!(
+                "Add it to ~/.ssh/authorized_keys on the server, then pick {} when you add the server or change its key.",
+                s.name
+            ),
+            what: "the public key",
+        }));
+    }
+
+    pub fn form_add_secret(&mut self) {
+        let form = Form::new(
+            FormKind::AddSecret,
+            "Add secret",
+            vec![
+                Field::choice(
+                    "kind",
+                    "kind",
+                    SecretKind::ALL
+                        .iter()
+                        .map(|k| k.label().to_string())
+                        .collect(),
+                ),
+                Field::text("name", "name").placeholder("github-deploy"),
+                Field::text("private_key", "private key")
+                    .masked()
+                    .hint("paste, or a file path"),
+                Field::text("access_key_id", "access key id"),
+                Field::text("secret_access_key", "secret key").masked(),
+                Field::text("value", "value").masked(),
+            ],
+        )
+        .subtitle("create or import")
+        .note(vec![
+            "Paste an OpenSSH private key without a passphrase, or type a path like".into(),
+            "~/.ssh/id_ed25519 to read it from this machine. Values stay masked.".into(),
+        ])
+        .submit("add", None)
+        .focus_on("name");
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    pub fn form_generate_key(&mut self) {
+        let form = Form::new(
+            FormKind::GenerateKey,
+            "Generate SSH key",
+            vec![Field::text("name", "name").placeholder("edge-key")],
+        )
+        .subtitle("ed25519, made by the daemon")
+        .submit("generate", None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    pub fn form_rename_secret(&mut self) {
+        let Some(s) = self.secrets.selected() else {
+            return;
+        };
+        let form = Form::new(
+            FormKind::RenameSecret {
+                secret_id: s.id.clone(),
+            },
+            "Rename secret",
+            vec![Field::text("name", "name").value(s.name.clone())],
+        )
+        .subtitle(s.name.clone())
+        .submit("rename", None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    pub fn form_replace_secret(&mut self) {
+        let Some(s) = self.secrets.selected() else {
+            return;
+        };
+        let fields = match s.kind {
+            SecretKind::SshKey => vec![
+                Field::text("private_key", "private key")
+                    .masked()
+                    .hint("paste, or a file path"),
+            ],
+            SecretKind::S3Credentials => vec![
+                Field::text("access_key_id", "access key id")
+                    .value(s.public_part.clone().unwrap_or_default()),
+                Field::text("secret_access_key", "secret key").masked(),
+            ],
+            SecretKind::Generic => vec![Field::text("value", "value").masked()],
+        };
+        let users = if s.used_by.is_empty() {
+            "Nothing uses it yet.".to_string()
+        } else {
+            let names: Vec<String> = s.used_by.iter().map(ToString::to_string).collect();
+            format!("{} use the new value from now on.", names.join(", "))
+        };
+        let form = Form::new(
+            FormKind::ReplaceSecret {
+                secret_id: s.id.clone(),
+                kind: s.kind,
+            },
+            "Replace value",
+            fields,
+        )
+        .subtitle(s.name.clone())
+        .note(vec![users])
+        .submit("replace", None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    // Storage
+
+    pub fn open_storage(&mut self) {
+        if self.screen != Screen::Storage {
+            self.storage.back = Some(self.screen);
+        }
+        self.screen = Screen::Storage;
+        self.refresh();
+    }
+
+    pub fn close_storage(&mut self) {
+        self.screen = match self.storage.back.take() {
+            Some(Screen::Service) if self.service.is_some() => Screen::Service,
+            Some(back @ (Screen::Servers | Screen::Settings | Screen::Secrets)) => back,
+            _ => Screen::Overview,
+        };
+        self.refresh();
+    }
+
+    pub fn select_storage(&mut self, row: usize) {
+        self.storage.row = row.min(self.storage.list.len().saturating_sub(1));
+    }
+
+    /// Puts, reads and deletes a probe object; the result lands in the list and a toast.
+    pub fn test_storage(&mut self) {
+        let Some(s) = self.storage.selected() else {
+            return;
+        };
+        let (id, name) = (s.id.clone(), s.name.clone());
+        if !self.storage.testing.insert(id.clone()) {
+            return;
+        }
+        self.progress(format!("testing {name}…"));
+        self.spawn(|c| async move {
+            let result = c.test_storage(&id).await.map_err(|e| format!("{e:#}"));
+            Msg::StorageTested(id, result)
+        });
+    }
+
+    /// A pick field for where backups go: local or a storage connection.
+    fn store_field(&self, id: Option<&str>) -> Field {
+        let storage = id.and_then(|id| self.storage.list.iter().find(|s| s.id == id));
+        let mut field = Field::pick(
+            "store",
+            "store",
+            id.unwrap_or_default(),
+            storage.map_or("local".to_string(), |s| s.name.clone()),
+        );
+        field.placeholder = storage.map_or("the data directory".into(), crate::picker::bucket_path);
+        field
+    }
+
+    /// Add a storage connection, or edit the selected one.
+    pub fn form_storage(&mut self, edit: bool) {
+        let existing = if edit {
+            match self.storage.selected() {
+                Some(s) => Some(s.clone()),
+                None => return,
+            }
+        } else {
+            None
+        };
+        let s = existing.as_ref();
+        let get = |f: fn(&StorageConnection) -> String| s.map(f).unwrap_or_default();
+        let creds_id = get(|s| s.credentials_secret_id.clone());
+        let creds = self
+            .secrets
+            .list
+            .iter()
+            .find(|c| c.id == creds_id)
+            .or_else(|| {
+                self.secrets
+                    .list
+                    .iter()
+                    .find(|c| !edit && c.kind == SecretKind::S3Credentials)
+            });
+        let mut credentials = Field::pick(
+            "credentials",
+            "credentials",
+            creds.map(|c| c.id.clone()).unwrap_or_default(),
+            creds.map_or("none".to_string(), |c| c.name.clone()),
+        );
+        credentials.placeholder = creds
+            .and_then(|c| c.public_part.clone())
+            .unwrap_or_else(|| "pick s3 credentials".into());
+        let form = Form::new(
+            match s {
+                Some(s) => FormKind::EditStorage {
+                    storage_id: s.id.clone(),
+                },
+                None => FormKind::AddStorage,
+            },
+            if edit { "Edit storage" } else { "Add storage" },
+            vec![
+                Field::text("name", "name")
+                    .value(get(|s| s.name.clone()))
+                    .placeholder("r2-backups"),
+                Field::text("endpoint", "endpoint")
+                    .value(get(|s| s.endpoint.clone()))
+                    .placeholder("https://<account>.r2.cloudflarestorage.com")
+                    .hint("S3 API base URL"),
+                Field::text("region", "region")
+                    .value(get(|s| s.region.clone()))
+                    .placeholder("us-east-1")
+                    .hint("auto for R2"),
+                Field::text("bucket", "bucket").value(get(|s| s.bucket.clone())),
+                Field::text("prefix", "path prefix")
+                    .value(get(|s| s.path_prefix.clone()))
+                    .hint("optional"),
+                Field::toggle("path_style", "path-style", s.is_some_and(|s| s.path_style))
+                    .hint("MinIO needs it on"),
+                credentials,
+            ],
+        )
+        .subtitle(s.map_or("S3-compatible".to_string(), |s| s.name.clone()))
+        .note(vec![
+            "Credentials are s3_credentials secrets; add them on the Secrets screen first.".into(),
+            "The connection is tested after it is saved.".into(),
+        ])
+        .submit(if edit { "save & test" } else { "add & test" }, None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    // Instance backups
+
+    pub fn select_instance_backup(&mut self, row: usize) {
+        self.settings.focus = SettingsFocus::Backups;
+        self.settings.backup_row = row.min(self.settings.backups.len().saturating_sub(1));
+    }
+
+    /// "b" in Settings: where the archive goes and the passphrase that encrypts it.
+    pub fn form_instance_backup(&mut self) {
+        let scheduled = self
+            .settings
+            .schedule
+            .as_ref()
+            .and_then(|s| s.storage_id.clone());
+        let form = Form::new(
+            FormKind::InstanceBackup,
+            "Back up instance",
+            vec![
+                self.store_field(scheduled.as_deref()),
+                Field::text("passphrase", "passphrase")
+                    .masked()
+                    .hint(format!("{MIN_PASSPHRASE_LEN}+ characters")),
+                Field::text("repeat", "repeat").masked(),
+            ],
+        )
+        .subtitle(self.context.clone())
+        .note(vec![
+            "Archives the store, config.toml, master.key and the SSH directory, encrypted with"
+                .into(),
+            "this passphrase. It is never stored: without it the archive cannot be restored."
+                .into(),
+            restore_hint(),
+        ])
+        .submit("back up", None)
+        .focus_on("passphrase");
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    pub fn form_instance_schedule(&mut self) {
+        let s = self.settings.schedule.clone().unwrap_or_default();
+        let form = Form::new(
+            FormKind::InstanceSchedule {
+                has_passphrase: s.has_passphrase,
+            },
+            "Instance backup schedule",
+            vec![
+                Field::toggle("enabled", "daily", s.enabled).hint("off keeps old archives"),
+                Field::text("hour", "hour (UTC)").value(s.hour_utc.to_string()),
+                Field::text("keep", "keep")
+                    .value(s.keep.to_string())
+                    .hint("per store"),
+                self.store_field(s.storage_id.as_deref()),
+                Field::text("passphrase", "passphrase")
+                    .masked()
+                    .placeholder(if s.has_passphrase {
+                        "stored · empty keeps it"
+                    } else {
+                        "needed for scheduled runs"
+                    })
+                    .hint(format!("{MIN_PASSPHRASE_LEN}+ characters")),
+                Field::text("repeat", "repeat").masked(),
+            ],
+        )
+        .subtitle(self.context.clone())
+        .note(vec![
+            "Scheduled runs need the passphrase, so the daemon stores it sealed with its".into(),
+            "master key. A new one replaces it; it is never shown again.".into(),
+        ])
+        .submit("save", None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    pub fn form_instance_download(&mut self) {
+        let Some(b) = self.settings.selected_backup().cloned() else {
+            return self.error("no instance backup selected · b to take one");
+        };
+        if b.status != BackupStatus::Done {
+            return self.error(match b.status {
+                BackupStatus::Running => "that backup is still running",
+                _ => "that backup failed and has no file",
+            });
+        }
+        let form = Form::new(
+            FormKind::DownloadBackup {
+                backup_id: b.id.clone(),
+                file_name: b.file_name.clone(),
+                instance: true,
+            },
+            "Download instance backup",
+            vec![
+                Field::text("path", "save to")
+                    .value(format!("./{}", b.file_name))
+                    .hint(format!("{} · encrypted", crate::util::bytes(b.size_bytes))),
+            ],
+        )
+        .subtitle(b.file_name.clone())
+        .note(vec![restore_hint()])
+        .submit("download", None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
+    // Pickers
+
+    fn daemon_key(&self) -> Option<String> {
+        self.info.as_ref().and_then(|i| i.ssh_public_key.clone())
+    }
+
+    fn open_picker(&mut self, picker: Picker) {
+        let store = picker.kind == PickKind::Store;
+        self.overlay = Some(Overlay::Picker(picker));
+        self.refill_picker();
+        if store {
+            self.load_storages();
+        } else {
+            self.load_secrets();
+        }
+    }
+
+    /// "k" on the Servers screen: the key a server connects with.
+    pub fn pick_server_key(&mut self, server: &Server) {
+        if server.kind == ServerKind::Local {
+            return self.error("the local server needs no ssh key");
+        }
+        self.open_picker(Picker {
+            title: "SSH key".into(),
+            subtitle: server.name.clone(),
+            kind: PickKind::SshKey,
+            items: Vec::new(),
+            row: 0,
+            target: PickFor::ServerKey {
+                server_id: server.id.clone(),
+                server: server.name.clone(),
+            },
+            current: server.ssh_key_secret_id.clone(),
+            note: vec![
+                Line::styled(
+                    format!(
+                        "Add the public key to ~/.ssh/authorized_keys on {} first.",
+                        server.name
+                    ),
+                    theme::muted(),
+                ),
+                Line::styled(
+                    "The daemon reconnects with the new key and checks it.",
+                    theme::muted(),
+                ),
+            ],
+            busy: false,
+        });
+    }
+
+    /// ⏎ on a pick field of the open form.
+    pub fn pick_for_form(&mut self, key: &'static str) {
+        let Some(Overlay::Form(form)) = self.overlay.take() else {
+            return;
+        };
+        let current = Some(form.raw(key)).filter(|v| !v.is_empty());
+        let (kind, title) = match key {
+            "ssh_key" => (PickKind::SshKey, "SSH key"),
+            "credentials" => (PickKind::S3Credentials, "Credentials"),
+            _ => (PickKind::Store, "Store"),
+        };
+        let subtitle = form.title.to_lowercase();
+        let note = match kind {
+            PickKind::SshKey => vec![Line::styled(
+                "Add the public key to ~/.ssh/authorized_keys on the server first.",
+                theme::muted(),
+            )],
+            PickKind::S3Credentials => vec![Line::styled(
+                "S3 credentials secrets; add them on the Secrets screen.",
+                theme::muted(),
+            )],
+            PickKind::Store => vec![Line::styled(
+                "Storage connections are managed on the Storage screen (o in Settings).",
+                theme::muted(),
+            )],
+        };
+        self.open_picker(Picker {
+            title: title.into(),
+            subtitle,
+            kind,
+            items: Vec::new(),
+            row: 0,
+            target: PickFor::Field(Box::new(form), key),
+            current,
+            note,
+            busy: false,
+        });
+    }
+
+    pub fn picker_cancel(&mut self) {
+        let Some(Overlay::Picker(p)) = self.overlay.take() else {
+            return;
+        };
+        if let PickFor::Field(form, _) = p.target {
+            self.overlay = Some(Overlay::Form(*form));
+        }
+    }
+
+    pub fn picker_copy(&mut self) {
+        let Some(Overlay::Picker(p)) = &self.overlay else {
+            return;
+        };
+        if let Some(text) = p.selected().and_then(|i| i.copy.clone()) {
+            self.copy(&text, "the public key");
+        }
+    }
+
+    pub fn picker_accept(&mut self) {
+        let Some(Overlay::Picker(p)) = &mut self.overlay else {
+            return;
+        };
+        if p.busy {
+            return;
+        }
+        let Some(item) = p.selected() else {
+            return self.picker_cancel();
+        };
+        if item.generate {
+            p.busy = true;
+            let base = match &p.target {
+                PickFor::ServerKey { server, .. } => server.clone(),
+                PickFor::BackupNow { name, .. } => name.clone(),
+                PickFor::Field(form, _) => Some(form.get("name"))
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or("server".into()),
+            };
+            let name = unique_name(&format!("{base}-key"), &self.secrets.list);
+            return self.spawn(|c| async move {
+                Msg::PickerKey(
+                    c.generate_ssh_key(&name)
+                        .await
+                        .map(Box::new)
+                        .map_err(|e| format!("{e:#}")),
+                )
+            });
+        }
+        let (id, name) = (item.id.clone(), item.name.clone());
+        let Some(Overlay::Picker(p)) = self.overlay.take() else {
+            return;
+        };
+        match p.target {
+            PickFor::Field(mut form, key) => {
+                let detail = p.items[p.row].detail.clone();
+                if let Some(field) = form.field_mut(key) {
+                    field.value = id.unwrap_or_default();
+                    field.shown = name;
+                    field.placeholder = detail;
+                }
+                form.error = None;
+                form.move_focus(1);
+                self.overlay = Some(Overlay::Form(*form));
+            }
+            PickFor::BackupNow { service_id, name } => {
+                self.start_backup(&service_id, &name, id);
+            }
+            PickFor::ServerKey { server_id, server } => {
+                if id == p.current {
+                    return;
+                }
+                self.progress(format!("connecting to {server} with {name}…"));
+                let body = UpdateServer {
+                    ssh_key_secret_id: Some(id.unwrap_or_default()),
+                };
+                self.spawn(move |c| async move {
+                    match c.update_server(&server_id, &body).await {
+                        Ok(s) if s.status == ServerStatus::Online => {
+                            Msg::Toast(format!("{server} now connects with {name}"))
+                        }
+                        Ok(_) => Msg::Error(format!(
+                            "{server} switched to {name} but is unreachable · check authorized_keys"
+                        )),
+                        Err(e) => Msg::Error(format!("{e:#}")),
+                    }
+                });
+            }
+        }
     }
 
     // Forms
@@ -2007,8 +2940,13 @@ impl App {
                 Field::text("host", "host").placeholder("203.0.113.10"),
                 Field::text("user", "user").value("root"),
                 Field::text("port", "ssh port").value("22"),
+                Field::pick("ssh_key", "ssh key", "", "daemon's own key"),
             ],
         )
+        .note(vec![
+            "The key must be in ~/.ssh/authorized_keys on the server. ⏎ on ssh key picks it."
+                .into(),
+        ])
         .subtitle(if has_key {
             "trust the daemon key first"
         } else {
@@ -2087,12 +3025,14 @@ impl App {
             action: ConfirmAction::PublicPort(service_id, Some(p)),
             verb: "confirm",
             busy: None,
+            error: Vec::new(),
         }));
     }
 
     pub fn form_schedule(&mut self) {
         let Some(view) = &self.service else { return };
-        let s = self.schedules.get(&view.id).copied().unwrap_or_default();
+        let s = self.schedules.get(&view.id).cloned().unwrap_or_default();
+        let store = self.store_field(s.storage_id.as_deref());
         let name = view
             .detail
             .as_ref()
@@ -2108,7 +3048,8 @@ impl App {
                 Field::text("hour", "hour (UTC)").value(s.hour_utc.to_string()),
                 Field::text("keep", "keep")
                     .value(s.keep.to_string())
-                    .hint("scheduled backups"),
+                    .hint("per store"),
+                store,
             ],
         )
         .subtitle(name)
@@ -2121,6 +3062,7 @@ impl App {
             FormKind::DownloadBackup {
                 backup_id: backup.id.clone(),
                 file_name: backup.file_name.clone(),
+                instance: false,
             },
             "Download backup",
             vec![
@@ -2141,6 +3083,7 @@ impl App {
         let FormKind::DownloadBackup {
             backup_id,
             file_name,
+            instance,
         } = form.kind.clone()
         else {
             return;
@@ -2161,13 +3104,27 @@ impl App {
             .values()
             .flatten()
             .find(|b| b.id == backup_id)
-            .map_or(0, |b| b.size_bytes);
+            .map(|b| b.size_bytes)
+            .or_else(|| {
+                self.settings
+                    .backups
+                    .iter()
+                    .find(|b| b.id == backup_id)
+                    .map(|b| b.size_bytes)
+            })
+            .unwrap_or(0);
         self.overlay = None;
         self.progress(format!("downloading {file_name}"));
         let client = self.client.clone();
         let tx = self.sender();
         tokio::spawn(async move {
-            let msg = match download(&client, &backup_id, &target, total, &file_name, &tx).await {
+            let file = Download {
+                id: &backup_id,
+                name: &file_name,
+                instance,
+                total,
+            };
+            let msg = match download(&client, file, &target, &tx).await {
                 Ok(n) => Msg::Toast(format!(
                     "saved {} · {}",
                     target.display(),
@@ -2263,23 +3220,71 @@ impl App {
     }
 }
 
+/// How an instance backup comes back on a new machine.
+pub fn restore_hint() -> String {
+    format!(
+        "Restore with: {} restore <file|s3://bucket/key> --passphrase-file <file>",
+        brand::DAEMON_BIN
+    )
+}
+
+/// The secret part of a value: what "copy value" copies.
+pub fn secret_text(value: &SecretValue) -> String {
+    match value {
+        SecretValue::SshKey { private_key } => private_key.clone(),
+        SecretValue::S3Credentials {
+            secret_access_key, ..
+        } => secret_access_key.clone(),
+        SecretValue::Generic { value } => value.clone(),
+    }
+}
+
+/// `base`, or `base-2`, `base-3`… when a secret already has that name.
+fn unique_name(base: &str, secrets: &[Secret]) -> String {
+    let base: String = base.chars().take(44).collect();
+    let taken = |n: &str| secrets.iter().any(|s| s.name == n);
+    if !taken(&base) {
+        return base;
+    }
+    (2..)
+        .map(|i| format!("{base}-{i}"))
+        .find(|n| !taken(n))
+        .unwrap_or(base)
+}
+
 pub fn is_database(s: &Service) -> bool {
     matches!(s.source, Source::Database { .. })
 }
 
 /// Stream a backup to `<target>.part`, reporting progress, then move it into place.
+/// A backup file to download: a database backup, or an instance backup when `instance`.
+struct Download<'a> {
+    id: &'a str,
+    name: &'a str,
+    instance: bool,
+    total: u64,
+}
+
 async fn download(
     client: &Client,
-    id: &str,
+    file: Download<'_>,
     target: &std::path::Path,
-    total: u64,
-    name: &str,
     tx: &Sender,
 ) -> anyhow::Result<u64> {
     use tokio::io::AsyncWriteExt;
+    let Download {
+        id,
+        name,
+        instance,
+        total,
+    } = file;
     let part = PathBuf::from(format!("{}.part", target.display()));
     let result = async {
-        let mut stream = client.download_backup(id).await?;
+        let mut stream = if instance {
+            client.download_instance_backup(id).await?
+        } else {
+            client.download_backup(id).await?
+        };
         let mut file = tokio::fs::File::create(&part).await?;
         let mut written = 0u64;
         let mut last = Instant::now();
@@ -2330,6 +3335,12 @@ enum Request {
         volumes: bool,
     },
     Schedule(Id, BackupSchedule),
+    Secret(CreateSecret),
+    GenerateKey(String),
+    UpdateSecret(Id, UpdateSecret),
+    Storage(Option<Id>, CreateStorage),
+    InstanceBackup(CreateInstanceBackup),
+    InstanceSchedule(UpdateInstanceBackupSchedule),
 }
 
 impl Request {
@@ -2420,6 +3431,72 @@ impl Request {
                     Then::Stay,
                 )
             }
+            Request::Secret(body) => {
+                let s = c.create_secret(&body).await?;
+                (format!("secret {} added", s.name), Then::Stay)
+            }
+            Request::GenerateKey(name) => {
+                let s = c.generate_ssh_key(&name).await?;
+                (
+                    format!("ssh key {} generated", s.name),
+                    Then::ShowKey(Box::new(s)),
+                )
+            }
+            Request::UpdateSecret(id, body) => {
+                let renamed = body.name.is_some();
+                let s = c.update_secret(&id, &body).await?;
+                let toast = if renamed {
+                    format!("renamed to {}", s.name)
+                } else {
+                    format!("value of {} replaced", s.name)
+                };
+                (toast, Then::Stay)
+            }
+            Request::Storage(id, body) => {
+                let s = match id {
+                    Some(id) => {
+                        let update = UpdateStorage {
+                            name: Some(body.name),
+                            endpoint: Some(body.endpoint),
+                            region: Some(body.region),
+                            bucket: Some(body.bucket),
+                            path_prefix: Some(body.path_prefix),
+                            path_style: Some(body.path_style),
+                            credentials_secret_id: Some(body.credentials_secret_id),
+                        };
+                        c.update_storage(&id, &update).await?
+                    }
+                    None => c.create_storage(&body).await?,
+                };
+                let test = match c.test_storage(&s.id).await {
+                    Ok(t) if t.ok => format!("test ok {}ms", t.latency_ms.unwrap_or_default()),
+                    Ok(t) => format!(
+                        "test failed: {}",
+                        t.error.as_deref().unwrap_or("no reason given")
+                    ),
+                    Err(e) => format!("test failed: {e:#}"),
+                };
+                (format!("{} saved · {test}", s.name), Then::Stay)
+            }
+            Request::InstanceBackup(body) => {
+                let b = c.create_instance_backup(&body).await?;
+                (
+                    format!("backing up the instance · {}", b.file_name),
+                    Then::Stay,
+                )
+            }
+            Request::InstanceSchedule(body) => {
+                let s = c.set_instance_backup_schedule(&body).await?;
+                let toast = if s.enabled {
+                    format!(
+                        "instance backups daily at {:02}:00 UTC · keep {}",
+                        s.hour_utc, s.keep
+                    )
+                } else {
+                    "instance backup schedule off".to_string()
+                };
+                (toast, Then::InstanceSchedule(s))
+            }
             Request::Schedule(id, body) => {
                 let s = c.set_backup_schedule(&id, &body).await?;
                 (
@@ -2429,6 +3506,72 @@ impl Request {
             }
         })
     }
+}
+
+/// The passphrase typed twice, or `None` when both fields are empty.
+fn passphrase(form: &Form) -> Result<Option<String>, String> {
+    let (p, repeat) = (form.raw("passphrase"), form.raw("repeat"));
+    if p.is_empty() && repeat.is_empty() {
+        return Ok(None);
+    }
+    if p.chars().count() < MIN_PASSPHRASE_LEN {
+        return Err(format!(
+            "the passphrase needs at least {MIN_PASSPHRASE_LEN} characters"
+        ));
+    }
+    if p != repeat {
+        return Err("the passphrases do not match".into());
+    }
+    Ok(Some(p))
+}
+
+/// The value fields of a secret form. A private key that is not pasted is read from the path typed.
+fn secret_value(form: &Form, kind: SecretKind) -> Result<SecretValue, String> {
+    let required = |key: &str, what: &str| {
+        let v = form.raw(key);
+        if v.trim().is_empty() {
+            Err(format!("{what} is required"))
+        } else {
+            Ok(v)
+        }
+    };
+    Ok(match kind {
+        SecretKind::SshKey => {
+            let input = required("private_key", "the private key")?;
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            SecretValue::SshKey {
+                private_key: read_private_key(input.trim(), home.as_deref())?,
+            }
+        }
+        SecretKind::S3Credentials => SecretValue::S3Credentials {
+            access_key_id: required("access_key_id", "the access key id")?
+                .trim()
+                .to_string(),
+            secret_access_key: required("secret_access_key", "the secret key")?
+                .trim()
+                .to_string(),
+        },
+        SecretKind::Generic => SecretValue::Generic {
+            value: required("value", "the value")?,
+        },
+    })
+}
+
+/// A pasted OpenSSH private key as is, or the contents of the file at the path typed.
+pub fn read_private_key(input: &str, home: Option<&std::path::Path>) -> Result<String, String> {
+    if input.contains("PRIVATE KEY") {
+        return Ok(format!("{}\n", input.trim_end()));
+    }
+    let path = match (input.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => PathBuf::from(input),
+    };
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if !text.contains("PRIVATE KEY") {
+        return Err(format!("{} is not a private key", path.display()));
+    }
+    Ok(text)
 }
 
 fn port(text: &str, required: bool) -> Result<Option<u16>, String> {
@@ -2625,6 +3768,7 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                     .filter(|u| !u.is_empty())
                     .unwrap_or("root".into()),
                 port: port(&form.get("port"), false)?.unwrap_or(22),
+                ssh_key_secret_id: Some(form.get("ssh_key")).filter(|k| !k.is_empty()),
             })
         }
         FormKind::PublicIp => {
@@ -2651,7 +3795,88 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                 form.on("enabled"),
                 &form.get("hour"),
                 &form.get("keep"),
+                Some(form.get("store")).filter(|s| !s.is_empty()),
             )?,
+        ),
+        FormKind::AddSecret => {
+            let kind = SecretKind::ALL[form.choice("kind")];
+            Request::Secret(CreateSecret {
+                name: named("name")?,
+                value: secret_value(form, kind)?,
+            })
+        }
+        FormKind::GenerateKey => Request::GenerateKey(named("name")?),
+        FormKind::InstanceBackup => Request::InstanceBackup(CreateInstanceBackup {
+            storage_id: Some(form.get("store")).filter(|s| !s.is_empty()),
+            passphrase: passphrase(form)?.ok_or("enter a passphrase")?,
+        }),
+        FormKind::InstanceSchedule { has_passphrase } => {
+            let s = crate::database::parse_schedule(
+                form.on("enabled"),
+                &form.get("hour"),
+                &form.get("keep"),
+                Some(form.get("store")).filter(|s| !s.is_empty()),
+            )?;
+            let passphrase = passphrase(form)?;
+            if s.enabled && passphrase.is_none() && !has_passphrase {
+                return Err("scheduled runs need a passphrase".into());
+            }
+            Request::InstanceSchedule(UpdateInstanceBackupSchedule {
+                enabled: s.enabled,
+                hour_utc: s.hour_utc,
+                keep: s.keep,
+                storage_id: s.storage_id,
+                passphrase,
+            })
+        }
+        FormKind::AddStorage | FormKind::EditStorage { .. } => {
+            let endpoint = form.get("endpoint");
+            if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                return Err("endpoint must start with https:// or http://".into());
+            }
+            let bucket = form.get("bucket");
+            if bucket.is_empty() {
+                return Err("bucket is required".into());
+            }
+            let credentials = form.get("credentials");
+            if credentials.is_empty() {
+                return Err("pick s3 credentials (⏎ on credentials)".into());
+            }
+            let region = form.get("region");
+            let id = match &form.kind {
+                FormKind::EditStorage { storage_id } => Some(storage_id.clone()),
+                _ => None,
+            };
+            Request::Storage(
+                id,
+                CreateStorage {
+                    name: named("name")?,
+                    endpoint: endpoint.trim_end_matches('/').to_string(),
+                    region: if region.is_empty() {
+                        "us-east-1".into()
+                    } else {
+                        region
+                    },
+                    bucket,
+                    path_prefix: form.get("prefix").trim_matches('/').to_string(),
+                    path_style: form.on("path_style"),
+                    credentials_secret_id: credentials,
+                },
+            )
+        }
+        FormKind::RenameSecret { secret_id } => Request::UpdateSecret(
+            secret_id.clone(),
+            UpdateSecret {
+                name: Some(named("name")?),
+                value: None,
+            },
+        ),
+        FormKind::ReplaceSecret { secret_id, kind } => Request::UpdateSecret(
+            secret_id.clone(),
+            UpdateSecret {
+                name: None,
+                value: Some(secret_value(form, *kind)?),
+            },
         ),
         FormKind::EnvVar { .. }
         | FormKind::ExposeDatabase { .. }
@@ -2675,6 +3900,75 @@ mod tests {
         assert_eq!(derive_name("ghcr.io/imgproxy/imgproxy:v3"), "imgproxy");
         assert_eq!(derive_name("traefik/whoami"), "whoami");
         assert_eq!(derive_name("nginx:1.27"), "nginx");
+    }
+
+    #[test]
+    fn private_keys_are_pasted_or_read_from_a_path() {
+        let dir = std::env::temp_dir().join(format!("tui-key-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".ssh")).unwrap();
+        let key = "-----BEGIN OPENSSH PRIVATE KEY-----
+abc
+-----END OPENSSH PRIVATE KEY-----
+";
+        std::fs::write(dir.join(".ssh/id"), key).unwrap();
+        assert_eq!(read_private_key(key.trim(), None).unwrap(), key);
+        assert_eq!(read_private_key("~/.ssh/id", Some(&dir)).unwrap(), key);
+        assert!(read_private_key("~/.ssh/missing", Some(&dir)).is_err());
+        std::fs::write(dir.join("plain"), "hello").unwrap();
+        assert!(
+            read_private_key(&dir.join("plain").display().to_string(), None)
+                .unwrap_err()
+                .contains("not a private key")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn instance_backup_passphrases_are_checked_before_sending() {
+        let form = |p: &str, repeat: &str| {
+            let mut f = Form::new(
+                FormKind::InstanceBackup,
+                "Back up instance",
+                vec![
+                    Field::pick("store", "store", "", "local"),
+                    Field::text("passphrase", "passphrase").masked(),
+                    Field::text("repeat", "repeat").masked(),
+                ],
+            );
+            f.focus = 1;
+            f.paste(p);
+            f.focus = 2;
+            f.paste(repeat);
+            f
+        };
+        let err = |f: &Form| build_request(f, false).err().unwrap_or_default();
+        assert!(err(&form("short", "short")).contains("at least 12"));
+        assert!(err(&form("long enough phrase", "long enough phrasE")).contains("do not match"));
+        assert_eq!(err(&form("", "")), "enter a passphrase");
+        assert!(matches!(
+            build_request(&form("long enough phrase", "long enough phrase"), false),
+            Ok(Request::InstanceBackup(CreateInstanceBackup {
+                storage_id: None,
+                ..
+            }))
+        ));
+        assert_eq!(form("abc", "").fields[1].hint, "3 of 12 characters");
+    }
+
+    #[test]
+    fn generated_key_names_do_not_collide() {
+        let secret = |name: &str| Secret {
+            id: name.into(),
+            name: name.into(),
+            kind: SecretKind::SshKey,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            public_part: None,
+            used_by: Vec::new(),
+        };
+        assert_eq!(unique_name("edge-key", &[]), "edge-key");
+        let taken = [secret("edge-key"), secret("edge-key-2")];
+        assert_eq!(unique_name("edge-key", &taken), "edge-key-3");
     }
 
     #[test]
