@@ -460,20 +460,19 @@ async fn remote_build_methods() {
     assert!(volumes.ends_with("_data"), "{volumes}");
     let worker = logs(&api, &compose.id, Some("worker"), "first=").await;
     assert!(worker.contains("first="), "{worker}");
-    // A relative bind mount resolves against the clone next to the daemon, a path that does not
-    // exist on the remote, whose engine mounts an empty directory there instead of the files.
+    // A writable bind mount of the repository becomes a volume on the remote, filled from the
+    // repository through the tunnel, instead of a path next to the daemon.
     let files = logs(&api, &compose.id, Some("files"), "files=").await;
-    assert!(files.contains("No such file"), "{files}");
+    assert!(files.contains("files=from the repository"), "{files}");
     let mounts = remote.docker(&[
         "inspect",
         "--format",
-        "{{range .Mounts}}{{.Type}} {{.Source}};{{end}}",
+        "{{range .Mounts}}{{.Type}} {{.Name}};{{end}}",
         names.iter().find(|n| n.contains("files")).unwrap(),
     ]);
-    let builds = daemon.dir.path().join("builds");
-    assert!(
-        mounts.starts_with(&format!("bind {}/", builds.display())),
-        "{mounts}"
+    assert_eq!(
+        mounts,
+        format!("volume {}-{}-files;", brand::PREFIX, compose.id)
     );
 
     // Railpack: `railpack prepare` runs next to the daemon, buildx builds on the remote
@@ -627,4 +626,145 @@ async fn remote_build_after_a_dropped_tunnel() {
     );
     assert_eq!(d.status, DeploymentStatus::Live, "{d:#?}");
     assert_eq!(remote_only(&remote, &svc.id).len(), 1);
+}
+
+/// A compose service with a config-file bind and a data-dir bind. Each boot counts itself in the
+/// data directory and prints the config file and a file the repository seeded the data with.
+const MOUNTS_COMPOSE: &str = r#"services:
+  app:
+    image: busybox:1.37
+    command: ["sh", "-c", "n=$$(( $$(cat /data/boots 2>/dev/null || echo 0) + 1 )); echo $$n > /data/boots; echo boot=$$n greeting=$$(cat /etc/app/greeting.conf) seed=$$(cat /data/seed.txt); exec sleep 3600"]
+    volumes:
+      - ./config/greeting.conf:/etc/app/greeting.conf:ro
+      - ./data:/data
+"#;
+
+/// Commits `files` in fixture `name`'s work tree and pushes them to its bare repository.
+fn commit(root: &Path, name: &str, files: &[(&str, &str)]) {
+    let work = root.join(name);
+    for (path, body) in files {
+        std::fs::write(work.join(path), body).unwrap();
+    }
+    run(&work, "git", &["commit", "-q", "-am", "change"]);
+    let bare = root.join(format!("{name}.git"));
+    run(
+        &work,
+        "git",
+        &["push", "-q", bare.to_str().unwrap(), "main"],
+    );
+}
+
+/// Compose bind mounts of the repository on a remote server: the files travel through the
+/// tunnel into volumes of the remote engine, data survives redeploys, config changes show up.
+#[tokio::test]
+#[ignore = "needs Docker with privileged containers"]
+async fn remote_compose_bind_mounts() {
+    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let api = daemon.client();
+    let remote = RemoteHost::start(&daemon.dir.path().join("ssh/id_ed25519.pub"));
+    let server = api
+        .create_server(&CreateServer {
+            name: "remote".into(),
+            host: "127.0.0.1".into(),
+            user: "root".into(),
+            port: remote.port,
+            ssh_key_secret_id: None,
+        })
+        .await
+        .unwrap();
+    let checked = api.check_server(&server.id).await.unwrap();
+    assert_eq!(checked.status, ServerStatus::Online, "{checked:?}");
+    api.create_project(&CreateProject {
+        name: "remote".into(),
+        description: None,
+    })
+    .await
+    .unwrap();
+    let env = api.tree().await.unwrap().projects[0].environments[0]
+        .environment
+        .clone();
+    let root = tempfile::tempdir().unwrap();
+    let repo = fixture(
+        root.path(),
+        "mounts",
+        &[
+            ("compose.yaml", MOUNTS_COMPOSE),
+            ("config/greeting.conf", "hello-v1\n"),
+            ("data/seed.txt", "from-the-repository\n"),
+        ],
+    );
+    let svc = api
+        .create_service(&service(&env, &server, "mounts", git(repo), 8080))
+        .await
+        .unwrap()
+        .service;
+
+    deploy_live(&api, &svc.id, Duration::from_secs(300)).await;
+    let out = logs(&api, &svc.id, Some("app"), "boot=1").await;
+    assert!(
+        out.contains("boot=1 greeting=hello-v1 seed=from-the-repository"),
+        "{out}"
+    );
+    deploy_live(&api, &svc.id, Duration::from_secs(300)).await;
+    let out = logs(&api, &svc.id, Some("app"), "boot=2").await;
+    assert!(out.contains("boot=2 greeting=hello-v1"), "{out}");
+    commit(
+        root.path(),
+        "mounts",
+        &[
+            ("config/greeting.conf", "hello-v2\n"),
+            ("data/seed.txt", "changed-in-the-repository\n"),
+        ],
+    );
+    deploy_live(&api, &svc.id, Duration::from_secs(300)).await;
+    let out = logs(&api, &svc.id, Some("app"), "boot=3").await;
+    assert!(
+        out.contains("boot=3 greeting=hello-v2 seed=from-the-repository"),
+        "{out}"
+    );
+
+    let names = remote_only(&remote, &svc.id);
+    assert_eq!(names.len(), 1, "{names:?}");
+    let detail = api.service(&svc.id).await.unwrap();
+    let volumes: Vec<String> = detail.volumes.iter().map(Volume::docker_name).collect();
+    assert_eq!(volumes.len(), 2, "{:#?}", detail.volumes);
+    let mounts = remote.docker(&[
+        "inspect",
+        "--format",
+        "{{range .Mounts}}{{.Type}} {{.Name}} {{.Source}};{{end}}",
+        &names[0],
+    ]);
+    assert!(
+        mounts.contains(&format!("volume {} ", volumes[0])),
+        "{mounts}"
+    );
+    assert!(
+        mounts.contains(&format!(
+            "/volumes/{}/_data/3/config/greeting.conf",
+            volumes[1]
+        )),
+        "{mounts}"
+    );
+    for v in &volumes {
+        remote.docker(&["volume", "inspect", v]);
+        assert!(
+            Command::new("docker")
+                .args(["volume", "inspect", v])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .code()
+                != Some(0),
+            "volume {v} is on the daemon's own engine"
+        );
+    }
+
+    api.delete_service(&svc.id, true).await.unwrap();
+    for v in &volumes {
+        assert!(
+            remote.try_docker(&["volume", "inspect", v]).is_err(),
+            "volume {v} outlived the service"
+        );
+    }
 }

@@ -667,6 +667,7 @@ mod tests {
             name: "data".into(),
             mount_path: "/var/lib/postgresql".into(),
             created_at: created,
+            compose: None,
         };
         let deployment = Deployment {
             id: new_id(),

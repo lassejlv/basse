@@ -204,6 +204,14 @@ basse domain add stack shop.example.com --compose-service web
 basse service build api --method dockerfile --target prod
 ```
 
+Compose bind mounts of the repository work on every server, local or SSH, and survive redeploys. The clone only lives next to the daemon for one deploy, so each bind mount becomes a volume on the service's server, filled through the Docker connection (the SSH tunnel for remote servers):
+
+- **Files and read-only directories are config.** `./nginx.conf:/etc/nginx/nginx.conf:ro` or `./config:/etc/app:ro` is copied from the repository into the service's `files` volume on every deploy, so a change in the repository shows up after a redeploy. Anything the container writes there is replaced on the next deploy.
+- **Writable directories are data.** `./data:/data`, or a path the repository doesn't have, becomes a volume of its own (`basse-<service id>-data`) that is kept across redeploys. When the volume is made it gets the repository's copy of the directory; after that the repository never overwrites it. Mark a config directory `:ro` to have it refreshed instead.
+- **Absolute host paths are left alone** and name paths on the service's server, such as `/var/run/docker.sock` or `/etc/localtime`. The deploy log warns about them because Basse doesn't copy, keep or remove them. A relative path that climbs out of the repository fails the deploy.
+
+All of these, and the compose file's named volumes, are listed in the service's Volumes tab. Deleting the service removes the copied config files; data volumes are kept unless you pass `--volumes`.
+
 In a monorepo, point each service at its app with `--root`: the Dockerfile, build context and compose file are then relative to that directory, compose runs with it as the project directory, Railpack builds it, and `auto` looks there. A push only deploys a service with a root when it changed a file inside the root; pass `--no-watch-paths` (or `basse service build <service> --watch-paths false`) to deploy on every push.
 
 ```sh

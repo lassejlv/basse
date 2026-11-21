@@ -24,6 +24,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio::sync::{broadcast, watch};
 
 mod methods;
+mod mounts;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const STABLE_FOR: Duration = Duration::from_secs(5);
