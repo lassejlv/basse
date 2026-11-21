@@ -66,12 +66,7 @@ pub fn note(servers: &[Server]) -> Option<String> {
 }
 
 /// Picker rows: usable servers in their usual order, then offline ones, which can't be picked.
-/// `blocked` is why a remote server can't run this workload, if it can't.
-pub fn items(
-    servers: &[Server],
-    address: impl Fn(&Server) -> String,
-    blocked: Option<&str>,
-) -> Vec<PickItem> {
+pub fn items(servers: &[Server], address: impl Fn(&Server) -> String) -> Vec<PickItem> {
     let mut sorted: Vec<&Server> = servers.iter().collect();
     sorted.sort_by_key(|s| s.status == ServerStatus::Offline);
     let default_id = default(servers).map(|s| s.id.clone());
@@ -87,8 +82,8 @@ pub fn items(
                 .as_deref()
                 .map(|v| format!(" · docker {v}"))
                 .unwrap_or_default();
-            let (glyph, style, note, disabled) = match (s.status, blocked) {
-                (ServerStatus::Offline, _) => (
+            let (glyph, style, note, disabled) = match s.status {
+                ServerStatus::Offline => (
                     "○",
                     theme::muted(),
                     match s.last_checked_at {
@@ -97,18 +92,13 @@ pub fn items(
                     },
                     true,
                 ),
-                (_, Some(why)) if s.kind == ServerKind::Ssh => {
-                    ("○", theme::muted(), why.to_string(), true)
-                }
-                (ServerStatus::Online, _) => (
+                ServerStatus::Online => (
                     "●",
                     theme::fg(theme::OK),
                     format!("connected{docker}"),
                     false,
                 ),
-                (ServerStatus::Unknown, _) => {
-                    ("◌", theme::muted(), "not checked yet".into(), false)
-                }
+                ServerStatus::Unknown => ("◌", theme::muted(), "not checked yet".into(), false),
             };
             item.glyph = Some((glyph, style));
             item.note = note;
@@ -118,20 +108,24 @@ pub fn items(
         .collect()
 }
 
+/// What a compose service on a remote server should know; every build method deploys there,
+/// but compose resolves bind mounts on the daemon's machine.
+pub const REMOTE_COMPOSE: &str =
+    "On an ssh server, compose bind mounts point at paths on this machine; use named volumes.";
+
 /// The line under the picker's list.
-pub fn picker_note(servers: &[Server], blocked: Option<&str>) -> String {
+pub fn picker_note(servers: &[Server]) -> String {
     let offline: Vec<&str> = servers
         .iter()
         .filter(|s| s.status == ServerStatus::Offline)
         .map(|s| s.name.as_str())
         .collect();
-    match (offline.as_slice(), blocked) {
-        (_, Some(why)) => format!("Remote servers can't run this yet: {why}."),
-        ([], None) => "A service stays on the server it is created on.".into(),
-        ([one], None) => format!(
+    match offline.as_slice() {
+        [] => "A service stays on the server it is created on.".into(),
+        [one] => format!(
             "{one} is offline, so it can't take new services. Check it again from the Servers screen."
         ),
-        (many, None) => format!(
+        many => format!(
             "{} servers are offline, so they can't take new services. Check them from the Servers screen.",
             many.len()
         ),
@@ -190,7 +184,7 @@ mod tests {
             server("main", ServerKind::Local, ServerStatus::Online),
             server("edge", ServerKind::Ssh, ServerStatus::Online),
         ];
-        let rows = items(&servers, address, None);
+        let rows = items(&servers, address);
         let names: Vec<_> = rows.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, ["main", "edge", "down"]);
         assert_eq!(
@@ -201,18 +195,6 @@ mod tests {
         assert_eq!(rows[1].detail, "ssh · root@edge.example.test");
         assert_eq!(rows[1].note, "connected · docker 27.3");
         assert_eq!(rows[2].note, "offline");
-        assert!(picker_note(&servers, None).starts_with("down is offline"));
-    }
-
-    #[test]
-    fn a_blocked_workload_disables_only_remote_servers() {
-        let servers = [
-            server("main", ServerKind::Local, ServerStatus::Online),
-            server("edge", ServerKind::Ssh, ServerStatus::Online),
-        ];
-        let rows = items(&servers, address, Some("needs the local server"));
-        assert!(!rows[0].disabled);
-        assert!(rows[1].disabled);
-        assert_eq!(rows[1].note, "needs the local server");
+        assert!(picker_note(&servers).starts_with("down is offline"));
     }
 }

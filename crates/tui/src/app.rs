@@ -4187,8 +4187,7 @@ impl App {
 
     /// ⏎ on the server field of a create form: every server, offline ones last and disabled.
     fn pick_server(&mut self, form: Form) {
-        let blocked = None;
-        let items = server_pick::items(&self.servers, |s| self.server_address(s), blocked);
+        let items = server_pick::items(&self.servers, |s| self.server_address(s));
         let current = Some(form.raw(server_pick::KEY)).filter(|v| !v.is_empty());
         let row = current
             .as_ref()
@@ -4199,7 +4198,15 @@ impl App {
             })
             .or_else(|| items.iter().position(|i| !i.disabled))
             .unwrap_or(0);
-        let note = server_pick::picker_note(&self.servers, blocked);
+        let mut note = vec![Line::styled(
+            server_pick::picker_note(&self.servers),
+            theme::muted(),
+        )];
+        let compose = form.choice("source") <= 1
+            && form.choice_label("build").as_deref() == Some(BUILD_LABELS[2]);
+        if compose && self.servers.iter().any(|s| s.kind == ServerKind::Ssh) {
+            note.push(Line::styled(server_pick::REMOTE_COMPOSE, theme::muted()));
+        }
         self.open_picker(Picker {
             title: "Server".into(),
             subtitle: format!("new service in {}", form.subtitle),
@@ -4208,7 +4215,7 @@ impl App {
             row,
             target: PickFor::Field(Box::new(form), server_pick::KEY),
             current,
-            note: vec![Line::styled(note, theme::muted())],
+            note,
             busy: false,
             git: None,
         });
