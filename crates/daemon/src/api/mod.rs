@@ -6,6 +6,7 @@ mod domain;
 mod github;
 mod instance;
 mod notify;
+mod onboarding;
 mod projects;
 mod secrets;
 mod servers;
@@ -39,6 +40,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/info", get(system::info))
         .route("/tree", get(system::tree))
         .route("/activity", get(system::activity))
+        .route(
+            "/onboarding",
+            get(onboarding::get).patch(onboarding::update),
+        )
         .route("/servers", get(servers::list).post(servers::create))
         .route(
             "/servers/{id}",
