@@ -43,6 +43,10 @@ pub fn ok(message: impl AsRef<str>) {
     println!("{} {}", paint("✓", Tone::Ok), message.as_ref());
 }
 
+pub fn warn(message: impl AsRef<str>) {
+    println!("{} {}", paint("!", Tone::Accent), message.as_ref());
+}
+
 pub fn note(message: impl AsRef<str>) {
     println!("{}", muted(message));
 }

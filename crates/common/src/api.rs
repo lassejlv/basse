@@ -46,7 +46,7 @@
 //! | POST | `/settings/proxy/restart` | | `Server` (reinstalls the proxy on the local server) |
 //! | POST | `/settings/prune` | | `PruneResult` (old build images, dangling images, build cache) |
 //! | GET | `/settings/version` | | `VersionCheck` (latest release, cached for an hour) |
-//! | POST | `/settings/update` | `UpdateRequest` | `UpdateResult` (replaces the binaries, then the daemon exits to restart) |
+//! | POST | `/settings/update` | `UpdateRequest` | `UpdateResult` (`updated: false` when that release is already installed; otherwise replaces the binaries, then the daemon exits to restart) |
 //! | GET | `/settings/domain` | | `InstanceDomain` (the DNS records to create and the last check) |
 //! | PUT | `/settings/domain` | `SetInstanceDomain` | `InstanceDomain` (routes the domain to the API through the proxy, then checks it) |
 //! | POST | `/settings/domain/check` | | `InstanceDomain` (DNS, ports 80 and 443, certificate, API) |
@@ -279,7 +279,7 @@ pub struct CreateDomain {
     pub compose_service: Option<String>,
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
@@ -372,7 +372,8 @@ pub struct RotatedToken {
 pub struct UpdateRequest {
     /// Release tag such as `v0.2.0`; defaults to the latest release.
     pub version: Option<String>,
-    /// Update even when no supervisor restarts the daemon, or when the version is not newer.
+    /// Reinstall even when the version is not newer, and update even when no supervisor restarts
+    /// the daemon. Without it, a release that is not newer answers `updated: false`.
     #[serde(default)]
     pub force: bool,
 }

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 common.workspace = true
 client.workspace = true
+release.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 futures-util.workspace = true

@@ -17,11 +17,23 @@ pub fn supervised() -> bool {
     std::env::var_os("INVOCATION_ID").is_some()
 }
 
+/// Installs the requested release, or answers `updated: false` when it is not newer than the
+/// running version and `force` is off.
 pub async fn run(state: &AppState, req: UpdateRequest) -> ApiResult<UpdateResult> {
+    let releases = release::Releases::new()?;
+    let tag = releases.resolve(req.version.as_deref()).await?;
+    let current = env!("CARGO_PKG_VERSION");
+    if !req.force && !release::is_newer(&tag, current) {
+        return Ok(UpdateResult {
+            from: current.to_string(),
+            to: current.to_string(),
+            updated: false,
+        });
+    }
     if !supervised() && !req.force {
         bad_request!(
             "{daemon} is not running under systemd, so nothing would start it again after the update; \
-             run it as a service (`{daemon} install-service`) or update with force (`{cli} update --force`) to restart it in place",
+             run it as a service (`{daemon} install-service`) or update with force (`{cli} update --server --force`) to restart it in place",
             daemon = brand::DAEMON_BIN,
             cli = brand::CLI_BIN
         );
@@ -29,17 +41,6 @@ pub async fn run(state: &AppState, req: UpdateRequest) -> ApiResult<UpdateResult
     refuse_while_deploying(state).await?;
     let target = release::current_target()
         .ok_or_else(|| AppError::BadRequest("no release is published for this platform".into()))?;
-    let releases = release::Releases::new()?;
-    let tag = match req.version.as_deref().map(str::trim) {
-        Some(v) if !v.is_empty() => format!("v{}", v.trim_start_matches('v')),
-        _ => releases.latest_tag().await?,
-    };
-    let current = env!("CARGO_PKG_VERSION");
-    if !req.force && !release::is_newer(&tag, current) {
-        bad_request!(
-            "{current} is already installed and {tag} is not newer; update with force to install it anyway"
-        );
-    }
     let exe = std::env::current_exe()?;
     let archive = releases.download(&tag, target).await?;
     let dir = state.dirs.builds_dir().join(format!("update-{tag}"));
@@ -58,6 +59,7 @@ pub async fn run(state: &AppState, req: UpdateRequest) -> ApiResult<UpdateResult
     Ok(UpdateResult {
         from: current.to_string(),
         to,
+        updated: true,
     })
 }
 

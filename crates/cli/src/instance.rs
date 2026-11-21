@@ -191,18 +191,192 @@ pub async fn prune(c: &Client, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Updates the daemon of the current context, then waits until the new version answers.
-pub async fn update_daemon(
-    c: &Client,
-    context: &str,
-    version: Option<String>,
+/// The sides `update` touches: this CLI binary, the current context's daemon, or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Steps {
+    pub cli: bool,
+    pub server: bool,
+}
+
+impl Steps {
+    pub const CLI: Steps = Steps {
+        cli: true,
+        server: false,
+    };
+
+    /// `--cli` and `--server` pick their side; with neither, both are updated.
+    pub fn from_flags(cli: bool, server: bool) -> Self {
+        if cli || server {
+            Self { cli, server }
+        } else {
+            Self {
+                cli: true,
+                server: true,
+            }
+        }
+    }
+}
+
+/// Updates this CLI, then the daemon of the current context, to the same release. A side that
+/// already runs it is up to date, not an error. When the CLI cannot be replaced the daemon is
+/// still updated and the CLI's error is returned at the end.
+pub async fn update(
+    config: &Config,
+    context: Option<&str>,
+    steps: Steps,
+    tag: Option<String>,
     force: bool,
     json: bool,
 ) -> Result<()> {
+    let mut report = serde_json::Map::new();
+    let mut target = tag.as_deref().map(release::tag);
+    let mut cli_error = None;
+    if steps.cli {
+        match update_cli(tag.as_deref(), force, json).await {
+            Ok((tag, result)) => {
+                target = Some(tag);
+                if !json {
+                    output::ok(match result.updated {
+                        true => format!("{} {} → {}", brand::CLI_BIN, result.from, result.to),
+                        false => format!("{} {} is up to date", brand::CLI_BIN, result.from),
+                    });
+                }
+                report.insert("cli".into(), serde_json::to_value(result)?);
+            }
+            Err(e) if steps.server => {
+                report.insert(
+                    "cli".into(),
+                    serde_json::json!({ "error": format!("{e:#}") }),
+                );
+                cli_error = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if steps.server {
+        match config.resolve(context) {
+            Ok((name, ctx)) => {
+                let c = Client::from_context(&ctx)?;
+                let daemon = match c.info().await {
+                    Ok(info) => {
+                        update_daemon(&c, &name, info, target.as_deref(), force, json).await
+                    }
+                    Err(e) if steps.cli => {
+                        if !json {
+                            output::warn(format!(
+                                "{} on {name} was not updated: {e:#}",
+                                brand::DAEMON_BIN
+                            ));
+                        }
+                        report.insert(
+                            "server".into(),
+                            serde_json::json!({ "warning": format!("{e:#}") }),
+                        );
+                        return finish(report, cli_error, json);
+                    }
+                    Err(e) => Err(e),
+                };
+                match daemon {
+                    Ok(result) => {
+                        if !json {
+                            output::ok(match result.updated {
+                                true => format!(
+                                    "{} {} → {} on {name}",
+                                    brand::DAEMON_BIN,
+                                    result.from,
+                                    result.to
+                                ),
+                                false => format!(
+                                    "{} {} on {name} is up to date",
+                                    brand::DAEMON_BIN,
+                                    result.from
+                                ),
+                            });
+                        }
+                        report.insert("server".into(), serde_json::to_value(result)?);
+                    }
+                    Err(e) => return Err(also(cli_error, e)),
+                }
+            }
+            Err(_) if steps.cli && context.is_none() => {}
+            Err(e) => return Err(also(cli_error, e)),
+        }
+    }
+    finish(report, cli_error, json)
+}
+
+/// The daemon's error, after the CLI's when that failed too, so neither is lost.
+fn also(cli_error: Option<anyhow::Error>, e: anyhow::Error) -> anyhow::Error {
+    match cli_error {
+        Some(cli) => anyhow::anyhow!(
+            "{cli:#}
+{} {e:#}",
+            paint("error:", Tone::Err)
+        ),
+        None => e,
+    }
+}
+
+fn finish(
+    report: serde_json::Map<String, serde_json::Value>,
+    cli_error: Option<anyhow::Error>,
+    json: bool,
+) -> Result<()> {
+    if json {
+        output::json(&report)?;
+    }
+    match cli_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Replaces this binary with `tag`, or the latest release. Returns the tag it resolved, so the
+/// daemon can be moved to the same release.
+async fn update_cli(
+    tag: Option<&str>,
+    force: bool,
+    json: bool,
+) -> Result<(String, common::UpdateResult)> {
+    let releases = release::Releases::new()?;
+    let tag = releases.resolve(tag).await?;
+    if !json && (force || release::is_newer(&tag, env!("CARGO_PKG_VERSION"))) {
+        output::note(format!("downloading {} {tag}…", brand::CLI_BIN,));
+    }
+    let result = release::update_cli(&releases, &tag, force).await?;
+    Ok((tag, result))
+}
+
+/// Updates the daemon behind `c` and waits until the new version answers. A daemon that
+/// already runs `tag` is up to date without a request, which also covers daemons from before
+/// `updated: false`, which refused instead.
+async fn update_daemon(
+    c: &Client,
+    context: &str,
+    info: DaemonInfo,
+    tag: Option<&str>,
+    force: bool,
+    json: bool,
+) -> Result<common::UpdateResult> {
+    if !force && tag.is_some_and(|tag| !release::is_newer(tag, &info.version)) {
+        return Ok(common::UpdateResult {
+            from: info.version.clone(),
+            to: info.version,
+            updated: false,
+        });
+    }
     if !json {
         output::note(format!("downloading the release on {context}…"));
     }
-    let result = c.update(&UpdateRequest { version, force }).await?;
+    let result = c
+        .update(&UpdateRequest {
+            version: tag.map(str::to_string),
+            force,
+        })
+        .await?;
+    if !result.updated {
+        return Ok(result);
+    }
     if !json {
         output::note(format!(
             "installed {} {}, restarting…",
@@ -223,68 +397,7 @@ pub async fn update_daemon(
             _ => tokio::time::sleep(Duration::from_secs(1)).await,
         }
     }
-    if json {
-        return output::json(&result);
-    }
-    output::ok(format!(
-        "{} updated {} → {} on {context}",
-        brand::DAEMON_BIN,
-        result.from,
-        result.to
-    ));
-    Ok(())
-}
-
-/// Replaces this CLI binary with a published release.
-pub async fn upgrade_cli(version: Option<String>, force: bool) -> Result<()> {
-    let target = release::current_target().context("no release is published for this platform")?;
-    let releases = release::Releases::new()?;
-    let tag = match version {
-        Some(v) => format!("v{}", v.trim().trim_start_matches('v')),
-        None => releases.latest_tag().await?,
-    };
-    let current = env!("CARGO_PKG_VERSION");
-    if !force && !release::is_newer(&tag, current) {
-        output::ok(format!(
-            "{} {current} is up to date (latest {tag})",
-            brand::CLI_BIN
-        ));
-        return Ok(());
-    }
-    output::note(format!("downloading {tag} for {target}…"));
-    let archive = releases.download(&tag, target).await?;
-    let dir =
-        std::env::temp_dir().join(format!("{}-upgrade-{}", brand::CLI_BIN, std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    let installed = (|| {
-        release::unpack(&archive, &dir)?;
-        let exe = std::env::current_exe()?;
-        release::install(&dir.join(brand::CLI_BIN), &exe)?;
-        anyhow::Ok(exe)
-    })();
-    let _ = std::fs::remove_dir_all(&dir);
-    let exe = match installed {
-        Ok(exe) => exe,
-        Err(e) if is_permission_denied(&e) => bail!(
-            "{e:#}: run it with sudo, e.g. `sudo {} upgrade`",
-            brand::CLI_BIN
-        ),
-        Err(e) => return Err(e),
-    };
-    output::ok(format!(
-        "{} {current} → {tag} at {}",
-        brand::CLI_BIN,
-        exe.display()
-    ));
-    Ok(())
-}
-
-fn is_permission_denied(e: &anyhow::Error) -> bool {
-    e.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
-    })
+    Ok(result)
 }
 
 /// Forgets saved contexts. The daemon never hears about it: the token stays valid until rotated.

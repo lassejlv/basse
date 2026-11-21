@@ -653,6 +653,24 @@ pub struct VersionCheck {
 pub struct UpdateResult {
     pub from: String,
     pub to: String,
+    /// `false` when `to` was already installed: nothing was replaced and nothing restarts.
+    /// Daemons from before this field only answered when they updated.
+    #[serde(default = "api::default_true")]
+    pub updated: bool,
+}
+
+/// The hint a client shows when it and the daemon it talks to run different versions, like
+/// "<cli> 0.3.0 ≠ <daemon> 0.4.0 · run <cli> update".
+pub fn version_skew(cli: &str, daemon: &str) -> Option<String> {
+    let (cli, daemon) = (cli.trim_start_matches('v'), daemon.trim_start_matches('v'));
+    (cli != daemon).then(|| {
+        format!(
+            "{} {cli} ≠ {} {daemon} · run {} update",
+            brand::CLI_BIN,
+            brand::DAEMON_BIN,
+            brand::CLI_BIN
+        )
+    })
 }
 
 /// What `DELETE /servers/{id}?purge=true` removed from the server.
@@ -1365,6 +1383,27 @@ mod tests {
             BuildMethod::Compose
         );
         assert!("make".parse::<BuildMethod>().is_err());
+    }
+
+    #[test]
+    fn version_skew_names_both_sides() {
+        assert_eq!(version_skew("0.4.0", "0.4.0"), None);
+        assert_eq!(version_skew("0.4.0", "v0.4.0"), None);
+        assert_eq!(
+            version_skew("0.3.0", "0.4.0").unwrap(),
+            format!(
+                "{} 0.3.0 ≠ {} 0.4.0 · run {} update",
+                brand::CLI_BIN,
+                brand::DAEMON_BIN,
+                brand::CLI_BIN
+            )
+        );
+    }
+
+    #[test]
+    fn update_results_from_older_daemons_count_as_updated() {
+        let old: UpdateResult = serde_json::from_str(r#"{"from":"0.3.0","to":"0.4.0"}"#).unwrap();
+        assert!(old.updated);
     }
 
     #[test]
