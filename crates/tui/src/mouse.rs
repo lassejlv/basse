@@ -36,6 +36,9 @@ pub enum Hit {
     FormField(usize),
     FormChoice(usize, usize),
     PaletteRow(usize),
+    PickRow(usize),
+    /// A row of the list on a full-screen list such as Secrets.
+    Item(usize),
 }
 
 static HITS: Mutex<Vec<(Rect, Hit)>> = Mutex::new(Vec::new());
@@ -250,6 +253,22 @@ fn click(app: &mut App, hit: Hit, double: bool) {
         Hit::FormField(i) => {
             if let Some(Overlay::Form(form)) = app.overlay.as_mut() {
                 form.click(i, None);
+                if form.fields[i].kind == crate::form::FieldKind::Pick && form.focus == i {
+                    press(app, KeyCode::Enter, KeyModifiers::NONE);
+                }
+            }
+        }
+        Hit::PickRow(i) => {
+            if let Some(Overlay::Picker(p)) = app.overlay.as_mut() {
+                p.row = i;
+            }
+            if double {
+                press(app, KeyCode::Enter, KeyModifiers::NONE);
+            }
+        }
+        Hit::Item(i) => {
+            if app.screen == Screen::Secrets {
+                app.select_secret(i);
             }
         }
         Hit::FormChoice(i, choice) => {

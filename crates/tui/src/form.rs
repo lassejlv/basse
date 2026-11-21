@@ -15,6 +15,8 @@ pub enum FieldKind {
     /// One of a fixed set, switched with ←/→ and drawn as chips.
     Choice(Vec<String>),
     Toggle,
+    /// A value chosen in a picker dialog; ⏎ opens it. `value` holds the id, `shown` its name.
+    Pick,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +32,8 @@ pub struct Field {
     pub visible: bool,
     /// Typed value is masked until revealed.
     pub masked: bool,
+    /// What a pick field shows for its value.
+    pub shown: String,
 }
 
 impl Field {
@@ -45,7 +49,28 @@ impl Field {
             hint: String::new(),
             visible: true,
             masked: false,
+            shown: String::new(),
         }
+    }
+
+    /// A field filled from a picker: `id` is the stored value, `shown` its label.
+    pub fn pick(
+        key: &'static str,
+        label: &'static str,
+        id: impl Into<String>,
+        shown: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: FieldKind::Pick,
+            value: id.into(),
+            shown: shown.into(),
+            ..Self::text(key, label)
+        }
+    }
+
+    pub fn masked(mut self) -> Self {
+        self.masked = true;
+        self
     }
 
     pub fn choice(key: &'static str, label: &'static str, options: Vec<String>) -> Self {
@@ -124,6 +149,15 @@ pub enum FormKind {
         backup_id: Id,
         file_name: String,
     },
+    AddSecret,
+    GenerateKey,
+    RenameSecret {
+        secret_id: Id,
+    },
+    ReplaceSecret {
+        secret_id: Id,
+        kind: common::SecretKind,
+    },
 }
 
 pub enum FormAction {
@@ -133,6 +167,8 @@ pub enum FormAction {
     Submit {
         alt: bool,
     },
+    /// ⏎ on a pick field: open its picker.
+    Pick(&'static str),
 }
 
 pub struct Form {
@@ -147,6 +183,8 @@ pub struct Form {
     pub busy: bool,
     /// Shown above the actions: the first line with a red ▲, the rest muted.
     pub warning: Vec<String>,
+    /// Muted explanation shown above the actions.
+    pub note: Vec<String>,
 }
 
 impl Form {
@@ -162,6 +200,7 @@ impl Form {
             alt_label: None,
             busy: false,
             warning: Vec::new(),
+            note: Vec::new(),
         };
         form.refresh();
         form.focus = form.next_visible(0, 1);
@@ -184,6 +223,11 @@ impl Form {
         self
     }
 
+    pub fn note(mut self, lines: Vec<String>) -> Self {
+        self.note = lines;
+        self
+    }
+
     pub fn focus_on(mut self, key: &str) -> Self {
         if let Some(i) = self.fields.iter().position(|f| f.key == key) {
             self.focus = i;
@@ -195,7 +239,7 @@ impl Form {
         self.fields.iter().find(|f| f.key == key)
     }
 
-    fn field_mut(&mut self, key: &str) -> Option<&mut Field> {
+    pub fn field_mut(&mut self, key: &str) -> Option<&mut Field> {
         self.fields.iter_mut().find(|f| f.key == key)
     }
 
@@ -238,6 +282,18 @@ impl Form {
             let hint = crate::database::hour_hint(&self.raw("hour"));
             if let Some(hour) = self.field_mut("hour") {
                 hour.hint = hint;
+            }
+            return;
+        }
+        if self.kind == FormKind::AddSecret {
+            let kind = self.choice("kind");
+            for f in &mut self.fields {
+                f.visible = match f.key {
+                    "private_key" => kind == 0,
+                    "access_key_id" | "secret_access_key" => kind == 1,
+                    "value" => kind == 2,
+                    _ => true,
+                };
             }
             return;
         }
@@ -314,6 +370,11 @@ impl Form {
                     alt: self.alt_label.is_some(),
                 };
             }
+            KeyCode::Enter | KeyCode::Char(' ')
+                if self.fields[self.focus].kind == FieldKind::Pick =>
+            {
+                return FormAction::Pick(self.fields[self.focus].key);
+            }
             KeyCode::Enter => return FormAction::Submit { alt: false },
             KeyCode::Tab | KeyCode::Down => self.move_focus(1),
             KeyCode::BackTab | KeyCode::Up => self.move_focus(-1),
@@ -352,6 +413,19 @@ impl Form {
         FormAction::None
     }
 
+    /// Pasted text goes into the focused text field as typed, newlines included.
+    pub fn paste(&mut self, text: &str) {
+        if self.busy {
+            return;
+        }
+        let field = &mut self.fields[self.focus];
+        if field.kind == FieldKind::Text {
+            field.value.push_str(text.trim_end_matches(['\r', '\n']));
+            self.error = None;
+            self.refresh();
+        }
+    }
+
     pub fn render(&self, frame: &mut Frame, area: Rect, tick: usize) {
         let visible: Vec<&Field> = self.fields.iter().filter(|f| f.visible).collect();
         let roomy = area.height as usize >= visible.len() * 2 + 9;
@@ -362,9 +436,16 @@ impl Form {
         } else {
             self.warning.len() + 1
         };
-        let height =
-            (visible.len() * rows_per_field + 6 + warning_rows + usize::from(self.error.is_some()))
-                as u16;
+        let note_rows = if self.note.is_empty() {
+            0
+        } else {
+            self.note.len() + 1
+        };
+        let height = (visible.len() * rows_per_field
+            + 6
+            + warning_rows
+            + note_rows
+            + usize::from(self.error.is_some())) as u16;
         let rect = area.centered(
             Constraint::Length(width),
             Constraint::Length(height.min(area.height)),
@@ -465,6 +546,27 @@ impl Form {
                         Span::styled(format!("{glyph} {text}"), style),
                     ])
                 }
+                FieldKind::Pick => {
+                    let action = if focused {
+                        theme::accent()
+                    } else {
+                        theme::muted()
+                    };
+                    let room = (value_a.width as usize).saturating_sub(9);
+                    let shown = crate::util::truncate(&field.shown, room);
+                    let detail = crate::util::truncate(
+                        &field.placeholder,
+                        room.saturating_sub(shown.chars().count() + 2),
+                    );
+                    let used = 1 + shown.chars().count() + 2 + detail.chars().count();
+                    Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(shown, theme::text()),
+                        Span::styled(format!("  {detail}"), theme::muted()),
+                        Span::raw(" ".repeat((value_a.width as usize).saturating_sub(used + 7))),
+                        Span::styled("⏎ pick", action),
+                    ])
+                }
                 FieldKind::Text => {
                     let shown = if field.masked && !field.value.is_empty() {
                         "•".repeat(field.value.chars().count().min(32))
@@ -503,7 +605,7 @@ impl Form {
                 );
             }
             if roomy {
-                if field.kind == FieldKind::Text {
+                if matches!(field.kind, FieldKind::Text | FieldKind::Pick) {
                     let rule = "─".repeat(value_a.width as usize);
                     let style = if focused {
                         theme::accent()
@@ -534,6 +636,17 @@ impl Form {
                 };
                 frame.render_widget(
                     Paragraph::new(Line::from(spans)),
+                    Rect::new(inner.x, y, inner.width, 1),
+                );
+                y += 1;
+            }
+        }
+
+        if !self.note.is_empty() {
+            y += 1;
+            for line in &self.note {
+                frame.render_widget(
+                    Paragraph::new(line.clone()).style(theme::muted()),
                     Rect::new(inner.x, y, inner.width, 1),
                 );
                 y += 1;
@@ -646,6 +759,74 @@ mod tests {
         form.handle_key(KeyEvent::from(KeyCode::Char('9')));
         assert_eq!(form.get("hour"), "39");
         assert_eq!(hint(&form), "0-23");
+    }
+
+    #[test]
+    fn secret_kind_shows_its_value_fields_and_pastes_stay_whole() {
+        let mut form = Form::new(
+            FormKind::AddSecret,
+            "Add secret",
+            vec![
+                Field::choice(
+                    "kind",
+                    "kind",
+                    vec!["ssh".into(), "s3".into(), "generic".into()],
+                ),
+                Field::text("name", "name"),
+                Field::text("private_key", "private key").masked(),
+                Field::text("access_key_id", "access key id"),
+                Field::text("secret_access_key", "secret key").masked(),
+                Field::text("value", "value").masked(),
+            ],
+        );
+        let visible = |f: &Form| -> Vec<&str> {
+            f.fields
+                .iter()
+                .filter(|x| x.visible)
+                .map(|x| x.key)
+                .collect()
+        };
+        assert_eq!(visible(&form), ["kind", "name", "private_key"]);
+        form.handle_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(
+            visible(&form),
+            ["kind", "name", "access_key_id", "secret_access_key"]
+        );
+        form.handle_key(KeyEvent::from(KeyCode::Left));
+        form.focus = 2;
+        form.paste(
+            "-----BEGIN KEY-----
+abc
+-----END KEY-----
+",
+        );
+        assert_eq!(
+            form.raw("private_key"),
+            "-----BEGIN KEY-----
+abc
+-----END KEY-----"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_pick_field_opens_its_picker() {
+        let mut form = Form::new(
+            FormKind::AddServer,
+            "Add server",
+            vec![
+                Field::text("name", "name"),
+                Field::pick("ssh_key", "ssh key", "", "daemon's own key"),
+            ],
+        );
+        assert!(matches!(
+            form.handle_key(KeyEvent::from(KeyCode::Enter)),
+            FormAction::Submit { .. }
+        ));
+        form.handle_key(KeyEvent::from(KeyCode::Tab));
+        assert!(matches!(
+            form.handle_key(KeyEvent::from(KeyCode::Enter)),
+            FormAction::Pick("ssh_key")
+        ));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use crate::app::*;
 use crate::database;
 use crate::mouse::{self, Hit};
+use crate::picker::short_key;
 use crate::theme;
 use crate::util::{self, truncate};
 use common::*;
@@ -37,6 +38,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Deploy => deploy(frame, body, app),
         Screen::Servers => servers(frame, body, app),
         Screen::Settings => settings(frame, body, app),
+        Screen::Secrets => secrets(frame, body, app),
     }
     key_bar(frame, keys, app);
     if app.overlay.is_some() {
@@ -58,6 +60,10 @@ pub fn render(frame: &mut Frame, app: &App) {
         Some(Overlay::Reveal(r)) => {
             dim(frame, area);
             reveal(frame, area, r);
+        }
+        Some(Overlay::Picker(p)) => {
+            dim(frame, area);
+            p.render(frame, area, app.tick);
         }
         Some(Overlay::Help) => {
             dim(frame, area);
@@ -308,6 +314,7 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("↑↓", "move"),
             ("a", "add server"),
             ("c", "check"),
+            ("K", "change key"),
             ("p", "set up proxy"),
             ("x", "remove"),
             ("X", "remove + clean up"),
@@ -325,6 +332,17 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("k", "copy key"),
             ("c", "prune"),
         ],
+        Screen::Secrets => {
+            let revealed = app.secrets.value().is_some();
+            let mut keys = vec![("↑↓", "move"), ("a", "add"), ("g", "generate key")];
+            if revealed {
+                keys.extend([("v", "hide"), ("C", "copy value")]);
+            } else {
+                keys.extend([("v", "reveal"), ("c", "copy public key")]);
+            }
+            keys.extend([("n", "rename"), ("e", "replace value"), ("x", "delete")]);
+            keys
+        }
     };
     let right = match app.screen {
         Screen::Overview => right,
@@ -2403,8 +2421,10 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
     );
     let inner = inside(&block, list);
     frame.render_widget(block, list);
-    let header =
-        Row::new(["", "NAME", "KIND", "HOST", "DOCKER", "PROXY", "CHECKED"]).style(theme::muted());
+    let header = Row::new([
+        "", "NAME", "KIND", "HOST", "KEY", "DOCKER", "PROXY", "CHECKED",
+    ])
+    .style(theme::muted());
     let rows: Vec<Row> = app
         .servers
         .iter()
@@ -2423,6 +2443,14 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
                     s.user.as_deref().unwrap_or("root"),
                     s.host.as_deref().unwrap_or("?"),
                     s.port.unwrap_or(22)
+                ),
+            };
+            let key = match (s.kind, &s.ssh_key_secret_id) {
+                (ServerKind::Local, _) => Span::styled("—", theme::muted()),
+                (_, None) => Span::styled("daemon key", theme::muted()),
+                (_, Some(id)) => Span::styled(
+                    app.secrets.name(id).unwrap_or("secret").to_string(),
+                    theme::text(),
                 ),
             };
             let (proxy, pstyle) = match s.proxy {
@@ -2449,6 +2477,7 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
                     theme::muted(),
                 )),
                 Cell::from(host),
+                Cell::from(key),
                 Cell::from(Span::styled(
                     s.docker_version.clone().unwrap_or("—".into()),
                     theme::muted(),
@@ -2475,6 +2504,7 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
                 Constraint::Length(16),
                 Constraint::Length(6),
                 Constraint::Fill(1),
+                Constraint::Length(16),
                 Constraint::Length(10),
                 Constraint::Length(15),
                 Constraint::Length(10),
@@ -2490,10 +2520,13 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(block, key_area);
         frame.render_widget(
             Paragraph::new(vec![
-                Line::styled(
-                    "Add this key to ~/.ssh/authorized_keys on a server before adding it:",
-                    theme::muted(),
-                ),
+                Line::from(vec![
+                    Span::styled(
+                        "Add this key to ~/.ssh/authorized_keys on a server before adding it, or pick one of your own keys with ",
+                        theme::muted(),
+                    ),
+                    Span::styled("K", theme::accent()),
+                ]),
                 Line::styled(key, theme::text()),
             ])
             .wrap(Wrap { trim: true }),
@@ -2536,20 +2569,52 @@ fn confirm(frame: &mut Frame, area: Rect, c: &Confirm, tick: usize) {
         .style(theme::text())
         .wrap(Wrap { trim: true });
     let msg_h = message.line_count(width.saturating_sub(6)) as u16;
+    let error: Vec<Line> = c
+        .error
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            if i == 0 {
+                Line::from(vec![
+                    Span::styled("✕ ", theme::fg(theme::ERR)),
+                    Span::styled(l.clone(), theme::text()),
+                ])
+            } else {
+                Line::styled(l.clone(), theme::muted())
+            }
+        })
+        .collect();
+    let error = Paragraph::new(error).wrap(Wrap { trim: true });
+    let err_h = if c.error.is_empty() {
+        0
+    } else {
+        error.line_count(width.saturating_sub(6)) as u16 + 1
+    };
     let inner = dialog(
         frame,
         area,
         width,
-        msg_h + 6,
+        msg_h + err_h + 6,
         vec![Span::styled(c.title.clone(), theme::text())],
     );
-    let [msg, rule, keys] = Layout::vertical([
+    let [msg, err, rule, keys] = Layout::vertical([
         Constraint::Fill(1),
+        Constraint::Length(err_h),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(inner);
     frame.render_widget(message, msg);
+    if err_h > 0 {
+        frame.render_widget(
+            error,
+            Rect {
+                y: err.y + 1,
+                height: err.height - 1,
+                ..err
+            },
+        );
+    }
     frame.render_widget(Paragraph::new(rule_line(rule.width)), rule);
     let style = if c.danger {
         Style::new().fg(theme::BG).bg(theme::ERR)
@@ -2576,22 +2641,32 @@ fn confirm(frame: &mut Frame, area: Rect, c: &Confirm, tick: usize) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("esc", theme::accent()),
-            Span::styled(" keep", theme::muted()),
+            Span::styled(
+                if c.error.is_empty() {
+                    " keep"
+                } else {
+                    " close"
+                },
+                theme::muted(),
+            ),
         ])),
         keys,
     );
+    mouse::hit(
+        Rect::new(keys.x, keys.y, 9, 1),
+        Hit::Key(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
+    if !c.error.is_empty() {
+        return;
+    }
     let chip = format!(" y {} ", c.verb);
     let chip_w = chip.chars().count() as u16;
     frame.render_widget(
         Paragraph::new(Span::styled(chip, style)).right_aligned(),
         keys,
-    );
-    mouse::hit(
-        Rect::new(keys.x, keys.y, 8, 1),
-        Hit::Key(
-            crossterm::event::KeyCode::Esc,
-            crossterm::event::KeyModifiers::NONE,
-        ),
     );
     mouse::hit(
         Rect::new(keys.right().saturating_sub(chip_w), keys.y, chip_w, 1),
@@ -2902,7 +2977,57 @@ fn settings(frame: &mut Frame, area: Rect, app: &App) {
         .spacing(1)
         .areas(row3);
     contexts_panel(frame, contexts, app);
+    let [secrets, servers] = Layout::vertical([Constraint::Fill(1); 2])
+        .spacing(1)
+        .areas(servers);
+    secrets_summary(frame, secrets, app);
     servers_summary(frame, servers, app);
+}
+
+/// A key hint on the last line of a summary panel, e.g. "s open secrets".
+fn panel_link(frame: &mut Frame, inner: Rect, key: &'static str, label: &str) {
+    if inner.height < 3 {
+        return;
+    }
+    hint_at(frame, inner.x, inner.bottom() - 1, key, label);
+}
+
+fn secrets_summary(frame: &mut Frame, area: Rect, app: &App) {
+    let block = panel(title("Secrets", false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let list = &app.secrets.list;
+    let count = |k: SecretKind| list.iter().filter(|s| s.kind == k).count();
+    let in_use = list.iter().filter(|s| !s.used_by.is_empty()).count();
+    let rows = lines_of(inner, 2);
+    setting_row(
+        frame,
+        rows[0],
+        "secrets",
+        vec![
+            Span::styled(list.len().to_string(), theme::text()),
+            Span::styled(
+                format!(
+                    "  {} ssh keys · {} s3 · {} generic",
+                    count(SecretKind::SshKey),
+                    count(SecretKind::S3Credentials),
+                    count(SecretKind::Generic)
+                ),
+                theme::muted(),
+            ),
+        ],
+        None,
+    );
+    if let Some(row) = rows.get(1) {
+        setting_row(
+            frame,
+            *row,
+            "in use",
+            vec![Span::styled(in_use.to_string(), theme::text())],
+            None,
+        );
+    }
+    panel_link(frame, inner, "s", "open secrets");
 }
 
 fn instance_panel(frame: &mut Frame, area: Rect, app: &App, s: &InstanceSettings) {
@@ -3042,23 +3167,6 @@ fn proxy_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
         }],
         Some(("m", "toggle")),
     );
-}
-
-/// `ssh-ed25519 AAAAC3Nz…q9Lk` and the key's comment.
-fn short_key(key: &str) -> (String, String) {
-    let mut parts = key.split_whitespace();
-    let kind = parts.next().unwrap_or_default();
-    let body = parts.next().unwrap_or_default();
-    let comment = parts.collect::<Vec<_>>().join(" ");
-    let n = body.chars().count();
-    let body = if n > 12 {
-        let head: String = body.chars().take(8).collect();
-        let tail: String = body.chars().skip(n - 4).collect();
-        format!("{head}…{tail}")
-    } else {
-        body.to_string()
-    };
-    (format!("{kind} {body}"), comment)
 }
 
 fn security_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
@@ -3268,5 +3376,271 @@ fn servers_summary(frame: &mut Frame, area: Rect, app: &App) {
                 crossterm::event::KeyModifiers::NONE,
             ),
         );
+    }
+}
+
+// Secrets
+
+/// The non-secret half shortened for the list: a short SSH key, or the access key id.
+fn public_short(s: &Secret) -> String {
+    match (&s.public_part, s.kind) {
+        (None, _) => "—".into(),
+        (Some(k), SecretKind::SshKey) => short_key(k).0,
+        (Some(id), _) if id.chars().count() > 14 => {
+            let n = id.chars().count();
+            let head: String = id.chars().take(6).collect();
+            let tail: String = id.chars().skip(n - 4).collect();
+            format!("{head}…{tail}")
+        }
+        (Some(id), _) => id.clone(),
+    }
+}
+
+fn secrets(frame: &mut Frame, area: Rect, app: &App) {
+    let view = &app.secrets;
+    let [list, detail] = Layout::vertical([Constraint::Fill(1), Constraint::Length(10)])
+        .spacing(1)
+        .areas(area);
+    let note = format!(
+        "sealed with the master key · {} secret{}",
+        view.list.len(),
+        if view.list.len() == 1 { "" } else { "s" }
+    );
+    let block = panel(
+        title("Secrets", true),
+        Some(Line::styled(note, theme::muted())),
+        true,
+    );
+    let inner = inside(&block, list);
+    frame.render_widget(block, list);
+    if view.list.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("no secrets yet · ", theme::muted()),
+                Span::styled("a", theme::accent()),
+                Span::styled(" to add or import one, ", theme::muted()),
+                Span::styled("g", theme::accent()),
+                Span::styled(" to generate an ssh key", theme::muted()),
+            ])),
+            inner,
+        );
+    } else {
+        let rows: Vec<Row> = view
+            .list
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let selected = i == view.row;
+                let users: Vec<String> = s.used_by.iter().map(ToString::to_string).collect();
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        s.name.clone(),
+                        if selected {
+                            theme::accent()
+                        } else {
+                            theme::text()
+                        },
+                    )),
+                    Cell::from(Span::styled(s.kind.label(), theme::muted())),
+                    Cell::from(Span::styled(
+                        public_short(s),
+                        if s.public_part.is_some() {
+                            theme::text()
+                        } else {
+                            theme::muted()
+                        },
+                    )),
+                    if users.is_empty() {
+                        Cell::from(Span::styled("—", theme::muted()))
+                    } else {
+                        Cell::from(Span::styled(users.join(", "), theme::text()))
+                    },
+                    Cell::from(Span::styled(util::ago(s.updated_at), theme::muted())),
+                ])
+                .style(if selected {
+                    theme::selected()
+                } else {
+                    Style::new()
+                })
+            })
+            .collect();
+        let offset = scroll_offset(view.row, inner.height.saturating_sub(1) as usize);
+        row_hits(inner, rows.len(), offset, Hit::Item);
+        frame.render_widget(
+            Table::new(
+                rows.into_iter().skip(offset),
+                [
+                    Constraint::Length(22),
+                    Constraint::Length(16),
+                    Constraint::Length(30),
+                    Constraint::Fill(1),
+                    Constraint::Length(10),
+                ],
+            )
+            .header(
+                Row::new(["NAME", "KIND", "PUBLIC PART", "USED BY", "UPDATED"])
+                    .style(theme::muted()),
+            )
+            .column_spacing(2),
+            inner,
+        );
+    }
+    secret_detail(frame, detail, app);
+}
+
+fn secret_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let view = &app.secrets;
+    let Some(s) = view.selected() else {
+        let block = panel(title("secret", false), None, false);
+        frame.render_widget(block, area);
+        return;
+    };
+    let block = panel(title(&s.name, false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let [left, right] = Layout::horizontal([Constraint::Fill(2), Constraint::Fill(3)])
+        .spacing(4)
+        .areas(inner);
+    let text = |t: String| vec![Span::styled(t, theme::text())];
+    let rows = lines_of(left, left.height);
+    let mut info: Vec<(&str, Vec<Span<'static>>)> = vec![
+        ("kind", text(s.kind.label().to_string())),
+        (
+            "created",
+            text(database::created(s.created_at, chrono::Utc::now())),
+        ),
+        ("updated", text(util::ago(s.updated_at))),
+    ];
+    if s.used_by.is_empty() {
+        info.push(("used by", vec![Span::styled("nothing", theme::muted())]));
+    }
+    for (i, u) in s.used_by.iter().enumerate() {
+        info.push((if i == 0 { "used by" } else { "" }, text(u.to_string())));
+    }
+    info.push(("id", vec![Span::styled(s.id.clone(), theme::muted())]));
+    for (row, (k, v)) in rows.iter().zip(info) {
+        setting_row(frame, *row, k, v, None);
+    }
+
+    let rows = lines_of(right, right.height);
+    let mut i = 0;
+    let mut row = |frame: &mut Frame, k: &str, v: Vec<Span<'static>>, hint| {
+        if let Some(r) = rows.get(i) {
+            setting_row(frame, *r, k, v, hint);
+        }
+        i += 1;
+    };
+    let value_w = (right.width as usize).saturating_sub(SETTING_KEY_W + 20);
+    match s.kind {
+        SecretKind::SshKey => {
+            let key = s.public_part.clone().unwrap_or_default();
+            let mut parts = key.split_whitespace();
+            let body = format!(
+                "{} {}",
+                parts.next().unwrap_or_default(),
+                parts.next().unwrap_or_default()
+            );
+            let comment = parts.collect::<Vec<_>>().join(" ");
+            row(
+                frame,
+                "public key",
+                text(truncate(&body, value_w)),
+                Some(("c", "copy")),
+            );
+            row(frame, "", vec![Span::styled(comment, theme::muted())], None);
+        }
+        SecretKind::S3Credentials => row(
+            frame,
+            "access key id",
+            text(s.public_part.clone().unwrap_or_default()),
+            Some(("c", "copy")),
+        ),
+        SecretKind::Generic => {}
+    }
+    let label = match s.kind {
+        SecretKind::SshKey => "private key",
+        SecretKind::S3Credentials => "secret key",
+        SecretKind::Generic => "value",
+    };
+    let revealed_at = view.revealed.as_ref().map(|(_, at)| *at);
+    match view.value() {
+        Some(value) => {
+            let value = crate::app::secret_text(value);
+            let mut lines = value.lines().filter(|l| !l.is_empty());
+            let first = lines.next().unwrap_or_default().to_string();
+            row(
+                frame,
+                label,
+                text(truncate(&first, value_w)),
+                Some(("C", "copy value")),
+            );
+            let more = lines.count();
+            if more > 0 {
+                row(
+                    frame,
+                    "",
+                    vec![Span::styled(
+                        format!("+ {more} more lines · C copies all"),
+                        theme::muted(),
+                    )],
+                    None,
+                );
+            }
+            row(
+                frame,
+                "",
+                vec![Span::styled(
+                    format!(
+                        "● revealed {} · recorded in the activity feed",
+                        revealed_at.map(util::clock).unwrap_or_default()
+                    ),
+                    theme::fg(theme::INFO),
+                )],
+                Some(("v", "hide")),
+            );
+            row(frame, "", Vec::new(), None);
+            row(
+                frame,
+                "",
+                vec![Span::styled(
+                    "Hidden again when you move to another secret or leave this screen.",
+                    theme::muted(),
+                )],
+                None,
+            );
+        }
+        None => {
+            row(
+                frame,
+                label,
+                vec![Span::styled("••••••••••••••••", theme::muted())],
+                Some(("v", "reveal")),
+            );
+            row(frame, "", Vec::new(), None);
+            if s.kind == SecretKind::SshKey {
+                row(
+                    frame,
+                    "",
+                    vec![
+                        Span::styled(
+                            "Add it to ~/.ssh/authorized_keys, then pick it with ",
+                            theme::muted(),
+                        ),
+                        Span::styled("K", theme::accent()),
+                        Span::styled(" on Servers.", theme::muted()),
+                    ],
+                    None,
+                );
+            }
+            row(
+                frame,
+                "",
+                vec![Span::styled(
+                    "Revealing a value is recorded in the activity feed.",
+                    theme::muted(),
+                )],
+                None,
+            );
+        }
     }
 }
