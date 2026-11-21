@@ -8,6 +8,7 @@ use std::fmt;
 
 pub mod api;
 pub mod brand;
+pub mod metrics;
 pub mod notify;
 pub mod onboarding;
 
@@ -591,7 +592,7 @@ pub struct DaemonInfo {
     pub mem_total: u64,
     pub disk_used: u64,
     pub disk_total: u64,
-    /// Recent CPU samples, oldest first, one every 15 seconds.
+    /// Recent CPU samples, oldest first, one every 10 seconds.
     pub cpu_history: Vec<f32>,
     pub proxy: ProxyStatus,
     /// Public key remote servers must trust for SSH connections.
@@ -698,7 +699,8 @@ pub struct ServiceStats {
     pub cpu_percent: f32,
     pub mem_used: u64,
     pub mem_limit: u64,
-    /// Samples, oldest first, one every 15 seconds for up to an hour.
+    /// Samples, oldest first, one every 10 seconds for up to an hour, summed over the
+    /// service's containers.
     pub cpu_history: Vec<f32>,
     pub mem_history: Vec<u64>,
 }

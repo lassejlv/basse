@@ -6,6 +6,7 @@ pub use config::{Config, Context};
 
 use anyhow::{Context as _, Result, anyhow};
 use common::api::*;
+use common::metrics::{MetricsRange, ServiceMetrics};
 use common::notify::*;
 use common::*;
 use futures_util::{Stream, StreamExt};
@@ -405,6 +406,20 @@ impl Client {
 
     pub async fn service_stats(&self, id: &str) -> Result<ServiceStats> {
         self.get(&format!("/services/{id}/stats")).await
+    }
+
+    /// Metrics over `range`; `container` picks one compose service instead of the sum.
+    pub async fn service_metrics(
+        &self,
+        id: &str,
+        range: MetricsRange,
+        container: Option<&str>,
+    ) -> Result<ServiceMetrics> {
+        let mut path = format!("/services/{id}/metrics?range={range}");
+        if let Some(c) = container {
+            path.push_str(&format!("&container={c}"));
+        }
+        self.get(&path).await
     }
 
     pub async fn set_env(&self, id: &str, vars: &[EnvVar]) -> Result<Vec<EnvVar>> {

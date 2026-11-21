@@ -14,6 +14,7 @@ mod error;
 mod github;
 mod host;
 mod instance;
+mod metrics;
 mod notify;
 mod onboarding;
 mod prune;

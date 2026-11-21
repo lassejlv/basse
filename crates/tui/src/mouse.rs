@@ -72,6 +72,10 @@ pub enum Hit {
     Record(usize),
     /// A container of a compose service; a click follows its logs.
     Container(usize),
+    /// A range on the Metrics tab.
+    MetricsRange(common::metrics::MetricsRange),
+    /// What the Metrics tab of a compose service shows: 0 is all containers, then each one.
+    MetricsContainer(usize),
     /// A step on the setup rail or the Overview checklist; a click goes there.
     SetupStep(common::onboarding::Step),
     /// A choice of the setup step on screen; a double-click picks it.
@@ -749,6 +753,14 @@ fn click(app: &mut App, hit: Hit, double: bool) {
         Hit::Container(i) => {
             keys::finish_text_input(app);
             app.pick_container(i);
+        }
+        Hit::MetricsRange(range) => {
+            keys::finish_text_input(app);
+            app.set_metrics_range(range);
+        }
+        Hit::MetricsContainer(i) => {
+            keys::finish_text_input(app);
+            app.pick_metrics_container(i);
         }
         Hit::Record(i) => {
             if let Some(r) = app

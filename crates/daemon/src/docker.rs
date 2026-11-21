@@ -917,6 +917,7 @@ pub fn proxy_container_labels(config: &ProxyConfig) -> HashMap<String, String> {
             "caddy_0.servers.client_ip_headers".to_string(),
             "CF-Connecting-IP".to_string(),
         ),
+        ("caddy_0.metrics.per_host".to_string(), String::new()),
     ]);
     let Some(route) = &config.route else {
         return labels;

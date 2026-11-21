@@ -1,10 +1,11 @@
-//! Services and their env vars, domains, volumes, logs and stats.
+//! Services and their env vars, domains, volumes, logs, stats and metrics.
 
 use super::{Json, Query, ndjson, no_content, optional_json};
 use crate::db::new_id;
 use crate::deploy::{self, Plan};
 use crate::docker;
 use crate::error::{ApiResult, AppError, bad_request, conflict};
+use crate::metrics;
 use crate::services::{self, Power};
 use crate::state::AppState;
 use crate::stats;
@@ -15,6 +16,7 @@ use axum::response::Response;
 use bollard::query_parameters::LogsOptions;
 use chrono::Utc;
 use common::api::{CreateDomain, CreateService, CreateVolume, DeployRequest, UpdateService};
+use common::metrics::{MetricsRange, ServiceMetrics};
 use common::*;
 use futures_util::StreamExt as _;
 use serde::Deserialize;
@@ -188,14 +190,28 @@ pub async fn logs(
     Ok(ndjson(ReceiverStream::new(rx)))
 }
 
+/// The Overview's figures: the last hour of raw samples, summed over the service's containers.
 pub async fn stats(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<ServiceStats>> {
-    if let Some(s) = state.stats.service(&id) {
-        return Ok(Json(s));
-    }
     let rec = services::record(&state, &id).await?;
+    let hour = MetricsRange::Hour;
+    let from = Utc::now() - chrono::TimeDelta::seconds(hour.secs());
+    let buckets = state
+        .db
+        .metric_buckets(&id, hour.step_secs(), from, None)
+        .await?;
+    let points = metrics::combine(&buckets);
+    if let Some(last) = points.last() {
+        return Ok(Json(ServiceStats {
+            cpu_percent: last.cpu as f32,
+            mem_used: last.mem,
+            mem_limit: last.mem_limit,
+            cpu_history: points.iter().map(|p| p.cpu as f32).collect(),
+            mem_history: points.iter().map(|p| p.mem).collect(),
+        }));
+    }
     let sampled = match &rec.live_container {
         Some(container) => match state.docker_for(&rec.service.server_id).await {
             Ok((_, docker)) => stats::sample_now(&docker, container).await,
@@ -210,6 +226,34 @@ pub async fn stats(
         cpu_history: Vec::new(),
         mem_history: Vec::new(),
     })))
+}
+
+#[derive(Deserialize)]
+pub struct MetricsQuery {
+    range: Option<String>,
+    container: Option<String>,
+}
+
+pub async fn metrics(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<MetricsQuery>,
+) -> ApiResult<Json<ServiceMetrics>> {
+    let range = match q.range.as_deref() {
+        None => MetricsRange::default(),
+        Some(r) => match r.parse() {
+            Ok(r) => r,
+            Err(e) => bad_request!("{e}"),
+        },
+    };
+    let rec = services::record(&state, &id).await?;
+    let container = q.container.as_deref().filter(|c| !c.is_empty());
+    if container.is_some() && !metrics::is_compose(&rec.service.source) {
+        bad_request!("only compose services have containers to pick");
+    }
+    Ok(Json(
+        metrics::service_metrics(&state, &id, range, container, Utc::now()).await?,
+    ))
 }
 
 pub async fn set_env(

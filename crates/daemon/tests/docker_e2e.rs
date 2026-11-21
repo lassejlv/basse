@@ -548,6 +548,40 @@ async fn docker_end_to_end() {
     );
     assert!(stats.mem_used > 0);
 
+    println!("== metrics: container samples and requests through the proxy");
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let metrics = loop {
+        for _ in 0..20 {
+            whoami(&http).await;
+        }
+        let m = api
+            .service_metrics(&sid, common::metrics::MetricsRange::Hour, None)
+            .await
+            .unwrap();
+        let requests: u64 = m
+            .points
+            .iter()
+            .filter_map(|p| p.http.as_ref())
+            .map(|h| h.s2xx)
+            .sum();
+        if m.points.len() >= 2 && requests > 0 {
+            break m;
+        }
+        assert!(Instant::now() < deadline, "no request metrics yet: {m:?}");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    };
+    assert!(metrics.http);
+    assert!(metrics.points.iter().all(|p| p.mem > 0 && p.pids > 0));
+    assert!(!metrics.deploys.is_empty(), "the live deploy is marked");
+    let last = metrics
+        .points
+        .iter()
+        .rev()
+        .find_map(|p| p.http.as_ref())
+        .unwrap();
+    println!("whoami metrics: {last:?}");
+    assert!(last.p50_ms.is_some());
+
     println!("== delete project");
     let ids = [sid.clone(), site.service.id.clone(), db.service.id.clone()];
     api.delete_project(&project.id).await.unwrap();

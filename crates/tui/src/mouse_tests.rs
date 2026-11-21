@@ -546,6 +546,7 @@ fn service_tab_labels_and_list_rows_match_their_targets() {
         reveal: false,
         database: true,
         container: None,
+        metrics: Default::default(),
     });
     app.backups.insert(
         "fixture-web".into(),
@@ -570,6 +571,7 @@ fn service_tab_labels_and_list_rows_match_their_targets() {
         ("Overview", Tab::Overview),
         ("Deployments", Tab::Deployments),
         ("Logs", Tab::Logs),
+        ("Metrics", Tab::Metrics),
         ("Database", Tab::Database),
         ("Backups", Tab::Backups),
         ("Env", Tab::Env),
@@ -2745,4 +2747,213 @@ async fn first_app_offers_the_sample_and_skipping_moves_on() {
     label(&buf, "You're set.");
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.screen, Screen::Overview, "⏎ on Done finishes");
+}
+
+fn metrics_data(range: common::metrics::MetricsRange) -> common::metrics::ServiceMetrics {
+    use common::metrics::{DeployMarker, HttpPoint, MetricPoint};
+    let to = Timestamp::default() + chrono::TimeDelta::hours(1);
+    let from = Timestamp::default();
+    let points = (0..360)
+        .map(|i| MetricPoint {
+            at: from + chrono::TimeDelta::seconds(i * 10),
+            cpu: 5.0 + (i % 7) as f64,
+            cpu_max: 12.0 + (i % 7) as f64,
+            mem: 200 << 20,
+            mem_max: 260 << 20,
+            mem_limit: 512 << 20,
+            net_rx: 1_200_000.0,
+            net_tx: 340_000.0,
+            disk_read: 0.0,
+            disk_write: 24_000.0,
+            pids: 9,
+            restarts: 0,
+            uptime_secs: 600,
+            http: Some(HttpPoint {
+                rps: 42.0,
+                s2xx: 400,
+                s3xx: 0,
+                s4xx: 15,
+                s5xx: 5,
+                p50_ms: Some(18.0),
+                p95_ms: Some(120.0),
+            }),
+        })
+        .collect();
+    common::metrics::ServiceMetrics {
+        range,
+        step_secs: range.step_secs(),
+        from,
+        to,
+        containers: vec!["frontend".into(), "queue".into()],
+        container: None,
+        points,
+        deploys: vec![DeployMarker {
+            at: from + chrono::TimeDelta::minutes(18),
+            number: 47,
+            status: DeploymentStatus::Superseded,
+        }],
+        http: true,
+    }
+}
+
+/// Braille cells below the toolbar, where only charts draw them.
+fn braille_cells(buf: &Buffer) -> usize {
+    let toolbar = label(buf, "1 1h").y;
+    buf.content()
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i / buf.area.width as usize > toolbar as usize)
+        .map(|(_, c)| c)
+        .filter(|c| {
+            c.symbol()
+                .chars()
+                .next()
+                .is_some_and(|ch| ('\u{2801}'..='\u{28FF}').contains(&ch))
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn metrics_tab_switches_ranges_and_containers_by_click_and_key() {
+    use common::metrics::MetricsRange;
+    let mut app = compose_fixture();
+    app.details
+        .get_mut("fixture-web")
+        .expect("fixture detail")
+        .service
+        .state = common::ServiceState::Running;
+    app.open_service("fixture-web", Tab::Metrics);
+    app.service.as_mut().expect("service view").metrics.data =
+        Some(metrics_data(MetricsRange::Hour));
+    let buf = draw(&app, 164, 40);
+    for text in [
+        "CPU  7% now · peak 18% · avg 8%",
+        "Memory  200 MiB now · peak 260 MiB · limit 512 MiB",
+        "Network  rx 1.2 MB/s · tx 340 kB/s",
+        "Disk I/O  read 0 B/s · write 24 kB/s",
+        "Requests  42 req/s · 2xx 95% · 4xx 4% · 5xx 1%",
+        "Latency  p50 18 ms · p95 120 ms",
+        "● live · every 10s",
+        "-30m",
+        "#47",
+        "512M",
+        "limit",
+    ] {
+        label(&buf, text);
+    }
+    assert!(braille_cells(&buf) > 200, "charts draw braille lines");
+    assert!(
+        buf.content().iter().any(|c| c.symbol() == "┊"),
+        "deploys are marked"
+    );
+
+    let toolbar = label(&buf, "1 1h").y;
+    for (text, range) in [
+        ("1 1h", MetricsRange::Hour),
+        ("2 24h", MetricsRange::Day),
+        ("3 7d", MetricsRange::Week),
+        ("4 30d", MetricsRange::Month),
+    ] {
+        assert_hit(
+            &app,
+            label_on(&buf, toolbar, text).expect("range"),
+            Hit::MetricsRange(range),
+        );
+    }
+    for (i, text) in ["all", "frontend", "queue", "migrate"]
+        .into_iter()
+        .enumerate()
+    {
+        assert_hit(
+            &app,
+            label_on(&buf, toolbar, text).expect("container"),
+            Hit::MetricsContainer(i),
+        );
+    }
+    assert_hit(
+        &app,
+        label_on(&buf, toolbar, "c").expect("c"),
+        char_key('c'),
+    );
+    let y = buf.area.bottom() - 1;
+    assert_hit(
+        &app,
+        label_on(&buf, y, "c container").expect("key bar"),
+        char_key('c'),
+    );
+    label_on(&buf, y, "←→ range").expect("range hint");
+
+    let week = label_on(&buf, toolbar, "3 7d").expect("range");
+    click(&mut app, Position::new(week.x + 2, week.y));
+    let metrics = |app: &App| {
+        let m = &app.service.as_ref().expect("service view").metrics;
+        (m.range, m.container.clone())
+    };
+    assert_eq!(metrics(&app), (MetricsRange::Week, None));
+    let queue = label_on(&buf, toolbar, "queue").expect("queue");
+    click(&mut app, Position::new(queue.x, queue.y));
+    assert_eq!(metrics(&app), (MetricsRange::Week, Some("queue".into())));
+
+    press(&mut app, KeyCode::Char('1'));
+    assert_eq!(metrics(&app).0, MetricsRange::Hour);
+    assert_eq!(
+        app.service.as_ref().map(|v| v.tab),
+        Some(Tab::Metrics),
+        "digits pick ranges here"
+    );
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Right);
+    assert_eq!(metrics(&app).0, MetricsRange::Week);
+    press(&mut app, KeyCode::Left);
+    assert_eq!(metrics(&app).0, MetricsRange::Day);
+    press(&mut app, KeyCode::Char('c'));
+    assert_eq!(metrics(&app).1.as_deref(), Some("migrate"));
+    press(&mut app, KeyCode::Char('c'));
+    assert_eq!(metrics(&app).1, None, "c wraps around to all containers");
+
+    let buf = draw(&app, 164, 40);
+    let tab_y = label(&buf, "Overview    Deployments").y;
+    let env = label_on(&buf, tab_y, "Env").expect("env tab");
+    click(&mut app, Position::new(env.x, env.y));
+    assert_eq!(app.service.as_ref().map(|v| v.tab), Some(Tab::Env));
+}
+
+#[tokio::test]
+async fn metrics_tab_says_it_is_collecting_and_where_requests_come_from() {
+    use common::metrics::MetricsRange;
+    let mut app = fixture();
+    app.details
+        .get_mut("fixture-web")
+        .expect("fixture detail")
+        .service
+        .state = common::ServiceState::Running;
+    app.open_service("fixture-web", Tab::Metrics);
+    let buf = draw(&app, 164, 40);
+    let collecting = (0..buf.area.height)
+        .filter(|&y| label_on(&buf, y, "collecting · first samples in ~10s").is_some())
+        .count();
+    assert_eq!(collecting, 3, "three rows of two panels each");
+    assert_eq!(braille_cells(&buf), 0);
+    assert!(label_on(&buf, label(&buf, "1 1h").y, "container").is_none());
+
+    let mut empty = metrics_data(MetricsRange::Hour);
+    empty.points.clear();
+    empty.deploys.clear();
+    empty.http = false;
+    app.service.as_mut().expect("service view").metrics.data = Some(empty);
+    let buf = draw(&app, 164, 40);
+    label(
+        &buf,
+        "no domain · requests appear once a domain routes here",
+    );
+    label(&buf, "CPU");
+
+    let mut quiet = metrics_data(MetricsRange::Hour);
+    for p in &mut quiet.points {
+        p.http = None;
+    }
+    app.service.as_mut().expect("service view").metrics.data = Some(quiet);
+    let buf = draw(&app, 164, 40);
+    label(&buf, "no requests in this range");
+    label(&buf, "CPU  7% now");
 }

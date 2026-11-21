@@ -30,6 +30,7 @@
 //! | POST | `/services/{id}/start` | | `ServiceDetail` |
 //! | GET | `/services/{id}/logs?tail=200&follow=true&container=web` | | NDJSON `LogLine` stream; `container` picks a compose service |
 //! | GET | `/services/{id}/stats` | | `ServiceStats` |
+//! | GET | `/services/{id}/metrics?range=1h&container=web` | | `metrics::ServiceMetrics`; `range` is 1h (default), 24h, 7d or 30d; `container` picks a compose service (default: all, summed); 400 for anything else |
 //! | PUT | `/services/{id}/env` | `Vec<EnvVar>` | `Vec<EnvVar>` (replaces all; applies on next deploy) |
 //! | POST | `/services/{id}/domains` | `CreateDomain` | `Domain` (applied to the live container at once) |
 //! | DELETE | `/domains/{id}` | | 204 |

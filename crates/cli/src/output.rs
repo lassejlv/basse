@@ -142,6 +142,40 @@ pub fn ago(at: Timestamp) -> String {
     }
 }
 
+/// `45s`, `12m`, `3h`, `9d`.
+pub fn duration(secs: i64) -> String {
+    match secs.max(0) {
+        s @ 0..60 => format!("{s}s"),
+        s @ 60..3600 => format!("{}m", s / 60),
+        s @ 3600..86_400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86_400),
+    }
+}
+
+/// A block sparkline of all of `values` in at most `width` columns, each the average of
+/// the values it covers, scaled from zero to the highest column.
+pub fn sparkline(values: &[f64], width: usize) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if values.is_empty() || width == 0 {
+        return String::new();
+    }
+    let columns = values.len().min(width);
+    let averages: Vec<f64> = (0..columns)
+        .map(|i| {
+            let chunk = &values[i * values.len() / columns..(i + 1) * values.len() / columns];
+            chunk.iter().sum::<f64>() / chunk.len() as f64
+        })
+        .collect();
+    let top = averages.iter().copied().fold(0.0, f64::max);
+    averages
+        .iter()
+        .map(|v| {
+            let level = if top > 0.0 { v / top * 7.0 } else { 0.0 };
+            BARS[level.round().clamp(0.0, 7.0) as usize]
+        })
+        .collect()
+}
+
 /// A file size such as `512 B`, `3.4 KB` or `1.2 GB`.
 pub fn size(n: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];

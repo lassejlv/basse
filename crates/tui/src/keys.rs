@@ -3,6 +3,7 @@
 use crate::app::*;
 use crate::form::{FormAction, FormKind};
 use crate::notify::{RuleAction, Section};
+use common::metrics::MetricsRange;
 use common::*;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -738,6 +739,18 @@ fn service(app: &mut App, key: KeyEvent) {
     let tabs = view.tabs();
     let n = tabs.len();
     let at = tabs.iter().position(|t| *t == tab).unwrap_or(0);
+    if tab == Tab::Metrics {
+        let compose = !view.compose().is_empty();
+        match key.code {
+            KeyCode::Char(c @ '1'..='4') => {
+                return app.set_metrics_range(MetricsRange::ALL[c as usize - '1' as usize]);
+            }
+            KeyCode::Left => return app.step_metrics_range(-1),
+            KeyCode::Right => return app.step_metrics_range(1),
+            KeyCode::Char('c') if compose => return app.next_metrics_container(),
+            _ => {}
+        }
+    }
     match key.code {
         KeyCode::Esc => return app.close_service(),
         KeyCode::Tab => return app.set_tab(tabs[(at + 1) % n]),

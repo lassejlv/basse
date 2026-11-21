@@ -71,6 +71,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/services/{id}/start", post(services::start))
         .route("/services/{id}/logs", get(services::logs))
         .route("/services/{id}/stats", get(services::stats))
+        .route("/services/{id}/metrics", get(services::metrics))
         .route("/services/{id}/env", put(services::set_env))
         .route("/services/{id}/domains", post(services::add_domain))
         .route("/domains/{id}", delete(services::delete_domain))

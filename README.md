@@ -7,6 +7,7 @@ Self-hosted deploys from the terminal. A control daemon runs on your server and 
 - **Zero-downtime deploys.** A new container must pass its health check before the proxy sends it traffic. Then the old one stops. Rollback redeploys an earlier image without rebuilding.
 - **Domains with automatic HTTPS.** Caddy runs as the reverse proxy on each server and gets certificates on its own.
 - **Logs, env vars and volumes.** Stream container and build logs, manage variables and secrets, and mount named volumes that survive redeploys.
+- **Metrics.** CPU, memory, network, disk I/O and, for services with a domain, requests, status codes and latency, sampled every 10 seconds and kept for 30 days, with each deploy marked on the charts.
 - **Database backups and access.** Back up one-click databases on demand or daily with retention, download and restore dumps, rotate passwords in place, and publish a database on a server port when you need to reach it from outside.
 - **More servers.** Register extra machines over SSH, with the daemon's key or an SSH key from the secrets manager, and the daemon deploys to them through the same API.
 - **Secrets manager.** SSH keys, S3 credentials and other values, encrypted at rest with a master key. Values are shown only when you explicitly reveal them, and every reveal is logged.
@@ -106,10 +107,11 @@ The mouse works too: click rows, tabs, dialog fields and the key hints in the bo
 |---|---|
 | Setup (`: setup`, `O` in Settings) | `⏎` continue or do the step, `s` skip, `↑↓` or `tab` move between steps (or choices), `esc` later. Domain: `e` edit, `r` check again. Backups: `a` add storage, `e` schedule. Notifications: `a` add a channel (it gets the Essentials events), `t` send a test. First app: `⏎` create and deploy, `o` open, `y` copy the URL |
 | Overview | `↑↓` move, `tab` switch pane, `⏎` open, `n` new service, `N` new project, `E` new environment, `d` deploy, `r` restart, `s` stop or start, `l` logs, `/` filter, `S` servers |
-| Service | `1`–`9` or `tab` switch tabs (Overview, Deployments, Logs, Database, Backups, Env, Domains, Volumes, Settings; Database and Backups only for databases), `a` add, `x` remove, `⏎` edit |
+| Service | `1`–`9` or `tab` switch tabs (Overview, Deployments, Logs, Metrics, Database, Backups, Env, Domains, Volumes, Settings; Database and Backups only for databases), `a` add, `x` remove, `⏎` edit |
 | Database | `v` reveal the password, `c`/`C` copy the internal or public URL, `p` expose on a server port or make internal again, `R` rotate the password |
 | Backups | `b` back up now (asks where when storage connections exist), `R` restore, `D` download to a local file, `x` delete, `e` edit the daily schedule and its store |
 | Logs | `f` follow, `/` search, `n`/`N` next or previous match, `e` errors only, `t` timestamps, `w` wrap |
+| Metrics | `1`–`4` or `←→` range (1h, 24h, 7d, 30d), `c` next container of a compose service |
 | Deploy | Live pipeline and build output, `c` cancel, `esc` back (the deploy keeps running) |
 | Servers | `a` add (pick an SSH key or generate one), `K` change a server's key, `c` check, `p` set up the proxy, `x` remove, `X` remove and clean up everything the daemon put there |
 | Secrets (`s` in Settings, or the palette) | `a` add or import, `g` generate an SSH key, `v` reveal (logged), `c` copy the public key, `n` rename, `e` replace the value, `x` delete |
@@ -128,6 +130,7 @@ basse db info postgres --reveal
 basse db backup postgres
 basse db schedule postgres --hour 3 --keep 7
 basse logs web -f
+basse service metrics web --range 24h
 basse deploy web
 basse rollback web
 basse status
