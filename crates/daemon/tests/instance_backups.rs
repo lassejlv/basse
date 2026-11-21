@@ -9,7 +9,7 @@ use common::*;
 use futures_util::StreamExt as _;
 use std::process::Command;
 use std::time::{Duration, Instant};
-use support::{Daemon, daemon_cmd, minio, pg};
+use support::{Daemon, Engine, daemon_cmd, minio, pg};
 
 const PASSPHRASE: &str = "correct horse battery staple";
 
@@ -60,7 +60,7 @@ async fn wait_running(api: &Client, service_id: &str) {
 
 #[tokio::test]
 async fn instance_backup_restores_into_a_fresh_data_dir() {
-    let Some(old) = Daemon::start().await else {
+    let Some(old) = Daemon::start_on_host().await else {
         return;
     };
     let Some((endpoint, bucket)) = minio::bucket().await else {
@@ -191,7 +191,7 @@ async fn instance_backup_restores_into_a_fresh_data_dir() {
     let passphrase_file = new_dir.path().join("passphrase");
     std::fs::write(&passphrase_file, format!("{PASSPHRASE}\n")).unwrap();
     let restore = |passphrase_file: &std::path::Path| {
-        let mut cmd: Command = daemon_cmd(&new_dir.path().join("data"));
+        let mut cmd: Command = daemon_cmd(&new_dir.path().join("data"), Engine::Host);
         cmd.args(["restore", &format!("s3://{bucket}/{key}")])
             .arg("--passphrase-file")
             .arg(passphrase_file)
@@ -235,7 +235,7 @@ async fn instance_backup_restores_into_a_fresh_data_dir() {
     let restored_dir = tempfile::TempDir::new().unwrap();
     std::fs::remove_dir(restored_dir.path()).unwrap();
     std::fs::rename(&data, restored_dir.path()).unwrap();
-    let new = Daemon::serve(restored_dir, old_token, Vec::new()).await;
+    let new = Daemon::serve(restored_dir, old_token, Vec::new(), Engine::Host).await;
     let api = new.client();
     let tree = api.tree().await.unwrap();
     assert_eq!(tree.projects.len(), 1);

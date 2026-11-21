@@ -19,7 +19,7 @@ const CANCEL_TIMEOUT: Duration = Duration::from_secs(25);
 
 #[tokio::test]
 async fn cancelling_during_build_stops_docker_and_preserves_the_live_deployment() {
-    let Some(daemon) = Daemon::start().await else {
+    let Some(daemon) = Daemon::start_on_host().await else {
         return;
     };
     let app = LiveApp::start(&daemon, vec![]).await;
@@ -99,7 +99,7 @@ async fn cancelling_during_build_stops_docker_and_preserves_the_live_deployment(
 
 #[tokio::test]
 async fn cancelling_during_health_removes_the_candidate_and_preserves_the_live_deployment() {
-    let Some(daemon) = Daemon::start().await else {
+    let Some(daemon) = Daemon::start_on_host().await else {
         return;
     };
     let app = LiveApp::start(&daemon, vec![]).await;
@@ -132,7 +132,7 @@ async fn cancelling_during_health_removes_the_candidate_and_preserves_the_live_d
 
 #[tokio::test]
 async fn cancellation_is_rejected_after_traffic_cutover_begins() {
-    let Some(daemon) = Daemon::start().await else {
+    let Some(daemon) = Daemon::start_on_host().await else {
         return;
     };
     let domain = format!("cancel-{}.localhost", rand::random::<u64>());

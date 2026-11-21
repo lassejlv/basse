@@ -6,7 +6,7 @@ use common::api::*;
 use common::onboarding::{OnboardingStatus, Step, StepState};
 use common::*;
 use reqwest::StatusCode;
-use support::Daemon;
+use support::{Daemon, Engine};
 
 #[tokio::test]
 async fn auth_is_required_and_errors_are_json() {
@@ -634,7 +634,7 @@ async fn serve_imports_a_sqlite_store_from_v0_1_0() {
         return;
     };
     let mut sqlite = None;
-    let Some(daemon) = Daemon::start_with(|dir| {
+    let Some(daemon) = Daemon::start_with(Engine::None, |dir| {
         let path = dir.join(format!("{}.db", common::brand::DIR));
         rusqlite::Connection::open(&path)
             .unwrap()

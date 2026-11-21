@@ -76,7 +76,7 @@ async fn objects(endpoint: &str, bucket: &str, prefix: &str) -> Vec<(String, u64
 
 #[tokio::test]
 async fn postgres_backups_go_to_s3_and_restore_from_it() {
-    let Some(daemon) = Daemon::start().await else {
+    let Some(daemon) = Daemon::start_on_host().await else {
         return;
     };
     let Some((endpoint, bucket)) = minio::bucket().await else {
