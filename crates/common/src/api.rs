@@ -35,7 +35,8 @@
 //! | GET | `/services/{id}/metrics?range=1h&container=web&replica=1` | | `metrics::ServiceMetrics`; `range` is 1h (default), 24h, 7d or 30d; `container` picks a compose service and `replica` a replica by index (default: all, summed); 400 for anything else |
 //! | POST | `/services/{id}/scale` | `ScaleRequest` | `ServiceDetail` (returns at once; replicas are added or drained in the background; 409 while autoscaling is on or when the server lacks the memory) |
 //! | PUT | `/services/{id}/autoscale` | `Autoscale` | `ServiceDetail` (turning it on scales into `min..=max` right away) |
-//! | GET | `/services/{id}/capacity` | | `ScaleCapacity` (room for more replicas on the service's server, by memory) |
+//! | GET | `/services/{id}/capacity` | | `ScaleCapacity` (room for more replicas on each server the service may run on, by memory) |
+//! | PUT | `/services/{id}/placement` | `Placement` | `ServiceDetail` (replicas move to fit it in the background, each new one health-checked before an old one drains; 400 for databases, compose services and servers that don't exist; 409 for a service with volumes on several servers without `volumes_per_server`) |
 //! | PUT | `/services/{id}/env` | `Vec<EnvVar>` | `Vec<EnvVar>` (replaces all; applies on next deploy) |
 //! | POST | `/services/{id}/domains` | `CreateDomain` | `Domain` (applied to the live container at once) |
 //! | DELETE | `/domains/{id}` | | 204 |
@@ -170,6 +171,30 @@
 //! | GET | `/onboarding` | | `onboarding::Onboarding` |
 //! | PATCH | `/onboarding` | `UpdateOnboarding` | `onboarding::Onboarding` (400 for skipping Welcome or Done) |
 //!
+//! Providers are cloud accounts reached with an API token, stored as a `generic` secret. A
+//! managed load balancer sends a service's domains to every server running a healthy replica,
+//! kept in step by the daemon (see [`crate::lb`]). Enabling one takes `confirm: true` after the
+//! client showed the plan; disabling keeps what was created unless `delete_resources=true`, and
+//! never deletes what the daemon didn't create.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | GET | `/providers` | | `Vec<lb::Provider>` |
+//! | POST | `/providers` | `lb::CreateProvider` | `lb::Provider` (checked against the provider; 400 when the token is refused) |
+//! | GET | `/providers/{id}` | | `lb::Provider` |
+//! | POST | `/providers/{id}/check` | | `lb::Provider` |
+//! | GET | `/providers/{id}/discover` | | `lb::ProviderDiscovery` (Hetzner: the daemon's servers matched by public address, locations, types with prices, networks, load balancers; Cloudflare: zones) |
+//! | DELETE | `/providers/{id}` | | 204; 409 while a load balancer uses it |
+//! | GET | `/services/{id}/lb` | | `lb::ServiceLb`; 404 when none is on |
+//! | POST | `/services/{id}/lb/plan` | `lb::LbConfig` | `lb::LbPlan` (what enabling would create, adopt or update, and its rough monthly cost; changes nothing) |
+//! | PUT | `/services/{id}/lb` | `lb::EnableLb` | `lb::ServiceLb` (turns it on or changes it, then syncs in the background; 400 without `confirm`) |
+//! | POST | `/services/{id}/lb/sync?force=true` | | `lb::ServiceLb` (syncs now; `force` overwrites changes made by hand) |
+//! | DELETE | `/services/{id}/lb?delete_resources=true` | | `lb::LbTeardown` |
+//!
+//! Every server's proxy answers `GET /.well-known/<prefix>-lb-health` on port 80 for a
+//! load-balanced domain with the service's health path on that server's own replicas, and 502
+//! when it has none, which is what the providers' health checks probe.
+//!
 //! Notifications: channels are destinations, rules send events in a scope to one channel.
 //! Channel configs are sealed under the master key; responses only carry the redacted config.
 //! Delivery runs in the background with retries, so no route waits on a channel except `test`.
@@ -192,6 +217,20 @@
 use crate::notify::{ChannelConfig, NotifyEvent, RuleScope};
 use crate::onboarding::{OnboardingStatus, Step};
 use crate::{EnvVar, Id, LbPolicy, RestartPolicy, SecretValue, Source};
+
+/// Body of `POST /services/{id}/lb/sync`'s query.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct LbSyncQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Query of `DELETE /services/{id}/lb`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct LbDisableQuery {
+    #[serde(default)]
+    pub delete_resources: bool,
+}
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

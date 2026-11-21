@@ -8,6 +8,7 @@ use std::fmt;
 
 pub mod api;
 pub mod brand;
+pub mod lb;
 pub mod metrics;
 pub mod notify;
 pub mod onboarding;
@@ -506,6 +507,8 @@ pub struct Scaling {
     pub shared_volume_ok: bool,
     #[serde(default)]
     pub autoscale: Autoscale,
+    #[serde(default)]
+    pub placement: Placement,
 }
 
 impl Default for Scaling {
@@ -515,7 +518,83 @@ impl Default for Scaling {
             max_surge: 1,
             shared_volume_ok: false,
             autoscale: Autoscale::default(),
+            placement: Placement::default(),
         }
+    }
+}
+
+/// Which servers a service's replicas run on. Each server's own proxy routes to the replicas
+/// on it, so a domain reaches every server whose address its DNS (or a managed load balancer)
+/// points at. Builds always run on the service's own server and the image is copied to the
+/// others.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Placement {
+    /// Servers replicas may run on, in order of preference. Empty means the service's server
+    /// alone, which is how every service starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<Id>,
+    #[serde(default)]
+    pub strategy: PlacementStrategy,
+    /// Lets a service with volumes run on more than one server. Every server then keeps its
+    /// own copy of each volume, which starts out empty, so replicas on different servers don't
+    /// see each other's files.
+    #[serde(default)]
+    pub volumes_per_server: bool,
+}
+
+impl Placement {
+    /// The servers replicas may run on: the list, or the service's server when it is empty.
+    pub fn servers_or(&self, home: &str) -> Vec<Id> {
+        if self.servers.is_empty() {
+            vec![home.to_string()]
+        } else {
+            self.servers.clone()
+        }
+    }
+
+    /// Whether replicas may run on more than one server.
+    pub fn is_multi_server(&self) -> bool {
+        self.servers.len() > 1
+    }
+}
+
+/// How replicas are spread over a service's servers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementStrategy {
+    /// As even as possible: each new replica goes to the server with the fewest, then the
+    /// most free memory.
+    #[default]
+    Spread,
+    /// Fill servers in list order, moving on when one runs out of memory.
+    Pack,
+}
+
+impl PlacementStrategy {
+    pub const ALL: [Self; 2] = [Self::Spread, Self::Pack];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Spread => "spread",
+            Self::Pack => "pack",
+        }
+    }
+}
+
+impl fmt::Display for PlacementStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for PlacementStrategy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|p| p.as_str() == s.to_ascii_lowercase())
+            .ok_or_else(|| format!("unknown placement strategy '{s}', expected spread or pack"))
     }
 }
 
@@ -655,9 +734,10 @@ pub struct Replica {
     pub mem_used: Option<u64>,
 }
 
-/// Room for more replicas of a service on its server, by memory.
+/// Room for more replicas of a service, by memory: the sum over its servers, and each server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScaleCapacity {
+    /// The service's own server.
     pub server_id: Id,
     pub mem_total: u64,
     /// Memory left for new containers, after a reserve for the system.
@@ -666,6 +746,23 @@ pub struct ScaleCapacity {
     pub per_replica: u64,
     /// How many more replicas fit.
     pub fits_more: u32,
+    /// Each server replicas may run on, in placement order. Servers that can't be reached
+    /// are listed with `fits_more: 0` and a `problem`.
+    #[serde(default)]
+    pub servers: Vec<ServerCapacity>,
+}
+
+/// Room for more replicas on one server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerCapacity {
+    pub server_id: Id,
+    pub mem_total: u64,
+    pub mem_free: u64,
+    pub fits_more: u32,
+    /// Replicas of the service on it now.
+    pub replicas: u16,
+    #[serde(default)]
+    pub problem: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1063,6 +1160,9 @@ pub struct ServiceDetail {
     /// The service's replicas by index; empty before the first deploy and for compose.
     #[serde(default)]
     pub replicas: Vec<Replica>,
+    /// Its managed load balancer, when one is on.
+    #[serde(default)]
+    pub lb: Option<lb::ServiceLb>,
 }
 
 /// How to reach a one-click database. Only set on [`ServiceDetail`] for database services.
@@ -1325,6 +1425,7 @@ pub enum UsageKind {
     Storage,
     Service,
     Source,
+    Provider,
 }
 
 /// One thing that uses a secret.
@@ -1342,6 +1443,7 @@ impl fmt::Display for Usage {
             UsageKind::Storage => "storage",
             UsageKind::Service => "service",
             UsageKind::Source => "source",
+            UsageKind::Provider => "provider",
         };
         write!(f, "{kind} {}", self.name)
     }

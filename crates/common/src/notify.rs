@@ -145,6 +145,9 @@ events! {
     ServiceMemoryHigh => "service.memory_high", Services, Warning, "Memory near its limit";
     ServiceScaled => "service.scaled", Services, Info, "Service scaled";
     ServiceScaleLimitReached => "service.scale_limit_reached", Services, Warning, "Scale limit reached";
+    LbSyncFailed => "lb.sync_failed", Services, Critical, "Load balancer sync failed";
+    LbDriftDetected => "lb.drift_detected", Services, Warning, "Load balancer changed by hand";
+    LbRecovered => "lb.recovered", Services, Success, "Load balancer back in sync";
     DatabaseCreated => "database.created", Databases, Info, "Database created";
     DatabaseBackupSucceeded => "database.backup_succeeded", Databases, Success, "Backup succeeded";
     DatabaseBackupFailed => "database.backup_failed", Databases, Critical, "Backup failed";
