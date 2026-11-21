@@ -364,6 +364,12 @@ enum ServerCmd {
     Proxy {
         name: String,
     },
+    /// Install Docker on a server that lacks it (get.docker.com, as root or with passwordless sudo).
+    InstallDocker {
+        name: String,
+        #[arg(long, short)]
+        yes: bool,
+    },
     /// Stop managing a server. With --purge, first remove everything the daemon put there.
     Remove {
         #[arg(required_unless_present = "all", conflicts_with = "all")]
@@ -1128,7 +1134,7 @@ async fn server(c: &Client, cmd: ServerCmd, json: bool) -> Result<()> {
                 })
                 .await?;
             let s = c.check_server(&s.id).await?;
-            report_server_check(&s, key.as_ref());
+            report_server_check(c, s).await?;
         }
         ServerCmd::SetKey { name, secret } => {
             let server = find_server(c, &name).await?;
@@ -1140,11 +1146,22 @@ async fn server(c: &Client, cmd: ServerCmd, json: bool) -> Result<()> {
                 ssh_key_secret_id: Some(key.as_ref().map(|k| k.id.clone()).unwrap_or_default()),
             };
             let s = c.update_server(&server.id, &body).await?;
-            report_server_check(&s, key.as_ref());
+            report_server_check(c, s).await?;
         }
         ServerCmd::Check { name } => {
             let s = c.check_server(&find_server(c, &name).await?.id).await?;
-            print_servers(&[s]);
+            print_servers(std::slice::from_ref(&s));
+            if s.status != ServerStatus::Online {
+                report_server_check(c, s).await?;
+            }
+        }
+        ServerCmd::InstallDocker { name, yes } => {
+            let s = find_server(c, &name).await?;
+            confirm(
+                &format!("Install Docker on {} with get.docker.com over SSH?", s.name),
+                yes,
+            )?;
+            install_docker(c, &s).await?;
         }
         ServerCmd::Proxy { name } => {
             let s = c.setup_proxy(&find_server(c, &name).await?.id).await?;
@@ -1166,25 +1183,82 @@ async fn server(c: &Client, cmd: ServerCmd, json: bool) -> Result<()> {
 }
 
 /// Prints whether a newly added or re-keyed server answers, and what to do when it does not.
-fn report_server_check(s: &Server, key: Option<&Secret>) {
+/// Prints the outcome of a server check: online, or the preflight checklist with the problem
+/// and its fix. Offers to install Docker when the daemon can, and returns the server after it.
+async fn report_server_check(c: &Client, s: Server) -> Result<Server> {
+    use std::io::IsTerminal as _;
     if s.status == ServerStatus::Online {
         output::ok(format!(
             "{} is online (docker {})",
             s.name,
             s.docker_version.clone().unwrap_or_default()
         ));
-        return;
+        return Ok(s);
     }
-    output::note(format!("{} is not reachable yet.", s.name));
-    let source = match key {
-        Some(k) => hint(&format!("secrets show {}", k.name)),
-        None => hint("server key"),
+    print_checks(&s);
+    let Some(problem) = &s.problem else {
+        output::note(format!("{} is not reachable.", s.name));
+        return Ok(s);
     };
-    println!(
-        "{} add the public key from {source} to ~/.ssh/authorized_keys on it, then run {}",
-        muted("next:"),
-        hint(&format!("server check {}", s.name))
-    );
+    println!("{} {}", paint("✕", Tone::Err), problem.summary);
+    if let Some(fix) = &problem.fix {
+        println!("  {} {fix}", muted("fix:"));
+    }
+    if !problem.can_install_docker {
+        println!(
+            "  {} {}",
+            muted("then:"),
+            hint(&format!("server check {}", s.name))
+        );
+        return Ok(s);
+    }
+    if !std::io::stdin().is_terminal() {
+        println!(
+            "  {} {}",
+            muted("or let the daemon do it:"),
+            hint(&format!("server install-docker {} --yes", s.name))
+        );
+        return Ok(s);
+    }
+    if confirm(&format!("Install Docker on {} now?", s.name), false).is_err() {
+        return Ok(s);
+    }
+    install_docker(c, &s).await
+}
+
+fn print_checks(s: &Server) {
+    for check in &s.checks {
+        let glyph = match check.status {
+            CheckStatus::Pass => paint("✓", Tone::Ok),
+            CheckStatus::Fail => paint("✕", Tone::Err),
+            CheckStatus::Skipped => muted("·"),
+        };
+        let label = match check.status {
+            CheckStatus::Skipped => muted(&check.label),
+            _ => check.label.clone(),
+        };
+        match &check.detail {
+            Some(detail) => println!("  {glyph} {label}  {}", muted(detail)),
+            None => println!("  {glyph} {label}"),
+        }
+    }
+}
+
+async fn install_docker(c: &Client, s: &Server) -> Result<Server> {
+    output::note(format!(
+        "installing Docker on {} with get.docker.com, this takes a minute or two…",
+        s.name
+    ));
+    let s = c.install_docker(&s.id).await?;
+    if s.status == ServerStatus::Online {
+        output::ok(format!(
+            "Docker {} installed, {} is online",
+            s.docker_version.clone().unwrap_or_default(),
+            s.name
+        ));
+        return Ok(s);
+    }
+    Box::pin(report_server_check(c, s)).await
 }
 
 async fn find_secret(c: &Client, query: &str) -> Result<Secret> {

@@ -17,8 +17,8 @@ use bollard::query_parameters::{
 };
 use bollard::{API_DEFAULT_VERSION, Docker};
 use common::{
-    ContainerInfo, Domain, Id, LogLine, LogStream, ProxyStatus, RestartPolicy, Server,
-    ServerCleanup, ServerKind, brand,
+    ContainerInfo, Domain, Id, LogLine, LogStream, PreflightCheck, ProxyStatus, RestartPolicy,
+    Server, ServerCleanup, ServerKind, brand,
 };
 use futures_util::StreamExt as _;
 use std::collections::HashMap;
@@ -34,6 +34,8 @@ const DOCKER_TIMEOUT_SECS: u64 = 120;
 pub struct DockerPool {
     clients: RwLock<HashMap<Id, Docker>>,
     tunnels: Mutex<HashMap<Id, Tunnel>>,
+    /// The preflight checklist from when each tunnel opened.
+    checks: Mutex<HashMap<Id, Vec<PreflightCheck>>>,
     connecting: tokio::sync::Mutex<()>,
     ssh: SshPaths,
     secrets: Secrets,
@@ -44,6 +46,7 @@ impl DockerPool {
         Self {
             clients: RwLock::new(HashMap::new()),
             tunnels: Mutex::new(HashMap::new()),
+            checks: Mutex::new(HashMap::new()),
             connecting: tokio::sync::Mutex::new(()),
             ssh,
             secrets,
@@ -62,13 +65,21 @@ impl DockerPool {
                 if let Some(docker) = self.cached(server) {
                     return Ok(docker);
                 }
-                let private_key = match &server.ssh_key_secret_id {
-                    Some(id) => Some(self.secrets.ssh_private_key(id).await?),
-                    None => None,
+                let (private_key, key_name) = match &server.ssh_key_secret_id {
+                    Some(id) => (
+                        Some(self.secrets.ssh_private_key(id).await?),
+                        self.secrets.name(id).await,
+                    ),
+                    None => (None, None),
                 };
-                let tunnel =
-                    Tunnel::open(&self.ssh, server, private_key.as_ref().map(|k| k.as_str()))
-                        .await?;
+                let (tunnel, checks) = Tunnel::connect(
+                    &self.ssh,
+                    server,
+                    private_key.as_ref().map(|k| k.as_str()),
+                    key_name.as_deref(),
+                )
+                .await?;
+                lock(&self.checks).insert(server.id.clone(), checks);
                 let docker = Docker::connect_with_unix(
                     &tunnel.socket.to_string_lossy(),
                     DOCKER_TIMEOUT_SECS,
@@ -131,6 +142,35 @@ impl DockerPool {
             .unwrap_or_else(|p| p.into_inner())
             .remove(server_id);
         lock(&self.tunnels).remove(server_id);
+    }
+
+    /// Runs a POSIX sh script on a remote server over SSH with its key.
+    pub async fn run_script(
+        &self,
+        server: &Server,
+        script: &str,
+        timeout: std::time::Duration,
+    ) -> Result<String> {
+        let private_key = match &server.ssh_key_secret_id {
+            Some(id) => Some(self.secrets.ssh_private_key(id).await?),
+            None => None,
+        };
+        crate::ssh::run(
+            &self.ssh,
+            server,
+            private_key.as_ref().map(|k| k.as_str()),
+            script,
+            timeout,
+        )
+        .await
+    }
+
+    /// The preflight checklist from when the server's tunnel opened; empty for the local server.
+    pub fn checks(&self, server_id: &str) -> Vec<PreflightCheck> {
+        lock(&self.checks)
+            .get(server_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 

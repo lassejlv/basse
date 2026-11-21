@@ -72,6 +72,10 @@ pub enum Msg {
     Backup(Box<Backup>),
     /// A blocking confirm finished: close it and show the outcome.
     ConfirmDone(Result<String, String>),
+    /// A server check finished.
+    ServerChecked(Result<Server, String>),
+    /// Installing Docker on a server finished; the server is checked again.
+    DockerInstalled(Result<Server, String>),
     /// The password was rotated; show the new URL once.
     Rotated(Box<DatabaseInfo>),
     /// Progress of a running download, shown as a busy toast.
@@ -145,6 +149,8 @@ pub enum Then {
     InstanceSchedule(InstanceBackupSchedule),
     /// Show the URL that creates a GitHub App, and follow its setup.
     GithubSetup(Box<GithubAppSetup>),
+    /// Show a server whose check failed, with what to do about it.
+    ServerDetail(Box<Server>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -472,6 +478,7 @@ pub enum ConfirmAction {
     DeleteNotifyRule(Id),
     DeleteSource(Id),
     RemoveDomain,
+    InstallDocker(Id),
 }
 
 impl ConfirmAction {
@@ -482,6 +489,7 @@ impl ConfirmAction {
             ConfirmAction::RotatePassword(_) => Some("rotating"),
             ConfirmAction::RestoreBackup(..) => Some("restoring"),
             ConfirmAction::CancelDeploy(_) => Some("cancelling"),
+            ConfirmAction::InstallDocker(_) => Some("installing"),
             ConfirmAction::RotateToken => Some("rotating"),
             ConfirmAction::Prune => Some("pruning"),
             ConfirmAction::Update { .. } => Some("downloading"),
@@ -652,6 +660,10 @@ pub enum Overlay {
     /// A GitHub App needs a verified instance domain first; holds the dialog's title.
     DomainNeeded(&'static str),
     Help,
+    /// A server's preflight checklist, problem and fix.
+    ServerDetail(crate::problem::ServerDetail),
+    /// The full text of an error the key bar cut short.
+    ErrorDetail(crate::problem::ErrorDetail),
 }
 
 /// A GitHub App being created with the manifest flow.
@@ -684,6 +696,8 @@ pub struct Toast {
     /// Work in progress: drawn with a spinner instead of a check mark.
     pub busy: bool,
     pub at: Instant,
+    /// The key bar cut the text short on the last draw, so `e` opens it in full.
+    pub truncated: std::cell::Cell<bool>,
 }
 
 /// Results sent from background work, tagged with the connection they were made on so replies
@@ -963,6 +977,7 @@ impl App {
             error: false,
             busy: false,
             at: Instant::now(),
+            truncated: Default::default(),
         });
     }
 
@@ -972,15 +987,17 @@ impl App {
             error: true,
             busy: false,
             at: Instant::now(),
+            truncated: Default::default(),
         });
     }
 
-    fn progress(&mut self, text: impl Into<String>) {
+    pub(crate) fn progress(&mut self, text: impl Into<String>) {
         self.toast = Some(Toast {
             text: text.into(),
             error: false,
             busy: true,
             at: Instant::now(),
+            truncated: Default::default(),
         });
     }
 
@@ -988,11 +1005,10 @@ impl App {
 
     pub fn on_tick(&mut self) {
         self.tick = self.tick.wrapping_add(1);
-        if self
-            .toast
-            .as_ref()
-            .is_some_and(|t| t.at.elapsed() > Duration::from_secs(5))
-        {
+        if self.toast.as_ref().is_some_and(|t| {
+            let keep = if t.truncated.get() { 15 } else { 5 };
+            t.at.elapsed() > Duration::from_secs(keep)
+        }) {
             self.toast = None;
         }
         if self.last_refresh.is_none_or(|t| t.elapsed() >= REFRESH) {
@@ -1350,6 +1366,7 @@ impl App {
                     Then::OpenDeploy(d) => self.open_deploy(*d),
                     Then::ShowKey(s) => self.show_key(&s),
                     Then::InstanceSchedule(s) => self.settings.schedule = Some(s),
+                    Then::ServerDetail(s) => self.open_server_detail(*s),
                     Then::GithubSetup(setup) => {
                         let GithubAppSetup { source, setup_url } = *setup;
                         self.upsert_source(source.clone());
@@ -1360,6 +1377,33 @@ impl App {
                     }
                 }
             }
+            Msg::ServerChecked(Ok(s)) => self.server_checked(s),
+            Msg::ServerChecked(Err(e)) => {
+                if let Some(Overlay::ServerDetail(d)) = &mut self.overlay {
+                    d.busy = None;
+                }
+                self.error(e);
+            }
+            Msg::DockerInstalled(Ok(s)) => {
+                self.refresh();
+                if s.status == ServerStatus::Online {
+                    self.overlay = None;
+                    self.server_checked(s);
+                } else {
+                    self.open_server_detail(s);
+                }
+            }
+            Msg::DockerInstalled(Err(e)) => match &mut self.overlay {
+                Some(Overlay::Confirm(c)) => {
+                    let (head, rest) = e.split_once(": ").unwrap_or((&e, ""));
+                    c.busy = None;
+                    c.error = std::iter::once(head)
+                        .chain(rest.lines().map(str::trim).filter(|l| !l.is_empty()))
+                        .map(str::to_string)
+                        .collect();
+                }
+                _ => self.error(e),
+            },
             Msg::FormError(e) => {
                 if let Some(Overlay::Form(form)) = &mut self.overlay {
                     form.fail(e);
@@ -2374,7 +2418,9 @@ impl App {
             ConfirmAction::DeleteInstanceBackup(_) => "instance backup deleted",
             ConfirmAction::DeleteNotifyChannel(_) => "channel deleted",
             ConfirmAction::DeleteNotifyRule(_) => "rule deleted",
-            ConfirmAction::DeleteSource(_) | ConfirmAction::RemoveDomain => "",
+            ConfirmAction::DeleteSource(_)
+            | ConfirmAction::RemoveDomain
+            | ConfirmAction::InstallDocker(_) => "",
         }
         .to_string();
         match action {
@@ -2417,6 +2463,7 @@ impl App {
                 self.act(ok, |c| async move { c.delete_server(&id).await })
             }
             ConfirmAction::RemoveContext(name) => self.remove_context(&name),
+            ConfirmAction::InstallDocker(id) => self.install_docker(id),
             ConfirmAction::RotateToken => self.rotate_token(),
             ConfirmAction::Prune => {
                 self.spawn(|c| async move {
@@ -2605,14 +2652,6 @@ impl App {
                 Ok(b) => Msg::Backup(Box::new(b)),
                 Err(e) => Msg::Error(format!("{e:#}")),
             }
-        });
-    }
-
-    pub fn check_server(&mut self, server: &Server) {
-        let id = server.id.clone();
-        self.toast(format!("checking {}…", server.name));
-        self.act(format!("{} checked", server.name), |c| async move {
-            c.check_server(&id).await
         });
     }
 
@@ -3597,6 +3636,7 @@ impl App {
                     error: false,
                     busy: false,
                     at: Instant::now(),
+                    truncated: Default::default(),
                 });
             }
             setup.source = s.clone();
@@ -5553,11 +5593,12 @@ impl Request {
             Request::Server(body) => {
                 let s = c.create_server(&body).await?;
                 let s = c.check_server(&s.id).await.unwrap_or(s);
-                let state = match s.status {
-                    ServerStatus::Online => "online",
-                    _ => "added but unreachable · check ssh access",
-                };
-                (format!("{} {state}", s.name), Then::Stay)
+                if s.status == ServerStatus::Online {
+                    let version = s.docker_version.as_deref().unwrap_or("?");
+                    (format!("{} online · docker {version}", s.name), Then::Stay)
+                } else {
+                    (format!("{} added", s.name), Then::ServerDetail(Box::new(s)))
+                }
             }
             Request::Settings(body) => {
                 let s = c.update_settings(&body).await?;
