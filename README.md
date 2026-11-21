@@ -90,11 +90,13 @@ The mouse works too: click rows, tabs, dialog fields and the key hints in the bo
 | Overview | `↑↓` move, `tab` switch pane, `⏎` open, `n` new service, `N` new project, `E` new environment, `d` deploy, `r` restart, `s` stop or start, `l` logs, `/` filter, `S` servers |
 | Service | `1`–`9` or `tab` switch tabs (Overview, Deployments, Logs, Database, Backups, Env, Domains, Volumes, Settings; Database and Backups only for databases), `a` add, `x` remove, `⏎` edit |
 | Database | `v` reveal the password, `c`/`C` copy the internal or public URL, `p` expose on a server port or make internal again, `R` rotate the password |
-| Backups | `b` back up now, `R` restore, `D` download to a local file, `x` delete, `e` edit the daily schedule |
+| Backups | `b` back up now (asks where when storage connections exist), `R` restore, `D` download to a local file, `x` delete, `e` edit the daily schedule and its store |
 | Logs | `f` follow, `/` search, `n`/`N` next or previous match, `e` errors only, `t` timestamps, `w` wrap |
 | Deploy | Live pipeline and build output, `c` cancel, `esc` back (the deploy keeps running) |
-| Servers | `a` add, `c` check, `p` set up the proxy, `x` remove, `X` remove and clean up everything the daemon put there |
-| Settings (`,` anywhere) | The instance (version and updates, public IP, data dir, Docker), the proxy, the API token and SSH key, pruning old images, and the daemon contexts saved on this machine. `u` update, `i` public IP, `m` auto-manage the proxy, `r` restart the proxy, `t` rotate the token, `k` copy the SSH key, `c` prune, `⏎` switch to the selected context, `x` forget it |
+| Servers | `a` add (pick an SSH key or generate one), `K` change a server's key, `c` check, `p` set up the proxy, `x` remove, `X` remove and clean up everything the daemon put there |
+| Secrets (`s` in Settings, or the palette) | `a` add or import, `g` generate an SSH key, `v` reveal (logged), `c` copy the public key, `n` rename, `e` replace the value, `x` delete |
+| Storage (`o` in Settings) | `a` add, `⏎` edit, `t` test, `x` remove |
+| Settings (`,` anywhere) | The instance (version and updates, public IP, data dir, Docker), the proxy, the API token and SSH key, pruning old images, and the daemon contexts saved on this machine. `u` update, `i` public IP, `m` auto-manage the proxy, `r` restart the proxy, `t` rotate the token, `k` copy the SSH key, `c` prune, `⏎` switch to the selected context, `x` forget it. With `tab` on Instance backups: `b` back up now, `e` schedule, `D` download, `x` delete |
 
 ## CLI
 
