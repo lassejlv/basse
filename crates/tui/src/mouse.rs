@@ -266,11 +266,16 @@ fn click(app: &mut App, hit: Hit, double: bool) {
                 press(app, KeyCode::Enter, KeyModifiers::NONE);
             }
         }
-        Hit::Item(i) => {
-            if app.screen == Screen::Secrets {
-                app.select_secret(i);
+        Hit::Item(i) => match app.screen {
+            Screen::Secrets => app.select_secret(i),
+            Screen::Storage => {
+                app.select_storage(i);
+                if double {
+                    press(app, KeyCode::Enter, KeyModifiers::NONE);
+                }
             }
-        }
+            _ => {}
+        },
         Hit::FormChoice(i, choice) => {
             if let Some(Overlay::Form(form)) = app.overlay.as_mut() {
                 form.click(i, Some(choice));

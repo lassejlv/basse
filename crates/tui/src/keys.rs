@@ -46,6 +46,36 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         Screen::Servers => servers(app, key),
         Screen::Settings => settings(app, key),
         Screen::Secrets => secrets(app, key),
+        Screen::Storage => storage(app, key),
+    }
+}
+
+fn storage(app: &mut App, key: KeyEvent) {
+    let row = app.storage.row;
+    match key.code {
+        KeyCode::Esc => app.close_storage(),
+        KeyCode::Up | KeyCode::Char('k') => app.select_storage(row.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') => app.select_storage(row + 1),
+        KeyCode::Char('a') => app.form_storage(false),
+        KeyCode::Enter | KeyCode::Char('e') => app.form_storage(true),
+        KeyCode::Char('t') => app.test_storage(),
+        KeyCode::Char('x') | KeyCode::Delete => {
+            let Some(s) = app.storage.selected().cloned() else {
+                return;
+            };
+            ask_to(
+                app,
+                &format!("Delete storage · {}", s.name),
+                format!(
+                    "Delete the connection {}? The daemon refuses while backups or schedules still use it.",
+                    s.name
+                ),
+                true,
+                ConfirmAction::DeleteStorage(s.id),
+                "delete",
+            );
+        }
+        _ => {}
     }
 }
 
@@ -231,6 +261,7 @@ pub fn run_command(app: &mut App, cmd: Command) {
         }
         Command::Settings => app.open_settings(),
         Command::Secrets => app.open_secrets(),
+        Command::Storage => app.open_storage(),
         Command::AddServer => app.form_server(),
         Command::SetupProxy => match app.local_server().cloned() {
             Some(s) => app.setup_proxy(&s),
@@ -889,6 +920,7 @@ fn settings(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('i') => app.form_public_ip(),
         KeyCode::Char('s') => app.open_secrets(),
+        KeyCode::Char('o') => app.open_storage(),
         KeyCode::Char('m') => {
             let on = !s.manage_proxy;
             app.change_settings(

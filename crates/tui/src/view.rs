@@ -39,6 +39,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Servers => servers(frame, body, app),
         Screen::Settings => settings(frame, body, app),
         Screen::Secrets => secrets(frame, body, app),
+        Screen::Storage => storage(frame, body, app),
     }
     key_bar(frame, keys, app);
     if app.overlay.is_some() {
@@ -343,6 +344,13 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             keys.extend([("n", "rename"), ("e", "replace value"), ("x", "delete")]);
             keys
         }
+        Screen::Storage => vec![
+            ("↑↓", "move"),
+            ("a", "add"),
+            ("⏎", "edit"),
+            ("t", "test"),
+            ("x", "delete"),
+        ],
     };
     let right = match app.screen {
         Screen::Overview => right,
@@ -1542,8 +1550,23 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         .map(Vec::as_slice)
         .unwrap_or_default();
     let total: u64 = backups.iter().map(|b| b.size_bytes).sum();
+    let where_of = |b: &Backup| match &b.storage_id {
+        None => "local".to_string(),
+        Some(id) => app.storage.name(id).unwrap_or("s3").to_string(),
+    };
+    let mut places: Vec<String> = backups.iter().map(where_of).collect();
+    places.sort();
+    places.dedup();
+    let places = match places.as_slice() {
+        [] => "local".to_string(),
+        [one] => one.clone(),
+        many => {
+            let (last, rest) = many.split_last().unwrap_or((&many[0], &[]));
+            format!("{} and {last}", rest.join(", "))
+        }
+    };
     let note = format!(
-        "{} backup{} · {} · local storage",
+        "{} backup{} · {} · {places}",
         backups.len(),
         if backups.len() == 1 { "" } else { "s" },
         util::bytes(total)
@@ -1594,6 +1617,14 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
                 ])),
                 Cell::from(Span::styled(b.trigger.as_str(), theme::muted())),
                 Cell::from(size),
+                Cell::from(Span::styled(
+                    where_of(b),
+                    if b.storage_id.is_some() {
+                        theme::text()
+                    } else {
+                        theme::muted()
+                    },
+                )),
                 Cell::from(file),
             ])
             .style(if selected {
@@ -1606,12 +1637,13 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
     ListPanel {
         heading: "Backups",
         note: &note,
-        header: Row::new(["", "CREATED", "TRIGGER", "SIZE", "FILE"]),
+        header: Row::new(["", "CREATED", "TRIGGER", "SIZE", "WHERE", "FILE"]),
         widths: vec![
             Constraint::Length(2),
             Constraint::Length(26),
             Constraint::Length(10),
             Constraint::Length(6),
+            Constraint::Length(16),
             Constraint::Fill(1),
         ],
         empty: "no backups yet · b to back up now",
@@ -1619,7 +1651,7 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
     .render(frame, main, rows, view.row);
 
     let [sched_a, _] =
-        Layout::vertical([Constraint::Length(10), Constraint::Fill(1)]).areas(rail_area);
+        Layout::vertical([Constraint::Length(11), Constraint::Fill(1)]).areas(rail_area);
     let block = panel(title("Schedule", false), None, false);
     let inner = inside(&block, sched_a);
     frame.render_widget(block, sched_a);
@@ -1664,8 +1696,19 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
             "keep",
             vec![
                 Span::styled(s.keep.to_string(), theme::text()),
-                Span::styled("  scheduled backups", theme::muted()),
+                Span::styled("  per store", theme::muted()),
             ],
+            w,
+        ),
+        kv(
+            "store",
+            vec![match &s.storage_id {
+                None => Span::styled("local", theme::muted()),
+                Some(id) => Span::styled(
+                    app.storage.name(id).unwrap_or("s3").to_string(),
+                    theme::text(),
+                ),
+            }],
             w,
         ),
         kv(
@@ -1681,8 +1724,8 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         Line::styled("manual backups are never pruned", theme::muted()),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
-    if inner.height >= 6 {
-        hint_at(frame, inner.x, inner.y + 5, "e", "edit schedule");
+    if inner.height >= 7 {
+        hint_at(frame, inner.x, inner.y + 6, "e", "edit schedule");
     }
 }
 
@@ -2977,10 +3020,11 @@ fn settings(frame: &mut Frame, area: Rect, app: &App) {
         .spacing(1)
         .areas(row3);
     contexts_panel(frame, contexts, app);
-    let [secrets, servers] = Layout::vertical([Constraint::Fill(1); 2])
+    let [secrets, storage, servers] = Layout::vertical([Constraint::Fill(1); 3])
         .spacing(1)
         .areas(servers);
     secrets_summary(frame, secrets, app);
+    storage_summary(frame, storage, app);
     servers_summary(frame, servers, app);
 }
 
@@ -2990,6 +3034,48 @@ fn panel_link(frame: &mut Frame, inner: Rect, key: &'static str, label: &str) {
         return;
     }
     hint_at(frame, inner.x, inner.bottom() - 1, key, label);
+}
+
+fn storage_summary(frame: &mut Frame, area: Rect, app: &App) {
+    let block = panel(title("Storage", false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let list = &app.storage.list;
+    let room = inner.height.saturating_sub(2) as usize;
+    let rows = lines_of(inner, room as u16);
+    if list.is_empty()
+        && let Some(row) = rows.first()
+    {
+        setting_row(
+            frame,
+            *row,
+            "none yet",
+            vec![Span::styled(
+                "backups stay in the data directory",
+                theme::muted(),
+            )],
+            None,
+        );
+    }
+    for (row, s) in rows.iter().zip(list) {
+        let (glyph, label, style) = crate::picker::test_state(s);
+        let detail = match &s.last_test {
+            Some(t) if !t.ok => t.error.clone().unwrap_or_default(),
+            _ => String::new(),
+        };
+        setting_row(
+            frame,
+            *row,
+            &truncate(&s.name, SETTING_KEY_W - 1),
+            vec![
+                Span::styled(format!("{glyph} "), style),
+                Span::styled(label, theme::text()),
+                Span::styled(format!("  {detail}"), theme::muted()),
+            ],
+            None,
+        );
+    }
+    panel_link(frame, inner, "o", "open storage");
 }
 
 fn secrets_summary(frame: &mut Frame, area: Rect, app: &App) {
@@ -3642,5 +3728,241 @@ fn secret_detail(frame: &mut Frame, area: Rect, app: &App) {
                 None,
             );
         }
+    }
+}
+
+// Storage
+
+fn storage(frame: &mut Frame, area: Rect, app: &App) {
+    let view = &app.storage;
+    let [list, detail] = Layout::vertical([Constraint::Fill(1), Constraint::Length(9)])
+        .spacing(1)
+        .areas(area);
+    let block = panel(
+        title("Storage", true),
+        Some(Line::styled(
+            "S3-compatible buckets for backups",
+            theme::muted(),
+        )),
+        true,
+    );
+    let inner = inside(&block, list);
+    frame.render_widget(block, list);
+    if view.list.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("no storage connections yet · ", theme::muted()),
+                Span::styled("a", theme::accent()),
+                Span::styled(
+                    " to add an S3, R2, B2 or MinIO bucket; backups stay in the data directory until then",
+                    theme::muted(),
+                ),
+            ])),
+            inner,
+        );
+    } else {
+        let rows: Vec<Row> = view
+            .list
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let selected = i == view.row;
+                let (glyph, label, style) = crate::picker::test_state(s);
+                let test = if view.testing.contains(&s.id) {
+                    Line::from(Span::styled(
+                        format!("{} testing…", util::spinner(app.tick)),
+                        theme::fg(theme::INFO),
+                    ))
+                } else {
+                    match &s.last_test {
+                        Some(t) if !t.ok => Line::from(vec![
+                            Span::styled("failed ", theme::fg(theme::ERR)),
+                            Span::styled(
+                                format!(
+                                    "{} · {}",
+                                    t.error.as_deref().unwrap_or("no reason given"),
+                                    util::ago(t.at)
+                                ),
+                                theme::muted(),
+                            ),
+                        ]),
+                        _ => Line::styled(label, theme::muted()),
+                    }
+                };
+                Row::new(vec![
+                    Cell::from(Span::styled(glyph, style)),
+                    Cell::from(Span::styled(
+                        s.name.clone(),
+                        if selected {
+                            theme::accent()
+                        } else {
+                            theme::text()
+                        },
+                    )),
+                    Cell::from(Span::styled(s.endpoint.clone(), theme::muted())),
+                    Cell::from(Span::styled(crate::picker::bucket_path(s), theme::text())),
+                    Cell::from(test),
+                ])
+                .style(if selected {
+                    theme::selected()
+                } else {
+                    Style::new()
+                })
+            })
+            .collect();
+        let offset = scroll_offset(view.row, inner.height.saturating_sub(1) as usize);
+        row_hits(inner, rows.len(), offset, Hit::Item);
+        frame.render_widget(
+            Table::new(
+                rows.into_iter().skip(offset),
+                [
+                    Constraint::Length(2),
+                    Constraint::Length(18),
+                    Constraint::Fill(1),
+                    Constraint::Length(28),
+                    Constraint::Length(40),
+                ],
+            )
+            .header(
+                Row::new(["", "NAME", "ENDPOINT", "BUCKET / PREFIX", "LAST TEST"])
+                    .style(theme::muted()),
+            )
+            .column_spacing(2),
+            inner,
+        );
+    }
+    storage_detail(frame, detail, app);
+}
+
+fn storage_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(s) = app.storage.selected() else {
+        frame.render_widget(panel(title("storage", false), None, false), area);
+        return;
+    };
+    let block = panel(title(&s.name, false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let [left, right] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)])
+        .spacing(4)
+        .areas(inner);
+    let text = |t: String| vec![Span::styled(t, theme::text())];
+    let creds = app
+        .secrets
+        .list
+        .iter()
+        .find(|c| c.id == s.credentials_secret_id);
+    let prefix = if s.path_prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", s.path_prefix)
+    };
+    let rows = lines_of(left, 6);
+    let lines: [(&str, Vec<Span<'static>>); 6] = [
+        ("endpoint", text(s.endpoint.clone())),
+        ("region", text(s.region.clone())),
+        ("bucket", text(s.bucket.clone())),
+        (
+            "path prefix",
+            vec![
+                Span::styled(
+                    if s.path_prefix.is_empty() {
+                        "none".to_string()
+                    } else {
+                        s.path_prefix.clone()
+                    },
+                    theme::text(),
+                ),
+                Span::styled(
+                    format!("  files go to {prefix}<service id>/<file>"),
+                    theme::muted(),
+                ),
+            ],
+        ),
+        (
+            "addressing",
+            vec![
+                Span::styled(
+                    if s.path_style {
+                        "path-style"
+                    } else {
+                        "virtual-hosted"
+                    },
+                    theme::text(),
+                ),
+                Span::styled(
+                    if s.path_style {
+                        "  <endpoint>/<bucket>"
+                    } else {
+                        "  <bucket>.<endpoint>"
+                    },
+                    theme::muted(),
+                ),
+            ],
+        ),
+        (
+            "credentials",
+            match creds {
+                Some(c) => vec![
+                    Span::styled(c.name.clone(), theme::text()),
+                    Span::styled(
+                        format!("  {}", c.public_part.clone().unwrap_or_default()),
+                        theme::muted(),
+                    ),
+                ],
+                None => vec![Span::styled("unknown secret", theme::fg(theme::ERR))],
+            },
+        ),
+    ];
+    for (row, (k, v)) in rows.iter().zip(lines) {
+        setting_row(frame, *row, k, v, None);
+    }
+    let rows = lines_of(right, 4);
+    let test = match &s.last_test {
+        _ if app.storage.testing.contains(&s.id) => vec![Span::styled(
+            format!("{} testing…", util::spinner(app.tick)),
+            theme::fg(theme::INFO),
+        )],
+        None => vec![Span::styled("never tested", theme::muted())],
+        Some(t) if t.ok => vec![
+            Span::styled("● ", theme::fg(theme::OK)),
+            Span::styled("ok", theme::text()),
+            Span::styled(
+                format!(
+                    "  put, get and delete in {}ms · {}",
+                    t.latency_ms.unwrap_or_default(),
+                    util::ago(t.at)
+                ),
+                theme::muted(),
+            ),
+        ],
+        Some(t) => vec![
+            Span::styled("✕ ", theme::fg(theme::ERR)),
+            Span::styled("failed", theme::text()),
+            Span::styled(format!("  {}", util::ago(t.at)), theme::muted()),
+        ],
+    };
+    if let Some(r) = rows.first() {
+        setting_row(frame, *r, "last test", test, Some(("t", "test")));
+    }
+    if let (Some(r), Some(err)) = (
+        rows.get(1),
+        s.last_test.as_ref().and_then(|t| t.error.clone()),
+    ) {
+        setting_row(
+            frame,
+            *r,
+            "",
+            vec![Span::styled(err, theme::fg(theme::ERR))],
+            None,
+        );
+    }
+    if let Some(r) = rows.get(2) {
+        setting_row(
+            frame,
+            *r,
+            "created",
+            text(database::created(s.created_at, chrono::Utc::now())),
+            None,
+        );
     }
 }

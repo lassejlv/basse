@@ -158,6 +158,10 @@ pub enum FormKind {
         secret_id: Id,
         kind: common::SecretKind,
     },
+    AddStorage,
+    EditStorage {
+        storage_id: Id,
+    },
 }
 
 pub enum FormAction {
@@ -352,7 +356,7 @@ impl Form {
         self.refresh();
     }
 
-    fn move_focus(&mut self, step: isize) {
+    pub fn move_focus(&mut self, step: isize) {
         let n = self.fields.len() as isize;
         let start = (self.focus as isize + step).rem_euclid(n) as usize;
         self.focus = self.next_visible(start, step);

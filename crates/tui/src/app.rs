@@ -65,6 +65,9 @@ pub enum Msg {
     Revealed(Box<RevealedSecret>),
     /// A key generated from the picker.
     PickerKey(Result<Box<Secret>, String>),
+    Storages(Vec<StorageConnection>),
+    /// A storage test finished.
+    StorageTested(Id, Result<StorageTest, String>),
 }
 
 /// Where to go after a form succeeds.
@@ -86,6 +89,7 @@ pub enum Screen {
     Servers,
     Settings,
     Secrets,
+    Storage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -328,6 +332,7 @@ pub enum ConfirmAction {
     RestoreBackup(Id, String),
     DeleteBackup(Id),
     DeleteSecret(Id),
+    DeleteStorage(Id),
 }
 
 impl ConfirmAction {
@@ -340,7 +345,7 @@ impl ConfirmAction {
             ConfirmAction::RotateToken => Some("rotating"),
             ConfirmAction::Prune => Some("pruning"),
             ConfirmAction::Update { .. } => Some("downloading"),
-            ConfirmAction::DeleteSecret(_) => Some("deleting"),
+            ConfirmAction::DeleteSecret(_) | ConfirmAction::DeleteStorage(_) => Some("deleting"),
             _ => None,
         }
     }
@@ -383,6 +388,7 @@ pub enum Command {
     Servers,
     Settings,
     Secrets,
+    Storage,
     AddServer,
     SetupProxy,
     Refresh,
@@ -391,7 +397,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 16] = [
+    pub const ALL: [Command; 17] = [
         Command::Deploy,
         Command::Restart,
         Command::Stop,
@@ -403,6 +409,7 @@ impl Command {
         Command::Servers,
         Command::Settings,
         Command::Secrets,
+        Command::Storage,
         Command::AddServer,
         Command::SetupProxy,
         Command::Refresh,
@@ -423,6 +430,7 @@ impl Command {
             Command::Servers => "servers",
             Command::Settings => "settings",
             Command::Secrets => "secrets",
+            Command::Storage => "storage",
             Command::AddServer => "add server",
             Command::SetupProxy => "set up proxy on this server",
             Command::Refresh => "refresh",
@@ -442,7 +450,7 @@ impl Command {
             Command::NewEnvironment => "E",
             Command::Servers => "S",
             Command::Settings => ",",
-            Command::Secrets | Command::AddServer | Command::SetupProxy => "",
+            Command::Secrets | Command::Storage | Command::AddServer | Command::SetupProxy => "",
             Command::Refresh => "ctrl+r",
             Command::Help => "?",
             Command::Quit => "q",
@@ -545,6 +553,30 @@ impl SecretsView {
     }
 }
 
+/// The Storage screen: S3-compatible buckets for backups.
+#[derive(Default)]
+pub struct StorageView {
+    pub list: Vec<StorageConnection>,
+    pub row: usize,
+    /// Connections being tested right now.
+    pub testing: HashSet<Id>,
+    /// Screen to return to on esc.
+    pub back: Option<Screen>,
+}
+
+impl StorageView {
+    pub fn selected(&self) -> Option<&StorageConnection> {
+        self.list.get(self.row)
+    }
+
+    pub fn name(&self, id: &str) -> Option<&str> {
+        self.list
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.name.as_str())
+    }
+}
+
 pub struct App {
     pub client: Client,
     pub context: String,
@@ -569,6 +601,7 @@ pub struct App {
     pub server_row: usize,
     pub settings: SettingsView,
     pub secrets: SecretsView,
+    pub storage: StorageView,
     /// Version the daemon is restarting into after an update.
     pub updating: Option<String>,
     /// No new requests while the token is being rotated: the old one is about to stop working.
@@ -606,6 +639,7 @@ impl App {
             server_row: 0,
             settings: SettingsView::default(),
             secrets: SecretsView::default(),
+            storage: StorageView::default(),
             updating: None,
             rotating: false,
             overlay: None,
@@ -745,14 +779,19 @@ impl App {
         }
         if matches!(
             self.screen,
-            Screen::Servers | Screen::Settings | Screen::Secrets
+            Screen::Servers | Screen::Settings | Screen::Secrets | Screen::Storage
         ) {
             self.load_secrets();
+        }
+        if matches!(self.screen, Screen::Settings | Screen::Storage)
+            || self.service.as_ref().is_some_and(|v| v.database)
+        {
+            self.load_storages();
         }
         let ids: Vec<Id> = match self.screen {
             Screen::Overview => self.env_services().iter().map(|s| s.id.clone()).collect(),
             Screen::Service | Screen::Deploy => self.service.iter().map(|s| s.id.clone()).collect(),
-            Screen::Servers | Screen::Settings | Screen::Secrets => Vec::new(),
+            Screen::Servers | Screen::Settings | Screen::Secrets | Screen::Storage => Vec::new(),
         };
         for id in ids {
             self.load_stats(&id);
@@ -772,6 +811,15 @@ impl App {
                 self.load_backups(&id);
             }
         }
+    }
+
+    pub fn load_storages(&self) {
+        self.spawn(|c| async move {
+            match c.storages().await {
+                Ok(s) => Msg::Storages(s),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
     }
 
     pub fn load_secrets(&self) {
@@ -1040,20 +1088,21 @@ impl App {
                 if matches!(
                     &self.overlay,
                     Some(Overlay::Confirm(Confirm {
-                        action: ConfirmAction::DeleteSecret(_),
+                        action: ConfirmAction::DeleteSecret(_) | ConfirmAction::DeleteStorage(_),
                         ..
                     }))
                 ) =>
             {
-                let hint = match self.secrets.selected().map(|s| s.kind) {
-                    Some(SecretKind::SshKey) => {
-                        "Pick another key for those servers first: Servers, select the server, K change key."
-                    }
-                    _ => "Point those at other credentials first, on the Storage screen.",
+                let hint = match (self.screen, self.secrets.selected().map(|s| s.kind)) {
+                    (Screen::Storage, _) => None,
+                    (_, Some(SecretKind::SshKey)) => Some(
+                        "Pick another key for those servers first: Servers, select the server, K change key.",
+                    ),
+                    _ => Some("Point those at other credentials first, on the Storage screen."),
                 };
                 if let Some(Overlay::Confirm(c)) = &mut self.overlay {
                     c.busy = None;
-                    c.error = vec![e, hint.into()];
+                    c.error = std::iter::once(e).chain(hint.map(String::from)).collect();
                 }
             }
             Msg::ConfirmDone(result) => {
@@ -1093,10 +1142,7 @@ impl App {
                     .and_then(|id| view.list.iter().position(|s| s.id == id))
                     .unwrap_or(view.row)
                     .min(view.list.len().saturating_sub(1));
-                if let Some(Overlay::Picker(p)) = &mut self.overlay {
-                    let key = self.info.as_ref().and_then(|i| i.ssh_public_key.clone());
-                    p.fill(&self.secrets.list, key.as_deref());
-                }
+                self.refill_picker();
             }
             Msg::Revealed(r) => {
                 if self.secrets.selected().map(|s| &s.id) == Some(&r.secret.id) {
@@ -1112,15 +1158,48 @@ impl App {
             Msg::PickerKey(Ok(s)) => {
                 let name = s.name.clone();
                 self.secrets.list.push((*s).clone());
+                self.refill_picker();
                 if let Some(Overlay::Picker(p)) = &mut self.overlay {
                     p.busy = false;
-                    let key = self.info.as_ref().and_then(|i| i.ssh_public_key.clone());
-                    p.fill(&self.secrets.list, key.as_deref());
                     p.select(&s.id);
                 }
                 self.toast(format!("generated {name} · c copies its public key"));
                 self.load_secrets();
             }
+            Msg::Storages(list) => {
+                let view = &mut self.storage;
+                let selected = view.selected().map(|s| s.id.clone());
+                view.list = list;
+                view.row = selected
+                    .and_then(|id| view.list.iter().position(|s| s.id == id))
+                    .unwrap_or(view.row)
+                    .min(view.list.len().saturating_sub(1));
+                self.refill_picker();
+            }
+            Msg::StorageTested(id, result) => {
+                self.storage.testing.remove(&id);
+                let name = self.storage.name(&id).unwrap_or("storage").to_string();
+                match result {
+                    Ok(t) if t.ok => self.toast(format!(
+                        "{name} ok · put, get and delete in {}ms",
+                        t.latency_ms.unwrap_or_default()
+                    )),
+                    Ok(t) => self.error(format!(
+                        "{name} failed: {}",
+                        t.error.as_deref().unwrap_or("no reason given")
+                    )),
+                    Err(e) => self.error(e),
+                }
+                self.load_storages();
+            }
+        }
+    }
+
+    /// Rebuild an open picker's list from the latest secrets and storages.
+    fn refill_picker(&mut self) {
+        let key = self.daemon_key();
+        if let Some(Overlay::Picker(p)) = &mut self.overlay {
+            p.fill(&self.secrets.list, &self.storage.list, key.as_deref());
         }
     }
 
@@ -1463,7 +1542,8 @@ impl App {
             ConfirmAction::PublicPort(..)
             | ConfirmAction::RotatePassword(_)
             | ConfirmAction::RestoreBackup(..)
-            | ConfirmAction::DeleteSecret(_) => "",
+            | ConfirmAction::DeleteSecret(_)
+            | ConfirmAction::DeleteStorage(_) => "",
         }
         .to_string();
         match action {
@@ -1568,6 +1648,13 @@ impl App {
                     .map(|_| "secret deleted".to_string());
                 Msg::ConfirmDone(result.map_err(|e| format!("{e:#}")))
             }),
+            ConfirmAction::DeleteStorage(id) => self.spawn(|c| async move {
+                let result = c
+                    .delete_storage(&id)
+                    .await
+                    .map(|_| "storage deleted".to_string());
+                Msg::ConfirmDone(result.map_err(|e| format!("{e:#}")))
+            }),
             ConfirmAction::RestoreBackup(id, file) => self.spawn(|c| async move {
                 let result = c
                     .restore_backup(&id)
@@ -1602,11 +1689,45 @@ impl App {
         self.toast(format!("copied {what}"));
     }
 
+    /// "b" on the Backups tab: straight to the data directory, or ask where when there are
+    /// storage connections.
     pub fn backup_now(&mut self, id: &str, name: &str) {
-        self.progress(format!("backing up {name}…"));
+        if self.storage.list.is_empty() {
+            return self.start_backup(id, name, None);
+        }
+        let scheduled = self.schedules.get(id).and_then(|s| s.storage_id.clone());
+        self.open_picker(Picker {
+            title: "Back up now".into(),
+            subtitle: name.to_string(),
+            kind: PickKind::Store,
+            items: Vec::new(),
+            row: 0,
+            target: PickFor::BackupNow {
+                service_id: id.to_string(),
+                name: name.to_string(),
+            },
+            current: None,
+            note: vec![Line::styled(
+                "Files go to <prefix>/<service id>/<file> in the bucket. Restore and download work from any store.",
+                theme::muted(),
+            )],
+            busy: false,
+        });
+        if let (Some(Overlay::Picker(p)), Some(s)) = (&mut self.overlay, scheduled) {
+            p.select(&s);
+        }
+    }
+
+    fn start_backup(&mut self, id: &str, name: &str, storage: Option<Id>) {
+        let place = storage
+            .as_deref()
+            .and_then(|s| self.storage.name(s))
+            .map(|s| format!(" to {s}"))
+            .unwrap_or_default();
+        self.progress(format!("backing up {name}{place}…"));
         let id = id.to_string();
         self.spawn(|c| async move {
-            match c.create_backup(&id, None).await {
+            match c.create_backup(&id, storage.as_deref()).await {
                 Ok(b) => Msg::Backup(Box::new(b)),
                 Err(e) => Msg::Error(format!("{e:#}")),
             }
@@ -2018,17 +2139,144 @@ impl App {
         self.overlay = Some(Overlay::Form(form));
     }
 
+    // Storage
+
+    pub fn open_storage(&mut self) {
+        if self.screen != Screen::Storage {
+            self.storage.back = Some(self.screen);
+        }
+        self.screen = Screen::Storage;
+        self.refresh();
+    }
+
+    pub fn close_storage(&mut self) {
+        self.screen = match self.storage.back.take() {
+            Some(Screen::Service) if self.service.is_some() => Screen::Service,
+            Some(back @ (Screen::Servers | Screen::Settings | Screen::Secrets)) => back,
+            _ => Screen::Overview,
+        };
+        self.refresh();
+    }
+
+    pub fn select_storage(&mut self, row: usize) {
+        self.storage.row = row.min(self.storage.list.len().saturating_sub(1));
+    }
+
+    /// Puts, reads and deletes a probe object; the result lands in the list and a toast.
+    pub fn test_storage(&mut self) {
+        let Some(s) = self.storage.selected() else {
+            return;
+        };
+        let (id, name) = (s.id.clone(), s.name.clone());
+        if !self.storage.testing.insert(id.clone()) {
+            return;
+        }
+        self.progress(format!("testing {name}…"));
+        self.spawn(|c| async move {
+            let result = c.test_storage(&id).await.map_err(|e| format!("{e:#}"));
+            Msg::StorageTested(id, result)
+        });
+    }
+
+    /// A pick field for where backups go: local or a storage connection.
+    fn store_field(&self, id: Option<&str>) -> Field {
+        let storage = id.and_then(|id| self.storage.list.iter().find(|s| s.id == id));
+        let mut field = Field::pick(
+            "store",
+            "store",
+            id.unwrap_or_default(),
+            storage.map_or("local".to_string(), |s| s.name.clone()),
+        );
+        field.placeholder = storage.map_or("the data directory".into(), crate::picker::bucket_path);
+        field
+    }
+
+    /// Add a storage connection, or edit the selected one.
+    pub fn form_storage(&mut self, edit: bool) {
+        let existing = if edit {
+            match self.storage.selected() {
+                Some(s) => Some(s.clone()),
+                None => return,
+            }
+        } else {
+            None
+        };
+        let s = existing.as_ref();
+        let get = |f: fn(&StorageConnection) -> String| s.map(f).unwrap_or_default();
+        let creds_id = get(|s| s.credentials_secret_id.clone());
+        let creds = self
+            .secrets
+            .list
+            .iter()
+            .find(|c| c.id == creds_id)
+            .or_else(|| {
+                self.secrets
+                    .list
+                    .iter()
+                    .find(|c| !edit && c.kind == SecretKind::S3Credentials)
+            });
+        let mut credentials = Field::pick(
+            "credentials",
+            "credentials",
+            creds.map(|c| c.id.clone()).unwrap_or_default(),
+            creds.map_or("none".to_string(), |c| c.name.clone()),
+        );
+        credentials.placeholder = creds
+            .and_then(|c| c.public_part.clone())
+            .unwrap_or_else(|| "pick s3 credentials".into());
+        let form = Form::new(
+            match s {
+                Some(s) => FormKind::EditStorage {
+                    storage_id: s.id.clone(),
+                },
+                None => FormKind::AddStorage,
+            },
+            if edit { "Edit storage" } else { "Add storage" },
+            vec![
+                Field::text("name", "name")
+                    .value(get(|s| s.name.clone()))
+                    .placeholder("r2-backups"),
+                Field::text("endpoint", "endpoint")
+                    .value(get(|s| s.endpoint.clone()))
+                    .placeholder("https://<account>.r2.cloudflarestorage.com")
+                    .hint("S3 API base URL"),
+                Field::text("region", "region")
+                    .value(get(|s| s.region.clone()))
+                    .placeholder("us-east-1")
+                    .hint("auto for R2"),
+                Field::text("bucket", "bucket").value(get(|s| s.bucket.clone())),
+                Field::text("prefix", "path prefix")
+                    .value(get(|s| s.path_prefix.clone()))
+                    .hint("optional"),
+                Field::toggle("path_style", "path-style", s.is_some_and(|s| s.path_style))
+                    .hint("MinIO needs it on"),
+                credentials,
+            ],
+        )
+        .subtitle(s.map_or("S3-compatible".to_string(), |s| s.name.clone()))
+        .note(vec![
+            "Credentials are s3_credentials secrets; add them on the Secrets screen first.".into(),
+            "The connection is tested after it is saved.".into(),
+        ])
+        .submit(if edit { "save & test" } else { "add & test" }, None);
+        self.overlay = Some(Overlay::Form(form));
+    }
+
     // Pickers
 
     fn daemon_key(&self) -> Option<String> {
         self.info.as_ref().and_then(|i| i.ssh_public_key.clone())
     }
 
-    fn open_picker(&mut self, mut picker: Picker) {
-        let key = self.daemon_key();
-        picker.fill(&self.secrets.list, key.as_deref());
+    fn open_picker(&mut self, picker: Picker) {
+        let store = picker.kind == PickKind::Store;
         self.overlay = Some(Overlay::Picker(picker));
-        self.load_secrets();
+        self.refill_picker();
+        if store {
+            self.load_storages();
+        } else {
+            self.load_secrets();
+        }
     }
 
     /// "k" on the Servers screen: the key a server connects with.
@@ -2074,9 +2322,10 @@ impl App {
             return;
         };
         let current = Some(form.raw(key)).filter(|v| !v.is_empty());
-        let (kind, title) = match (&form.kind, key) {
-            (FormKind::AddServer, _) => (PickKind::SshKey, "SSH key"),
-            _ => (PickKind::S3Credentials, "Credentials"),
+        let (kind, title) = match key {
+            "ssh_key" => (PickKind::SshKey, "SSH key"),
+            "credentials" => (PickKind::S3Credentials, "Credentials"),
+            _ => (PickKind::Store, "Store"),
         };
         let subtitle = form.title.to_lowercase();
         let note = match kind {
@@ -2090,6 +2339,10 @@ impl App {
             ])],
             PickKind::S3Credentials => vec![Line::styled(
                 "S3 credentials secrets; add them on the Secrets screen.",
+                theme::muted(),
+            )],
+            PickKind::Store => vec![Line::styled(
+                "Storage connections are managed on the Storage screen (o in Settings).",
                 theme::muted(),
             )],
         };
@@ -2138,6 +2391,7 @@ impl App {
             p.busy = true;
             let base = match &p.target {
                 PickFor::ServerKey { server, .. } => server.clone(),
+                PickFor::BackupNow { name, .. } => name.clone(),
                 PickFor::Field(form, _) => Some(form.get("name"))
                     .filter(|n| !n.is_empty())
                     .unwrap_or("server".into()),
@@ -2164,7 +2418,12 @@ impl App {
                     field.shown = name;
                     field.placeholder = detail;
                 }
+                form.error = None;
+                form.move_focus(1);
                 self.overlay = Some(Overlay::Form(*form));
+            }
+            PickFor::BackupNow { service_id, name } => {
+                self.start_backup(&service_id, &name, id);
             }
             PickFor::ServerKey { server_id, server } => {
                 if id == p.current {
@@ -2529,6 +2788,7 @@ impl App {
     pub fn form_schedule(&mut self) {
         let Some(view) = &self.service else { return };
         let s = self.schedules.get(&view.id).cloned().unwrap_or_default();
+        let store = self.store_field(s.storage_id.as_deref());
         let name = view
             .detail
             .as_ref()
@@ -2544,7 +2804,8 @@ impl App {
                 Field::text("hour", "hour (UTC)").value(s.hour_utc.to_string()),
                 Field::text("keep", "keep")
                     .value(s.keep.to_string())
-                    .hint("scheduled backups"),
+                    .hint("per store"),
+                store,
             ],
         )
         .subtitle(name)
@@ -2793,6 +3054,7 @@ enum Request {
     Secret(CreateSecret),
     GenerateKey(String),
     UpdateSecret(Id, UpdateSecret),
+    Storage(Option<Id>, CreateStorage),
 }
 
 impl Request {
@@ -2903,6 +3165,32 @@ impl Request {
                     format!("value of {} replaced", s.name)
                 };
                 (toast, Then::Stay)
+            }
+            Request::Storage(id, body) => {
+                let s = match id {
+                    Some(id) => {
+                        let update = UpdateStorage {
+                            name: Some(body.name),
+                            endpoint: Some(body.endpoint),
+                            region: Some(body.region),
+                            bucket: Some(body.bucket),
+                            path_prefix: Some(body.path_prefix),
+                            path_style: Some(body.path_style),
+                            credentials_secret_id: Some(body.credentials_secret_id),
+                        };
+                        c.update_storage(&id, &update).await?
+                    }
+                    None => c.create_storage(&body).await?,
+                };
+                let test = match c.test_storage(&s.id).await {
+                    Ok(t) if t.ok => format!("test ok {}ms", t.latency_ms.unwrap_or_default()),
+                    Ok(t) => format!(
+                        "test failed: {}",
+                        t.error.as_deref().unwrap_or("no reason given")
+                    ),
+                    Err(e) => format!("test failed: {e:#}"),
+                };
+                (format!("{} saved · {test}", s.name), Then::Stay)
             }
             Request::Schedule(id, body) => {
                 let s = c.set_backup_schedule(&id, &body).await?;
@@ -3185,6 +3473,7 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                 form.on("enabled"),
                 &form.get("hour"),
                 &form.get("keep"),
+                Some(form.get("store")).filter(|s| !s.is_empty()),
             )?,
         ),
         FormKind::AddSecret => {
@@ -3195,6 +3484,41 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
             })
         }
         FormKind::GenerateKey => Request::GenerateKey(named("name")?),
+        FormKind::AddStorage | FormKind::EditStorage { .. } => {
+            let endpoint = form.get("endpoint");
+            if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                return Err("endpoint must start with https:// or http://".into());
+            }
+            let bucket = form.get("bucket");
+            if bucket.is_empty() {
+                return Err("bucket is required".into());
+            }
+            let credentials = form.get("credentials");
+            if credentials.is_empty() {
+                return Err("pick s3 credentials (⏎ on credentials)".into());
+            }
+            let region = form.get("region");
+            let id = match &form.kind {
+                FormKind::EditStorage { storage_id } => Some(storage_id.clone()),
+                _ => None,
+            };
+            Request::Storage(
+                id,
+                CreateStorage {
+                    name: named("name")?,
+                    endpoint: endpoint.trim_end_matches('/').to_string(),
+                    region: if region.is_empty() {
+                        "us-east-1".into()
+                    } else {
+                        region
+                    },
+                    bucket,
+                    path_prefix: form.get("prefix").trim_matches('/').to_string(),
+                    path_style: form.on("path_style"),
+                    credentials_secret_id: credentials,
+                },
+            )
+        }
         FormKind::RenameSecret { secret_id } => Request::UpdateSecret(
             secret_id.clone(),
             UpdateSecret {

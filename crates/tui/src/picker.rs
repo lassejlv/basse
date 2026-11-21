@@ -4,7 +4,7 @@ use crate::form::Form;
 use crate::mouse::{self, Hit};
 use crate::theme;
 use crate::util::truncate;
-use common::{Id, Secret, SecretKind};
+use common::{Id, Secret, SecretKind, StorageConnection};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -19,6 +19,8 @@ pub enum PickKind {
     SshKey,
     /// S3 credentials secrets.
     S3Credentials,
+    /// Where a backup goes: the data directory or a storage connection.
+    Store,
 }
 
 /// Where the choice goes.
@@ -27,6 +29,8 @@ pub enum PickFor {
     Field(Box<Form>, &'static str),
     /// The key a server connects with.
     ServerKey { server_id: Id, server: String },
+    /// A manual backup of a database service.
+    BackupNow { service_id: Id, name: String },
 }
 
 pub struct PickItem {
@@ -90,6 +94,45 @@ pub fn short_key(key: &str) -> (String, String) {
     (format!("{kind} {body}"), comment)
 }
 
+/// "bucket / prefix", or the bucket alone.
+pub fn bucket_path(s: &StorageConnection) -> String {
+    if s.path_prefix.is_empty() {
+        s.bucket.clone()
+    } else {
+        format!("{} / {}", s.bucket, s.path_prefix)
+    }
+}
+
+/// Glyph, short label and style of a connection's last test.
+pub fn test_state(s: &StorageConnection) -> (&'static str, String, Style) {
+    match &s.last_test {
+        None => ("○", "never tested".into(), theme::muted()),
+        Some(t) if t.ok => (
+            "●",
+            format!(
+                "ok {}ms · {}",
+                t.latency_ms.unwrap_or_default(),
+                crate::util::ago(t.at)
+            ),
+            theme::fg(theme::OK),
+        ),
+        Some(_) => ("✕", "last test failed".into(), theme::fg(theme::ERR)),
+    }
+}
+
+fn store_item(s: &StorageConnection) -> PickItem {
+    let (glyph, note, style) = test_state(s);
+    let mut item = PickItem::new(Some(s.id.clone()), &s.name, bucket_path(s));
+    item.glyph = Some((glyph, style));
+    item.note = note;
+    item.note_style = if style == theme::fg(theme::ERR) {
+        style
+    } else {
+        theme::muted()
+    };
+    item
+}
+
 fn usage(s: &Secret) -> String {
     match s.used_by.as_slice() {
         [] => "unused".to_string(),
@@ -100,7 +143,12 @@ fn usage(s: &Secret) -> String {
 
 impl Picker {
     /// Rebuild the list from the secrets, keeping the selected entry.
-    pub fn fill(&mut self, secrets: &[Secret], daemon_key: Option<&str>) {
+    pub fn fill(
+        &mut self,
+        secrets: &[Secret],
+        storages: &[StorageConnection],
+        daemon_key: Option<&str>,
+    ) {
         let selected = self.items.get(self.row).map(|i| (i.id.clone(), i.generate));
         let mut items = Vec::new();
         match self.kind {
@@ -143,9 +191,19 @@ impl Picker {
                     items.push(item);
                 }
             }
+            PickKind::Store => {
+                items.push(PickItem::new(
+                    None,
+                    "local",
+                    "the data directory on this machine",
+                ));
+                items.extend(storages.iter().map(store_item));
+            }
         }
         self.items = items;
-        self.mark_current();
+        if !matches!(self.target, PickFor::BackupNow { .. }) {
+            self.mark_current();
+        }
         self.row = selected
             .and_then(|(id, generate)| {
                 self.items
@@ -223,7 +281,7 @@ impl Picker {
         let mut lines = Vec::new();
         if self.items.is_empty() {
             lines.push(Line::styled(
-                "nothing to pick yet · add one on the Secrets screen",
+                "nothing to pick yet · add S3 credentials on the Secrets screen",
                 theme::muted(),
             ));
         }
@@ -296,6 +354,9 @@ impl Picker {
         let chip = match self.selected() {
             _ if self.busy => format!(" {} generating… ", crate::util::spinner(tick)),
             Some(i) if i.generate => " ⏎ generate ".to_string(),
+            Some(i) if matches!(self.target, PickFor::BackupNow { .. }) => {
+                format!(" ⏎ back up to {} ", truncate(&i.name, 30))
+            }
             Some(i) => format!(" ⏎ use {} ", truncate(&i.name, 30)),
             None => " ⏎ close ".to_string(),
         };
