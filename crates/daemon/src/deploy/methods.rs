@@ -110,11 +110,12 @@ impl Job {
         }
     }
 
-    /// Settles `auto` on the method the repository calls for and saves it on the service.
+    /// Settles `auto` on the method the service's root directory calls for and saves it on the
+    /// service. `root_dir` is that directory inside the clone.
     pub(super) async fn resolve_build(
         &mut self,
         svc: &mut Service,
-        repo_dir: &Path,
+        root_dir: &Path,
     ) -> Result<Build> {
         let Source::Git {
             dockerfile,
@@ -129,7 +130,7 @@ impl Job {
             return Ok(build.clone());
         }
         let found = build::detect(
-            |p| repo_dir.join(p).is_file(),
+            |p| root_dir.join(p).is_file(),
             &build::dockerfile_path(context, dockerfile),
             build.compose_file.as_deref(),
         );
@@ -152,19 +153,20 @@ impl Job {
     }
 
     /// Builds the image with Railpack: it writes a build plan for the detected language and
-    /// BuildKit builds the plan through Railpack's frontend.
+    /// BuildKit builds the plan through Railpack's frontend. It builds `context` inside the
+    /// service's root directory, `root_dir`.
     pub(super) async fn build_railpack(
         &mut self,
         server: &Server,
         svc: &Service,
-        repo_dir: &Path,
+        root_dir: &Path,
         context: &str,
         tag: &str,
     ) -> Result<()> {
         self.begin(StepKind::Build, Some("railpack".into())).await;
         let log = self.log.clone();
         let railpack = build::ensure_railpack(&self.state.dirs, |l| log.system(l)).await?;
-        let dir = super::safe_join(repo_dir, context)?;
+        let dir = super::safe_join(root_dir, context)?;
         let plan = dir.join("railpack-plan.json");
         let info = dir.join("railpack-info.json");
         let dir_arg = dir.to_string_lossy().into_owned();
@@ -223,26 +225,29 @@ impl Job {
     }
 
     /// Builds and starts a compose project as one group of containers. Every compose service
-    /// gets the daemon's labels, and domains route to the compose service they name.
+    /// gets the daemon's labels, and domains route to the compose service they name. The
+    /// compose file is looked up in the service's root directory, `root_dir`, and a service
+    /// with a `root` runs compose with it as the project directory.
     pub(super) async fn deploy_compose(
         &mut self,
         docker: &Docker,
         server: &Server,
         svc: &Service,
-        repo_dir: &Path,
+        root_dir: &Path,
         build: &Build,
     ) -> Result<()> {
         let file = match &build.compose_file {
             Some(f) => super::clean_relative(f)?.to_string_lossy().into_owned(),
             None => build::COMPOSE_FILES
                 .iter()
-                .find(|f| repo_dir.join(f).is_file())
+                .find(|f| root_dir.join(f).is_file())
                 .map(|f| (*f).to_string())
                 .context("no compose file: add compose.yaml or set the compose file")?,
         };
-        if !repo_dir.join(&file).is_file() {
+        if !root_dir.join(&file).is_file() {
             bail!("no compose file at {file}");
         }
+        let has_root = matches!(&svc.source, Source::Git { root, .. } if !root.is_empty());
         let project = build::compose_project(&svc.id);
         let mut env = self.state.docker.cli_env(server).await?;
         env.extend(
@@ -255,6 +260,12 @@ impl Job {
         );
         let compose = |extra: &[&str]| -> Vec<String> {
             let mut args = vec!["compose".into(), "--project-name".into(), project.clone()];
+            if has_root {
+                args.extend([
+                    "--project-directory".into(),
+                    root_dir.to_string_lossy().into_owned(),
+                ]);
+            }
             args.extend(["--file".into(), file.clone()]);
             args.extend(extra.iter().map(|s| s.to_string()));
             args
@@ -266,7 +277,7 @@ impl Job {
                 Path::new("docker"),
                 &compose(&["config", "--services"]),
                 &env,
-                repo_dir,
+                root_dir,
             )
             .await?
             .lines()
@@ -280,7 +291,7 @@ impl Job {
         let domains = self.state.db.domains(&svc.id).await?;
         let overrides = build::compose_override(svc, &names, &domains)?;
         let override_file = format!(".{}-compose.json", brand::PREFIX);
-        std::fs::write(repo_dir.join(&override_file), overrides.to_string())?;
+        std::fs::write(root_dir.join(&override_file), overrides.to_string())?;
         if overrides.get("networks").is_some() {
             docker::ensure_network(docker, brand::PROXY_NETWORK).await?;
         }
@@ -294,7 +305,7 @@ impl Job {
             Path::new("docker"),
             &with_override(&["build"]),
             &env,
-            repo_dir,
+            root_dir,
         )
         .await?;
         self.end(StepKind::Build, Some(format!("{} services", names.len())))
@@ -306,7 +317,7 @@ impl Job {
             Path::new("docker"),
             &with_override(&["up", "--detach", "--remove-orphans"]),
             &env,
-            repo_dir,
+            root_dir,
         )
         .await?;
         self.end(StepKind::Start, None).await;

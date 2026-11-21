@@ -4171,7 +4171,7 @@ impl App {
                 self.overlay = Some(Overlay::Form(*form));
                 self.spawn(move |c| async move {
                     let result = c
-                        .detect_build(&source, &repo, &value)
+                        .detect_build(&source, &repo, &value, "")
                         .await
                         .map_err(|e| format!("{e:#}"));
                     Msg::Detected {
@@ -4581,14 +4581,19 @@ impl App {
         ];
         let mut fields = vec![Field::text("name", "name").value(s.name.clone())];
         let mut git_source = None;
+        let (mut git_root, mut git_watch_paths) = (String::new(), true);
         match &s.source {
             Source::Git {
                 repo,
                 branch,
                 source_id,
                 auto_deploy,
+                root,
+                watch_paths,
                 ..
             } => {
+                git_root = root.clone();
+                git_watch_paths = *watch_paths;
                 fields.push(Field::text("repo", "repository").value(repo.clone()));
                 fields.push(Field::text("branch", "branch").value(branch.clone()));
                 fields.extend(build_fields(Some(&s.source), "applies on next deploy"));
@@ -4627,6 +4632,8 @@ impl App {
             FormKind::EditService {
                 service_id: s.id.clone(),
                 source_id: git_source,
+                root: git_root,
+                watch_paths: git_watch_paths,
             },
             "Settings",
             fields,
@@ -5601,6 +5608,8 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                             .unwrap_or("main".into()),
                         dockerfile,
                         context,
+                        root: String::new(),
+                        watch_paths: true,
                         source_id: Some(source_id),
                         auto_deploy: form.on("auto_deploy"),
                         build,
@@ -5622,6 +5631,8 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                         branch: or("branch", "main"),
                         dockerfile,
                         context,
+                        root: String::new(),
+                        watch_paths: true,
                         source_id: None,
                         auto_deploy: false,
                         build,
@@ -5676,6 +5687,8 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
         FormKind::EditService {
             service_id,
             source_id,
+            root,
+            watch_paths,
         } => {
             let source = if !form.get("repo").is_empty() {
                 let (dockerfile, context, build) = build_parts(form);
@@ -5684,6 +5697,8 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                     branch: form.get("branch"),
                     dockerfile,
                     context,
+                    root: root.clone(),
+                    watch_paths: *watch_paths,
                     source_id: source_id.clone(),
                     auto_deploy: source_id.is_none() || form.on("auto_deploy"),
                     build,

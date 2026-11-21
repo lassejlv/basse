@@ -132,6 +132,9 @@ pub enum FormKind {
         service_id: Id,
         /// The git source the service clones from, which makes auto-deploy editable.
         source_id: Option<Id>,
+        /// The git service's root directory and watch paths, kept as they are on save.
+        root: String,
+        watch_paths: bool,
     },
     AddDomain {
         service_id: Id,

@@ -1793,6 +1793,8 @@ fn compose_fixture() -> App {
         branch: "main".into(),
         dockerfile: "Dockerfile".into(),
         context: ".".into(),
+        root: String::new(),
+        watch_paths: true,
         source_id: None,
         auto_deploy: false,
         build: common::Build {

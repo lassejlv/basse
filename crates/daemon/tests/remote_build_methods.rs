@@ -239,6 +239,8 @@ fn git(repo: String) -> Source {
         branch: "main".into(),
         dockerfile: "Dockerfile".into(),
         context: ".".into(),
+        root: String::new(),
+        watch_paths: true,
         source_id: None,
         auto_deploy: false,
         build: Build {

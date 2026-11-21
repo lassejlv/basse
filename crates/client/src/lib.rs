@@ -522,11 +522,33 @@ impl Client {
         Self::json(rb).await
     }
 
-    /// The build method a branch would get: Dockerfile, else compose file, else Railpack.
-    pub async fn detect_build(&self, id: &str, repo: &str, branch: &str) -> Result<BuildDetection> {
+    /// The build method a branch would get for a service in `root` (empty for the repository
+    /// root): Dockerfile, else compose file, else Railpack.
+    pub async fn detect_build(
+        &self,
+        id: &str,
+        repo: &str,
+        branch: &str,
+        root: &str,
+    ) -> Result<BuildDetection> {
         let rb = self
             .req(Method::GET, &format!("/sources/{id}/detect"))
-            .query(&[("repo", repo), ("branch", branch)]);
+            .query(&[("repo", repo), ("branch", branch), ("root", root)]);
+        Self::json(rb).await
+    }
+
+    /// Names of the directories directly under `path` on a branch (empty for the repository
+    /// root), for picking a service's root directory.
+    pub async fn source_dirs(
+        &self,
+        id: &str,
+        repo: &str,
+        branch: &str,
+        path: &str,
+    ) -> Result<Vec<String>> {
+        let rb = self
+            .req(Method::GET, &format!("/sources/{id}/dirs"))
+            .query(&[("repo", repo), ("branch", branch), ("path", path)]);
         Self::json(rb).await
     }
 

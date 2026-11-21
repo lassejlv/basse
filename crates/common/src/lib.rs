@@ -189,8 +189,17 @@ pub enum Source {
         branch: String,
         /// Dockerfile path relative to `context`.
         dockerfile: String,
-        /// Build context directory relative to the repository root.
+        /// Build context directory relative to `root`.
         context: String,
+        /// Directory inside the repository the service lives in, for monorepos; empty is the
+        /// repository root. `context`, `dockerfile` and `build.compose_file` are relative to
+        /// it, compose runs with it as the project directory, and Railpack builds it (joined
+        /// with `context`). Normalized with [`clean_root`].
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        root: String,
+        /// With a `root`, push webhooks only deploy when a changed file is inside it.
+        #[serde(default = "default_true")]
+        watch_paths: bool,
         /// The [`GitSource`] that authenticates the clone, with `repo` as `owner/name`. `None`
         /// clones `repo` as a URL, anonymously or with the daemon's SSH key as a deploy key.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -284,13 +293,13 @@ pub struct Build {
     /// Dockerfile stage to build (`--target`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    /// Compose file relative to the repository root; `None` looks for `compose.yaml`,
+    /// Compose file relative to the service's `root`; `None` looks for `compose.yaml`,
     /// `compose.yml`, `docker-compose.yaml` and `docker-compose.yml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compose_file: Option<String>,
 }
 
-/// What `GET /sources/{id}/detect` found at a branch's root.
+/// What `GET /sources/{id}/detect` found in a branch's root directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildDetection {
     /// Never `Auto`.
@@ -1306,6 +1315,29 @@ fn default_true() -> bool {
     true
 }
 
+/// Normalizes a git service's root directory: trims it, drops `.` and empty segments (so
+/// leading `./` and `/` and a trailing `/` go away) and maps `.` or `/` to empty, the
+/// repository root. Rejects `..` segments, backslashes and NUL, so the root stays inside the
+/// repository.
+pub fn clean_root(root: &str) -> Result<String, String> {
+    let trimmed = root.trim();
+    if trimmed.contains(['\\', '\0']) {
+        return Err(format!(
+            "invalid root directory '{trimmed}': use forward slashes, such as apps/api"
+        ));
+    }
+    let parts: Vec<&str> = trimmed
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+    if parts.contains(&"..") {
+        return Err(format!(
+            "root directory '{trimmed}' must stay inside the repository: '..' is not allowed"
+        ));
+    }
+    Ok(parts.join("/"))
+}
+
 /// Lowercase letters, digits and dashes, starting with a letter, at most 48 characters.
 pub fn validate_name(name: &str) -> Result<(), String> {
     let ok = !name.is_empty()
@@ -1335,11 +1367,14 @@ mod tests {
             branch: "main".into(),
             dockerfile: "Dockerfile".into(),
             context: ".".into(),
+            root: String::new(),
+            watch_paths: true,
             source_id: None,
             auto_deploy: true,
             build: Build::default(),
         };
         let json = serde_json::to_string(&src).unwrap();
+        assert!(!json.contains("\"root\""));
         assert!(json.contains(r#""type":"git""#));
         assert_eq!(serde_json::from_str::<Source>(&json).unwrap(), src);
         assert_eq!(src.label(), "acme/api@main");
@@ -1352,6 +1387,8 @@ mod tests {
             build,
             auto_deploy,
             source_id,
+            root,
+            watch_paths,
             ..
         } = serde_json::from_str(old).unwrap()
         else {
@@ -1359,12 +1396,29 @@ mod tests {
         };
         assert_eq!(build.method, BuildMethod::Dockerfile);
         assert!(auto_deploy);
+        assert_eq!(root, "");
+        assert!(watch_paths);
         assert_eq!(source_id, None);
         assert_eq!(
             "docker-compose".parse::<BuildMethod>().unwrap(),
             BuildMethod::Compose
         );
         assert!("make".parse::<BuildMethod>().is_err());
+    }
+
+    #[test]
+    fn root_directories_are_normalized() {
+        assert_eq!(clean_root("").unwrap(), "");
+        assert_eq!(clean_root(" . ").unwrap(), "");
+        assert_eq!(clean_root("/").unwrap(), "");
+        assert_eq!(clean_root("./apps/api/").unwrap(), "apps/api");
+        assert_eq!(clean_root("/apps//api/./").unwrap(), "apps/api");
+        assert_eq!(clean_root("apps/..web").unwrap(), "apps/..web");
+        assert!(clean_root("..").is_err());
+        assert!(clean_root("apps/../../etc").is_err());
+        assert!(clean_root("/../etc").is_err());
+        assert!(clean_root("apps\\api").is_err());
+        assert!(clean_root("apps\0").is_err());
     }
 
     #[test]

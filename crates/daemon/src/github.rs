@@ -423,24 +423,36 @@ struct ContentEntry {
 }
 
 impl Github {
-    /// Names of the files at the root of a branch.
-    pub async fn root_files(
+    /// Names of the entries of one kind (`file` or `dir`) directly inside `path` on a
+    /// branch; an empty `path` is the repository root. `path` must be normalized with
+    /// [`common::clean_root`].
+    pub async fn list_dir(
         &self,
         token: &str,
         full_name: &str,
         branch: &str,
+        path: &str,
+        kind: &str,
     ) -> Result<Vec<String>> {
         validate_full_name(full_name)?;
         let branch = url_encode(branch);
-        let entries: Vec<ContentEntry> = self
+        let path: String = path
+            .split('/')
+            .filter(|p| !p.is_empty())
+            .map(|p| format!("/{}", url_encode(p)))
+            .collect();
+        let listing: serde_json::Value = self
             .get(
-                &format!("/repos/{full_name}/contents?ref={branch}"),
+                &format!("/repos/{full_name}/contents{path}?ref={branch}"),
                 Auth::Token(token),
             )
             .await?;
+        let Ok(entries) = serde_json::from_value::<Vec<ContentEntry>>(listing) else {
+            bail!("'{}' is not a directory", path.trim_start_matches('/'));
+        };
         Ok(entries
             .into_iter()
-            .filter(|e| e.kind == "file")
+            .filter(|e| e.kind == kind)
             .map(|e| e.name)
             .collect())
     }
@@ -481,6 +493,16 @@ pub struct PushEvent {
     #[serde(default)]
     pub deleted: bool,
     pub repository: PushRepo,
+    #[serde(default)]
+    pub commits: Vec<PushCommit>,
+}
+
+/// The files a pushed commit changed. GitHub leaves the lists out of some payloads.
+#[derive(Debug, Deserialize)]
+pub struct PushCommit {
+    pub added: Option<Vec<String>>,
+    pub modified: Option<Vec<String>>,
+    pub removed: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -492,6 +514,26 @@ impl PushEvent {
     /// The pushed branch; `None` for tags.
     pub fn branch(&self) -> Option<&str> {
         self.git_ref.strip_prefix("refs/heads/")
+    }
+
+    /// Whether the push should deploy a service living in `root` that watches its paths: a
+    /// changed file is inside `root`, or the payload does not say which files changed (no
+    /// commits, or a commit without file lists), so the push cannot be ruled out.
+    pub fn touches(&self, root: &str) -> bool {
+        if root.is_empty() {
+            return true;
+        }
+        let prefix = format!("{root}/");
+        self.commits.is_empty()
+            || self.commits.iter().any(|c| {
+                let lists = [&c.added, &c.modified, &c.removed];
+                lists.iter().all(|l| l.is_none())
+                    || lists
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .any(|f| f.starts_with(&prefix))
+            })
     }
 }
 
@@ -604,5 +646,32 @@ mod tests {
             serde_json::from_str(r#"{"ref":"refs/tags/v1","repository":{"full_name":"acme/api"}}"#)
                 .unwrap();
         assert_eq!(tag.branch(), None);
+    }
+
+    #[test]
+    fn pushes_deploy_a_root_only_when_a_file_inside_it_changed() {
+        let push = |commits: &str| -> PushEvent {
+            serde_json::from_str(&format!(
+                r#"{{"ref":"refs/heads/main","repository":{{"full_name":"acme/mono"}},"commits":{commits}}}"#
+            ))
+            .unwrap()
+        };
+        let web_only = push(
+            r#"[{"added":["apps/web/page.tsx"],"modified":["README.md"],"removed":[]},
+                {"added":[],"modified":["apps/web/package.json"],"removed":["apps/api-old/x"]}]"#,
+        );
+        assert!(web_only.touches("apps/web"));
+        assert!(web_only.touches(""));
+        assert!(!web_only.touches("apps/api"));
+        assert!(!web_only.touches("app"));
+        let removed = push(r#"[{"added":[],"modified":[],"removed":["apps/api/main.go"]}]"#);
+        assert!(removed.touches("apps/api"));
+        assert!(push("[]").touches("apps/api"));
+        assert!(push(r#"[{"id":"abc"}]"#).touches("apps/api"));
+        let no_commits: PushEvent = serde_json::from_str(
+            r#"{"ref":"refs/heads/main","repository":{"full_name":"acme/mono"}}"#,
+        )
+        .unwrap();
+        assert!(no_commits.touches("apps/api"));
     }
 }
