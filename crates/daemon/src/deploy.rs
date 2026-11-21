@@ -492,13 +492,19 @@ impl Job {
                     repo,
                     branch,
                     source_id,
+                    root,
                     ..
                 },
             ) => {
                 self.set_status(DeploymentStatus::Building).await;
+                let root = root.clone();
                 let dir = self
                     .clone_repo(&repo.clone(), &branch.clone(), source_id.clone().as_deref())
                     .await?;
+                let dir = root_dir(&dir, &root)?;
+                if !root.is_empty() {
+                    self.log.system(format!("Building in {root}"));
+                }
                 let build = self.resolve_build(&mut svc, &dir).await?;
                 self.service = Some(svc.clone());
                 let Source::Git { context, .. } = &svc.source else {
@@ -915,7 +921,7 @@ impl Job {
         &mut self,
         docker: &Docker,
         svc: &Service,
-        repo_dir: &Path,
+        root_dir: &Path,
         build: &Build,
         tag: &str,
     ) -> Result<()> {
@@ -936,7 +942,7 @@ impl Job {
             .into_iter()
             .map(|v| (v.key, v.value))
             .collect();
-        let context_dir = safe_join(repo_dir, context)?;
+        let context_dir = safe_join(root_dir, context)?;
         let dockerfile_rel = clean_relative(dockerfile)?;
         if !context_dir.join(&dockerfile_rel).is_file() {
             bail!(
@@ -1405,6 +1411,18 @@ fn clean_relative(rel: &str) -> Result<PathBuf> {
     Ok(out)
 }
 
+/// The service's root directory inside the clone, which must not leave it through a symlink.
+fn root_dir(repo_dir: &Path, root: &str) -> Result<PathBuf> {
+    let dir = repo_dir.join(clean_relative(root)?);
+    if !dir.is_dir() {
+        bail!("root directory '{root}' does not exist in the repository");
+    }
+    if !dir.canonicalize()?.starts_with(repo_dir.canonicalize()?) {
+        bail!("root directory '{root}' must stay inside the repository");
+    }
+    Ok(dir)
+}
+
 fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
     let dir = base.join(clean_relative(rel)?);
     if !dir.is_dir() {
@@ -1464,6 +1482,22 @@ mod tests {
         assert_eq!(clean_relative(".").unwrap(), PathBuf::new());
         assert!(clean_relative("../etc").is_err());
         assert!(clean_relative("/etc").is_err());
+    }
+
+    #[test]
+    fn root_directories_stay_inside_the_clone() {
+        let repo = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join("apps/api")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("escape")).unwrap();
+        assert_eq!(root_dir(repo.path(), "").unwrap(), repo.path());
+        assert_eq!(
+            root_dir(repo.path(), "apps/api").unwrap(),
+            repo.path().join("apps/api")
+        );
+        assert!(root_dir(repo.path(), "apps/web").is_err());
+        assert!(root_dir(repo.path(), "escape").is_err());
+        assert!(root_dir(repo.path(), "../x").is_err());
     }
 
     #[test]

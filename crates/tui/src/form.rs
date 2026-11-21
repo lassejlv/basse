@@ -402,6 +402,8 @@ impl Form {
         if matches!(self.kind, FormKind::EditService { .. }) {
             let has_build = self.field("build").is_some();
             self.build_fields(has_build);
+            let github = self.field("watch_paths").is_some();
+            self.root_fields("root", github);
             return;
         }
         if !matches!(self.kind, FormKind::NewService { .. }) {
@@ -414,15 +416,18 @@ impl Form {
         for f in &mut self.fields {
             f.visible = match f.key {
                 "git_source" | "gh_repo" | "gh_branch" | "auto_deploy" => source == 0,
-                "repo" | "branch" => source == 1,
+                "repo" | "branch" | "root" => source == 1,
+                "gh_root" => source == 0,
                 "build" | "dockerfile" | "context" | "target" | "compose_file" => source <= 1,
                 "image" => source == 2,
                 "engine" | "version" => source == 3,
                 "port" | "domain" => source != 3,
+                crate::server_pick::KEY => f.visible,
                 _ => true,
             };
         }
         self.build_fields(source <= 1);
+        self.root_fields(if source == 0 { "gh_root" } else { "root" }, source == 0);
         let token = self.field("git_source").is_some_and(|f| {
             f.placeholder
                 .starts_with(common::GitSourceKind::GithubToken.label())
@@ -443,6 +448,15 @@ impl Form {
                 3 => db.image().to_string(),
                 _ => "derived from the source".to_string(),
             };
+        }
+    }
+
+    /// Watch paths only matter for a GitHub service with a root directory.
+    fn root_fields(&mut self, key: &str, github: bool) {
+        let root = common::clean_root(&self.raw(key)).unwrap_or_default();
+        if let Some(f) = self.field_mut("watch_paths") {
+            f.visible = github && !root.is_empty();
+            f.hint = format!("pushes to {root}");
         }
     }
 

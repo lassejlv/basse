@@ -168,6 +168,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/sources/{id}/repos", get(sources::repos))
         .route("/sources/{id}/branches", get(sources::branches))
         .route("/sources/{id}/detect", get(sources::detect))
+        .route("/sources/{id}/dirs", get(sources::dirs))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth));
     Router::new()
         .nest(API_PREFIX, api)

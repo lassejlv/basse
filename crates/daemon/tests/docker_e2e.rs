@@ -337,6 +337,8 @@ async fn docker_end_to_end() {
                 branch: "main".into(),
                 dockerfile: "Dockerfile".into(),
                 context: ".".into(),
+                root: String::new(),
+                watch_paths: true,
                 source_id: None,
                 auto_deploy: true,
                 build: Build::default(),

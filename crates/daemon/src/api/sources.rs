@@ -337,29 +337,63 @@ pub async fn repos(
     )))
 }
 
+/// Entries of one kind (`file` or `dir`) directly inside `dir` on a branch.
+async fn list_dir(
+    state: &AppState,
+    id: &str,
+    repo: &str,
+    branch: &str,
+    dir: &str,
+    kind: &str,
+) -> ApiResult<Vec<String>> {
+    github::validate_full_name(repo).map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let dir = clean_root(dir).map_err(AppError::BadRequest)?;
+    let source = ready(state, id).await?;
+    let token = sources::access_token(state, &source).await?;
+    Ok(Github::new(&source.api_url)?
+        .list_dir(&token, repo, branch, &dir, kind)
+        .await?)
+}
+
 #[derive(Deserialize)]
 pub struct DetectQuery {
     repo: String,
     branch: String,
+    #[serde(default)]
+    root: String,
 }
 
-/// The build method a branch would get, from the files at its root.
+/// The build method a branch would get, from the files in the service's root directory.
 pub async fn detect(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(query): Query<DetectQuery>,
 ) -> ApiResult<Json<BuildDetection>> {
-    github::validate_full_name(&query.repo).map_err(|e| AppError::BadRequest(e.to_string()))?;
-    let source = ready(&state, &id).await?;
-    let token = sources::access_token(&state, &source).await?;
-    let files = Github::new(&source.api_url)?
-        .root_files(&token, &query.repo, &query.branch)
-        .await?;
+    let files = list_dir(&state, &id, &query.repo, &query.branch, &query.root, "file").await?;
     Ok(Json(crate::build::detect(
         |f| files.iter().any(|n| n == f),
         "Dockerfile",
         None,
     )))
+}
+
+#[derive(Deserialize)]
+pub struct DirsQuery {
+    repo: String,
+    branch: String,
+    #[serde(default)]
+    path: String,
+}
+
+/// The directories directly under `path` on a branch, for picking a service's root.
+pub async fn dirs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<DirsQuery>,
+) -> ApiResult<Json<Vec<String>>> {
+    let mut dirs = list_dir(&state, &id, &query.repo, &query.branch, &query.path, "dir").await?;
+    dirs.sort();
+    Ok(Json(dirs))
 }
 
 #[derive(Deserialize)]

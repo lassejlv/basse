@@ -105,21 +105,22 @@ impl DockerPool {
     }
 
     /// Environment that points the `docker` CLI at the same engine as [`Self::get`]: the SSH
-    /// tunnel's socket for remote servers, the default socket for the local one. Call it after
-    /// `get`, which opens the tunnel.
-    pub fn cli_env(&self, server: &Server) -> Vec<(String, String)> {
-        match server.kind {
-            ServerKind::Local => Vec::new(),
-            ServerKind::Ssh => lock(&self.tunnels)
-                .get(&server.id)
-                .map(|t| {
-                    vec![(
-                        "DOCKER_HOST".to_string(),
-                        format!("unix://{}", t.socket.display()),
-                    )]
-                })
-                .unwrap_or_default(),
+    /// tunnel's socket for remote servers, reopening the tunnel when a failed check closed it,
+    /// and the default socket for the local one. Without a tunnel the CLI would silently use the
+    /// local engine, so that is an error.
+    pub async fn cli_env(&self, server: &Server) -> Result<Vec<(String, String)>> {
+        if server.kind == ServerKind::Local {
+            return Ok(Vec::new());
         }
+        self.get(server).await?;
+        let socket = lock(&self.tunnels)
+            .get(&server.id)
+            .map(|t| t.socket.clone())
+            .with_context(|| format!("the SSH tunnel to server {} closed", server.name))?;
+        Ok(vec![(
+            "DOCKER_HOST".to_string(),
+            format!("unix://{}", socket.display()),
+        )])
     }
 
     /// Drops the cached client and closes its tunnel, e.g. after the server was deleted or a

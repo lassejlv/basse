@@ -201,6 +201,14 @@ basse domain add stack shop.example.com --compose-service web
 basse service build api --method dockerfile --target prod
 ```
 
+In a monorepo, point each service at its app with `--root`: the Dockerfile, build context and compose file are then relative to that directory, compose runs with it as the project directory, Railpack builds it, and `auto` looks there. A push only deploys a service with a root when it changed a file inside the root; pass `--no-watch-paths` (or `basse service build <service> --watch-paths false`) to deploy on every push.
+
+```sh
+basse service create shop/production api --source acme --repo acme/mono --root apps/api
+basse service create shop/production web --source acme --repo acme/mono --root apps/web
+basse service build web --root apps/site
+```
+
 Without a source, `--repo` still takes any clone URL: public repositories clone anonymously, and `git@github.com:` URLs use the daemon's SSH key, which you can add to a repository as a deploy key (`basse server key` prints it).
 
 ## Secrets
