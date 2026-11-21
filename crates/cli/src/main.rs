@@ -1933,7 +1933,10 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
                 );
             }
             for cs in &d.compose {
-                let state = cs.container.as_ref().map_or("not created", |c| c.state.as_str());
+                let state = cs
+                    .container
+                    .as_ref()
+                    .map_or("not created", |c| c.state.as_str());
                 println!("{}{} {}", k("compose"), cs.name, muted(state));
             }
             for v in &d.volumes {
