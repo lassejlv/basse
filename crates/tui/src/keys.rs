@@ -26,12 +26,20 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         }
         return app.toast("refreshed");
     }
-    if app.screen == Screen::Domain && app.domain.input.is_some() {
+    let setup_domain =
+        app.screen == Screen::Setup && app.setup.step == common::onboarding::Step::Domain;
+    if (app.screen == Screen::Domain || setup_domain) && app.domain.input.is_some() {
+        if setup_domain && key.code == KeyCode::Esc {
+            return crate::setup::domain_input_esc(app);
+        }
         return domain_input(app, key);
     }
+    let setup_deploy =
+        app.screen == Screen::Setup && app.setup.app.is_some() && app.deploy.is_some();
     if (ctrl && key.code == KeyCode::Char('x') && app.screen == Screen::Service)
         || (key.code == KeyCode::Char('c')
             && (app.screen == Screen::Deploy
+                || setup_deploy
                 || app.screen == Screen::Service
                     && app
                         .service
@@ -62,6 +70,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         Screen::Notifications => notifications(app, key),
         Screen::Sources => sources(app, key),
         Screen::Domain => domain(app, key),
+        Screen::Setup => crate::setup::keys(app, key),
     }
 }
 
@@ -481,7 +490,7 @@ pub fn paste(app: &mut App, text: &str) {
             let line = text.lines().next().unwrap_or_default().trim().to_string();
             app.picker_search(|s| s.push_str(&line));
         }
-        None if app.screen == Screen::Domain => {
+        None if matches!(app.screen, Screen::Domain | Screen::Setup) => {
             if let Some(input) = app.domain.input.as_mut() {
                 input.push_str(text.trim());
             }
@@ -515,6 +524,7 @@ pub fn run_command(app: &mut App, cmd: Command) {
         Command::Notifications => app.open_notifications(),
         Command::Sources => app.open_sources(),
         Command::Domain => app.open_domain(),
+        Command::Setup => app.open_setup(),
         Command::BackUpInstance => {
             app.open_settings();
             app.form_instance_backup();
@@ -568,7 +578,7 @@ fn ask_stop(app: &mut App, s: &Service) {
 
 fn cancel_deploy(app: &mut App, key: KeyEvent) {
     let deployment = match app.screen {
-        Screen::Deploy => app.deploy.as_ref().map(|v| &v.deployment),
+        Screen::Deploy | Screen::Setup => app.deploy.as_ref().map(|v| &v.deployment),
         _ => app.service.as_ref().and_then(|v| {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 v.active_deployment()
@@ -620,6 +630,13 @@ fn ask_delete_service(app: &mut App, s: &Service) {
     );
 }
 
+fn checklist(app: &App) -> bool {
+    app.setup
+        .data
+        .as_ref()
+        .is_some_and(common::onboarding::Onboarding::show_checklist)
+}
+
 fn overview(app: &mut App, key: KeyEvent) {
     let pane = app.overview.pane;
     let selected = app.selected_service().cloned();
@@ -655,6 +672,8 @@ fn overview(app: &mut App, key: KeyEvent) {
         KeyCode::Esc if !app.overview.filter.is_empty() => app.overview.filter.clear(),
         KeyCode::Char('n') => app.form_new_service(),
         KeyCode::Char('N') => app.form_new_project(),
+        KeyCode::Char('o') if checklist(app) => app.open_setup(),
+        KeyCode::Char('X') if checklist(app) => app.dismiss_checklist(),
         KeyCode::Char('E') => app.form_new_environment(),
         KeyCode::Char('x') | KeyCode::Delete if pane == Pane::Sidebar => {
             let item = app.side_items().get(app.overview.side).copied();
@@ -1129,6 +1148,9 @@ fn servers(app: &mut App, key: KeyEvent) {
 }
 
 fn settings(app: &mut App, key: KeyEvent) {
+    if key.code == KeyCode::Char('O') {
+        return app.open_setup();
+    }
     let names = app.settings.context_names();
     let selected = names.get(app.settings.row).cloned();
     if app.settings.focus == SettingsFocus::Backups {
@@ -1206,31 +1228,52 @@ fn settings(app: &mut App, key: KeyEvent) {
     };
     match key.code {
         KeyCode::Char('u') => {
-            let latest = app
-                .settings
-                .release
-                .as_ref()
-                .filter(|r| r.update_available)
-                .and_then(|r| r.latest.clone());
-            let Some(latest) = latest else {
-                return app.toast(format!("{} {} is up to date", brand::DAEMON_BIN, s.version));
+            let (cli, daemon) = (app.cli_update(), app.daemon_update());
+            let Some(latest) = daemon.clone().or(cli.clone()) else {
+                return app.toast(format!(
+                    "{} {} and {} {} are up to date",
+                    brand::CLI_BIN,
+                    env!("CARGO_PKG_VERSION"),
+                    brand::DAEMON_BIN,
+                    s.version
+                ));
+            };
+            let from = match daemon {
+                Some(_) => s.version.clone(),
+                None => env!("CARGO_PKG_VERSION").to_string(),
             };
             let restart = if s.supervised {
                 "The daemon restarts and this screen reconnects."
             } else {
                 "systemd does not supervise the daemon, so it restarts itself in place."
             };
-            ask_to(
-                app,
-                &format!("Update · {} → {latest}", s.version),
-                format!(
+            let body = match (cli.is_some(), daemon.is_some()) {
+                (true, true) => format!(
+                    "Update {} here and {} on {} to {latest}? {restart} Running apps are not touched.",
+                    brand::CLI_BIN,
+                    brand::DAEMON_BIN,
+                    app.context
+                ),
+                (false, _) => format!(
                     "Update {} on {} to {latest}? {restart} Running apps are not touched.",
                     brand::DAEMON_BIN,
                     app.context
                 ),
+                (true, false) => format!(
+                    "Update {} here to {latest}? Restart {} afterwards to use it.",
+                    brand::CLI_BIN,
+                    brand::CLI_BIN
+                ),
+            };
+            ask_to(
+                app,
+                &format!("Update · {from} → {latest}"),
+                body,
                 false,
                 ConfirmAction::Update {
                     force: !s.supervised,
+                    cli: cli.is_some(),
+                    server: daemon.is_some(),
                 },
                 "update",
             );

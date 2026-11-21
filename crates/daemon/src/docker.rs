@@ -205,9 +205,17 @@ pub fn proxy_labels(
             format!("caddy_{i}.reverse_proxy.lb_try_duration"),
             "5s".into(),
         );
+        labels.insert(
+            format!("caddy_{i}.reverse_proxy.header_up"),
+            REAL_IP_HEADER.into(),
+        );
     }
     labels
 }
+
+/// Hands upstreams the visitor's address as `X-Real-IP`: the connecting address, or the one a
+/// trusted proxy such as Cloudflare forwards.
+const REAL_IP_HEADER: &str = "X-Real-IP {client_ip}";
 
 // Containers
 
@@ -881,27 +889,102 @@ pub struct InstanceRoute {
     pub domain: String,
     /// Port the daemon listens on.
     pub port: u16,
+    /// The domain resolves to Cloudflare's proxy, where only the HTTP-01 challenge can work.
+    pub proxied: bool,
 }
 
-/// Labels on the proxy container itself that route the instance domain to the daemon. Responses
-/// are flushed at once so log streams arrive line by line.
-pub fn instance_route_labels(route: &InstanceRoute) -> HashMap<String, String> {
-    HashMap::from([
-        ("caddy".to_string(), route.domain.clone()),
+/// Everything the proxy container is configured with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyConfig {
+    pub route: Option<InstanceRoute>,
+    /// Proxies whose forwarded visitor address (`CF-Connecting-IP`) is believed, as
+    /// space-separated CIDRs: Cloudflare's ranges.
+    pub trusted: String,
+}
+
+/// Labels on the proxy container itself: global options, and the routes that send the instance
+/// domain to the daemon. Responses are flushed at once so log streams arrive line by line. On
+/// plain http only the domain check's token goes to the daemon, so the check can tell whether a
+/// request really arrived over http; everything else redirects to https as usual.
+pub fn proxy_container_labels(config: &ProxyConfig) -> HashMap<String, String> {
+    let mut labels = HashMap::from([
+        (brand::label("proxy"), "true".to_string()),
         (
-            "caddy.reverse_proxy".to_string(),
-            format!("{HOST_GATEWAY}:{}", route.port),
+            "caddy_0.servers.trusted_proxies".to_string(),
+            format!("static {}", config.trusted),
         ),
+        (
+            "caddy_0.servers.client_ip_headers".to_string(),
+            "CF-Connecting-IP".to_string(),
+        ),
+    ]);
+    let Some(route) = &config.route else {
+        return labels;
+    };
+    let upstream = format!("{HOST_GATEWAY}:{}", route.port);
+    let scheme = |s: &str| format!("{} {s}", crate::domain::scheme_header());
+    labels.extend([
+        ("caddy".to_string(), route.domain.clone()),
+        ("caddy.reverse_proxy".to_string(), upstream.clone()),
         (
             "caddy.reverse_proxy.flush_interval".to_string(),
             "-1".into(),
         ),
-    ])
+        (
+            "caddy.reverse_proxy.header_up_0".to_string(),
+            scheme("https"),
+        ),
+        (
+            "caddy.reverse_proxy.header_up_1".to_string(),
+            REAL_IP_HEADER.into(),
+        ),
+        ("caddy_1".to_string(), format!("http://{}", route.domain)),
+        (
+            "caddy_1.0_handle".to_string(),
+            format!("{}*", crate::domain::verify_prefix()),
+        ),
+        ("caddy_1.0_handle.reverse_proxy".to_string(), upstream),
+        (
+            "caddy_1.0_handle.reverse_proxy.header_up_0".to_string(),
+            scheme("http"),
+        ),
+        (
+            "caddy_1.0_handle.reverse_proxy.header_up_1".to_string(),
+            REAL_IP_HEADER.into(),
+        ),
+        (
+            "caddy_1.1_handle.redir".to_string(),
+            "https://{host}{uri} 308".into(),
+        ),
+    ]);
+    if route.proxied {
+        labels.extend([
+            ("caddy.tls.issuer".to_string(), "acme".to_string()),
+            (
+                "caddy.tls.issuer.disable_tlsalpn_challenge".to_string(),
+                String::new(),
+            ),
+        ]);
+    }
+    labels
 }
 
-/// Creates (or recreates) the proxy container on the shared proxy network, serving the
-/// instance domain when `route` is set.
-pub async fn install_proxy(docker: &Docker, route: Option<&InstanceRoute>) -> Result<()> {
+/// The labels the proxy container was created with, if there is one, leaving out those its
+/// image brings.
+pub async fn proxy_labels_now(docker: &Docker) -> Result<Option<HashMap<String, String>>> {
+    let ours = |k: &String| k.starts_with("caddy") || *k == brand::label("proxy");
+    Ok(inspect(docker, brand::PROXY_CONTAINER).await?.map(|c| {
+        c.config
+            .and_then(|c| c.labels)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(k, _)| ours(k))
+            .collect()
+    }))
+}
+
+/// Creates (or recreates) the proxy container on the shared proxy network.
+pub async fn install_proxy(docker: &Docker, config: &ProxyConfig) -> Result<()> {
     ensure_network(docker, brand::PROXY_NETWORK).await?;
     if !image_exists(docker, PROXY_IMAGE).await? {
         pull_image(docker, PROXY_IMAGE, |line| {
@@ -914,11 +997,7 @@ pub async fn install_proxy(docker: &Docker, route: Option<&InstanceRoute>) -> Re
         name: brand::PROXY_CONTAINER.to_string(),
         image: PROXY_IMAGE.to_string(),
         env: vec![format!("CADDY_INGRESS_NETWORKS={}", brand::PROXY_NETWORK)],
-        labels: {
-            let mut labels = route.map(instance_route_labels).unwrap_or_default();
-            labels.insert(brand::label("proxy"), "true".to_string());
-            labels
-        },
+        labels: proxy_container_labels(config),
         extra_hosts: vec![format!("{HOST_GATEWAY}:host-gateway")],
         binds: vec![
             "/var/run/docker.sock:/var/run/docker.sock:ro".to_string(),
@@ -1067,16 +1146,59 @@ mod tests {
 
     #[test]
     fn the_instance_domain_routes_to_the_daemon_on_the_host() {
-        let labels = instance_route_labels(&InstanceRoute {
-            domain: "deploy.example.com".into(),
-            port: 7700,
-        });
+        let config = |proxied| ProxyConfig {
+            route: Some(InstanceRoute {
+                domain: "deploy.example.com".into(),
+                port: 7700,
+                proxied,
+            }),
+            trusted: "173.245.48.0/20 2400:cb00::/32".into(),
+        };
+        let labels = proxy_container_labels(&config(false));
         assert_eq!(labels["caddy"], "deploy.example.com");
         assert_eq!(
             labels["caddy.reverse_proxy"],
             format!("{HOST_GATEWAY}:7700")
         );
         assert_eq!(labels["caddy.reverse_proxy.flush_interval"], "-1");
+        assert_eq!(labels["caddy_1"], "http://deploy.example.com");
+        assert_eq!(
+            labels["caddy_1.0_handle"],
+            format!("/.well-known/acme-challenge/{}-verify-*", brand::PREFIX)
+        );
+        assert_eq!(
+            labels["caddy_1.0_handle.reverse_proxy.header_up_0"],
+            format!("x-{}-origin-scheme http", brand::PREFIX)
+        );
+        assert_eq!(labels["caddy_1.1_handle.redir"], "https://{host}{uri} 308");
+        assert!(!labels.contains_key("caddy.tls.issuer"));
+
+        let proxied = proxy_container_labels(&config(true));
+        assert_eq!(proxied["caddy.tls.issuer"], "acme");
+        assert_eq!(proxied["caddy.tls.issuer.disable_tlsalpn_challenge"], "");
+    }
+
+    #[test]
+    fn the_proxy_trusts_cloudflare_for_the_visitor_address() {
+        let labels = proxy_container_labels(&ProxyConfig {
+            route: None,
+            trusted: "173.245.48.0/20 2400:cb00::/32".into(),
+        });
+        assert_eq!(
+            labels["caddy_0.servers.trusted_proxies"],
+            "static 173.245.48.0/20 2400:cb00::/32"
+        );
+        assert_eq!(
+            labels["caddy_0.servers.client_ip_headers"],
+            "CF-Connecting-IP"
+        );
+        assert_eq!(labels[&brand::label("proxy")], "true");
+        assert!(!labels.contains_key("caddy"));
+        let service = proxy_labels(&[domain("a.com", None, true)], Some(80), "svc");
+        assert_eq!(
+            service["caddy_0.reverse_proxy.header_up"],
+            "X-Real-IP {client_ip}"
+        );
     }
 
     #[test]

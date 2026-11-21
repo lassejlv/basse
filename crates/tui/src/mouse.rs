@@ -72,6 +72,12 @@ pub enum Hit {
     Record(usize),
     /// A container of a compose service; a click follows its logs.
     Container(usize),
+    /// A step on the setup rail or the Overview checklist; a click goes there.
+    SetupStep(common::onboarding::Step),
+    /// A choice of the setup step on screen; a double-click picks it.
+    SetupChoice(usize),
+    /// The Overview checklist panel.
+    SetupChecklist,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -504,7 +510,12 @@ fn click(app: &mut App, hit: Hit, double: bool) {
             }
             press(app, code, mods);
         }
-        Hit::Block | Hit::Logs | Hit::List(_) | Hit::PaletteInput => {}
+        Hit::Block | Hit::Logs | Hit::List(_) | Hit::PaletteInput | Hit::SetupChecklist => {}
+        Hit::SetupStep(step) => {
+            keys::finish_text_input(app);
+            crate::setup::click_step(app, step);
+        }
+        Hit::SetupChoice(i) => crate::setup::click_choice(app, i, double),
         Hit::Header(HeaderLink::Project | HeaderLink::Environment) => {
             let path = if app.screen == Screen::Overview {
                 app.current_env().map(|(p, e)| (&p.project, &e.environment))

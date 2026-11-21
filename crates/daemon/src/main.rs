@@ -3,6 +3,7 @@
 mod api;
 mod backup_store;
 mod build;
+mod cloudflare;
 mod config;
 mod database;
 mod db;
@@ -14,6 +15,7 @@ mod github;
 mod host;
 mod instance;
 mod notify;
+mod onboarding;
 mod prune;
 mod restore;
 mod secrets;
@@ -335,6 +337,7 @@ async fn open_store(dirs: &DataDir, config: &mut Config) -> Result<Db> {
         record_import(&db, &sqlite, &imported).await?;
     }
     ensure_local_server(&db).await?;
+    onboarding::init(&db).await?;
     Ok(db)
 }
 
@@ -515,6 +518,10 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
                     && server.proxy != ProxyStatus::Running
                 {
                     api::ensure_local_proxy(&state, server).await;
+                } else if server.proxy == ProxyStatus::Running
+                    && let Err(e) = api::sync_proxy(&state, server).await
+                {
+                    tracing::warn!("cannot update the proxy: {e:#}");
                 }
             }
         }

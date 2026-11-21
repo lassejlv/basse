@@ -1,8 +1,8 @@
 //! Published releases: the latest tag, verified archive downloads for a target, and atomic
-//! replacement of installed binaries. Used by the daemon's self-update and the CLI's `upgrade`.
+//! replacement of installed binaries. Used by the daemon's self-update and the CLI's `update`.
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use common::brand;
+use common::{UpdateResult, brand};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use std::path::Path;
@@ -50,6 +50,11 @@ pub fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
     let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
     let version = (parts.next()??, parts.next()??, parts.next()??);
     parts.next().is_none().then_some(version)
+}
+
+/// The release tag of a version: `v1.2.3` for `1.2.3` or `v1.2.3`.
+pub fn tag(version: &str) -> String {
+    format!("v{}", version.trim().trim_start_matches('v'))
 }
 
 /// Whether `candidate` is a strictly newer version than `current`; unparsable versions never are.
@@ -178,6 +183,14 @@ impl Releases {
         Ok(release.tag_name)
     }
 
+    /// The tag of `version`, or of the latest release when it is `None` or empty.
+    pub async fn resolve(&self, version: Option<&str>) -> Result<String> {
+        match version.map(str::trim) {
+            Some(v) if !v.is_empty() => Ok(tag(v)),
+            _ => self.latest_tag().await,
+        }
+    }
+
     /// Downloads the archive of `tag` for `target` and verifies it against its `.sha256`.
     pub async fn download(&self, tag: &str, target: &str) -> Result<Vec<u8>> {
         let name = archive_name(target);
@@ -190,9 +203,87 @@ impl Releases {
     }
 }
 
+/// Replaces the running CLI binary with the build of `tag`. A release that is not newer than
+/// this binary changes nothing and answers `updated: false`, unless `force` reinstalls it.
+pub async fn update_cli(releases: &Releases, tag: &str, force: bool) -> Result<UpdateResult> {
+    let current = env!("CARGO_PKG_VERSION");
+    if !force && !is_newer(tag, current) {
+        return Ok(UpdateResult {
+            from: current.into(),
+            to: current.into(),
+            updated: false,
+        });
+    }
+    let target = current_target().context("no release is published for this platform")?;
+    let archive = releases.download(tag, target).await?;
+    let exe = std::env::current_exe()?;
+    let dir =
+        std::env::temp_dir().join(format!("{}-update-{}", brand::CLI_BIN, std::process::id()));
+    let installed = (|| {
+        std::fs::create_dir_all(&dir)?;
+        unpack(&archive, &dir)?;
+        install(&dir.join(brand::CLI_BIN), &exe)
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    installed.map_err(needs_sudo)?;
+    Ok(UpdateResult {
+        from: current.into(),
+        to: tag.trim_start_matches('v').into(),
+        updated: true,
+    })
+}
+
+/// Names the command that works when the binary sits in a directory only root can write, such
+/// as /usr/local/bin.
+fn needs_sudo(e: anyhow::Error) -> anyhow::Error {
+    let denied = e.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+    });
+    if denied {
+        anyhow!("{e:#}; run `sudo {} update --cli`", brand::CLI_BIN)
+    } else {
+        e
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn versions_become_tags() {
+        assert_eq!(tag("0.4.1"), "v0.4.1");
+        assert_eq!(tag(" v0.4.1 "), "v0.4.1");
+    }
+
+    #[tokio::test]
+    async fn a_cli_that_is_not_older_is_up_to_date() {
+        let releases = Releases::new().unwrap();
+        let current = env!("CARGO_PKG_VERSION");
+        for tag in [format!("v{current}"), "v0.0.1".to_string()] {
+            let result = update_cli(&releases, &tag, false).await.unwrap();
+            assert!(!result.updated);
+            assert_eq!(
+                (result.from.as_str(), result.to.as_str()),
+                (current, current)
+            );
+        }
+    }
+
+    #[test]
+    fn an_unwritable_binary_names_the_sudo_command() {
+        let write = format!("cannot write /usr/local/bin/.{}.new", brand::CLI_BIN);
+        let denied =
+            anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                .context(write.clone());
+        let message = needs_sudo(denied).to_string();
+        assert!(message.starts_with(&write));
+        assert!(message.ends_with(&format!("run `sudo {} update --cli`", brand::CLI_BIN)));
+        let other = needs_sudo(anyhow!("checksum mismatch")).to_string();
+        assert_eq!(other, "checksum mismatch");
+    }
 
     #[test]
     fn versions_compare_numerically() {

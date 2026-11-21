@@ -9,6 +9,7 @@ use std::fmt;
 pub mod api;
 pub mod brand;
 pub mod notify;
+pub mod onboarding;
 
 /// Default TCP port the daemon's API listens on.
 pub const DEFAULT_PORT: u16 = 7700;
@@ -662,6 +663,24 @@ pub struct VersionCheck {
 pub struct UpdateResult {
     pub from: String,
     pub to: String,
+    /// `false` when `to` was already installed: nothing was replaced and nothing restarts.
+    /// Daemons from before this field only answered when they updated.
+    #[serde(default = "api::default_true")]
+    pub updated: bool,
+}
+
+/// The hint a client shows when it and the daemon it talks to run different versions, like
+/// "<cli> 0.3.0 ≠ <daemon> 0.4.0 · run <cli> update".
+pub fn version_skew(cli: &str, daemon: &str) -> Option<String> {
+    let (cli, daemon) = (cli.trim_start_matches('v'), daemon.trim_start_matches('v'));
+    (cli != daemon).then(|| {
+        format!(
+            "{} {cli} ≠ {} {daemon} · run {} update",
+            brand::CLI_BIN,
+            brand::DAEMON_BIN,
+            brand::CLI_BIN
+        )
+    })
 }
 
 /// What `DELETE /servers/{id}?purge=true` removed from the server.
@@ -1242,6 +1261,22 @@ pub struct InstanceDomain {
     /// Results of the last check, in order; empty before the first one.
     pub checks: Vec<DomainCheck>,
     pub checked_at: Option<Timestamp>,
+    /// Set when the last check found the domain behind Cloudflare's proxy (orange cloud).
+    #[serde(default)]
+    pub cloudflare: Option<CloudflareProxy>,
+}
+
+/// How the instance domain goes through Cloudflare's proxy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudflareProxy {
+    /// Record types that resolve to Cloudflare's edge, `A` and/or `AAAA`.
+    pub records: Vec<String>,
+    /// Record types that point straight at this server instead, as when only AAAA is proxied.
+    #[serde(default)]
+    pub direct: Vec<String>,
+    /// Cloudflare forwarded an https request to this server over plain http: the zone's
+    /// SSL/TLS mode is Flexible, which loops redirects. It should be Full (strict).
+    pub flexible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1419,6 +1454,27 @@ mod tests {
         assert!(clean_root("/../etc").is_err());
         assert!(clean_root("apps\\api").is_err());
         assert!(clean_root("apps\0").is_err());
+    }
+
+    #[test]
+    fn version_skew_names_both_sides() {
+        assert_eq!(version_skew("0.4.0", "0.4.0"), None);
+        assert_eq!(version_skew("0.4.0", "v0.4.0"), None);
+        assert_eq!(
+            version_skew("0.3.0", "0.4.0").unwrap(),
+            format!(
+                "{} 0.3.0 ≠ {} 0.4.0 · run {} update",
+                brand::CLI_BIN,
+                brand::DAEMON_BIN,
+                brand::CLI_BIN
+            )
+        );
+    }
+
+    #[test]
+    fn update_results_from_older_daemons_count_as_updated() {
+        let old: UpdateResult = serde_json::from_str(r#"{"from":"0.3.0","to":"0.4.0"}"#).unwrap();
+        assert!(old.updated);
     }
 
     #[test]

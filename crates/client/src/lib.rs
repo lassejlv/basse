@@ -165,6 +165,17 @@ impl Client {
 
     // Servers
 
+    pub async fn onboarding(&self) -> Result<common::onboarding::Onboarding> {
+        self.get("/onboarding").await
+    }
+
+    pub async fn update_onboarding(
+        &self,
+        body: &UpdateOnboarding,
+    ) -> Result<common::onboarding::Onboarding> {
+        self.patch("/onboarding", body).await
+    }
+
     pub async fn servers(&self) -> Result<Vec<Server>> {
         self.get("/servers").await
     }

@@ -27,6 +27,8 @@ UNIT="$DAEMON_BIN.service"
 
 MODE="server"
 VERSION="latest"
+RUNNING_AS="running"
+PROXY_STATE="off (--no-proxy)"
 FROM_SOURCE=0
 ARCHIVE=""
 FIREWALL=1
@@ -366,8 +368,10 @@ start_daemon() {
 		systemctl enable "$UNIT" >/dev/null 2>&1
 		systemctl restart "$UNIT"
 		ok "$DAEMON_BIN is running under systemd ($UNIT)"
+		RUNNING_AS="systemd ($UNIT)"
 	else
 		warn "systemd not found: starting $DAEMON_BIN in the background; add it to your init system to survive reboots"
+		RUNNING_AS="in the background, logs in /var/log/$DAEMON_BIN.log"
 		pkill -x "$DAEMON_BIN" 2>/dev/null || true
 		env "${ENV_PREFIX}_PUBLIC_IP=$PUBLIC_IP" nohup "$BIN_DIR/$DAEMON_BIN" --data-dir "$DATA_DIR" serve >"/var/log/$DAEMON_BIN.log" 2>&1 &
 		note "logs: /var/log/$DAEMON_BIN.log"
@@ -391,11 +395,13 @@ wait_for_proxy() {
 		i=$((i + 1))
 		if [ $i -gt 120 ]; then
 			warn "the proxy is not running yet; check '$CLI_BIN status' in a minute"
+			PROXY_STATE="starting, check '$CLI_BIN status' in a minute"
 			return 0
 		fi
 		sleep 1
 	done
 	ok "Proxy running on ports 80 and 443"
+	PROXY_STATE="running on ports 80 and 443"
 }
 
 # Logs in the CLI for root and the user who ran sudo, so '$CLI_BIN' works right away.
@@ -440,20 +446,30 @@ install_server() {
 	open_firewall
 	[ -n "$token" ] && login_local_cli "$token"
 
-	ip=$(public_ip)
-	printf '\n%s%s is ready%s\n\n' "$C_OK" "$NAME" "$C_RESET"
-	printf '  %-10s http://%s:%s\n' "API" "$ip" "$PORT"
+	summary "$(public_ip)" "$token"
+}
+
+# The last thing the installer prints: what runs, how to connect, what to do next.
+summary() {
+	ip="$1"
+	token="$2"
+	version=$("$BIN_DIR/$DAEMON_BIN" --version | awk '{print $2}')
 	if [ -n "$token" ]; then
-		printf '  %-10s %s\n' "Token" "$token"
-		note "the token is shown only once; rotate it with '$DAEMON_BIN token rotate'"
-		printf '\n  On this server, run %s%s%s to open the dashboard.\n' "$C_ACCENT" "$CLI_BIN" "$C_RESET"
-		printf '\n  From your laptop:\n'
-		printf '    curl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | sh -s -- --cli\n' "$REPO"
-		printf '    %s login http://%s:%s --token %s\n' "$CLI_BIN" "$ip" "$PORT" "$token"
+		printf '\n%s%s is ready%s\n\n' "$C_OK" "$NAME" "$C_RESET"
 	else
-		printf '\n  Upgraded and restarted. Run %s%s%s to open the dashboard.\n' "$C_ACCENT" "$CLI_BIN" "$C_RESET"
+		printf '\n%s%s is upgraded%s, data and token kept\n\n' "$C_OK" "$NAME" "$C_RESET"
 	fi
-	printf '\n  Point a domain'"'"'s A record at %s, then add it to a service.\n\n' "$ip"
+	printf '  %-8s %s %s, %s\n' "daemon" "$DAEMON_BIN" "$version" "$RUNNING_AS"
+	printf '  %-8s %s\n' "proxy" "$PROXY_STATE"
+	printf '  %-8s %s\n' "docker" "$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo running)"
+	printf '  %-8s http://%s:%s\n' "api" "$ip" "$PORT"
+	if [ -n "$token" ]; then
+		printf '\n  On your laptop (macOS or Linux):\n\n'
+		printf '    curl -fsSL https://raw.githubusercontent.com/%s/main/install.sh | sh -s -- --cli\n' "$REPO"
+		printf '    %s%s login http://%s:%s --token %s%s\n\n' "$C_ACCENT" "$CLI_BIN" "$ip" "$PORT" "$token" "$C_RESET"
+		note "the token is shown only once; '$DAEMON_BIN token rotate' issues a new one"
+	fi
+	printf '\n  Next: run %s%s%s, here or on your laptop, to set up this instance.\n\n' "$C_ACCENT" "$CLI_BIN" "$C_RESET"
 }
 
 install_cli() {
@@ -468,7 +484,8 @@ install_cli() {
 	*":$INSTALL_DIR:"*) ;;
 	*) warn "$INSTALL_DIR is not on your PATH; add it to your shell profile" ;;
 	esac
-	printf '\n  Connect with: %s login http://<server-ip>:%s --token <token>\n\n' "$CLI_BIN" "$PORT"
+	printf '\n  Connect with: %s%s login http://<server-ip>:%s --token <token>%s\n' "$C_ACCENT" "$CLI_BIN" "$PORT" "$C_RESET"
+	printf '  Then run %s%s%s.\n\n' "$C_ACCENT" "$CLI_BIN" "$C_RESET"
 }
 
 # Uninstall

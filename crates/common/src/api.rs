@@ -46,10 +46,10 @@
 //! | POST | `/settings/proxy/restart` | | `Server` (reinstalls the proxy on the local server) |
 //! | POST | `/settings/prune` | | `PruneResult` (old build images, dangling images, build cache) |
 //! | GET | `/settings/version` | | `VersionCheck` (latest release, cached for an hour) |
-//! | POST | `/settings/update` | `UpdateRequest` | `UpdateResult` (replaces the binaries, then the daemon exits to restart) |
+//! | POST | `/settings/update` | `UpdateRequest` | `UpdateResult` (`updated: false` when that release is already installed; otherwise replaces the binaries, then the daemon exits to restart) |
 //! | GET | `/settings/domain` | | `InstanceDomain` (the DNS records to create and the last check) |
 //! | PUT | `/settings/domain` | `SetInstanceDomain` | `InstanceDomain` (routes the domain to the API through the proxy, then checks it) |
-//! | POST | `/settings/domain/check` | | `InstanceDomain` (DNS, ports 80 and 443, certificate, API) |
+//! | POST | `/settings/domain/check` | | `InstanceDomain` (DNS, ports 80 and 443, certificate, API; detects Cloudflare's proxy) |
 //! | DELETE | `/settings/domain` | | `InstanceDomain` (the API is served on IP:port only again) |
 //!
 //! Git sources. Credentials are stored as secrets and never returned. GitHub App sources need a
@@ -77,6 +77,13 @@
 //! | GET | `/github/{id}/callback?code=&state=` | the setup state; exchanges the code for the app's credentials, then redirects to the install page |
 //! | GET | `/github/{id}/setup?installation_id=` | the installation must belong to the app, asked with the app's JWT |
 //! | POST | `/github/{id}/webhook` | `X-Hub-Signature-256` with the app's webhook secret; a push to a tracked branch deploys |
+//!
+//! The instance domain check fetches its own one-time token through the proxy, over http and
+//! https, to prove that traffic for the domain reaches this server whatever sits in between.
+//!
+//! | Method | Path | Proof |
+//! |---|---|---|
+//! | GET | `/.well-known/acme-challenge/<prefix>-verify-{nonce}` | the nonce of a running check; answers `<nonce> <scheme>`, the scheme the proxy received it on |
 //!
 //! Git services build with `Source::Git.build`: a Dockerfile (with `target` and the service's
 //! env as build args), a compose file deployed as one group (`ServiceDetail.compose` lists its
@@ -148,6 +155,15 @@
 //! | GET | `/instance/backups/{id}/download` | | the encrypted archive as `application/octet-stream` |
 //! | DELETE | `/instance/backups/{id}` | | 204 |
 //!
+//! First-run setup. The daemon stores skips and whether the flow was finished or closed; each
+//! step's `done` is read from the instance itself. An instance that already had projects when it
+//! upgraded starts out finished.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | GET | `/onboarding` | | `onboarding::Onboarding` |
+//! | PATCH | `/onboarding` | `UpdateOnboarding` | `onboarding::Onboarding` (400 for skipping Welcome or Done) |
+//!
 //! Notifications: channels are destinations, rules send events in a scope to one channel.
 //! Channel configs are sealed under the master key; responses only carry the redacted config.
 //! Delivery runs in the background with retries, so no route waits on a channel except `test`.
@@ -168,6 +184,7 @@
 //! | GET | `/notify/deliveries?limit=50&channel_id=&rule_id=` | | `Vec<NotifyDelivery>`, newest first |
 
 use crate::notify::{ChannelConfig, NotifyEvent, RuleScope};
+use crate::onboarding::{OnboardingStatus, Step};
 use crate::{EnvVar, Id, RestartPolicy, SecretValue, Source};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -289,7 +306,7 @@ pub struct CreateDomain {
     pub compose_service: Option<String>,
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
@@ -365,6 +382,20 @@ impl fmt::Debug for ConnectGithubToken {
     }
 }
 
+/// Fields left as `None` keep their value.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateOnboarding {
+    pub status: Option<OnboardingStatus>,
+    pub current: Option<Step>,
+    /// Steps to mark as skipped; only [`Step::TASKS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip: Vec<Step>,
+    /// Skipped steps to put back on the list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unskip: Vec<Step>,
+    pub checklist_dismissed: Option<bool>,
+}
+
 /// Fields left as `None` keep their value. An empty `public_ip_override` (or `auto`) clears the
 /// override so the address is detected again.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -382,7 +413,8 @@ pub struct RotatedToken {
 pub struct UpdateRequest {
     /// Release tag such as `v0.2.0`; defaults to the latest release.
     pub version: Option<String>,
-    /// Update even when no supervisor restarts the daemon, or when the version is not newer.
+    /// Reinstall even when the version is not newer, and update even when no supervisor restarts
+    /// the daemon. Without it, a release that is not newer answers `updated: false`.
     #[serde(default)]
     pub force: bool,
 }
