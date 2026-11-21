@@ -463,10 +463,48 @@ pub struct Domain {
 pub struct Volume {
     pub id: Id,
     pub service_id: Id,
-    /// Short name; the Docker volume is `<brand prefix>-<service id>-<name>`.
+    /// Short name; the Docker volume is `<brand prefix>-<service id>-<name>` unless compose
+    /// named it (see [`Volume::docker_name`]).
     pub name: String,
+    /// Where it is mounted; a compose volume lists every target, comma-separated.
     pub mount_path: String,
     pub created_at: Timestamp,
+    /// Set on volumes the daemon keeps for a compose service. These come from the compose file
+    /// and are updated on every deploy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose: Option<ComposeVolume>,
+}
+
+impl Volume {
+    /// The Docker volume's name on the service's server.
+    pub fn docker_name(&self) -> String {
+        match &self.compose {
+            Some(ComposeVolume::Named { docker_name }) => docker_name.clone(),
+            _ => format!("{}-{}-{}", brand::PREFIX, self.service_id, self.name),
+        }
+    }
+}
+
+/// Where a compose service's volume comes from. Bind mounts that point into the repository
+/// can't be mounted from the clone, which lives next to the daemon and only for one deploy, so
+/// the daemon turns them into volumes on the service's server:
+///
+/// - a file, or a directory mounted read-only, is configuration: it is copied from the
+///   repository into the `Files` volume on every deploy, so changes show up after a redeploy;
+/// - a writable directory, or a path the repository doesn't have, is data: it becomes a `Data`
+///   volume of its own that survives redeploys, filled from the repository only when it is made.
+///
+/// Absolute host paths (`/var/run/docker.sock`) are left alone and name paths on the server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComposeVolume {
+    /// A named volume of the compose file, which compose creates as `docker_name`.
+    Named { docker_name: String },
+    /// A writable bind mount of `path`, relative to the repository root.
+    Data { path: String },
+    /// Files and read-only directories, relative to the repository root, copied fresh on every
+    /// deploy.
+    Files { paths: Vec<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

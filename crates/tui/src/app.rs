@@ -4658,7 +4658,7 @@ impl App {
             .servers
             .iter()
             .all(|s| s.status != ServerStatus::Offline);
-        let mut note = if moving.is_some() && all_online {
+        let note = if moving.is_some() && all_online {
             Vec::new()
         } else {
             vec![Line::styled(
@@ -4666,11 +4666,6 @@ impl App {
                 theme::muted(),
             )]
         };
-        let compose = form.choice("source") <= 1
-            && form.choice_label("build").as_deref() == Some(BUILD_LABELS[2]);
-        if compose && self.servers.iter().any(|s| s.kind == ServerKind::Ssh) {
-            note.push(Line::styled(server_pick::REMOTE_COMPOSE, theme::muted()));
-        }
         let subtitle = match &moving {
             Some(from) => format!(
                 "move {} from {}",
@@ -5305,14 +5300,15 @@ impl App {
         };
         let mut server = Field::pick(server_pick::KEY, "server", "", "");
         server_pick::set(&mut server, target, &self.server_address(target));
-        let compose =
-            matches!(&s.source, Source::Git { build, .. } if build.method == BuildMethod::Compose);
         let database = matches!(s.source, Source::Database { .. });
-        let volumes: Vec<&str> = detail.volumes.iter().map(|v| v.name.as_str()).collect();
+        let volumes: Vec<&str> = detail
+            .volumes
+            .iter()
+            .filter(|v| !matches!(v.compose, Some(common::ComposeVolume::Files { .. })))
+            .map(|v| v.name.as_str())
+            .collect();
         let (copy, hint) = if database {
             (true, "databases always copy".to_string())
-        } else if compose {
-            (false, "compose volumes".to_string())
         } else if volumes.is_empty() {
             (false, "no volumes".to_string())
         } else {

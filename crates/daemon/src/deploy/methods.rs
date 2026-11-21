@@ -26,6 +26,29 @@ impl Job {
         env: &[(String, String)],
         cwd: &Path,
     ) -> Result<String> {
+        self.run_command(program, args, env, cwd, true).await
+    }
+
+    /// Like [`Job::run_logged`], but returns stdout without logging it, for output that can
+    /// hold secrets such as a resolved compose file.
+    async fn run_quiet(
+        &self,
+        program: &Path,
+        args: &[String],
+        env: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<String> {
+        self.run_command(program, args, env, cwd, false).await
+    }
+
+    async fn run_command(
+        &self,
+        program: &Path,
+        args: &[String],
+        env: &[(String, String)],
+        cwd: &Path,
+        log_stdout: bool,
+    ) -> Result<String> {
         self.check_cancelled()?;
         let name = program.file_name().map_or_else(
             || program.display().to_string(),
@@ -61,7 +84,9 @@ impl Job {
                             Some(l) => {
                                 captured.push_str(&l);
                                 captured.push('\n');
-                                self.push_line(LogStream::Stdout, &l);
+                                if log_stdout {
+                                    self.push_line(LogStream::Stdout, &l);
+                                }
                             }
                             None => out_done = true,
                         },
@@ -272,24 +297,30 @@ impl Job {
         };
         self.begin(StepKind::Build, Some(format!("compose · {file}")))
             .await;
-        let names: Vec<String> = self
-            .run_logged(
-                Path::new("docker"),
-                &compose(&["config", "--services"]),
-                &env,
-                root_dir,
-            )
-            .await?
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(String::from)
-            .collect();
+        let resolved: serde_json::Value = serde_json::from_str(
+            &self
+                .run_quiet(
+                    Path::new("docker"),
+                    &compose(&["config", "--format", "json"]),
+                    &env,
+                    root_dir,
+                )
+                .await?,
+        )
+        .context("cannot read the resolved compose file")?;
+        let names: Vec<String> = resolved["services"]
+            .as_object()
+            .map(|s| s.keys().cloned().collect())
+            .unwrap_or_default();
         if names.is_empty() {
             bail!("{file} has no services");
         }
         let domains = self.state.db.domains(&svc.id).await?;
-        let overrides = build::compose_override(svc, &names, &domains)?;
+        let mut overrides = build::compose_override(svc, &names, &domains)?;
+        let repo = self.state.dirs.build_dir(&self.d.id);
+        let plan = super::mounts::plan(&resolved, &repo, self.state.dirs.root())?;
+        self.compose_mounts(docker, server, svc, &repo, &plan, &mut overrides)
+            .await?;
         let override_file = format!(".{}-compose.json", brand::PREFIX);
         std::fs::write(root_dir.join(&override_file), overrides.to_string())?;
         if overrides.get("networks").is_some() {

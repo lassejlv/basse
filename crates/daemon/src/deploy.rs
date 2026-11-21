@@ -24,6 +24,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio::sync::{broadcast, watch};
 
 mod methods;
+mod mounts;
 mod transfer;
 
 use transfer::Moving;

@@ -947,6 +947,36 @@ fn service(app: &mut App, key: KeyEvent) {
                 app.copy(&volume.mount_path, "mount path");
             }
         }
+        (Tab::Volumes, KeyCode::Char('x' | 'X') | KeyCode::Delete)
+            if detail.volumes.get(row).is_some_and(|v| v.compose.is_some()) =>
+        {
+            let v = &detail.volumes[row];
+            let (title, message, danger) = match v.compose {
+                Some(ComposeVolume::Files { .. }) => (
+                    "Remove copied files",
+                    format!(
+                        "Remove the files {} copied from the repository? The next deploy copies them again.",
+                        s.name
+                    ),
+                    false,
+                ),
+                _ => (
+                    "Remove volume and data",
+                    format!(
+                        "Remove {} and permanently delete its data? It comes from the compose file, so the next deploy makes it again, empty or from the repository.",
+                        v.name
+                    ),
+                    true,
+                ),
+            };
+            ask(
+                app,
+                title,
+                message,
+                danger,
+                ConfirmAction::DeleteVolume(v.id.clone(), true),
+            );
+        }
         (Tab::Volumes, KeyCode::Char('x') | KeyCode::Delete) => {
             if let Some(v) = detail.volumes.get(row) {
                 ask(

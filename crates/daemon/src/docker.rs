@@ -28,7 +28,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 
 /// Reverse proxy image run on every server.
 pub const PROXY_IMAGE: &str = "lucaslorentz/caddy-docker-proxy:2.12-alpine";
-/// Image of the containers that hold a volume while it is copied; they are created, never run.
+/// Small image for helper containers that copy files into or between volumes.
 pub const HELPER_IMAGE: &str = "busybox:1.37";
 const DOCKER_TIMEOUT_SECS: u64 = 120;
 
@@ -839,6 +839,30 @@ pub async fn remove_compose_leftovers(docker: &Docker, project: &str, volumes: b
         }
     }
     Ok(())
+}
+
+/// Creates the volume unless it exists; true when it was created.
+pub async fn create_volume_if_missing(docker: &Docker, name: &str) -> Result<bool> {
+    match docker.inspect_volume(name).await {
+        Ok(_) => Ok(false),
+        Err(e) if is_not_found(&e) => ensure_volume(docker, name).await.map(|()| true),
+        Err(e) => Err(e).with_context(|| format!("cannot inspect volume {name}")),
+    }
+}
+
+/// Where the volume's files are on its server, for bind-mounting single files out of it.
+pub async fn volume_mountpoint(docker: &Docker, name: &str) -> Result<String> {
+    let volume = docker
+        .inspect_volume(name)
+        .await
+        .with_context(|| format!("cannot inspect volume {name}"))?;
+    if volume.mountpoint.is_empty() {
+        bail!(
+            "volume {name} uses the {} driver, which has no path on the server",
+            volume.driver
+        );
+    }
+    Ok(volume.mountpoint)
 }
 
 pub async fn ensure_volume(docker: &Docker, name: &str) -> Result<()> {

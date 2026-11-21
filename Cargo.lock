@@ -614,7 +614,7 @@ checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
 
 [[package]]
 name = "cli"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -632,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "client"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "common",
@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "common"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "chrono",
  "serde",
@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "daemon"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3238,7 +3238,7 @@ checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
 
 [[package]]
 name = "release"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "common",
@@ -4689,7 +4689,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tui"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

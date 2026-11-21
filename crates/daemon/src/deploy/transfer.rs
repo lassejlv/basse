@@ -184,27 +184,37 @@ impl Job {
     }
 
     /// Named volumes of the service on the old server, with their labels.
+    /// The service's volumes as the store lists them, except a compose service's `Files`
+    /// volume, which every deploy fills from the repository. A compose service also brings
+    /// the named volumes of its project that a deploy before the store kept them created.
     async fn source_volumes(
         &self,
         source: &Docker,
         svc: &Service,
     ) -> Result<Vec<(String, HashMap<String, String>)>> {
-        if is_compose(svc) {
-            let label = format!(
-                "com.docker.compose.project={}",
-                build::compose_project(&svc.id)
-            );
-            return docker::volumes_by_label(source, &label).await;
-        }
-        let mut out = Vec::new();
+        let mut out: Vec<(String, HashMap<String, String>)> = Vec::new();
         for v in self.state.db.volumes(&svc.id).await? {
-            let name = docker::volume_name(&svc.id, &v.name);
+            if matches!(v.compose, Some(ComposeVolume::Files { .. })) {
+                continue;
+            }
+            let name = v.docker_name();
             match docker::volume_labels(source, &name).await? {
                 Some(labels) => out.push((name, labels)),
                 None => self.log.system(format!(
                     "Volume {} does not exist yet; nothing to copy",
                     v.name
                 )),
+            }
+        }
+        if is_compose(svc) {
+            let label = format!(
+                "com.docker.compose.project={}",
+                build::compose_project(&svc.id)
+            );
+            for (name, labels) in docker::volumes_by_label(source, &label).await? {
+                if !out.iter().any(|(n, _)| *n == name) {
+                    out.push((name, labels));
+                }
             }
         }
         Ok(out)
