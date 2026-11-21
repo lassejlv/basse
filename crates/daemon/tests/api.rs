@@ -481,6 +481,27 @@ fn serve_refuses_an_uninitialized_data_dir() {
 }
 
 #[tokio::test]
+async fn updating_to_a_release_that_is_not_newer_is_up_to_date() {
+    let Some(daemon) = Daemon::start().await else {
+        return;
+    };
+    let c = daemon.client();
+    let current = c.info().await.unwrap().version;
+    for version in [current.clone(), format!("v{current}"), "0.0.1".into()] {
+        let result = c
+            .update(&UpdateRequest {
+                version: Some(version),
+                force: false,
+            })
+            .await
+            .unwrap();
+        assert!(!result.updated);
+        assert_eq!((&result.from, &result.to), (&current, &current));
+    }
+    assert_eq!(c.info().await.unwrap().version, current);
+}
+
+#[tokio::test]
 async fn settings_persist_and_the_api_rotates_the_token() {
     let Some(daemon) = Daemon::start().await else {
         return;

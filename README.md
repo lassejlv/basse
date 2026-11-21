@@ -53,11 +53,15 @@ basse
 ## Update
 
 ```sh
-basse update     # update the daemon of the current context and wait for it to restart
-basse upgrade    # update this CLI binary (use sudo if it lives in /usr/local/bin)
+basse update            # this CLI first, then the daemon of the current context, to the latest release
+basse update --cli      # only this CLI binary (same as `basse upgrade`)
+basse update --server   # only the daemon, and wait for it to restart
+basse update --tag v0.4.1 --force   # a specific release, reinstalled even if it is installed
 ```
 
-The daemon downloads the release for its platform, checks its SHA-256, replaces its own binary and the `basse` CLI next to it, and exits so systemd starts the new version. It refuses while a deployment is running. The TUI shows "update available" on the Settings screen, where `u` does the same.
+A side that already runs the release prints "up to date" and is left alone; a side that updates prints `from → to`. Without a logged-in context only the CLI is updated, and an unreachable daemon gets a warning while the CLI still updates. If the CLI lives somewhere you can't write, such as `/usr/local/bin`, the error tells you to run `sudo basse update --cli`; the daemon is still updated.
+
+The daemon downloads the release for its platform, checks its SHA-256, replaces its own binary and the `basse` CLI next to it, and exits so systemd starts the new version. It refuses while a deployment is running. When the CLI and the daemon run different versions, commands end with a quiet hint such as `basse 0.3.0 ≠ bassed 0.4.0 · run basse update`, and the TUI shows it in its top bar. The TUI's Settings screen shows both versions, and `u` updates both.
 
 ## Uninstall
 
@@ -324,7 +328,7 @@ basse notify events                                                         # th
 |---|---|
 | `crates/common` | Domain types, the HTTP API contract and `brand`, the one place that holds product names |
 | `crates/client` | Typed HTTP client and the saved daemon contexts |
-| `crates/release` | Release lookups, verified downloads and binary replacement for `update` and `upgrade` |
+| `crates/release` | Release lookups, verified downloads and binary replacement for `update` |
 | `crates/daemon` | The `bassed` binary: axum API, Postgres through sqlx, Docker through bollard, Caddy proxy, deploy pipeline, SSH servers |
 | `crates/tui` | The ratatui interface |
 | `crates/cli` | The `basse` binary: clap commands that open the TUI by default |

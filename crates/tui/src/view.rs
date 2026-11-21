@@ -191,10 +191,12 @@ fn top_bar(frame: &mut Frame, area: Rect, app: &App) {
             .public_ip
             .clone()
             .unwrap_or_else(|| info.hostname.clone());
-        left.push(Span::styled(
-            format!("{host} · {} {}  ", brand::DAEMON_BIN, info.version),
-            theme::muted(),
-        ));
+        let daemon = match app.cli_updated.as_deref() == Some(info.version.as_str()) {
+            true => None,
+            false => version_skew(env!("CARGO_PKG_VERSION"), &info.version),
+        }
+        .unwrap_or_else(|| format!("{} {}", brand::DAEMON_BIN, info.version));
+        left.push(Span::styled(format!("{host} · {daemon}  "), theme::muted()));
     }
     left.push(match (&app.connection_error, &app.info) {
         _ if app.updating.is_some() => Span::styled(
@@ -3235,6 +3237,7 @@ fn confirm(frame: &mut Frame, area: Rect, c: &Confirm, tick: usize) {
     if let Some((since, label)) = c.busy {
         let wait = match c.action {
             ConfirmAction::RestoreBackup(..) => "the database is busy until this finishes",
+            ConfirmAction::Update { server: false, .. } => "replacing this binary",
             _ => "waiting for the daemon",
         };
         frame.render_widget(Paragraph::new(wait).style(theme::muted()), keys);
@@ -3736,7 +3739,7 @@ fn instance_panel(frame: &mut Frame, area: Rect, app: &App, s: &InstanceSettings
         rows[0],
         "version",
         version,
-        update.as_ref().map(|_| ("u", "update")),
+        (update.is_some() || app.cli_update().is_some()).then_some(("u", "update")),
     );
     setting_row(
         frame,
@@ -3766,16 +3769,20 @@ fn instance_panel(frame: &mut Frame, area: Rect, app: &App, s: &InstanceSettings
         Some(("i", "edit")),
     );
     if let Some(row) = rows.get(3) {
-        setting_row(
-            frame,
-            *row,
-            "from a shell",
-            vec![Span::styled(
-                format!("{} update", brand::CLI_BIN),
-                theme::text(),
-            )],
-            None,
-        );
+        let mut cli = vec![Span::styled(env!("CARGO_PKG_VERSION"), theme::text())];
+        match (&app.cli_updated, app.cli_update(), &app.settings.release) {
+            (Some(to), _, _) => cli.push(Span::styled(
+                format!("  {to} installed · restart {} to use it", brand::CLI_BIN),
+                theme::muted(),
+            )),
+            (None, Some(latest), _) => cli.push(Span::styled(
+                format!("  update available {latest}"),
+                theme::accent(),
+            )),
+            (None, None, Some(_)) => cli.push(Span::styled("  up to date", theme::muted())),
+            _ => {}
+        }
+        setting_row(frame, *row, "cli", cli, None);
     }
     let rows = lines_of(right, 4);
     let value = |v: String| vec![Span::styled(v, theme::text())];
