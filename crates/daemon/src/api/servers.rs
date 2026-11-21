@@ -5,12 +5,14 @@ use super::{Json, Query, no_content};
 use crate::db::new_id;
 use crate::docker;
 use crate::error::{ApiResult, AppError, bad_request, conflict};
+use crate::notify::Event;
 use crate::services;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse as _, Response};
 use chrono::Utc;
 use common::api::{CreateServer, UpdateServer};
+use common::notify::NotifyEvent;
 use common::*;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -264,6 +266,8 @@ pub async fn ensure_local_proxy(state: &AppState, server: Server) {
 
 /// Pings Docker on the server and stores status, engine version and proxy status.
 pub async fn check_server(state: &AppState, mut server: Server) -> anyhow::Result<Server> {
+    let before = server.status;
+    let mut failure = None;
     let probe = async {
         let docker = state.docker.get(&server).await?;
         let version = docker.version().await?;
@@ -278,16 +282,38 @@ pub async fn check_server(state: &AppState, mut server: Server) -> anyhow::Resul
         }
         Ok(Err(e)) => {
             tracing::warn!(server = %server.name, "server check failed: {e:#}");
+            failure = Some(format!("{e:#}"));
             server.status = ServerStatus::Offline;
             state.docker.forget(&server.id);
         }
         Err(_) => {
             tracing::warn!(server = %server.name, "server check timed out");
+            failure = Some(format!("no answer within {}s", CHECK_TIMEOUT.as_secs()));
             server.status = ServerStatus::Offline;
             state.docker.forget(&server.id);
         }
     }
     server.last_checked_at = Some(Utc::now());
     state.db.update_server_check(&server).await?;
+    let event = |kind| {
+        let mut e = Event::new(kind).about(server.name.clone(), server.id.clone());
+        if let Some(host) = &server.host {
+            e = e.field("Host", host.clone());
+        }
+        e
+    };
+    if before != server.status {
+        match server.status {
+            ServerStatus::Online => state.notify(event(NotifyEvent::ServerConnected).detail(
+                format!("Docker {}", server.docker_version.as_deref().unwrap_or("?")),
+            )),
+            ServerStatus::Offline => state.notify(
+                event(NotifyEvent::ServerUnreachable)
+                    .detail(failure.unwrap_or_default())
+                    .hint(format!("{} server check {}", brand::CLI_BIN, server.name)),
+            ),
+            ServerStatus::Unknown => {}
+        }
+    }
     Ok(server)
 }

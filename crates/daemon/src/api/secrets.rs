@@ -3,12 +3,14 @@
 use super::{Json, no_content};
 use crate::db::new_id;
 use crate::error::{ApiResult, AppError, bad_request, conflict};
+use crate::notify::Event;
 use crate::secrets;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use chrono::Utc;
 use common::api::{CreateSecret, GenerateSshKey, UpdateSecret};
+use common::notify::NotifyEvent;
 use common::*;
 use std::sync::Arc;
 
@@ -75,6 +77,7 @@ async fn insert(state: &AppState, name: String, value: SecretValue) -> ApiResult
             Some(secret.kind.label().to_string()),
         )
         .await;
+    secret_event(state, NotifyEvent::SecretChanged, &secret, "added");
     Ok(secret)
 }
 
@@ -141,8 +144,19 @@ pub async fn update(
         (true, false) => format!("Secret {old_name} renamed to {}", secret.name),
         (false, _) => format!("Secret {} replaced", secret.name),
     };
+    secret_event(&state, NotifyEvent::SecretChanged, &secret, &message);
     state.activity(ActivityLevel::Info, message, None).await;
     Ok(Json(secret))
+}
+
+/// A security event about a secret; never carries its value.
+fn secret_event(state: &AppState, kind: NotifyEvent, secret: &Secret, what: &str) {
+    state.notify(
+        Event::new(kind)
+            .about(secret.name.clone(), secret.id.clone())
+            .detail(what.to_string())
+            .field("Kind", secret.kind.label()),
+    );
 }
 
 pub async fn delete(
@@ -166,6 +180,7 @@ pub async fn delete(
             None,
         )
         .await;
+    secret_event(&state, NotifyEvent::SecretChanged, &secret, "deleted");
     Ok(no_content())
 }
 
@@ -182,5 +197,11 @@ pub async fn reveal(
             None,
         )
         .await;
+    secret_event(
+        &state,
+        NotifyEvent::SecretRevealed,
+        &secret,
+        "its value was read through the API",
+    );
     Ok(Json(RevealedSecret { secret, value }))
 }

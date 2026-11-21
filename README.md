@@ -222,6 +222,48 @@ The old server is gone and you have an instance backup in S3 (or a downloaded ar
 7. **Point DNS** for your domains at the new server so the proxy can get certificates again.
 8. **Take a fresh instance backup** once everything is green.
 
+## Notifications
+
+A channel is somewhere messages go; a rule sends a set of events from the whole instance, one project, one environment or one service to a channel. Nothing is sent until a rule says so.
+
+```sh
+basse notify channel add ops-discord --kind discord < webhook-url.txt      # the credential comes from stdin or --secret-file
+basse notify channel add oncall --kind smtp --host smtp.example.com --username alerts \
+  --from "Alerts <alerts@example.com>" --to oncall@example.com --secret-file smtp-password.txt
+basse notify channel add phone --kind ntfy --topic acme-alerts            # server defaults to https://ntfy.sh
+basse notify channel list                                                   # targets are shown redacted
+basse notify channel test ops-discord
+
+basse notify presets                                                        # essentials, deploys, databases, everything
+basse notify rule add --channel ops-discord --preset essentials
+basse notify rule add --channel ops-discord --preset deploys --project acme --exclude deploy.queued
+basse notify rule add --channel phone --event service.crashed --event "server.*" --service acme/production/api
+basse notify rule list
+basse notify log                                                            # the last attempts with status and error
+basse notify events                                                         # the whole catalog
+```
+
+| Kind | Needs | Credential (stdin or `--secret-file`) |
+|---|---|---|
+| `smtp` | `--host`, `--port`, `--security` (starttls, tls, none), `--username`, `--from`, `--to` | password (with `--username`) |
+| `resend` | `--from`, `--to` | API key |
+| `cloudflare` | `--account-id`, `--from`, `--to` (Cloudflare Email Service, sending domain onboarded) | API token with email sending permission |
+| `discord`, `slack`, `mattermost`, `google-chat` | | webhook URL |
+| `teams` | a Workflows "post to a channel when a webhook request is received" flow | webhook URL |
+| `telegram` | `--chat-id` | bot token |
+| `ntfy` | `--topic`, `--server` | access token, optional (`--secret-file`) |
+| `gotify` | `--server` | app token |
+| `pushover` | `--user` | app token |
+| `webhook` | `--url`, `--header "Name: value"` | HMAC secret, optional (`--secret-file`) |
+
+**Events.** Deploys (queued, started, succeeded, failed, cancelled, rolled back, health check failed), services (started, stopped, restarted, crashed, killed out of memory, restart loop), databases (created, backup succeeded or failed, restore done or failed, password rotated), instance backups, S3 storage unreachable, TLS certificates (issued or renewed, expiring soon, invalid), servers (connected, unreachable, disk or memory above 90% on the daemon's machine), the daemon (started, update available, update installed) and security (API token rotated, secret changed, secret revealed). Each has a stable id such as `deploy.failed` and a severity that colors the message.
+
+**Presets** fill a rule's events in one pick and can be adjusted afterwards: *Essentials* (every critical event: failures and outages), *Deploys* (the whole deploy lifecycle), *Databases & backups* (databases, instance backups and storage) and *Everything*. A rule without a preset is a custom pick.
+
+**Delivery.** Events are queued and sent in the background, so a slow channel never holds up a deploy. A failed attempt is retried after 5 s, 30 s and 2 min when retrying can help (timeouts, 5xx, 429). Each rule drops the same event about the same subject within its dedupe window (5 minutes by default) and sends at most 30 messages an hour; dropped ones show as `suppressed` in the log, which keeps the last 1000 attempts. Generic webhooks get a JSON body with the event id, severity, subject ids and fields, and an `X-Basse-Signature: sha256=<hex>` HMAC of the body when a secret is set.
+
+**Credentials.** A channel's whole config is encrypted with the master key like a secret, bound to the channel's id. The API only ever returns it redacted: passwords, tokens and header values become `[redacted]` and webhook URLs are cut to their host.
+
 ## Workspace
 
 | Crate | What it is |

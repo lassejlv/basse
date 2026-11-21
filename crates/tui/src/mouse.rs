@@ -57,6 +57,16 @@ pub enum Hit {
     PickRow(usize),
     /// A row of the list on a full-screen list such as Secrets.
     Item(usize),
+    /// A tab of the Notifications screen.
+    NotifySection(crate::notify::Section),
+    /// A row of the rule dialog's settings.
+    RuleField(crate::notify::RuleFocus),
+    /// A chip on a row of the rule dialog.
+    RuleChoice(crate::notify::RuleFocus, usize),
+    /// A preset in the rule dialog.
+    Preset(usize),
+    /// An event in the rule dialog's checklist.
+    NotifyEvent(common::notify::NotifyEvent),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +83,8 @@ pub enum List {
     Secrets,
     Storage,
     InstanceBackups,
+    Notify,
+    Rule,
 }
 
 thread_local! {
@@ -218,6 +230,7 @@ pub fn key_for_label(label: &str) -> Option<(KeyCode, KeyModifiers)> {
         "ctrl+s" => (KeyCode::Char('s'), KeyModifiers::CONTROL),
         "ctrl+r" => (KeyCode::Char('r'), KeyModifiers::CONTROL),
         "ctrl+k" => (KeyCode::Char('k'), KeyModifiers::CONTROL),
+        "space" => (KeyCode::Char(' '), none),
         "y" => (KeyCode::Char('y'), none),
         _ => {
             let mut chars = label.chars();
@@ -610,8 +623,41 @@ fn click(app: &mut App, hit: Hit, double: bool) {
                 }
             }
             Screen::Settings => app.select_instance_backup(i),
+            Screen::Notifications => {
+                app.notify.select(i);
+                if double {
+                    press(app, KeyCode::Enter, KeyModifiers::NONE);
+                }
+            }
             _ => {}
         },
+        Hit::NotifySection(section) => app.notify.section = section,
+        Hit::RuleField(focus) => {
+            if let Some(Overlay::Rule(d)) = app.overlay.as_mut() {
+                d.click_field(focus);
+                if matches!(
+                    focus,
+                    crate::notify::RuleFocus::Channel | crate::notify::RuleFocus::Scope
+                ) {
+                    press(app, KeyCode::Enter, KeyModifiers::NONE);
+                }
+            }
+        }
+        Hit::RuleChoice(focus, i) => {
+            if let Some(Overlay::Rule(d)) = app.overlay.as_mut() {
+                d.click_choice(focus, i);
+            }
+        }
+        Hit::Preset(i) => {
+            if let Some(Overlay::Rule(d)) = app.overlay.as_mut() {
+                d.click_preset(i);
+            }
+        }
+        Hit::NotifyEvent(event) => {
+            if let Some(Overlay::Rule(d)) = app.overlay.as_mut() {
+                d.click_event(event);
+            }
+        }
         Hit::FormChoice(i, choice) => {
             if let Some(Overlay::Form(form)) = app.overlay.as_mut() {
                 form.click(i, Some(choice));

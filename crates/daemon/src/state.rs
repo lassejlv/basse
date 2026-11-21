@@ -7,6 +7,7 @@ use crate::db::Db;
 use crate::deploy::Deploys;
 use crate::docker::DockerPool;
 use crate::error::AppError;
+use crate::notify::Notifier;
 use crate::secrets::{MasterKey, Secrets};
 use crate::stats::Stats;
 use anyhow::{Context as _, Result, bail};
@@ -28,6 +29,7 @@ pub struct AppState {
     pub stats: Stats,
     pub db_locks: database::Locks,
     pub secrets: Secrets,
+    pub notifier: Notifier,
     /// Held while an instance backup runs; there is at most one at a time.
     pub instance_backup_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     /// Client used for health checks; does not follow redirects so 3xx counts as healthy.
@@ -100,6 +102,7 @@ impl AppState {
         Ok(Self {
             docker: DockerPool::new(crate::ssh::paths(&dirs.ssh_dir()), secrets.clone()),
             secrets,
+            notifier: Notifier::default(),
             instance_backup_lock: Default::default(),
             db,
             dirs,

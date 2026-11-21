@@ -1,6 +1,7 @@
 //! Command line interface. With no subcommand it opens the TUI.
 
 mod instance;
+mod notify;
 mod output;
 mod resolve;
 
@@ -157,6 +158,9 @@ enum Cmd {
     /// Encrypted backups of the daemon itself, for disaster recovery.
     #[command(subcommand)]
     Instance(InstanceCmd),
+    /// Notifications: channels, rules with presets, and the delivery log.
+    #[command(subcommand)]
+    Notify(notify::NotifyCmd),
 }
 
 #[derive(Subcommand)]
@@ -740,6 +744,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Secrets(cmd) => secrets(&c, cmd, json).await,
         Cmd::Storage(cmd) => storage(&c, cmd, json).await,
         Cmd::Instance(cmd) => instance(&c, cmd, json).await,
+        Cmd::Notify(cmd) => notify::run(&c, cmd, json).await,
     }
 }
 

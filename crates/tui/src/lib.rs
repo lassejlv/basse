@@ -7,6 +7,7 @@ mod keys;
 mod mouse;
 #[cfg(test)]
 mod mouse_tests;
+mod notify;
 mod picker;
 mod theme;
 mod util;

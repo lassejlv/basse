@@ -21,6 +21,10 @@ pub enum PickKind {
     S3Credentials,
     /// Where a backup goes: the data directory or a storage connection.
     Store,
+    /// A notification channel for a rule; items are filled by the rule dialog.
+    Channel,
+    /// What a rule listens to; items are filled by the rule dialog.
+    Scope,
 }
 
 /// Where the choice goes.
@@ -31,6 +35,8 @@ pub enum PickFor {
     ServerKey { server_id: Id, server: String },
     /// A manual backup of a database service.
     BackupNow { service_id: Id, name: String },
+    /// The channel or scope of the rule dialog, which is shown again afterwards.
+    Rule(Box<crate::notify::RuleDialog>),
 }
 
 pub struct PickItem {
@@ -149,6 +155,9 @@ impl Picker {
         storages: &[StorageConnection],
         daemon_key: Option<&str>,
     ) {
+        if matches!(self.kind, PickKind::Channel | PickKind::Scope) {
+            return;
+        }
         let selected = self.items.get(self.row).map(|i| (i.id.clone(), i.generate));
         let mut items = Vec::new();
         match self.kind {
@@ -199,6 +208,7 @@ impl Picker {
                 ));
                 items.extend(storages.iter().map(store_item));
             }
+            PickKind::Channel | PickKind::Scope => {}
         }
         self.items = items;
         if !matches!(self.target, PickFor::BackupNow { .. }) {
@@ -276,18 +286,22 @@ impl Picker {
         ])
         .areas(inner);
 
-        let name_w = 24usize;
+        let name_w = if self.kind == PickKind::Scope { 40 } else { 24 };
         let note_w = 22usize;
         let detail_w = (list.width as usize).saturating_sub(name_w + note_w + 4);
         mouse::hit(list, Hit::List(List::Picker));
         let mut lines = Vec::new();
         if self.items.is_empty() {
             lines.push(Line::styled(
-                "nothing to pick yet · add S3 credentials on the Secrets screen",
+                match self.kind {
+                    PickKind::Channel => "no channels yet · add one on the Channels tab",
+                    _ => "nothing to pick yet · add S3 credentials on the Secrets screen",
+                },
                 theme::muted(),
             ));
         }
-        for (i, item) in self.items.iter().enumerate() {
+        let offset = (self.row + 1).saturating_sub(list.height as usize);
+        for (i, item) in self.items.iter().enumerate().skip(offset) {
             let selected = i == self.row;
             let (glyph, glyph_style) = item.glyph.unwrap_or((" ", theme::muted()));
             let detail_style = if item.generate {
@@ -321,9 +335,9 @@ impl Picker {
                     Style::new()
                 }),
             );
-            if (i as u16) < list.height {
+            if ((i - offset) as u16) < list.height {
                 mouse::hit(
-                    Rect::new(list.x, list.y + i as u16, list.width, 1),
+                    Rect::new(list.x, list.y + (i - offset) as u16, list.width, 1),
                     Hit::PickRow(i),
                 );
             }

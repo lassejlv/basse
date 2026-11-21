@@ -17,6 +17,7 @@
 use crate::backup_store::BackupStore;
 use crate::db::new_id;
 use crate::error::{ApiResult, AppError, bad_request, conflict};
+use crate::notify::Event;
 use crate::state::AppState;
 use crate::store;
 use anyhow::{Context as _, Result, bail};
@@ -26,6 +27,7 @@ use chacha20poly1305::aead::stream::{DecryptorBE32, EncryptorBE32};
 use chacha20poly1305::aead::{KeyInit as _, Payload};
 use chrono::Utc;
 use common::api::{MIN_PASSPHRASE_LEN, UpdateInstanceBackupSchedule};
+use common::notify::NotifyEvent;
 use common::*;
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
@@ -266,6 +268,13 @@ async fn run(state: &AppState, mut backup: InstanceBackup, passphrase: Zeroizing
                     Some(backup.file_name.clone()),
                 )
                 .await;
+            state.notify(
+                Event::new(NotifyEvent::InstanceBackupSucceeded)
+                    .about(crate::host::hostname(), "instance-backup")
+                    .detail(backup.file_name.clone())
+                    .field("Trigger", backup.trigger.as_str())
+                    .field("Storage", backup.storage.as_str()),
+            );
         }
         Err(e) => {
             let message = format!("{e:#}");
@@ -275,9 +284,17 @@ async fn run(state: &AppState, mut backup: InstanceBackup, passphrase: Zeroizing
                 .activity(
                     ActivityLevel::Error,
                     "Instance backup failed".into(),
-                    Some(message),
+                    Some(message.clone()),
                 )
                 .await;
+            state.notify(
+                Event::new(NotifyEvent::InstanceBackupFailed)
+                    .about(crate::host::hostname(), "instance-backup")
+                    .detail(message)
+                    .field("Trigger", backup.trigger.as_str())
+                    .field("Storage", backup.storage.as_str())
+                    .hint(format!("{} instance backups", brand::CLI_BIN)),
+            );
         }
     }
     if let Err(e) = state.db.update_instance_backup(&backup).await {

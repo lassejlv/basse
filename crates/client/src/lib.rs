@@ -6,6 +6,7 @@ pub use config::{Config, Context};
 
 use anyhow::{Context as _, Result, anyhow};
 use common::api::*;
+use common::notify::*;
 use common::*;
 use futures_util::{Stream, StreamExt};
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
@@ -547,5 +548,76 @@ impl Client {
     pub async fn rollback(&self, id: &str) -> Result<Deployment> {
         self.post_empty(&format!("/deployments/{id}/rollback"))
             .await
+    }
+
+    pub async fn notify_catalog(&self) -> Result<NotifyCatalog> {
+        self.get("/notify/catalog").await
+    }
+
+    pub async fn notify_channels(&self) -> Result<Vec<NotifyChannel>> {
+        self.get("/notify/channels").await
+    }
+
+    pub async fn notify_channel(&self, id: &str) -> Result<NotifyChannel> {
+        self.get(&format!("/notify/channels/{id}")).await
+    }
+
+    pub async fn create_notify_channel(&self, body: &CreateNotifyChannel) -> Result<NotifyChannel> {
+        self.post("/notify/channels", body).await
+    }
+
+    pub async fn update_notify_channel(
+        &self,
+        id: &str,
+        body: &UpdateNotifyChannel,
+    ) -> Result<NotifyChannel> {
+        self.patch(&format!("/notify/channels/{id}"), body).await
+    }
+
+    pub async fn delete_notify_channel(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/notify/channels/{id}")).await
+    }
+
+    /// Sends a test message and returns its delivery once it has been attempted.
+    pub async fn test_notify_channel(&self, id: &str) -> Result<NotifyDelivery> {
+        self.post_empty(&format!("/notify/channels/{id}/test"))
+            .await
+    }
+
+    pub async fn notify_rules(&self) -> Result<Vec<NotifyRule>> {
+        self.get("/notify/rules").await
+    }
+
+    pub async fn create_notify_rule(&self, body: &CreateNotifyRule) -> Result<NotifyRule> {
+        self.post("/notify/rules", body).await
+    }
+
+    pub async fn update_notify_rule(
+        &self,
+        id: &str,
+        body: &UpdateNotifyRule,
+    ) -> Result<NotifyRule> {
+        self.patch(&format!("/notify/rules/{id}"), body).await
+    }
+
+    pub async fn delete_notify_rule(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/notify/rules/{id}")).await
+    }
+
+    /// The newest deliveries first, optionally only those of one channel or rule.
+    pub async fn notify_deliveries(
+        &self,
+        limit: usize,
+        channel_id: Option<&str>,
+        rule_id: Option<&str>,
+    ) -> Result<Vec<NotifyDelivery>> {
+        let mut path = format!("/notify/deliveries?limit={limit}");
+        if let Some(id) = channel_id {
+            path.push_str(&format!("&channel_id={id}"));
+        }
+        if let Some(id) = rule_id {
+            path.push_str(&format!("&rule_id={id}"));
+        }
+        self.get(&path).await
     }
 }

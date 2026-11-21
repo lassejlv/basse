@@ -103,7 +103,27 @@
 //! | PUT | `/instance/backups/schedule` | `UpdateInstanceBackupSchedule` | `InstanceBackupSchedule` |
 //! | GET | `/instance/backups/{id}/download` | | the encrypted archive as `application/octet-stream` |
 //! | DELETE | `/instance/backups/{id}` | | 204 |
+//!
+//! Notifications: channels are destinations, rules send events in a scope to one channel.
+//! Channel configs are sealed under the master key; responses only carry the redacted config.
+//! Delivery runs in the background with retries, so no route waits on a channel except `test`.
+//!
+//! | Method | Path | Body | Response |
+//! |---|---|---|---|
+//! | GET | `/notify/catalog` | | `NotifyCatalog` (every event and preset) |
+//! | GET | `/notify/channels` | | `Vec<NotifyChannel>` |
+//! | POST | `/notify/channels` | `CreateNotifyChannel` | `NotifyChannel` |
+//! | GET | `/notify/channels/{id}` | | `NotifyChannel` |
+//! | PATCH | `/notify/channels/{id}` | `UpdateNotifyChannel` | `NotifyChannel` |
+//! | DELETE | `/notify/channels/{id}` | | 204 (removes its rules too) |
+//! | POST | `/notify/channels/{id}/test` | | `NotifyDelivery` (sends a test message and waits for it) |
+//! | GET | `/notify/rules` | | `Vec<NotifyRule>` |
+//! | POST | `/notify/rules` | `CreateNotifyRule` | `NotifyRule` |
+//! | PATCH | `/notify/rules/{id}` | `UpdateNotifyRule` | `NotifyRule` |
+//! | DELETE | `/notify/rules/{id}` | | 204 |
+//! | GET | `/notify/deliveries?limit=50&channel_id=&rule_id=` | | `Vec<NotifyDelivery>`, newest first |
 
+use crate::notify::{ChannelConfig, NotifyEvent, RuleScope};
 use crate::{EnvVar, Id, RestartPolicy, SecretValue, Source};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -343,3 +363,74 @@ impl fmt::Debug for UpdateInstanceBackupSchedule {
 
 /// Shortest passphrase an instance backup accepts.
 pub const MIN_PASSPHRASE_LEN: usize = 12;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CreateNotifyChannel {
+    pub name: String,
+    pub config: ChannelConfig,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl fmt::Debug for CreateNotifyChannel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CreateNotifyChannel")
+            .field("name", &self.name)
+            .field("config", &self.config.redacted())
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+/// Fields left as `None` keep their value. A new `config` replaces the stored config and may
+/// change the kind; a credential sent back exactly as the API showed it (redacted) keeps its
+/// stored value.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct UpdateNotifyChannel {
+    pub name: Option<String>,
+    pub enabled: Option<bool>,
+    pub config: Option<ChannelConfig>,
+}
+
+impl fmt::Debug for UpdateNotifyChannel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpdateNotifyChannel")
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("config", &self.config.as_ref().map(ChannelConfig::redacted))
+            .finish()
+    }
+}
+
+/// A new rule. Clients expand a preset into `events` themselves (see
+/// [`crate::notify::preset`]) so the user can adjust it; `preset` only records where the set
+/// started.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateNotifyRule {
+    pub channel_id: Id,
+    #[serde(default)]
+    pub scope: RuleScope,
+    #[serde(default)]
+    pub preset: Option<String>,
+    pub events: Vec<NotifyEvent>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Defaults to [`crate::notify::DEFAULT_DEDUPE_SECS`].
+    #[serde(default)]
+    pub dedupe_secs: Option<u32>,
+    /// Defaults to [`crate::notify::DEFAULT_MAX_PER_HOUR`].
+    #[serde(default)]
+    pub max_per_hour: Option<u32>,
+}
+
+/// Fields left as `None` keep their value. `preset: Some("")` marks the set as custom.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateNotifyRule {
+    pub channel_id: Option<Id>,
+    pub scope: Option<RuleScope>,
+    pub preset: Option<String>,
+    pub events: Option<Vec<NotifyEvent>>,
+    pub enabled: Option<bool>,
+    pub dedupe_secs: Option<u32>,
+    pub max_per_hour: Option<u32>,
+}

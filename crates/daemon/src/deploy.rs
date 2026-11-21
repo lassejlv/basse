@@ -3,11 +3,13 @@
 use crate::db::{ServiceRecord, new_id};
 use crate::docker::{self, ContainerSpec, RunState};
 use crate::error::{ApiResult, AppError, bad_request, conflict};
+use crate::notify::Event;
 use crate::state::AppState;
 use anyhow::{Context as _, Result, anyhow, bail};
 use bollard::Docker;
 use bollard::query_parameters::BuildImageOptions;
 use chrono::Utc;
+use common::notify::NotifyEvent;
 use common::*;
 use futures_util::StreamExt as _;
 use std::collections::HashMap;
@@ -209,6 +211,14 @@ pub async fn enqueue(
         "Deployment #{} queued (trigger: {trigger})",
         d.number
     ));
+    state
+        .notify_service(
+            service,
+            Event::new(NotifyEvent::DeployQueued)
+                .deploy(d.number)
+                .field("Trigger", trigger),
+        )
+        .await;
     let service_lock = state.deploys.lock_for(&service.id);
     // Holding the registry lock while spawning guarantees the entry exists before the task
     // can try to remove it.
@@ -339,6 +349,12 @@ pub async fn cancel(state: &Arc<AppState>, deployment_id: &str) -> ApiResult<Dep
                 None,
             )
             .await;
+        state
+            .notify_service(
+                &rec.service,
+                Event::new(NotifyEvent::DeployCancelled).deploy(d.number),
+            )
+            .await;
     }
     Ok(d)
 }
@@ -441,6 +457,16 @@ impl Job {
                 Some(self.d.trigger.clone()),
             )
             .await;
+        self.state
+            .notify_service(
+                &svc,
+                Event::new(NotifyEvent::DeployStarted)
+                    .deploy(self.d.number)
+                    .detail(format!("{} to {}", svc.source.label(), server.name))
+                    .field("Trigger", self.d.trigger.clone())
+                    .hint(format!("{} deployments {}", brand::CLI_BIN, svc.name)),
+            )
+            .await;
 
         let image = match (&plan, &svc.source) {
             (
@@ -519,14 +545,34 @@ impl Job {
                             svc,
                             ActivityLevel::Success,
                             format!("Deploy #{} is live", self.d.number),
-                            Some(elapsed),
+                            Some(elapsed.clone()),
+                        )
+                        .await;
+                    let rollback = self.d.trigger == "rollback";
+                    let kind = if rollback {
+                        NotifyEvent::DeployRolledBack
+                    } else {
+                        NotifyEvent::DeploySucceeded
+                    };
+                    let detail = match (&self.d.commit, &self.d.commit_message) {
+                        (Some(sha), Some(msg)) => format!("{} {msg}", &sha[..sha.len().min(7)]),
+                        _ => self.d.image.clone().unwrap_or_default(),
+                    };
+                    self.state
+                        .notify_service(
+                            svc,
+                            Event::new(kind)
+                                .deploy(self.d.number)
+                                .detail(detail)
+                                .field("Took", elapsed),
                         )
                         .await;
                 }
             }
             Err(e) => {
                 let message = format!("{e:#}");
-                if let Some(kind) = self.current.take() {
+                let failed_step = self.current.take();
+                if let Some(kind) = failed_step {
                     self.mark(kind, StepStatus::Failed, None).await;
                 }
                 for step in &mut self.d.steps {
@@ -562,9 +608,22 @@ impl Job {
                                 svc,
                                 ActivityLevel::Error,
                                 format!("Deploy #{} failed", self.d.number),
-                                Some(message),
+                                Some(message.clone()),
                             )
-                            .await
+                            .await;
+                        let kind = if failed_step == Some(StepKind::Health) {
+                            NotifyEvent::DeployHealthCheckFailed
+                        } else {
+                            NotifyEvent::DeployFailed
+                        };
+                        let mut event = Event::new(kind)
+                            .deploy(self.d.number)
+                            .detail(message)
+                            .hint(format!("{} deployments {}", brand::CLI_BIN, svc.name));
+                        if let Some(step) = failed_step {
+                            event = event.field("Step", step.as_str());
+                        }
+                        self.state.notify_service(svc, event).await;
                     }
                     None => {
                         self.state
