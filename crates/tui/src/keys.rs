@@ -32,10 +32,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         KeyCode::Char('q') => return app.quit = true,
         KeyCode::Char('?') => return app.overlay = Some(Overlay::Help),
         KeyCode::Char(':') => return app.overlay = Some(Overlay::Palette(Palette::default())),
-        KeyCode::Char('S') if app.screen != Screen::Servers => {
-            app.screen = Screen::Servers;
-            return app.refresh();
-        }
+        KeyCode::Char('S') => return app.open_servers(),
         KeyCode::Char(',') if app.screen != Screen::Settings => return app.open_settings(),
         _ => {}
     }
@@ -117,6 +114,12 @@ fn text_input_active(app: &App) -> bool {
         Screen::Overview => app.overview.filtering,
         Screen::Service => app.service.as_ref().is_some_and(|v| v.logs.searching),
         _ => false,
+    }
+}
+
+pub fn finish_text_input(app: &mut App) {
+    if text_input_active(app) {
+        text_input(app, KeyEvent::from(KeyCode::Enter));
     }
 }
 
@@ -255,10 +258,7 @@ pub fn run_command(app: &mut App, cmd: Command) {
         Command::NewService => app.form_new_service(),
         Command::NewProject => app.form_new_project(),
         Command::NewEnvironment => app.form_new_environment(),
-        Command::Servers => {
-            app.screen = Screen::Servers;
-            app.refresh();
-        }
+        Command::Servers => app.open_servers(),
         Command::Settings => app.open_settings(),
         Command::Secrets => app.open_secrets(),
         Command::Storage => app.open_storage(),
@@ -617,6 +617,11 @@ fn service(app: &mut App, key: KeyEvent) {
             }
         }
         (Tab::Domains, KeyCode::Char('a')) => app.form_domain(),
+        (Tab::Domains, KeyCode::Enter) => {
+            if let Some(domain) = detail.domains.get(row) {
+                app.copy(&domain_url(domain), "domain URL");
+            }
+        }
         (Tab::Domains, KeyCode::Char('x') | KeyCode::Delete) => {
             if let Some(d) = detail.domains.get(row) {
                 ask(
@@ -629,6 +634,11 @@ fn service(app: &mut App, key: KeyEvent) {
             }
         }
         (Tab::Volumes, KeyCode::Char('a')) => app.form_volume(),
+        (Tab::Volumes, KeyCode::Enter) => {
+            if let Some(volume) = detail.volumes.get(row) {
+                app.copy(&volume.mount_path, "mount path");
+            }
+        }
         (Tab::Volumes, KeyCode::Char('x') | KeyCode::Delete) => {
             if let Some(v) = detail.volumes.get(row) {
                 ask(
@@ -703,7 +713,7 @@ fn service(app: &mut App, key: KeyEvent) {
         }
         (Tab::Backups, KeyCode::Char('b')) => app.backup_now(&s.id, &s.name),
         (Tab::Backups, KeyCode::Char('e')) => app.form_schedule(),
-        (Tab::Backups, KeyCode::Char('R') | KeyCode::Char('D') | KeyCode::Char('x')) => {
+        (Tab::Backups, KeyCode::Enter | KeyCode::Char('R' | 'D' | 'x')) => {
             let Some(b) = backups.get(row) else {
                 return app.error("no backup selected · b to take one");
             };
@@ -726,7 +736,7 @@ fn service(app: &mut App, key: KeyEvent) {
                     ConfirmAction::RestoreBackup(b.id.clone(), b.file_name.clone()),
                     "restore",
                 ),
-                KeyCode::Char('D') => app.form_download(b),
+                KeyCode::Enter | KeyCode::Char('D') => app.form_download(b),
                 _ => ask_to(
                     app,
                     "Delete backup",
@@ -746,6 +756,11 @@ fn service(app: &mut App, key: KeyEvent) {
     }
 }
 
+pub fn domain_url(domain: &Domain) -> String {
+    let scheme = if domain.tls { "https" } else { "http" };
+    format!("{scheme}://{}", domain.host)
+}
+
 fn util_sha(c: &str) -> String {
     crate::util::short_sha(c).to_string()
 }
@@ -762,6 +777,7 @@ fn deploy(app: &mut App, key: KeyEvent) {
             logs.follow = !logs.follow;
             if logs.follow {
                 logs.offset = 0;
+                logs.step_anchor = None;
             }
         }
         KeyCode::Char('w') => logs.wrap = !logs.wrap,
@@ -797,12 +813,15 @@ fn servers(app: &mut App, key: KeyEvent) {
     let n = app.servers.len();
     let selected = app.servers.get(app.server_row).cloned();
     match key.code {
-        KeyCode::Esc => {
-            app.screen = if app.service.is_some() {
-                Screen::Service
-            } else {
-                Screen::Overview
-            };
+        KeyCode::Esc => app.close_servers(),
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(public_key) = app
+                .info
+                .as_ref()
+                .and_then(|info| info.ssh_public_key.clone())
+            {
+                app.copy(&public_key, "the ssh key");
+            }
         }
         KeyCode::Up | KeyCode::Char('k') => app.server_row = app.server_row.saturating_sub(1),
         KeyCode::Down | KeyCode::Char('j') => {
@@ -814,7 +833,7 @@ fn servers(app: &mut App, key: KeyEvent) {
                 app.pick_server_key(&s);
             }
         }
-        KeyCode::Char('c') => {
+        KeyCode::Enter | KeyCode::Char('c') => {
             if let Some(s) = selected {
                 app.check_server(&s);
             }
@@ -856,22 +875,21 @@ fn servers(app: &mut App, key: KeyEvent) {
 fn settings(app: &mut App, key: KeyEvent) {
     let names = app.settings.context_names();
     let selected = names.get(app.settings.row).cloned();
-    let Some(s) = app.settings.settings.clone() else {
-        if key.code == KeyCode::Esc {
-            app.close_settings();
-        }
-        return;
-    };
     match key.code {
-        KeyCode::Esc => app.close_settings(),
-        KeyCode::Up => app.settings.row = app.settings.row.saturating_sub(1),
+        KeyCode::Esc => return app.close_settings(),
+        KeyCode::Up => {
+            app.settings.row = app.settings.row.saturating_sub(1);
+            return;
+        }
         KeyCode::Down => {
             app.settings.row = (app.settings.row + 1).min(names.len().saturating_sub(1));
+            return;
         }
         KeyCode::Enter => {
             if let Some(name) = selected {
                 app.switch_context(&name);
             }
+            return;
         }
         KeyCode::Char('x') | KeyCode::Delete => {
             let Some(name) = selected else { return };
@@ -887,7 +905,14 @@ fn settings(app: &mut App, key: KeyEvent) {
                 true,
                 ConfirmAction::RemoveContext(name),
             );
+            return;
         }
+        _ => {}
+    }
+    let Some(s) = app.settings.settings.clone() else {
+        return;
+    };
+    match key.code {
         KeyCode::Char('u') => {
             let latest = app
                 .settings

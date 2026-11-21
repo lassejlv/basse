@@ -1,13 +1,13 @@
 //! The picker dialog: choose an SSH key, S3 credentials or a backup store from a list.
 
 use crate::form::Form;
+use crate::mouse::List;
 use crate::mouse::{self, Hit};
 use crate::theme;
 use crate::util::truncate;
 use common::{Id, Secret, SecretKind, StorageConnection};
-use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
@@ -245,6 +245,7 @@ impl Picker {
             Constraint::Length(width),
             Constraint::Length(height.min(area.height)),
         );
+        mouse::modal(rect);
         frame.render_widget(Clear, rect);
         let mut heading = vec![
             Span::raw(" "),
@@ -278,6 +279,7 @@ impl Picker {
         let name_w = 24usize;
         let note_w = 22usize;
         let detail_w = (list.width as usize).saturating_sub(name_w + note_w + 4);
+        mouse::hit(list, Hit::List(List::Picker));
         let mut lines = Vec::new();
         if self.items.is_empty() {
             lines.push(Line::styled(
@@ -333,24 +335,6 @@ impl Picker {
             rule,
         );
 
-        let copyable = self.selected().is_some_and(|i| i.copy.is_some());
-        let hints: &[(&str, &str)] = if copyable {
-            &[("↑↓", "move"), ("c", "copy public key"), ("esc", "cancel")]
-        } else {
-            &[("↑↓", "move"), ("esc", "cancel")]
-        };
-        let mut left = Vec::new();
-        let mut x = keys.x;
-        for (k, l) in hints {
-            left.push(Span::styled(*k, theme::accent()));
-            left.push(Span::styled(format!(" {l}   "), theme::muted()));
-            let w = (k.chars().count() + 1 + l.chars().count()) as u16;
-            if let Some((code, mods)) = mouse::key_for_label(k) {
-                mouse::hit(Rect::new(x, keys.y, w, 1), Hit::Key(code, mods));
-            }
-            x += w + 3;
-        }
-        frame.render_widget(Paragraph::new(Line::from(left)), keys);
         let chip = match self.selected() {
             _ if self.busy => format!(" {} generating… ", crate::util::spinner(tick)),
             Some(i) if i.generate => " ⏎ generate ".to_string(),
@@ -360,14 +344,27 @@ impl Picker {
             Some(i) => format!(" ⏎ use {} ", truncate(&i.name, 30)),
             None => " ⏎ close ".to_string(),
         };
-        let chip_w = chip.chars().count() as u16;
-        frame.render_widget(
-            Paragraph::new(Span::styled(chip, theme::chip())).right_aligned(),
-            keys,
-        );
-        mouse::hit(
-            Rect::new(keys.right().saturating_sub(chip_w), keys.y, chip_w, 1),
-            Hit::Key(KeyCode::Enter, KeyModifiers::NONE),
+        let chip = Span::styled(chip, theme::chip());
+        let chip_w = (chip.width() as u16).min(keys.width);
+        let chip_area = Rect::new(keys.right() - chip_w, keys.y, chip_w, 1);
+        frame.render_widget(Paragraph::new(chip), chip_area);
+        if !self.busy {
+            mouse::key_target(chip_area, "⏎");
+        }
+        let copyable = self.selected().is_some_and(|i| i.copy.is_some());
+        let hints: &[(&str, &str)] = if copyable {
+            &[("↑↓", "move"), ("c", "copy public key"), ("esc", "cancel")]
+        } else {
+            &[("↑↓", "move"), ("esc", "cancel")]
+        };
+        mouse::hints(
+            frame,
+            Rect {
+                width: keys.width.saturating_sub(chip_w + 1),
+                ..keys
+            },
+            hints,
+            Alignment::Left,
         );
     }
 }

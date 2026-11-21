@@ -89,6 +89,18 @@ jobs:
           sudo basse status
           curl -fsS http://127.0.0.1:7700/healthz
           docker ps
+      - name: Instance backup and restore under systemd
+        run: |
+          set -eux
+          $CLI_BIN project create disaster
+          printf 'correct horse battery staple' > pass.txt
+          $CLI_BIN instance backup --passphrase-file pass.txt
+          $CLI_BIN instance download -o instance.enc
+          $CLI_BIN project delete disaster --yes
+          sudo "$DAEMON_BIN" restore instance.enc --passphrase-file pass.txt
+          systemctl is-active "$DAEMON_BIN"
+          $CLI_BIN project list | grep disaster
+          $CLI_BIN project delete disaster --yes
       - name: Self-update under systemd from a local release
         run: |
           set -eux
