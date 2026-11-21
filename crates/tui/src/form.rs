@@ -125,8 +125,9 @@ pub enum FormKind {
     NewEnvironment {
         project_id: Id,
     },
+    /// `None` creates a project named after the service, with its production environment.
     NewService {
-        environment_id: Id,
+        environment_id: Option<Id>,
     },
     EditService {
         service_id: Id,
@@ -919,7 +920,7 @@ mod tests {
     fn service_form() -> Form {
         Form::new(
             FormKind::NewService {
-                environment_id: "e".into(),
+                environment_id: Some("e".into()),
             },
             "New service",
             vec![

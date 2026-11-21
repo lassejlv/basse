@@ -107,6 +107,9 @@ pub enum Msg {
         repo: String,
         result: Result<Vec<GitBranch>, String>,
     },
+    Onboarding(Result<common::onboarding::Onboarding, String>),
+    /// The setup flow's test message finished.
+    SetupTested(Result<notify_types::NotifyDelivery, String>),
     /// What the picked repository and branch build with.
     Detected {
         source: Id,
@@ -143,6 +146,8 @@ pub enum Screen {
     Sources,
     /// The instance domain guide, reached from Settings.
     Domain,
+    /// First-run setup, opened on connect until the instance is onboarded.
+    Setup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -513,6 +518,7 @@ pub enum Command {
     Notifications,
     Sources,
     Domain,
+    Setup,
     BackUpInstance,
     AddServer,
     SetupProxy,
@@ -522,7 +528,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Command; 21] = [
+    pub const ALL: [Command; 22] = [
         Command::Deploy,
         Command::Restart,
         Command::Stop,
@@ -538,6 +544,7 @@ impl Command {
         Command::Notifications,
         Command::Sources,
         Command::Domain,
+        Command::Setup,
         Command::BackUpInstance,
         Command::AddServer,
         Command::SetupProxy,
@@ -563,6 +570,7 @@ impl Command {
             Command::Notifications => "notifications",
             Command::Sources => "sources",
             Command::Domain => "instance domain",
+            Command::Setup => "setup: domain, git, backups, notifications, first app",
             Command::BackUpInstance => "back up this instance",
             Command::AddServer => "add server",
             Command::SetupProxy => "set up proxy on this server",
@@ -588,6 +596,7 @@ impl Command {
             | Command::Notifications
             | Command::Sources
             | Command::Domain
+            | Command::Setup
             | Command::BackUpInstance
             | Command::AddServer
             | Command::SetupProxy => "",
@@ -839,6 +848,7 @@ pub struct App {
     pub notify: NotifyView,
     pub sources: SourcesView,
     pub domain: DomainView,
+    pub setup: crate::setup::SetupView,
     /// Version the daemon is restarting into after an update.
     pub updating: Option<String>,
     /// No new requests while the token is being rotated: the old one is about to stop working.
@@ -881,6 +891,7 @@ impl App {
             notify: NotifyView::default(),
             sources: SourcesView::default(),
             domain: DomainView::default(),
+            setup: crate::setup::SetupView::default(),
             updating: None,
             rotating: false,
             overlay: None,
@@ -899,7 +910,7 @@ impl App {
         }
     }
 
-    fn spawn<F>(&self, f: impl FnOnce(Client) -> F)
+    pub(crate) fn spawn<F>(&self, f: impl FnOnce(Client) -> F)
     where
         F: Future<Output = Msg> + Send + 'static,
     {
@@ -968,7 +979,8 @@ impl App {
         if self.last_refresh.is_none_or(|t| t.elapsed() >= REFRESH) {
             self.refresh();
         }
-        if self.screen == Screen::Deploy && self.tick.is_multiple_of(4) {
+        let embedded = self.screen == Screen::Setup && self.deploy.is_some();
+        if (self.screen == Screen::Deploy || embedded) && self.tick.is_multiple_of(4) {
             self.refresh_deployment();
         }
         if self.tick.is_multiple_of(16) {
@@ -1028,6 +1040,10 @@ impl App {
             }
         });
         self.spawn(|c| async move { Msg::Activity(c.activity(50).await.unwrap_or_default()) });
+        self.load_onboarding();
+        if self.screen == Screen::Setup {
+            self.load_step();
+        }
         if matches!(self.screen, Screen::Servers | Screen::Settings) || self.servers.is_empty() {
             self.spawn(|c| async move { Msg::Servers(c.servers().await.unwrap_or_default()) });
         }
@@ -1066,7 +1082,8 @@ impl App {
             | Screen::Storage
             | Screen::Notifications
             | Screen::Sources
-            | Screen::Domain => Vec::new(),
+            | Screen::Domain
+            | Screen::Setup => Vec::new(),
         };
         for id in ids {
             self.load_stats(&id);
@@ -1124,7 +1141,7 @@ impl App {
         });
     }
 
-    fn load_detail(&self, id: &str) {
+    pub(crate) fn load_detail(&self, id: &str) {
         let id = id.to_string();
         self.spawn(|c| async move {
             match c.service(&id).await {
@@ -1304,6 +1321,9 @@ impl App {
                     Then::Stay => {}
                     Then::Settings(s) => self.apply(Msg::Settings(s)),
                     Then::OpenService(id, tab) => self.open_service(&id, tab),
+                    Then::OpenDeploy(d) if self.screen == Screen::Setup => {
+                        self.follow_first_deploy(*d)
+                    }
                     Then::OpenDeploy(d) => self.open_deploy(*d),
                     Then::ShowKey(s) => self.show_key(&s),
                     Then::InstanceSchedule(s) => self.settings.schedule = Some(s),
@@ -1328,7 +1348,17 @@ impl App {
                 self.toast(t);
                 self.refresh();
             }
-            Msg::Error(e) => self.error(e),
+            Msg::Error(e) => {
+                self.setup.busy = None;
+                self.error(e);
+            }
+            Msg::Onboarding(Ok(o)) => self.onboarding_loaded(o),
+            Msg::Onboarding(Err(_)) => {}
+            Msg::SetupTested(result) => {
+                self.setup.testing = false;
+                self.setup.test = Some(result);
+                self.load_notify();
+            }
             Msg::Settings(s) => {
                 self.settings.settings = Some(*s);
                 self.settings.loaded_at = Some(Instant::now());
@@ -1586,6 +1616,9 @@ impl App {
                     *was = created;
                 }
                 form.busy = false;
+                if created {
+                    self.channel_created(&channel);
+                }
                 let id = channel.id.clone();
                 self.overlay = Some(Overlay::ChannelTest(notify::ChannelTestStep {
                     channel: *channel,
@@ -2574,7 +2607,7 @@ impl App {
         });
     }
 
-    fn load_settings(&mut self) {
+    pub(crate) fn load_settings(&mut self) {
         self.load_instance_backups();
         self.spawn(|c| async move {
             match c.instance_backup_schedule().await {
@@ -2677,6 +2710,7 @@ impl App {
         self.secrets = SecretsView::default();
         self.storage = StorageView::default();
         self.notify = NotifyView::default();
+        self.setup = crate::setup::SetupView::default();
         self.settings.back = Some(Screen::Overview);
         self.open_settings();
         self.toast(format!("connected to {name}"));
@@ -4422,6 +4456,14 @@ impl App {
         let Some((project, env)) = self.current_env() else {
             return self.error("create a project first (N)");
         };
+        let subtitle = format!("{} / {}", project.project.name, env.environment.name);
+        let id = env.environment.id.clone();
+        self.form_new_service_in(Some(id), subtitle);
+    }
+
+    /// The New service form for an environment, or for a new project when `environment` is
+    /// `None`.
+    pub fn form_new_service_in(&mut self, environment: Option<Id>, subtitle: String) {
         let servers: Vec<String> = if self.servers.is_empty() {
             vec!["local".into()]
         } else {
@@ -4487,15 +4529,12 @@ impl App {
         }
         let form = Form::new(
             FormKind::NewService {
-                environment_id: env.environment.id.clone(),
+                environment_id: environment,
             },
             "New service",
             fields,
         )
-        .subtitle(format!(
-            "{} / {}",
-            project.project.name, env.environment.name
-        ))
+        .subtitle(subtitle)
         .submit("create & deploy", Some("create only"))
         .focus_on(match (github, only) {
             (false, _) => "repo",
@@ -5096,6 +5135,8 @@ async fn download(
 /// A validated request from a form, ready to send.
 enum Request {
     Project(CreateProject),
+    /// A service in a new project named after it.
+    FirstApp(Box<CreateService>),
     Environment(Id, CreateEnvironment),
     Service(Box<CreateService>),
     Update {
@@ -5146,6 +5187,24 @@ impl Request {
             Request::Environment(project, body) => {
                 let e = c.create_environment(&project, &body).await?;
                 (format!("environment {} created", e.name), Then::Stay)
+            }
+            Request::FirstApp(mut body) => {
+                let p = c
+                    .create_project(&CreateProject {
+                        name: body.name.clone(),
+                        description: None,
+                    })
+                    .await?;
+                let env = c
+                    .tree()
+                    .await?
+                    .projects
+                    .into_iter()
+                    .find(|n| n.project.id == p.id)
+                    .and_then(|n| n.environments.into_iter().next())
+                    .ok_or_else(|| anyhow::anyhow!("the new project has no environment"))?;
+                body.environment_id = env.environment.id;
+                return Box::pin(Request::Service(body).send(c)).await;
             }
             Request::Service(body) => {
                 let deploy = body.deploy;
@@ -5591,8 +5650,8 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
             validate_name(&name)?;
             let domain = form.get("domain");
             let port = port(&form.get("port"), !domain.is_empty())?;
-            Request::Service(Box::new(CreateService {
-                environment_id: environment_id.clone(),
+            let body = Box::new(CreateService {
+                environment_id: environment_id.clone().unwrap_or_default(),
                 server_id: None,
                 name,
                 source,
@@ -5608,7 +5667,11 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                 },
                 volumes: Vec::new(),
                 deploy: !alt,
-            }))
+            });
+            match environment_id {
+                Some(_) => Request::Service(body),
+                None => Request::FirstApp(body),
+            }
         }
         FormKind::EditService {
             service_id,
@@ -5875,7 +5938,7 @@ mod tests {
     fn new_service_sends_the_build_method_and_its_fields() {
         let mut form = Form::new(
             FormKind::NewService {
-                environment_id: "e".into(),
+                environment_id: Some("e".into()),
             },
             "New service",
             [
