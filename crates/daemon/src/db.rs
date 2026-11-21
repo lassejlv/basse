@@ -67,6 +67,15 @@ pub struct ReplicaRow {
     pub container_id: String,
 }
 
+/// A custom error page with the HTML the proxy serves.
+#[derive(Debug, Clone)]
+pub struct StoredErrorPage {
+    /// `None` for the instance default.
+    pub service_id: Option<Id>,
+    pub page: CustomErrorPage,
+    pub html: Option<String>,
+}
+
 /// A service's backup schedule plus when the scheduler last started a backup for it.
 #[derive(Debug, Clone)]
 pub struct ScheduleRecord {
@@ -869,6 +878,111 @@ impl Db {
     }
 
     /// Whether another service on the same server already publishes `port`.
+    pub async fn branded_error_pages(&self, service_id: &str) -> Result<bool> {
+        let branded: Option<bool> =
+            sqlx::query_scalar("SELECT branded_error_pages FROM services WHERE id = $1")
+                .bind(service_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(branded.unwrap_or(true))
+    }
+
+    pub async fn set_branded_error_pages(&self, service_id: &str, branded: bool) -> Result<()> {
+        sqlx::query("UPDATE services SET branded_error_pages = $2 WHERE id = $1")
+            .bind(service_id)
+            .bind(branded)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Services whose errors pass through unbranded.
+    pub async fn unbranded_services(&self) -> Result<Vec<Id>> {
+        Ok(
+            sqlx::query_scalar("SELECT id FROM services WHERE NOT branded_error_pages")
+                .fetch_all(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Custom error pages of a service, or the instance defaults for `None`, in
+    /// [`ErrorPageKind::ALL`] order.
+    pub async fn error_pages(&self, service_id: Option<&str>) -> Result<Vec<StoredErrorPage>> {
+        let mut pages: Vec<StoredErrorPage> = self
+            .all_error_pages()
+            .await?
+            .into_iter()
+            .filter(|p| p.service_id.as_deref() == service_id)
+            .collect();
+        pages.sort_by_key(|p| p.page.kind);
+        Ok(pages)
+    }
+
+    /// Every custom error page, of every service and the instance.
+    pub async fn all_error_pages(&self) -> Result<Vec<StoredErrorPage>> {
+        self.fetch(
+            "SELECT service_id, kind, source, html, warnings, updated_at FROM error_pages".into(),
+            &[],
+            |row| {
+                let html: Option<String> = row.try_get(3)?;
+                Ok(StoredErrorPage {
+                    service_id: row.try_get(0)?,
+                    page: CustomErrorPage {
+                        kind: col_enum(row, 1)?,
+                        source: col_json(row, 2)?,
+                        size: html.as_ref().map(|h| h.len() as u64),
+                        warnings: col_json(row, 4)?,
+                        updated_at: row.try_get(5)?,
+                    },
+                    html,
+                })
+            },
+        )
+        .await
+    }
+
+    /// Creates or replaces the page of its kind.
+    pub async fn set_error_page(&self, page: &StoredErrorPage) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM error_pages WHERE COALESCE(service_id, '') = COALESCE($1, '') AND kind = $2",
+        )
+        .bind(&page.service_id)
+        .bind(enum_str(&page.page.kind))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO error_pages (service_id, kind, source, html, warnings, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(&page.service_id)
+        .bind(enum_str(&page.page.kind))
+        .bind(Json(&page.page.source))
+        .bind(&page.html)
+        .bind(Json(&page.page.warnings))
+        .bind(page.page.updated_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Whether there was a page to delete.
+    pub async fn delete_error_page(
+        &self,
+        service_id: Option<&str>,
+        kind: ErrorPageKind,
+    ) -> Result<bool> {
+        let done = sqlx::query(
+            "DELETE FROM error_pages WHERE COALESCE(service_id, '') = COALESCE($1, '') AND kind = $2",
+        )
+        .bind(service_id)
+        .bind(enum_str(&kind))
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
     pub async fn public_port_taken(
         &self,
         server_id: &str,

@@ -12,6 +12,7 @@ mod deploy;
 mod docker;
 mod domain;
 mod error;
+mod error_pages;
 mod github;
 mod host;
 mod instance;

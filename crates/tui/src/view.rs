@@ -99,6 +99,10 @@ pub fn render(frame: &mut Frame, app: &App) {
             dim(frame, area);
             crate::problem::render_error_detail(frame, area, e);
         }
+        Some(Overlay::ErrorPages(d)) => {
+            dim(frame, area);
+            crate::error_pages::render(frame, area, app, d);
+        }
         Some(Overlay::Scale(d)) => {
             dim(frame, area);
             crate::replicas::render_scale(frame, area, d, app.tick);
@@ -513,6 +517,7 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("g", "sources"),
             ("i", "public ip"),
             ("m", "auto proxy"),
+            ("p", "error pages"),
             ("r", "restart proxy"),
             ("t", "rotate token"),
             ("k", "copy key"),
@@ -2920,9 +2925,14 @@ fn settings_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
             w,
         ),
         kv("restart", val(s.restart.as_str().into()), w),
+        kv("error pages", error_pages_summary(&d.error_pages), w),
         kv("server", val(d.server.name.clone()), w),
         kv("id", vec![Span::styled(s.id.clone(), theme::muted())], w),
         Line::raw(""),
+        Line::from(vec![
+            Span::styled("p", theme::accent()),
+            Span::styled("  edit error pages", theme::muted()),
+        ]),
         Line::from(vec![
             Span::styled("m", theme::accent()),
             Span::styled("  move to another server", theme::muted()),
@@ -2933,7 +2943,7 @@ fn settings_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         ]),
     ]);
     let last = lines.len() as u16 - 1;
-    for (row, key) in [(last - 1, "m"), (last, "X")] {
+    for (row, key) in [(last - 2, "p"), (last - 1, "m"), (last, "X")] {
         if row < inner.height {
             mouse::key_target(
                 Rect::new(
@@ -2947,6 +2957,22 @@ fn settings_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         }
     }
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// "● branded  · custom 404, 503", or "○ off".
+fn error_pages_summary(pages: &ErrorPages) -> Vec<Span<'static>> {
+    if !pages.branded {
+        return vec![Span::styled("○ off · raw proxy responses", theme::muted())];
+    }
+    let mut spans = vec![Span::styled("● branded", theme::fg(theme::OK))];
+    if !pages.custom.is_empty() {
+        let kinds: Vec<&str> = pages.custom.iter().map(|p| p.kind.as_str()).collect();
+        spans.push(Span::styled(
+            format!("  · custom {}", kinds.join(", ")),
+            theme::muted(),
+        ));
+    }
+    spans
 }
 
 // Deploy
@@ -3820,7 +3846,7 @@ fn settings(frame: &mut Frame, area: Rect, app: &App) {
         let [proxy, security, maintenance] = Layout::horizontal([Constraint::Fill(1); 3])
             .spacing(1)
             .areas(row2);
-        proxy_panel(frame, proxy, s);
+        proxy_panel(frame, proxy, s, app.settings.error_pages.as_ref());
         security_panel(frame, security, s);
         maintenance_panel(frame, maintenance, s);
     } else {
@@ -4096,10 +4122,27 @@ fn instance_panel(frame: &mut Frame, area: Rect, app: &App, s: &InstanceSettings
     );
 }
 
-fn proxy_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
-    let block = panel(title("Proxy", false), None, false);
+fn proxy_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings, pages: Option<&ErrorPages>) {
+    let custom = pages.map_or(0, |p| p.custom.len());
+    let link = Line::from(vec![
+        Span::styled("p", theme::accent()),
+        Span::styled(" error pages · ", theme::muted()),
+        Span::styled(
+            if custom == 0 {
+                "built-in".to_string()
+            } else {
+                format!("{custom} custom")
+            },
+            theme::muted(),
+        ),
+    ]);
+    let link_w = link.width() as u16;
+    let block = panel(title("Proxy", false), Some(link), false);
     let inner = inside(&block, area);
     frame.render_widget(block, area);
+    if area.width > link_w + 12 {
+        mouse::key_target(Rect::new(area.right() - link_w - 2, area.y, link_w, 1), "p");
+    }
     let rows = lines_of(inner, 3);
     let (glyph, label, style) = match s.proxy {
         ProxyStatus::Running => ("●", "running", theme::fg(theme::OK)),

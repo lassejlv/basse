@@ -1578,7 +1578,7 @@ mod real_proxy {
             }),
             trusted: trusted.into(),
         };
-        let pages = crate::proxy_pages::archive(&[]).unwrap();
+        let pages = crate::proxy_pages::archive(&Default::default()).unwrap();
         docker::install_proxy(&docker, &config, pages)
             .await
             .unwrap();

@@ -3,6 +3,7 @@
 mod databases;
 mod deployments;
 mod domain;
+mod error_pages;
 mod github;
 mod instance;
 mod notify;
@@ -165,6 +166,15 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(domain::get).put(domain::set).delete(domain::remove),
         )
         .route("/settings/domain/check", post(domain::check))
+        .route(
+            "/services/{id}/error-pages/{kind}",
+            put(error_pages::set_service).delete(error_pages::delete_service),
+        )
+        .route("/settings/error-pages", get(error_pages::instance))
+        .route(
+            "/settings/error-pages/{kind}",
+            put(error_pages::set_instance).delete(error_pages::delete_instance),
+        )
         .route("/sources", get(sources::list))
         .route("/sources/github", post(sources::create_github_app))
         .route("/sources/github/connect", post(sources::connect_github_app))

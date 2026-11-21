@@ -1138,3 +1138,203 @@ async fn scaling_rules_are_enforced_before_anything_runs() {
     many.replicas = Some(3);
     assert_eq!(api.create_service(&many).await.unwrap().service.replicas, 3);
 }
+
+#[tokio::test]
+async fn error_pages_are_validated_stored_and_listed() {
+    let Some(daemon) = Daemon::start().await else {
+        return;
+    };
+    let api = daemon.client();
+    api.create_project(&CreateProject {
+        name: "pages".into(),
+        description: None,
+    })
+    .await
+    .unwrap();
+    let env = api.tree().await.unwrap().projects[0].environments[0]
+        .environment
+        .id
+        .clone();
+    let create = |name: &str, source: Source| CreateService {
+        environment_id: env.clone(),
+        server_id: None,
+        name: name.into(),
+        source,
+        port: Some(80),
+        command: None,
+        restart: RestartPolicy::default(),
+        health_path: None,
+        env: vec![],
+        domains: vec![],
+        volumes: vec![],
+        deploy: false,
+        replicas: None,
+    };
+    let web = api
+        .create_service(&create(
+            "web",
+            Source::Image {
+                image: "nginx:alpine".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let id = web.service.id.as_str();
+    assert_eq!(web.error_pages, ErrorPages::default());
+    let upload = |html: String| SetErrorPage::Upload {
+        html,
+        name: Some("pages/down.html".into()),
+    };
+
+    let page = api
+        .set_error_page(
+            Some(id),
+            ErrorPageKind::NoServer,
+            &upload(r#"<link rel="stylesheet" href="https://fonts.example.com/a.css">down"#.into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page.source,
+        ErrorPageSource::Upload {
+            name: Some("down.html".into())
+        }
+    );
+    assert_eq!(page.warnings.len(), 1);
+    assert!(page.warnings[0].contains("fonts.example.com"), "{page:?}");
+    let e = api
+        .set_error_page(
+            Some(id),
+            ErrorPageKind::Timeout,
+            &upload("x".repeat(MAX_ERROR_PAGE_BYTES + 1)),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("at most 256 KB"), "{e:#}");
+    let e = api
+        .set_error_page(
+            Some(id),
+            ErrorPageKind::Timeout,
+            &SetErrorPage::Repo {
+                path: "errors/504.html".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{e:#}").contains("not built from a repository"),
+        "{e:#}"
+    );
+
+    let git = api
+        .create_service(&create(
+            "api",
+            Source::Git {
+                repo: "https://example.com/acme/api.git".into(),
+                branch: "main".into(),
+                dockerfile: "Dockerfile".into(),
+                context: ".".into(),
+                root: String::new(),
+                watch_paths: true,
+                source_id: None,
+                auto_deploy: false,
+                build: Build::default(),
+            },
+        ))
+        .await
+        .unwrap();
+    let e = api
+        .set_error_page(
+            Some(&git.service.id),
+            ErrorPageKind::Timeout,
+            &SetErrorPage::Repo {
+                path: "../504.html".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("inside the repository"), "{e:#}");
+    let repo = api
+        .set_error_page(
+            Some(&git.service.id),
+            ErrorPageKind::Timeout,
+            &SetErrorPage::Repo {
+                path: "./errors/504.html".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.source,
+        ErrorPageSource::Repo {
+            path: "errors/504.html".into()
+        }
+    );
+    assert_eq!(repo.size, None);
+
+    let off = api
+        .update_service(
+            id,
+            &UpdateService {
+                branded_error_pages: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!off.error_pages.branded);
+    assert_eq!(off.error_pages.custom.len(), 1);
+    assert_eq!(off.error_pages.custom[0].kind, ErrorPageKind::NoServer);
+
+    let e = api
+        .set_error_page(
+            None,
+            ErrorPageKind::NotFound,
+            &SetErrorPage::Repo {
+                path: "404.html".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("uploaded"), "{e:#}");
+    api.set_error_page(None, ErrorPageKind::NotFound, &upload("<p>gone</p>".into()))
+        .await
+        .unwrap();
+    let instance = api.instance_error_pages().await.unwrap();
+    assert!(instance.branded);
+    assert_eq!(instance.custom.len(), 1);
+    assert_eq!(instance.custom[0].size, Some(11));
+    assert!(
+        api.service(id)
+            .await
+            .unwrap()
+            .error_pages
+            .page(ErrorPageKind::NotFound)
+            .is_none()
+    );
+
+    api.delete_error_page(None, ErrorPageKind::NotFound)
+        .await
+        .unwrap();
+    let e = api
+        .delete_error_page(None, ErrorPageKind::NotFound)
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("no custom 404 page"), "{e:#}");
+    api.delete_error_page(Some(id), ErrorPageKind::NoServer)
+        .await
+        .unwrap();
+    assert!(api.service(id).await.unwrap().error_pages.custom.is_empty());
+
+    let res = reqwest::Client::new()
+        .put(format!(
+            "{}{API_PREFIX}/services/{id}/error-pages/418",
+            daemon.url
+        ))
+        .bearer_auth(&daemon.token)
+        .json(&upload("x".into()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}

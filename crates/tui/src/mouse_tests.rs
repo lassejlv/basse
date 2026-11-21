@@ -140,6 +140,7 @@ fn fixture() -> App {
             }],
             container: None,
             compose: Vec::new(),
+            error_pages: common::ErrorPages::default(),
             replicas: Vec::new(),
             database: None,
         },
@@ -3455,4 +3456,50 @@ async fn metrics_tab_picks_replicas_and_charts_their_count() {
     press(&mut app, KeyCode::Char('c'));
     click(&mut app, Position::new(all.x, all.y));
     assert_eq!(picked(&app), None);
+}
+
+#[tokio::test]
+async fn error_pages_open_from_settings_and_every_row_and_key_is_clickable() {
+    let mut app = fixture();
+    app.open_service("fixture-web", Tab::Settings);
+    let buf = draw(&app, 120, 30);
+    let row = assert_hit(&app, label(&buf, "p  edit error pages"), char_key('p'));
+    label(&buf, "● branded");
+    click(&mut app, row);
+    assert!(matches!(
+        &app.overlay,
+        Some(Overlay::ErrorPages(d)) if d.service_id.as_deref() == Some("fixture-web") && d.row == 0
+    ));
+    let buf = draw(&app, 120, 30);
+    assert_rows(
+        &app,
+        &buf,
+        &[
+            ("nothing here", Hit::ErrorPageRow(0)),
+            ("no server", Hit::ErrorPageRow(1)),
+            ("timed out", Hit::ErrorPageRow(3)),
+            ("went wrong", Hit::ErrorPageRow(4)),
+        ],
+    );
+    assert_hit(&app, label(&buf, "b toggle"), char_key('b'));
+    assert_hit(&app, label(&buf, "x reset"), char_key('x'));
+    assert_hit(&app, label(&buf, "b branded"), char_key('b'));
+    assert_hit(&app, label(&buf, "esc close"), key(KeyCode::Esc));
+    let set = assert_hit(&app, label(&buf, "⏎ set page"), key(KeyCode::Enter));
+    let timed_out = label(&buf, "timed out");
+    click(&mut app, Position::new(timed_out.x, timed_out.y));
+    assert!(matches!(&app.overlay, Some(Overlay::ErrorPages(d)) if d.row == 3));
+    click(&mut app, set);
+    let Some(Overlay::Form(form)) = &app.overlay else {
+        panic!("set page form");
+    };
+    assert!(matches!(
+        form.kind,
+        FormKind::ErrorPage {
+            kind: common::ErrorPageKind::Timeout,
+            ..
+        }
+    ));
+    press(&mut app, KeyCode::Esc);
+    assert!(matches!(&app.overlay, Some(Overlay::ErrorPages(d)) if d.row == 3));
 }

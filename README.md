@@ -250,6 +250,24 @@ basse service autoscale web --off
 - **Autoscaling** checks every 15 seconds against the last minute of metrics: CPU in percent of one core, memory in percent of the limit, and requests per second, each averaged per replica. The service gets `ceil(replicas × observed ÷ target)` replicas for its busiest target, within `--min` and `--max`. Values within 10% of their target change nothing; scaling up waits `--up-cooldown` (60s) after any scaling, scaling down waits `--down-cooldown` (5m) and follows the highest need of the last `--stabilization` (5m), so a short dip doesn't remove replicas. It never adds more replicas than the server's free memory fits. Scaling is recorded in the activity feed and sends `service.scaled`; hitting `--max` or the memory limit sends `service.scale_limit_reached` once.
 - **Limits.** Replicas run on the service's server for now. Databases always run one replica, and compose services aren't scaled yet. Requests in flight on a replica when it crashes are lost; the rest of the traffic moves to the other replicas.
 
+## Error pages
+
+Each service can serve its own page in place of any of the five proxy pages (404, 503, starting, 504 and 5xx), and the instance can set defaults for every service without one. Branded pages can also be turned off per service.
+
+```sh
+basse service error-page set api 503 ./down.html          # upload a page from this computer
+basse service error-page set api 504 --repo errors/504.html  # a file in the repo, read on every deploy
+basse service error-page list api
+basse service error-page reset api 503
+basse service error-page branded api off                  # the proxy's own empty 502/503/504 pass through
+basse proxy error-page set 404 ./404.html                 # instance default, also for unknown hosts
+```
+
+- **Lookup order.** The service's own page comes first, then the instance default, then the built-in page.
+- **Pages** are one self-contained HTML file of at most 256 KB, served as is. A page that loads resources from other hosts is accepted, with a warning. Non-browser clients still get the JSON error.
+- **Repo pages** are paths relative to the service's root directory, read from the clone on every deploy from source. A missing or invalid file is noted in the deploy log, and the default page is served until the next deploy.
+- **Changes apply at once**, with no redeploy. The TUI has the same controls under `p` on a service's Settings tab, and under `p` on the Settings screen for the instance defaults.
+
 ## Secrets
 
 Secrets hold values the daemon uses but nobody should read in passing: SSH private keys for servers, S3 credentials for storage, and generic values.

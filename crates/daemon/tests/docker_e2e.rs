@@ -69,6 +69,194 @@ async fn wait_status(
     }
 }
 
+/// Waits until the proxy answers plain http for `host` with `status` and a body `check` accepts.
+async fn wait_body(
+    http: &reqwest::Client,
+    host: &str,
+    accept: &str,
+    status: impl Fn(u16) -> bool,
+    check: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let got = proxied(http, "http://127.0.0.1/", host, accept).await;
+        if let Some((s, _, body)) = &got
+            && status(*s)
+            && check(body)
+        {
+            return body.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{host} never answered as expected: {got:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Custom pages and the branded switch, through the real proxy. `sid` is stopped, so its
+/// domain answers 503.
+async fn error_pages(api: &Client, http: &reqwest::Client, env: &Environment, sid: &str) {
+    println!("== error pages: a service's custom 503 while it is stopped");
+    let upload = |html: &str, name: &str| SetErrorPage::Upload {
+        html: html.into(),
+        name: Some(name.into()),
+    };
+    let set = api
+        .set_error_page(
+            Some(sid),
+            ErrorPageKind::NoServer,
+            &upload("<h1>whoami is resting</h1>", "down.html"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(set.size, Some(26));
+    assert!(set.warnings.is_empty(), "{set:?}");
+    wait_body(
+        http,
+        WHOAMI_HOST,
+        "text/html",
+        |s| s == 503,
+        |b| b == "<h1>whoami is resting</h1>",
+    )
+    .await;
+    let json = wait_body(
+        http,
+        WHOAMI_HOST,
+        "application/json",
+        |s| s == 503,
+        |_| true,
+    )
+    .await;
+    assert!(json.contains("no server is available"), "{json}");
+
+    println!("== error pages: the instance default 404 for an unknown host");
+    let page = "<p>{{html .Host}} is not here</p>";
+    api.set_error_page(None, ErrorPageKind::NotFound, &upload(page, "404.html"))
+        .await
+        .unwrap();
+    wait_body(
+        http,
+        "nobody.localhost",
+        "text/html",
+        |s| s == 404,
+        |b| b == page,
+    )
+    .await;
+    api.delete_error_page(None, ErrorPageKind::NotFound)
+        .await
+        .unwrap();
+    wait_body(
+        http,
+        "nobody.localhost",
+        "text/html",
+        |s| s == 404,
+        |b| b.contains("Nothing here."),
+    )
+    .await;
+    api.delete_error_page(Some(sid), ErrorPageKind::NoServer)
+        .await
+        .unwrap();
+    wait_body(
+        http,
+        WHOAMI_HOST,
+        "text/html",
+        |s| s == 503,
+        |b| b.contains("No server available."),
+    )
+    .await;
+
+    println!("== error pages: branded off lets the proxy's raw 502/503 through");
+    let broken = api
+        .create_service(&CreateService {
+            environment_id: env.id.clone(),
+            server_id: None,
+            name: "wrong-port".into(),
+            source: Source::Image {
+                image: "traefik/whoami".into(),
+            },
+            port: Some(81),
+            command: None,
+            restart: RestartPolicy::UnlessStopped,
+            health_path: None,
+            env: vec![],
+            domains: vec![],
+            volumes: vec![],
+            deploy: true,
+            replicas: None,
+        })
+        .await
+        .unwrap();
+    let bid = broken.service.id.clone();
+    let live = wait_finished(
+        api,
+        &latest_deployment(api, &bid).await.id,
+        Duration::from_secs(120),
+    )
+    .await;
+    assert_eq!(live.status, DeploymentStatus::Live, "{live:?}");
+    const BROKEN_HOST: &str = "wrong-port.localhost";
+    api.add_domain(
+        &bid,
+        &CreateDomain {
+            host: BROKEN_HOST.into(),
+            port: None,
+            tls: false,
+            compose_service: None,
+        },
+    )
+    .await
+    .unwrap();
+    let reconfig = latest_deployment(api, &bid).await;
+    wait_finished(api, &reconfig.id, Duration::from_secs(120)).await;
+    wait_body(
+        http,
+        BROKEN_HOST,
+        "text/html",
+        |s| s == 503,
+        |b| b.contains("No server available."),
+    )
+    .await;
+    let off = api
+        .update_service(
+            &bid,
+            &UpdateService {
+                branded_error_pages: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!off.error_pages.branded);
+    // Caddy answers 502 while the upstream refuses, then 503 once passive health marks it down.
+    wait_body(
+        http,
+        BROKEN_HOST,
+        "text/html",
+        |s| s == 502 || s == 503,
+        str::is_empty,
+    )
+    .await;
+    api.update_service(
+        &bid,
+        &UpdateService {
+            branded_error_pages: Some(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    wait_body(
+        http,
+        BROKEN_HOST,
+        "text/html",
+        |s| s == 503,
+        |b| b.contains("No server available."),
+    )
+    .await;
+    api.delete_service(&bid, false).await.unwrap();
+}
+
 async fn wait_finished(api: &Client, deployment_id: &str, timeout: Duration) -> Deployment {
     let deadline = Instant::now() + timeout;
     loop {
@@ -397,6 +585,7 @@ async fn docker_end_to_end() {
     let (retry, page) = wait_status(&http, WHOAMI_HOST, "text/html", 503).await;
     assert!(page.contains("No server available."), "{page}");
     assert_eq!(retry.as_deref(), Some("30"));
+    error_pages(&api, &http, &env, &sid).await;
     assert_eq!(
         api.start(&sid).await.unwrap().service.state,
         ServiceState::Running

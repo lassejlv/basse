@@ -985,6 +985,7 @@ mod tests {
                     container: None,
                     database: None,
                     compose: Vec::new(),
+                    error_pages: ErrorPages::default(),
                     replicas: Vec::new(),
                 })
             }

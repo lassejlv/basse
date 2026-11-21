@@ -1,5 +1,6 @@
 //! Command line interface. With no subcommand it opens the TUI.
 
+mod error_pages;
 mod instance;
 mod notify;
 mod output;
@@ -350,6 +351,9 @@ enum TokenCmd {
 enum ProxyCmd {
     /// Reinstall the proxy on the daemon's own server.
     Restart,
+    /// The instance-wide default error pages.
+    #[command(subcommand)]
+    ErrorPage(error_pages::InstanceErrorPageCmd),
 }
 
 #[derive(Subcommand)]
@@ -554,6 +558,10 @@ enum ServiceCmd {
         #[arg(long, short)]
         detach: bool,
     },
+    /// The pages the proxy serves when it cannot answer for the service: branded or the
+    /// proxy's own, and custom pages.
+    #[command(subcommand)]
+    ErrorPage(error_pages::ServiceErrorPageCmd),
     Delete {
         service: String,
         /// Also delete the service's volumes and their data.
@@ -859,6 +867,7 @@ async fn dispatch(c: Client, name: String, command: Cmd, json: bool) -> Result<(
         Cmd::Settings { cmd } => instance::settings(&c, cmd, json).await,
         Cmd::Token(TokenCmd::Rotate) => instance::rotate_token(&c, &name, json).await,
         Cmd::Proxy(ProxyCmd::Restart) => instance::restart_proxy(&c, json).await,
+        Cmd::Proxy(ProxyCmd::ErrorPage(cmd)) => error_pages::instance(&c, cmd, json).await,
         Cmd::Prune => instance::prune(&c, json).await,
         Cmd::Status => status(&c, &name, json).await,
         Cmd::Setup {
@@ -2549,6 +2558,7 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
             }
         }
         ServiceCmd::Create(args) => create_service(c, *args).await?,
+        ServiceCmd::ErrorPage(cmd) => error_pages::service(c, cmd, json).await?,
         ServiceCmd::Metrics {
             service,
             range,

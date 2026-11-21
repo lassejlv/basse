@@ -491,6 +491,33 @@ impl Client {
             .await
     }
 
+    /// Sets a custom error page of a service, or of the instance with `service_id: None`.
+    pub async fn set_error_page(
+        &self,
+        service_id: Option<&str>,
+        kind: ErrorPageKind,
+        body: &SetErrorPage,
+    ) -> Result<CustomErrorPage> {
+        Self::json(
+            self.req(Method::PUT, &error_page_path(service_id, kind))
+                .json(body),
+        )
+        .await
+    }
+
+    pub async fn delete_error_page(
+        &self,
+        service_id: Option<&str>,
+        kind: ErrorPageKind,
+    ) -> Result<()> {
+        self.delete(&error_page_path(service_id, kind)).await
+    }
+
+    /// The instance-wide default error pages.
+    pub async fn instance_error_pages(&self) -> Result<ErrorPages> {
+        self.get("/settings/error-pages").await
+    }
+
     pub async fn delete_domain(&self, id: &str) -> Result<()> {
         self.delete(&format!("/domains/{id}")).await
     }
@@ -817,5 +844,12 @@ impl Client {
             path.push_str(&format!("&rule_id={id}"));
         }
         self.get(&path).await
+    }
+}
+
+fn error_page_path(service_id: Option<&str>, kind: ErrorPageKind) -> String {
+    match service_id {
+        Some(id) => format!("/services/{id}/error-pages/{kind}"),
+        None => format!("/settings/error-pages/{kind}"),
     }
 }

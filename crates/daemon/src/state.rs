@@ -10,7 +10,7 @@ use crate::docker::{self, DockerPool, InstanceRoute, ProxyConfig};
 use crate::domain::{NetProbe, Probe, Report};
 use crate::error::AppError;
 use crate::notify::Notifier;
-use crate::proxy_pages::{self, HeldHost, Hold};
+use crate::proxy_pages::{self, CustomPage, HeldHost, Hold, ProxyPages};
 use crate::secrets::{MasterKey, Secrets};
 use crate::stats::Stats;
 use anyhow::{Context as _, Result, bail};
@@ -240,17 +240,51 @@ impl AppState {
     }
 
     /// The proxy pages for `server_id`, holding a fallback route for every domain there whose
-    /// service has no container to answer: stopped, never deployed, or deploying for the first
-    /// time.
+    /// service has no container to answer (stopped, never deployed, or deploying for the first
+    /// time), and the branded and custom pages of its services.
     pub async fn proxy_pages(&self, server_id: &str) -> Result<Vec<u8>> {
-        let mut held: Vec<HeldHost> = Vec::new();
+        let mut pages = ProxyPages::default();
+        let unbranded = self.db.unbranded_services().await?;
+        let mut custom = self.db.all_error_pages().await?;
+        custom.retain(|c| c.html.is_some());
+        pages.custom.extend(
+            custom
+                .iter()
+                .filter(|c| c.service_id.is_none())
+                .map(|c| CustomPage {
+                    service_id: None,
+                    hosts: Vec::new(),
+                    kind: c.page.kind,
+                    html: c.html.clone().unwrap_or_default(),
+                }),
+        );
         for rec in self.db.services().await? {
             let svc = &rec.service;
+            if svc.server_id != server_id {
+                continue;
+            }
+            let domains = self.db.domains(&svc.id).await?;
+            let hosts: Vec<String> = domains.iter().map(|d| d.host.clone()).collect();
+            if unbranded.contains(&svc.id) {
+                pages.raw.extend(hosts.iter().cloned());
+            } else {
+                pages.custom.extend(
+                    custom
+                        .iter()
+                        .filter(|c| c.service_id.as_ref() == Some(&svc.id))
+                        .map(|c| CustomPage {
+                            service_id: Some(svc.id.clone()),
+                            hosts: hosts.clone(),
+                            kind: c.page.kind,
+                            html: c.html.clone().unwrap_or_default(),
+                        }),
+                );
+            }
             let deployed = rec.live_container.is_some() || svc.live_deployment_id.is_some();
             // A stopped service keeps its route container, which answers for its domains with
             // the error pages itself; holding them here too would define each site twice.
             let routed = deployed && crate::replicas::has_route(&svc.source);
-            if svc.server_id != server_id || (deployed && !rec.stopped) || routed {
+            if (deployed && !rec.stopped) || routed {
                 continue;
             }
             let hold = if rec.busy.is_some() {
@@ -258,9 +292,9 @@ impl AppState {
             } else {
                 Hold::Down
             };
-            for d in self.db.domains(&svc.id).await? {
-                if d.port.or(svc.port).is_some() && !held.iter().any(|h| h.host == d.host) {
-                    held.push(HeldHost {
+            for d in domains {
+                if d.port.or(svc.port).is_some() && !pages.held.iter().any(|h| h.host == d.host) {
+                    pages.held.push(HeldHost {
                         host: d.host,
                         tls: d.tls,
                         hold,
@@ -268,7 +302,7 @@ impl AppState {
                 }
             }
         }
-        proxy_pages::archive(&held)
+        proxy_pages::archive(&pages)
     }
 
     /// Rewrites the pages on the proxy of `server_id` after a service there gained or lost the

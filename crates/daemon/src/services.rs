@@ -185,6 +185,7 @@ pub async fn detail(state: &AppState, id: &str) -> ApiResult<ServiceDetail> {
         container,
         database,
         compose,
+        error_pages: crate::error_pages::of_service(state, id).await?,
         replicas,
     })
 }
@@ -381,6 +382,10 @@ pub async fn update(state: &AppState, id: &str, body: UpdateService) -> ApiResul
         s.server_id = state.server(&server_id).await?.id;
     }
     state.db.update_service(&s).await?;
+    if let Some(branded) = body.branded_error_pages {
+        state.db.set_branded_error_pages(&s.id, branded).await?;
+        state.refresh_proxy_pages(&s.server_id).await;
+    }
     if rec.live_container.is_some() && route_before != (s.scaling.lb_policy, s.health_path.clone())
     {
         let (_, docker) = state.docker_for(&s.server_id).await?;
