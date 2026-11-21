@@ -8,7 +8,10 @@ Self-hosted deploys from the terminal. A control daemon runs on your server and 
 - **Domains with automatic HTTPS.** Caddy runs as the reverse proxy on each server and gets certificates on its own.
 - **Logs, env vars and volumes.** Stream container and build logs, manage variables and secrets, and mount named volumes that survive redeploys.
 - **Database backups and access.** Back up one-click databases on demand or daily with retention, download and restore dumps, rotate passwords in place, and publish a database on a server port when you need to reach it from outside.
-- **More servers.** Register extra machines over SSH, and the daemon deploys to them through the same API.
+- **More servers.** Register extra machines over SSH, with the daemon's key or an SSH key from the secrets manager, and the daemon deploys to them through the same API.
+- **Secrets manager.** SSH keys, S3 credentials and other values, encrypted at rest with a master key. Values are shown only when you explicitly reveal them, and every reveal is logged.
+- **S3 storage.** Keep database backups in AWS S3, Cloudflare R2, Backblaze B2, MinIO or any other S3-compatible bucket.
+- **Instance backups.** One encrypted archive of the daemon itself, and `bassed restore` to bring it back on a new machine.
 
 ## Install
 
@@ -124,6 +127,99 @@ basse logout [context] [--all]          # forgets the token here; rotate it to r
 
 Every command takes `--json` and `--context <name>` (switch between daemons with `basse context use`). Run `basse <command> --help` for the details.
 
+## Secrets
+
+Secrets hold values the daemon uses but nobody should read in passing: SSH private keys for servers, S3 credentials for storage, and generic values.
+
+```sh
+basse secrets generate-ssh-key edge-key                   # ed25519, generated in the daemon; prints the public key
+basse secrets add deploy-key --kind ssh-key --file ~/.ssh/id_ed25519
+basse secrets add r2 --kind s3 --access-key-id <id> --file secret.txt   # the secret key comes from the file or stdin
+basse secrets add stripe --kind generic < value.txt
+basse secrets list                                        # kind, public part, what uses it; never values
+basse secrets show edge-key                               # includes the public key to put in authorized_keys
+basse secrets reveal stripe                               # prints the value and records it in the activity feed
+basse secrets rename stripe stripe-live
+basse secrets replace r2 --access-key-id <id> --file new-secret.txt
+basse secrets rm stripe                                   # refused while a server or storage uses it
+```
+
+Values are never taken as command-line arguments, so they stay out of shell history and process lists. The API returns a value only from `POST /secrets/{id}/reveal`; lists, `--json` output, activity rows and error messages never contain one.
+
+**Encryption.** `bassed init` (or the first start of an existing install) writes 32 random bytes to `/var/lib/basse/master.key` with mode 0600. Each value is encrypted with XChaCha20-Poly1305 under that key with a fresh random nonce, and the secret's id is authenticated as associated data, so a ciphertext copied onto another row does not decrypt. The database only ever sees ciphertext. Losing `master.key` means losing every secret, so keep instance backups (below), which include it.
+
+**SSH keys for servers.** `basse server add edge 203.0.113.7 --key edge-key` connects with that key instead of the daemon's own one, and `basse server set-key edge [<secret>]` switches a server to another key (no secret goes back to the daemon's key). Put the key's public part (`basse secrets show edge-key`) in `~/.ssh/authorized_keys` on the server. The daemon hands the key to `ssh` as a mode-0600 file in `/var/lib/basse/ssh/keys` that exists only during the handshake.
+
+## Storage
+
+A storage connection is an S3-compatible bucket for backups. Its credentials are an `s3_credentials` secret.
+
+```sh
+basse secrets add r2 --kind s3 --access-key-id <id> --file secret.txt
+basse storage add offsite --endpoint https://<account>.r2.cloudflarestorage.com --region auto \
+  --bucket backups --prefix basse --credentials r2      # adds it and runs a test
+basse storage test offsite                               # put, read back and delete a probe object, with latency
+basse storage list
+basse storage rm offsite                                 # refused while backups or schedules use it
+```
+
+| Provider | `--endpoint` | `--region` | Notes |
+|---|---|---|---|
+| AWS S3 | `https://s3.<region>.amazonaws.com` | the bucket's region | |
+| Cloudflare R2 | `https://<account id>.r2.cloudflarestorage.com` | `auto` | |
+| Backblaze B2 | `https://s3.<region>.backblazeb2.com` | e.g. `us-west-004` | |
+| MinIO, Garage, Ceph | your server's URL | as configured | add `--path-style` |
+
+Database backups then take a target:
+
+```sh
+basse db backup postgres --storage offsite
+basse db schedule postgres --hour 3 --keep 7 --storage offsite   # --storage local goes back to the data dir
+basse db backups postgres                                         # the WHERE column shows local or s3:<name>
+```
+
+Objects are stored as `<prefix>/<service id>/<file>`. Uploads stream from disk in 8 MiB multipart chunks and downloads stream as they arrive, so a backup is never held in memory whole. Download and restore work the same whichever store a backup is in. Retention runs per store, so moving a schedule to S3 never prunes the backups still kept locally.
+
+## Instance backups and disaster recovery
+
+An instance backup is one archive of the daemon itself: a `pg_dump -Fc` of its store, `config.toml`, `master.key`, the `ssh/` keys and known hosts, and a manifest of the local database backup files (the files themselves are not included; back them up to S3 storage to keep them off the machine). The archive contains the master key, so it is always encrypted with a passphrase you choose. The passphrase is never stored for manual backups; without it the archive cannot be opened, by you or anyone else.
+
+```sh
+basse instance backup --storage offsite --passphrase-file pass.txt   # or pipe the passphrase on stdin
+basse instance backups
+basse instance download [<backup>] [-o file]
+basse instance rm <backup>
+basse instance schedule --hour 2 --keep 7 --storage offsite --passphrase-file pass.txt
+basse instance schedule --off
+```
+
+The archive is a `tar.gz` encrypted with XChaCha20-Poly1305 in the STREAM construction (64 KiB chunks), under a key derived from the passphrase with argon2id (64 MiB, 3 passes). Any change to the file, including cutting it short, makes decryption fail.
+
+**The schedule stores the passphrase.** Scheduled runs need the passphrase without you, so `instance schedule` keeps it encrypted under the master key. That is a trade-off: anyone who gets the data directory (and with it `master.key` and the store) can recover the passphrase and open every archive made with it. They already hold everything those archives contain, so the archives in S3 stay useless to someone who has only the bucket. If that is not acceptable, run manual backups from your laptop instead (`basse instance backup` from a cron job there), where the passphrase never reaches the server.
+
+### Disaster recovery runbook
+
+The old server is gone and you have an instance backup in S3 (or a downloaded archive) and its passphrase.
+
+1. **Install a fresh server** with the one-line install above. It creates a new, empty daemon with its own managed Postgres.
+2. **Put the passphrase in a file** that only root can read:
+   ```sh
+   install -m 600 /dev/null /root/pass.txt && printf '%s' '<passphrase>' > /root/pass.txt
+   ```
+3. **Restore.** From S3, with credentials that can read the bucket (from a local file, drop the `--s3-*` flags and the environment variables):
+   ```sh
+   sudo AWS_ACCESS_KEY_ID=<id> AWS_SECRET_ACCESS_KEY=<secret> bassed restore \
+     s3://backups/basse/instance/instance-20261120-020000-14.tar.gz.enc \
+     --passphrase-file /root/pass.txt \
+     --s3-endpoint https://<account>.r2.cloudflarestorage.com --s3-region auto
+   ```
+   Use `--s3-path-style` for MinIO and other self-hosted stores. `bassed restore` stops the `bassed` service, puts back `config.toml`, `master.key` and `ssh/`, replaces the store with the dump (in the managed container, or in the external database the old config names; `--database-url` picks another one), checks that every secret decrypts, starts the service again and checks every server.
+4. **Point your CLI at the new server.** The API token is the old one, so `basse login http://<new-ip>:7700 --token <old token>` works, or edit the context's URL in `~/.config/basse/config.toml`. Run `basse status`.
+5. **Remote servers** trust the same keys as before, because the SSH keys came back with the archive. Servers that show offline in the restore output usually only need a firewall rule for the new IP.
+6. **Redeploy apps that ran on the old machine itself.** The store knows every service, but their containers and volumes were on the lost server. Run `basse deploy <service>` for them, and restore databases from their S3 backups with `basse db restore <service> <backup>`. Local database backups were on the old disk; the restore prints how many are missing.
+7. **Point DNS** for your domains at the new server so the proxy can get certificates again.
+8. **Take a fresh instance backup** once everything is green.
+
 ## Workspace
 
 | Crate | What it is |
@@ -136,7 +232,7 @@ Every command takes `--json` and `--context <name>` (switch between daemons with
 | `crates/cli` | The `basse` binary: clap commands that open the TUI by default |
 
 ```sh
-cargo test --workspace   # Postgres-backed tests start a throwaway postgres:18-alpine container and skip without Docker
+cargo test --workspace   # starts throwaway postgres:18-alpine and MinIO containers; skips without Docker
 cargo test -p daemon --test docker_e2e -- --ignored --test-threads 1   # needs Docker and free ports 80/443
 ```
 
