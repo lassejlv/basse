@@ -920,3 +920,84 @@ async fn secrets_are_encrypted_masked_and_protected_while_in_use() {
         assert!(!feed.contains(plaintext), "activity leaked {plaintext}");
     }
 }
+
+#[tokio::test]
+async fn metrics_validate_the_range_and_start_empty() {
+    use common::metrics::MetricsRange;
+    let Some(daemon) = Daemon::start().await else {
+        return;
+    };
+    let api = daemon.client();
+    let http = reqwest::Client::new();
+    let project = api
+        .create_project(&CreateProject {
+            name: "shop".into(),
+            description: None,
+        })
+        .await
+        .unwrap();
+    let tree = api.tree().await.unwrap();
+    let node = tree
+        .projects
+        .iter()
+        .find(|p| p.project.id == project.id)
+        .unwrap();
+    let web = api
+        .create_service(&CreateService {
+            environment_id: node.environments[0].environment.id.clone(),
+            server_id: None,
+            name: "web".into(),
+            source: Source::Image {
+                image: "nginx:alpine".into(),
+            },
+            port: Some(80),
+            command: None,
+            restart: RestartPolicy::default(),
+            health_path: None,
+            env: vec![],
+            domains: vec!["shop.example.com".into()],
+            volumes: vec![],
+            deploy: false,
+        })
+        .await
+        .unwrap();
+    let id = &web.service.id;
+
+    for range in MetricsRange::ALL {
+        let m = api.service_metrics(id, range, None).await.unwrap();
+        assert_eq!(m.range, range);
+        assert_eq!(m.step_secs, range.step_secs());
+        assert!(m.points.is_empty() && m.deploys.is_empty() && m.containers.is_empty());
+        assert!(m.http, "a domain routes to the service");
+        let span = (m.to - m.from).num_seconds();
+        assert!(span >= range.secs() && span < range.secs() + range.step_secs());
+    }
+
+    let get = |query: &str| {
+        http.get(format!(
+            "{}{API_PREFIX}/services/{id}/metrics{query}",
+            daemon.url
+        ))
+        .bearer_auth(&daemon.token)
+        .send()
+    };
+    let res = get("").await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let m: common::metrics::ServiceMetrics = res.json().await.unwrap();
+    assert_eq!(m.range, MetricsRange::Hour);
+    for bad in ["?range=5m", "?range=", "?container=web"] {
+        let res = get(bad).await.unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad}");
+        let _: ApiError = res.json().await.unwrap();
+    }
+    let res = http
+        .get(format!(
+            "{}{API_PREFIX}/services/missing/metrics",
+            daemon.url
+        ))
+        .bearer_auth(&daemon.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}

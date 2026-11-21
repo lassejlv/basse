@@ -412,6 +412,18 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                     ("s", "stop/start"),
                     ("l", "logs"),
                 ],
+                Tab::Metrics => {
+                    let mut keys = vec![("tab", "next tab"), ("←→", "range")];
+                    if app
+                        .service
+                        .as_ref()
+                        .is_some_and(|v| !v.compose().is_empty())
+                    {
+                        keys.push(("c", "container"));
+                    }
+                    keys.extend([("d", "deploy"), ("r", "restart")]);
+                    keys
+                }
             }
         }
         Screen::Deploy => {
@@ -1565,6 +1577,7 @@ fn service(frame: &mut Frame, area: Rect, app: &App) {
         Tab::Overview => service_overview(frame, body, app, view),
         Tab::Deployments => deployments_tab(frame, body, app, view),
         Tab::Logs => logs_tab(frame, body, app, view),
+        Tab::Metrics => crate::metrics::tab(frame, body, app, view),
         Tab::Database => database_tab(frame, body, app, view),
         Tab::Backups => backups_tab(frame, body, app, view),
         Tab::Env => env_tab(frame, body, view),

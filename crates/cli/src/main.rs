@@ -11,6 +11,7 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use client::{Client, Config, Context};
 use common::api::*;
+use common::metrics::{HttpPoint, MetricPoint, MetricsRange, ServiceMetrics};
 use common::*;
 use futures_util::StreamExt;
 use output::{Cell, Tone, muted, paint};
@@ -439,6 +440,16 @@ enum ServiceCmd {
         service: String,
     },
     Create(Box<CreateArgs>),
+    /// CPU, memory, network, disk and requests over a range, with sparklines.
+    Metrics {
+        service: String,
+        /// 1h, 24h, 7d or 30d.
+        #[arg(long, default_value = "1h")]
+        range: MetricsRange,
+        /// One compose service instead of the whole group.
+        #[arg(long)]
+        container: Option<String>,
+    },
     /// Show or change how a git service is built; applies on the next deploy.
     Build {
         service: String,
@@ -894,6 +905,115 @@ async fn dispatch(c: Client, name: String, command: Cmd, json: bool) -> Result<(
         Cmd::Notify(cmd) => notify::run(&c, cmd, json).await,
         Cmd::Source(cmd) => sources::source(&c, cmd, json).await,
     }
+}
+
+/// One row per measure: now, average, peak and a sparkline of the range.
+fn print_metrics(scope: &str, s: &Service, m: &ServiceMetrics) {
+    const WIDTH: usize = 32;
+    let which = m
+        .container
+        .as_deref()
+        .map(|c| format!(" · {c}"))
+        .unwrap_or_default();
+    println!(
+        "{}{which} {}",
+        s.name,
+        muted(format!(
+            "{scope} · last {} · {} points of {}s",
+            m.range,
+            m.points.len(),
+            m.step_secs
+        ))
+    );
+    if !m.containers.is_empty() {
+        println!(
+            "{}",
+            muted(format!(
+                "containers {} · --container picks one",
+                m.containers.join(" ")
+            ))
+        );
+    }
+    let Some(last) = m.points.last() else {
+        output::note("collecting · first samples in ~10s");
+        return;
+    };
+    let pct: fn(f64) -> String = |v| format!("{v:.0}%");
+    let mem: fn(f64) -> String = |v| output::bytes(v as u64);
+    let rate: fn(f64) -> String = |v| format!("{}/s", output::size(v as u64));
+    let ms: fn(f64) -> String = |v| format!("{v:.0} ms");
+    let rps: fn(f64) -> String = |v| format!("{v:.1}/s");
+    type Pick = fn(&MetricPoint) -> Option<f64>;
+    type Fmt = fn(f64) -> String;
+    let mut rows: Vec<(&str, Pick, Fmt)> = vec![
+        ("cpu", |p| Some(p.cpu), pct),
+        ("memory", |p| Some(p.mem as f64), mem),
+        ("net rx", |p| Some(p.net_rx), rate),
+        ("net tx", |p| Some(p.net_tx), rate),
+        ("disk read", |p| Some(p.disk_read), rate),
+        ("disk write", |p| Some(p.disk_write), rate),
+        ("pids", |p| Some(p.pids as f64), |v| format!("{v:.0}")),
+    ];
+    if m.http {
+        rows.push(("requests", |p| p.http.as_ref().map(|h| h.rps), rps));
+        rows.push(("p50", |p| p.http.as_ref().and_then(|h| h.p50_ms), ms));
+        rows.push(("p95", |p| p.http.as_ref().and_then(|h| h.p95_ms), ms));
+    }
+    let table: Vec<Vec<output::Cell>> = rows
+        .into_iter()
+        .map(|(name, pick, fmt)| {
+            let values: Vec<f64> = m.points.iter().filter_map(pick).collect();
+            let now = pick(last).map_or("—".into(), fmt);
+            let avg = if values.is_empty() {
+                "—".into()
+            } else {
+                fmt(values.iter().sum::<f64>() / values.len() as f64)
+            };
+            let peak = values
+                .iter()
+                .copied()
+                .reduce(f64::max)
+                .map_or("—".into(), fmt);
+            vec![
+                output::Cell(name.into(), Tone::Muted),
+                now.into(),
+                avg.into(),
+                peak.into(),
+                output::Cell(output::sparkline(&values, WIDTH), Tone::Info),
+            ]
+        })
+        .collect();
+    output::table(
+        &["", "NOW", "AVG", "PEAK", &format!("LAST {}", m.range)],
+        table,
+    );
+    let mut facts = vec![
+        format!("limit {}", output::bytes(last.mem_limit)),
+        format!("restarts {}", last.restarts),
+        format!("up {}", output::duration(last.uptime_secs)),
+    ];
+    let http: Vec<&HttpPoint> = m.points.iter().filter_map(|p| p.http.as_ref()).collect();
+    let total: u64 = http.iter().map(|h| h.requests()).sum();
+    if total > 0 {
+        let share = |f: fn(&HttpPoint) -> u64| {
+            http.iter().map(|h| f(h)).sum::<u64>() as f64 / total as f64 * 100.0
+        };
+        facts.push(format!(
+            "2xx {:.0}% · 4xx {:.0}% · 5xx {:.0}%",
+            share(|h| h.s2xx + h.s3xx),
+            share(|h| h.s4xx),
+            share(|h| h.s5xx)
+        ));
+    }
+    if !m.deploys.is_empty() {
+        let deploys: Vec<String> = m
+            .deploys
+            .iter()
+            .map(|d| format!("#{} {}", d.number, output::ago(d.at)))
+            .collect();
+        facts.push(format!("deploys {}", deploys.join(", ")));
+    }
+    println!("{}", muted(facts.join(" · ")));
 }
 
 async fn find(c: &Client, query: &str) -> Result<(Project, Environment, Service)> {
@@ -2157,6 +2277,20 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
             }
         }
         ServiceCmd::Create(args) => create_service(c, *args).await?,
+        ServiceCmd::Metrics {
+            service,
+            range,
+            container,
+        } => {
+            let (p, e, s) = find(c, &service).await?;
+            let m = c
+                .service_metrics(&s.id, range, container.as_deref())
+                .await?;
+            if json {
+                return output::json(&m);
+            }
+            print_metrics(&format!("{}/{}", p.name, e.name), &s, &m);
+        }
         ServiceCmd::Build {
             service,
             method,

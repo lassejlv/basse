@@ -7,6 +7,7 @@ use crate::server_pick;
 use crate::theme;
 use client::{Client, Config};
 use common::api::*;
+use common::metrics::{MetricsRange, ServiceMetrics};
 use common::notify as notify_types;
 use common::*;
 use futures_util::StreamExt;
@@ -39,6 +40,8 @@ pub enum Msg {
     Servers(Vec<Server>),
     Detail(Box<ServiceDetail>),
     Stats(Id, ServiceStats),
+    /// Metrics of a service for the range and container they were asked for.
+    Metrics(Id, MetricsRange, Option<String>, Box<ServiceMetrics>),
     Deployments(Id, Vec<Deployment>),
     Deployment(Box<Deployment>),
     OpenLinkedDeployment(Id, Result<Box<Deployment>, String>),
@@ -182,6 +185,7 @@ pub enum Tab {
     Overview,
     Deployments,
     Logs,
+    Metrics,
     Database,
     Backups,
     Env,
@@ -191,10 +195,11 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 9] = [
+    pub const ALL: [Tab; 10] = [
         Tab::Overview,
         Tab::Deployments,
         Tab::Logs,
+        Tab::Metrics,
         Tab::Database,
         Tab::Backups,
         Tab::Env,
@@ -208,6 +213,7 @@ impl Tab {
             Tab::Overview => "Overview",
             Tab::Deployments => "Deployments",
             Tab::Logs => "Logs",
+            Tab::Metrics => "Metrics",
             Tab::Database => "Database",
             Tab::Backups => "Backups",
             Tab::Env => "Env",
@@ -394,6 +400,16 @@ pub struct ServiceView {
     pub database: bool,
     /// The compose service whose logs the Logs tab shows.
     pub container: Option<String>,
+    pub metrics: MetricsView,
+}
+
+/// What the Metrics tab shows: a range, optionally one compose service, and the last answer.
+#[derive(Debug, Default)]
+pub struct MetricsView {
+    pub range: MetricsRange,
+    /// The compose service picked; `None` sums the whole service.
+    pub container: Option<String>,
+    pub data: Option<ServiceMetrics>,
 }
 
 impl ServiceView {
@@ -1132,6 +1148,9 @@ impl App {
         }
         if let Some(view) = &self.service {
             let (id, database) = (view.id.clone(), view.database);
+            if view.tab == Tab::Metrics {
+                self.load_metrics();
+            }
             self.load_detail(&id);
             self.load_deployments(&id);
             if database {
@@ -1262,6 +1281,13 @@ impl App {
             }
             Msg::Stats(id, s) => {
                 self.stats.insert(id, s);
+            }
+            Msg::Metrics(id, range, container, m) => {
+                if let Some(view) = self.service.as_mut().filter(|v| {
+                    v.id == id && v.metrics.range == range && v.metrics.container == container
+                }) {
+                    view.metrics.data = Some(*m);
+                }
             }
             Msg::Deployments(id, d) => {
                 if let Some(view) = self.service.as_mut().filter(|v| v.id == id) {
@@ -2166,6 +2192,7 @@ impl App {
                 || self.details.get(id).is_some_and(|d| d.database.is_some())
                 || self.all_services().any(|s| s.id == id && is_database(s)),
             container: None,
+            metrics: MetricsView::default(),
         });
         self.load_detail(id);
         self.load_deployments(id);
@@ -2183,6 +2210,83 @@ impl App {
         if tab == Tab::Logs && view.log_task.is_none() {
             self.start_service_logs();
         }
+        if tab == Tab::Metrics {
+            self.load_metrics();
+        }
+    }
+
+    /// Asks for the open service's metrics with the Metrics tab's range and container.
+    pub fn load_metrics(&self) {
+        let Some(view) = &self.service else { return };
+        let (id, range, container) = (
+            view.id.clone(),
+            view.metrics.range,
+            view.metrics.container.clone(),
+        );
+        self.spawn(move |c| async move {
+            match c.service_metrics(&id, range, container.as_deref()).await {
+                Ok(m) => Msg::Metrics(id, range, container, Box::new(m)),
+                Err(e) => Msg::Error(format!("{e:#}")),
+            }
+        });
+    }
+
+    /// Shows another range; the chart keeps the old one until the new one arrives.
+    pub fn set_metrics_range(&mut self, range: MetricsRange) {
+        let Some(view) = self.service.as_mut() else {
+            return;
+        };
+        if view.metrics.range != range {
+            view.metrics.range = range;
+            self.load_metrics();
+        }
+    }
+
+    /// Steps through the ranges with ← and →, stopping at either end.
+    pub fn step_metrics_range(&mut self, delta: isize) {
+        let Some(view) = &self.service else { return };
+        let all = MetricsRange::ALL;
+        let at = all
+            .iter()
+            .position(|r| *r == view.metrics.range)
+            .unwrap_or(0);
+        let next = (at as isize + delta).clamp(0, all.len() as isize - 1) as usize;
+        self.set_metrics_range(all[next]);
+    }
+
+    /// Picks what the Metrics tab of a compose service shows: 0 is all containers summed,
+    /// then each compose service in order.
+    pub fn pick_metrics_container(&mut self, i: usize) {
+        let Some(view) = self.service.as_mut() else {
+            return;
+        };
+        let container = match i {
+            0 => None,
+            i => match view.compose().get(i - 1) {
+                Some(s) => Some(s.name.clone()),
+                None => return,
+            },
+        };
+        if view.metrics.container != container {
+            view.metrics.container = container;
+            self.load_metrics();
+        }
+    }
+
+    /// "c" on the Metrics tab of a compose service: all, then each container in turn.
+    pub fn next_metrics_container(&mut self) {
+        let Some(view) = &self.service else { return };
+        let compose = view.compose();
+        if compose.is_empty() {
+            return;
+        }
+        let at = view
+            .metrics
+            .container
+            .as_deref()
+            .and_then(|c| compose.iter().position(|s| s.name == c))
+            .map_or(0, |i| i + 1);
+        self.pick_metrics_container((at + 1) % (compose.len() + 1));
     }
 
     pub fn open_service_overview(&mut self) {

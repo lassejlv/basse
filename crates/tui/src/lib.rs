@@ -4,6 +4,7 @@ mod app;
 mod database;
 mod form;
 mod keys;
+mod metrics;
 mod mouse;
 #[cfg(test)]
 mod mouse_tests;

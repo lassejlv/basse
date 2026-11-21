@@ -1,7 +1,9 @@
 //! Postgres storage: the schema lives in `migrations/`; this is every query the daemon runs.
 
+use crate::metrics::{self, Bucket, Sample};
 use anyhow::{Context as _, Result};
 use chrono::Utc;
+use common::metrics::DeployMarker;
 use common::notify::*;
 use common::*;
 use rand::Rng as _;
@@ -1772,6 +1774,181 @@ impl Db {
 
     // Query helpers
 
+    // Metrics
+
+    /// Folds one sample of a container into its raw row and every rollup at once.
+    pub async fn insert_metric_sample(
+        &self,
+        service_id: &str,
+        container: &str,
+        at: Timestamp,
+        s: &Sample,
+    ) -> Result<()> {
+        let (resolutions, starts): (Vec<i32>, Vec<Timestamp>) = metrics::buckets_of(at)
+            .iter()
+            .map(|&(res, start)| (i32::try_from(res).unwrap_or(i32::MAX), start))
+            .unzip();
+        let big = |n: u64| i64::try_from(n).unwrap_or(i64::MAX);
+        let rates = s.rates.unwrap_or_default();
+        let http = s.http.unwrap_or_default();
+        let requests: u64 = http.classes.iter().sum();
+        let weighted = |p: Option<f64>| p.map_or(0.0, |p| p * requests as f64);
+        let latency_requests = if http.p50_ms.is_some() { requests } else { 0 };
+        sqlx::query(
+            "INSERT INTO metrics (service_id, container, resolution, at, samples, cpu_sum, cpu_max,
+                 mem_sum, mem_max, mem_limit, rate_samples, net_rx_sum, net_tx_sum, disk_read_sum,
+                 disk_write_sum, pids_max, restarts, uptime, http_secs, s2xx, s3xx, s4xx, s5xx,
+                 latency_requests, p50_wsum, p95_wsum)
+             SELECT $1, $2, r.resolution, r.at, 1, $5, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                 $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
+             FROM unnest($3::int[], $4::timestamptz[]) AS r(resolution, at)
+             ON CONFLICT (service_id, container, resolution, at) DO UPDATE SET
+                 samples = metrics.samples + 1,
+                 cpu_sum = metrics.cpu_sum + EXCLUDED.cpu_sum,
+                 cpu_max = GREATEST(metrics.cpu_max, EXCLUDED.cpu_max),
+                 mem_sum = metrics.mem_sum + EXCLUDED.mem_sum,
+                 mem_max = GREATEST(metrics.mem_max, EXCLUDED.mem_max),
+                 mem_limit = EXCLUDED.mem_limit,
+                 rate_samples = metrics.rate_samples + EXCLUDED.rate_samples,
+                 net_rx_sum = metrics.net_rx_sum + EXCLUDED.net_rx_sum,
+                 net_tx_sum = metrics.net_tx_sum + EXCLUDED.net_tx_sum,
+                 disk_read_sum = metrics.disk_read_sum + EXCLUDED.disk_read_sum,
+                 disk_write_sum = metrics.disk_write_sum + EXCLUDED.disk_write_sum,
+                 pids_max = GREATEST(metrics.pids_max, EXCLUDED.pids_max),
+                 restarts = EXCLUDED.restarts,
+                 uptime = EXCLUDED.uptime,
+                 http_secs = metrics.http_secs + EXCLUDED.http_secs,
+                 s2xx = metrics.s2xx + EXCLUDED.s2xx,
+                 s3xx = metrics.s3xx + EXCLUDED.s3xx,
+                 s4xx = metrics.s4xx + EXCLUDED.s4xx,
+                 s5xx = metrics.s5xx + EXCLUDED.s5xx,
+                 latency_requests = metrics.latency_requests + EXCLUDED.latency_requests,
+                 p50_wsum = metrics.p50_wsum + EXCLUDED.p50_wsum,
+                 p95_wsum = metrics.p95_wsum + EXCLUDED.p95_wsum",
+        )
+        .bind(service_id)
+        .bind(container)
+        .bind(resolutions)
+        .bind(starts)
+        .bind(s.cpu)
+        .bind(s.mem as f64)
+        .bind(big(s.mem))
+        .bind(big(s.mem_limit))
+        .bind(i32::from(s.rates.is_some()))
+        .bind(rates.net_rx)
+        .bind(rates.net_tx)
+        .bind(rates.disk_read)
+        .bind(rates.disk_write)
+        .bind(big(s.pids))
+        .bind(s.restarts)
+        .bind(s.uptime_secs)
+        .bind(http.secs)
+        .bind(big(http.classes[0]))
+        .bind(big(http.classes[1]))
+        .bind(big(http.classes[2]))
+        .bind(big(http.classes[3]))
+        .bind(big(latency_requests))
+        .bind(weighted(http.p50_ms))
+        .bind(weighted(http.p95_ms))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Buckets of one resolution from `from` on, oldest first; every container's unless one
+    /// is named.
+    pub async fn metric_buckets(
+        &self,
+        service_id: &str,
+        resolution: i64,
+        from: Timestamp,
+        container: Option<&str>,
+    ) -> Result<Vec<Bucket>> {
+        let rows = sqlx::query(
+            "SELECT container, at, samples, cpu_sum, cpu_max, mem_sum, mem_max, mem_limit,
+                 rate_samples, net_rx_sum, net_tx_sum, disk_read_sum, disk_write_sum, pids_max,
+                 restarts, uptime, http_secs, s2xx, s3xx, s4xx, s5xx, latency_requests, p50_wsum,
+                 p95_wsum
+             FROM metrics
+             WHERE service_id = $1 AND resolution = $2 AND at >= $3
+                 AND ($4::text IS NULL OR container = $4)
+             ORDER BY at, container",
+        )
+        .bind(service_id)
+        .bind(i32::try_from(resolution).unwrap_or(i32::MAX))
+        .bind(from)
+        .bind(container)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(bucket_from_row)
+            .collect::<sqlx::Result<_>>()?)
+    }
+
+    /// The containers with buckets of this resolution from `from` on, by name.
+    pub async fn metric_containers(
+        &self,
+        service_id: &str,
+        resolution: i64,
+        from: Timestamp,
+    ) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT DISTINCT container FROM metrics
+             WHERE service_id = $1 AND resolution = $2 AND at >= $3 ORDER BY container",
+        )
+        .bind(service_id)
+        .bind(i32::try_from(resolution).unwrap_or(i32::MAX))
+        .bind(from)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Drops the buckets each level no longer keeps at `now`; returns how many went.
+    pub async fn expire_metrics(&self, now: Timestamp) -> Result<u64> {
+        let (resolutions, cutoffs): (Vec<i32>, Vec<Timestamp>) = metrics::cutoffs(now)
+            .iter()
+            .map(|&(res, cutoff)| (i32::try_from(res).unwrap_or(i32::MAX), cutoff))
+            .unzip();
+        Ok(sqlx::query(
+            "DELETE FROM metrics m
+             USING unnest($1::int[], $2::timestamptz[]) AS c(resolution, cutoff)
+             WHERE m.resolution = c.resolution AND m.at < c.cutoff",
+        )
+        .bind(resolutions)
+        .bind(cutoffs)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
+    /// Deployments of a service that went live from `from` on, oldest first.
+    pub async fn deploy_markers(
+        &self,
+        service_id: &str,
+        from: Timestamp,
+    ) -> Result<Vec<DeployMarker>> {
+        let rows = sqlx::query(
+            "SELECT finished_at, number, status FROM deployments
+             WHERE service_id = $1 AND status IN ('live', 'superseded') AND finished_at >= $2
+             ORDER BY finished_at",
+        )
+        .bind(service_id)
+        .bind(from)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                Ok(DeployMarker {
+                    at: row.try_get(0)?,
+                    number: row.try_get(1)?,
+                    status: col_enum(row, 2)?,
+                })
+            })
+            .collect::<sqlx::Result<_>>()?)
+    }
+
     async fn fetch<T>(
         &self,
         sql: String,
@@ -2127,6 +2304,37 @@ fn col_json<T: DeserializeOwned>(row: &PgRow, idx: usize) -> sqlx::Result<T> {
     Ok(value)
 }
 
+fn bucket_from_row(row: &PgRow) -> sqlx::Result<Bucket> {
+    Ok(Bucket {
+        container: row.try_get(0)?,
+        at: row.try_get(1)?,
+        samples: i64::from(row.try_get::<i32, _>(2)?),
+        cpu_sum: row.try_get(3)?,
+        cpu_max: row.try_get(4)?,
+        mem_sum: row.try_get(5)?,
+        mem_max: row.try_get(6)?,
+        mem_limit: row.try_get(7)?,
+        rate_samples: i64::from(row.try_get::<i32, _>(8)?),
+        net_rx_sum: row.try_get(9)?,
+        net_tx_sum: row.try_get(10)?,
+        disk_read_sum: row.try_get(11)?,
+        disk_write_sum: row.try_get(12)?,
+        pids_max: row.try_get(13)?,
+        restarts: row.try_get(14)?,
+        uptime: row.try_get(15)?,
+        http_secs: row.try_get(16)?,
+        classes: [
+            row.try_get(17)?,
+            row.try_get(18)?,
+            row.try_get(19)?,
+            row.try_get(20)?,
+        ],
+        latency_requests: row.try_get(21)?,
+        p50_wsum: row.try_get(22)?,
+        p95_wsum: row.try_get(23)?,
+    })
+}
+
 fn col_port(row: &PgRow, idx: usize) -> sqlx::Result<Option<u16>> {
     row.try_get::<Option<i32>, _>(idx)?
         .map(|p| u16::try_from(p).map_err(|e| decode_error(idx, e)))
@@ -2433,6 +2641,168 @@ pub mod tests {
 
         db.delete_service(&svc_id).await.unwrap();
         assert!(db.backup(&second.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn metrics_roll_up_and_expire_per_level() {
+        use crate::metrics::{HttpSample, Rates};
+        use chrono::TimeDelta;
+        let Some(db) = test_db().await else { return };
+        let (_, env) = project(&db).await;
+        let srv = server(&db).await;
+        let svc_id = raw_service(&db, &env, &srv, r#"{"type":"image","image":"nginx"}"#).await;
+        // 2023-11-14 22:00:00 UTC: on a boundary of every level.
+        let hour = chrono::DateTime::from_timestamp(1_699_999_200, 0).unwrap();
+        let secs = TimeDelta::seconds;
+        for i in 0..12u32 {
+            let sample = Sample {
+                cpu: f64::from(i),
+                mem: 100 + u64::from(i) * 10,
+                mem_limit: 1000,
+                rates: (i > 0).then_some(Rates {
+                    net_rx: 10.0,
+                    net_tx: 5.0,
+                    disk_read: 0.0,
+                    disk_write: 2.0,
+                }),
+                pids: u64::from(i % 4),
+                restarts: 1,
+                uptime_secs: i64::from(i) * 10,
+                http: Some(HttpSample {
+                    secs: 10.0,
+                    classes: [8, 0, 1, 1],
+                    p50_ms: Some(10.0 + f64::from(i % 2) * 10.0),
+                    p95_ms: Some(50.0),
+                }),
+            };
+            db.insert_metric_sample(&svc_id, "", hour + secs(i64::from(i) * 10), &sample)
+                .await
+                .unwrap();
+        }
+        let points = |res, from| {
+            let db = db.clone();
+            let svc_id = svc_id.clone();
+            async move {
+                crate::metrics::combine(&db.metric_buckets(&svc_id, res, from, None).await.unwrap())
+            }
+        };
+
+        let raw = points(10, hour).await;
+        assert_eq!(raw.len(), 12);
+        assert_eq!(raw[3].cpu, 3.0);
+        assert_eq!(raw[0].net_rx, 0.0);
+
+        let minutes = points(60, hour).await;
+        assert_eq!(minutes.len(), 2);
+        let first = &minutes[0];
+        assert_eq!(first.at, hour);
+        assert_eq!(first.cpu, 2.5);
+        assert_eq!(first.cpu_max, 5.0);
+        assert_eq!(first.mem, 125);
+        assert_eq!(first.mem_max, 150);
+        // The first sample had no rates, so they average over the other five.
+        assert_eq!(first.net_rx, 10.0);
+        assert_eq!(first.pids, 3);
+        assert_eq!(first.uptime_secs, 50);
+        let http = first.http.as_ref().unwrap();
+        assert_eq!((http.s2xx, http.s4xx, http.s5xx), (48, 6, 6));
+        assert_eq!(http.rps, 1.0);
+        assert_eq!(http.p50_ms, Some(15.0));
+        assert_eq!(minutes[1].at, hour + secs(60));
+        assert_eq!(minutes[1].cpu, 8.5);
+
+        let hours = points(3600, hour).await;
+        assert_eq!(hours.len(), 1);
+        assert_eq!(hours[0].cpu, 5.5);
+        assert_eq!(hours[0].mem_max, 210);
+        assert_eq!(points(600, hour).await.len(), 1);
+        assert_eq!(db.metric_containers(&svc_id, 60, hour).await.unwrap(), [""]);
+
+        let level_rows = |res| {
+            let db = db.clone();
+            let svc_id = svc_id.clone();
+            async move {
+                db.metric_buckets(&svc_id, res, hour - secs(86_400 * 60), None)
+                    .await
+                    .unwrap()
+                    .len()
+            }
+        };
+        assert_eq!(db.expire_metrics(hour + secs(3600 + 59)).await.unwrap(), 6);
+        assert_eq!(level_rows(10).await, 6);
+        db.expire_metrics(hour + TimeDelta::hours(2)).await.unwrap();
+        assert_eq!(level_rows(10).await, 0);
+        assert_eq!(level_rows(60).await, 2);
+        db.expire_metrics(hour + TimeDelta::hours(25))
+            .await
+            .unwrap();
+        assert_eq!(level_rows(60).await, 0);
+        assert_eq!(level_rows(600).await, 1);
+        db.expire_metrics(hour + TimeDelta::days(8)).await.unwrap();
+        assert_eq!(level_rows(600).await, 0);
+        assert_eq!(level_rows(3600).await, 1);
+        db.expire_metrics(hour + TimeDelta::days(31)).await.unwrap();
+        assert_eq!(level_rows(3600).await, 0);
+    }
+
+    #[tokio::test]
+    async fn metrics_go_with_their_service_and_deploys_mark_the_timeline() {
+        let Some(db) = test_db().await else { return };
+        let (_, env) = project(&db).await;
+        let srv = server(&db).await;
+        let svc_id = raw_service(&db, &env, &srv, r#"{"type":"image","image":"nginx"}"#).await;
+        let now = Utc::now();
+        for container in ["web", "worker"] {
+            db.insert_metric_sample(&svc_id, container, now, &Sample::default())
+                .await
+                .unwrap();
+        }
+        let from = now - chrono::TimeDelta::hours(1);
+        assert_eq!(
+            db.metric_containers(&svc_id, 10, from).await.unwrap(),
+            ["web", "worker"]
+        );
+        assert_eq!(
+            db.metric_buckets(&svc_id, 10, from, Some("web"))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mut statuses = Vec::new();
+        for status in [
+            DeploymentStatus::Superseded,
+            DeploymentStatus::Failed,
+            DeploymentStatus::Live,
+        ] {
+            let mut d = deployment(&svc_id);
+            db.insert_deployment(&mut d, &srv.id).await.unwrap();
+            d.status = status;
+            d.finished_at = Some(now - chrono::TimeDelta::minutes(10 - d.number));
+            db.update_deployment(&d).await.unwrap();
+            statuses.push(d.number);
+        }
+        let markers = db.deploy_markers(&svc_id, from).await.unwrap();
+        assert_eq!(
+            markers
+                .iter()
+                .map(|m| (m.number, m.status))
+                .collect::<Vec<_>>(),
+            [
+                (statuses[0], DeploymentStatus::Superseded),
+                (statuses[2], DeploymentStatus::Live)
+            ]
+        );
+        assert!(db.deploy_markers(&svc_id, now).await.unwrap().is_empty());
+
+        db.delete_service(&svc_id).await.unwrap();
+        assert!(
+            db.metric_containers(&svc_id, 10, from)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

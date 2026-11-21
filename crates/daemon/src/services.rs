@@ -363,7 +363,6 @@ pub async fn delete(
     state.db.delete_service(&svc.id).await?;
     state.deploys.forget_service(&svc.id);
     state.db_locks.forget_service(&svc.id);
-    state.stats.forget_service(&svc.id);
     state
         .service_activity(svc, ActivityLevel::Info, "Service deleted".into(), None)
         .await;
