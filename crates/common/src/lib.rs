@@ -1224,7 +1224,7 @@ pub fn check_error_page(html: &str) -> Result<Vec<String>, String> {
         return Ok(Vec::new());
     }
     Ok(vec![format!(
-        "loads resources from {}; error pages should be self-contained, because those hosts may be unreachable when the page is shown",
+        "loads resources from {}; inline them so the page still works when those hosts are unreachable",
         hosts.join(", ")
     )])
 }

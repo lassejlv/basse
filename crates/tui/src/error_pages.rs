@@ -87,10 +87,7 @@ impl App {
             Field::text("path", "path")
                 .value(path)
                 .placeholder("./down.html")
-                .hint(format!(
-                    "≤ {} KB · one self-contained HTML file",
-                    MAX_ERROR_PAGE_BYTES / 1024
-                )),
+                .hint(format!("HTML, ≤ {} KB", MAX_ERROR_PAGE_BYTES / 1024)),
         );
         let mut form = Form::new(
             FormKind::ErrorPage { service_id, kind },
@@ -137,7 +134,12 @@ impl App {
                 .map(|n| n.to_string_lossy().into_owned());
             let shown: Vec<String> = warnings
                 .iter()
-                .map(|w| format!("{} {w}", name.as_deref().unwrap_or("the page")))
+                .flat_map(|w| w.split("; "))
+                .enumerate()
+                .map(|(i, w)| match i {
+                    0 => format!("{} {w}", name.as_deref().unwrap_or("the page")),
+                    _ => w.to_string(),
+                })
                 .collect();
             if !shown.is_empty() && form.warning != shown {
                 form.warning = shown;
@@ -209,7 +211,11 @@ impl App {
 }
 
 fn kb(n: u64) -> String {
-    format!("{:.1} KB", n as f64 / 1024.0)
+    if n < 1024 {
+        format!("{n} B")
+    } else {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    }
 }
 
 pub fn keys(app: &mut App, key: KeyEvent) {
@@ -276,10 +282,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, d: &ErrorPagesDialog) {
     let instance = app.settings.error_pages.as_ref();
     let branded = pages.is_none_or(|p| p.branded);
     let note = match (service, branded) {
-        (None, _) => "applies to every service that has no page of its own, and to unknown hosts",
-        (Some(_), false) => {
-            "off · visitors get the proxy's raw response (an empty 502, 503 or 504)"
-        }
+        (None, _) => "for services without their own page, and for unknown hosts",
+        (Some(_), false) => "off · visitors get the proxy's empty 502, 503 or 504",
         (Some(_), true) if app.builds_from_git(service) => {
             "repo pages are read from the root dir on every deploy"
         }
@@ -297,7 +301,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, d: &ErrorPagesDialog) {
         frame,
         area,
         WIDTH,
-        head + ErrorPageKind::ALL.len() as u16 + 7,
+        head + ErrorPageKind::ALL.len() as u16 + 9,
         vec![
             Span::styled("Error pages", theme::text()),
             Span::styled(format!(" · {name}"), theme::muted()),

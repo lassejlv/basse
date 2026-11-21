@@ -391,7 +391,7 @@ fn keys_for(app: &App) -> (Keys, Keys) {
                         .as_ref()
                         .and_then(|v| v.detail.as_ref())
                         .is_some_and(|d| crate::replicas::scalable(&d.service));
-                    let mut keys = vec![("tab", "next tab"), ("⏎", "edit"), ("p", "error pages")];
+                    let mut keys = vec![("tab", "next tab"), ("⏎", "edit")];
                     if scalable {
                         keys.extend([("←→", "panel"), ("s", "scale"), ("a", "autoscale")]);
                     }
@@ -3836,7 +3836,7 @@ pub(crate) fn lines_of(area: Rect, n: u16) -> Vec<Rect> {
 fn settings(frame: &mut Frame, area: Rect, app: &App) {
     let [row1, row2, row3] = Layout::vertical([
         Constraint::Length(7),
-        Constraint::Length(6),
+        Constraint::Length(5),
         Constraint::Fill(1),
     ])
     .spacing(1)
@@ -4123,10 +4123,27 @@ fn instance_panel(frame: &mut Frame, area: Rect, app: &App, s: &InstanceSettings
 }
 
 fn proxy_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings, pages: Option<&ErrorPages>) {
-    let block = panel(title("Proxy", false), None, false);
+    let custom = pages.map_or(0, |p| p.custom.len());
+    let link = Line::from(vec![
+        Span::styled("p", theme::accent()),
+        Span::styled(" error pages · ", theme::muted()),
+        Span::styled(
+            if custom == 0 {
+                "built-in".to_string()
+            } else {
+                format!("{custom} custom")
+            },
+            theme::muted(),
+        ),
+    ]);
+    let link_w = link.width() as u16;
+    let block = panel(title("Proxy", false), Some(link), false);
     let inner = inside(&block, area);
     frame.render_widget(block, area);
-    let rows = lines_of(inner, 4);
+    if area.width > link_w + 12 {
+        mouse::key_target(Rect::new(area.right() - link_w - 2, area.y, link_w, 1), "p");
+    }
+    let rows = lines_of(inner, 3);
     let (glyph, label, style) = match s.proxy {
         ProxyStatus::Running => ("●", "running", theme::fg(theme::OK)),
         ProxyStatus::Stopped => ("○", "stopped", theme::fg(theme::ERR)),
@@ -4162,19 +4179,6 @@ fn proxy_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings, pages: Optio
         Some(("m", "toggle")),
     );
     mouse::key_target(toggle, "m");
-    let custom = pages.map_or(0, |p| p.custom.len());
-    let pages = setting_row(
-        frame,
-        rows[3],
-        "error pages",
-        vec![if custom == 0 {
-            Span::styled("built-in", theme::muted())
-        } else {
-            Span::styled(format!("{custom} custom"), theme::text())
-        }],
-        Some(("p", "edit")),
-    );
-    mouse::key_target(pages, "p");
 }
 
 fn security_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
