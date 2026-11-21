@@ -593,11 +593,14 @@ fn validate_source(source: Source) -> ApiResult<Source> {
             branch,
             dockerfile,
             context,
+            root,
+            watch_paths,
             source_id,
             auto_deploy,
             build,
         } => {
             let build = validate_build(build)?;
+            let root = clean_root(&root).map_err(AppError::BadRequest)?;
             let repo = repo.trim().to_string();
             let source_id = non_empty(source_id);
             if source_id.is_some() {
@@ -623,6 +626,8 @@ fn validate_source(source: Source) -> ApiResult<Source> {
                 branch,
                 dockerfile,
                 context,
+                root,
+                watch_paths,
                 source_id,
                 auto_deploy,
                 build,

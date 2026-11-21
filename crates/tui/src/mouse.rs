@@ -687,6 +687,9 @@ fn click(app: &mut App, hit: Hit, double: bool) {
         }
         Hit::PickRow(i) => {
             if let Some(Overlay::Picker(p)) = app.overlay.as_mut() {
+                if p.items.get(i).is_some_and(|item| item.disabled) {
+                    return;
+                }
                 p.row = i;
             }
             if double {

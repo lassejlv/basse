@@ -1,6 +1,7 @@
 //! The three build methods against a real Docker engine, each with a small fixture repository:
 //! a multi-stage Dockerfile with a target and build args, a compose project with a routed
-//! service and a named volume, and a Node app built by Railpack. Run with
+//! service and a named volume, and a Node app built by Railpack; and a monorepo whose apps
+//! live in subdirectories, one per method, deployed as services with different roots. Run with
 //! `cargo test -p daemon --test build_methods -- --ignored --test-threads 1`.
 
 mod support;
@@ -86,6 +87,8 @@ fn git_service(
             branch: "main".into(),
             dockerfile: "Dockerfile".into(),
             context: ".".into(),
+            root: String::new(),
+            watch_paths: true,
             source_id: None,
             auto_deploy: true,
             build: Build {
@@ -106,6 +109,49 @@ fn git_service(
         volumes: vec![],
         deploy: false,
     }
+}
+
+/// A monorepo with a decoy app at its root and one app per build method under `apps/`.
+fn monorepo(root: &Path) -> String {
+    fixture(
+        root,
+        &[
+            (
+                "Dockerfile",
+                "FROM busybox:1.37\nCMD [\"sh\", \"-c\", \"echo the repository root was built; exec sleep 3600\"]\n",
+            ),
+            (
+                "apps/api/Dockerfile",
+                "FROM busybox:1.37\nARG GREETING=unset\nRUN echo \"api built with $GREETING\" > /greeting\n\
+                 CMD [\"sh\", \"-c\", \"cat /greeting; exec httpd -f -p 8080 -h /\"]\n",
+            ),
+            (
+                "apps/web/compose.yaml",
+                "services:\n  web:\n    build: ./site\n    env_file: web.env\n",
+            ),
+            ("apps/web/web.env", "WEB_GREETING=from-the-env-file\n"),
+            (
+                "apps/web/site/Dockerfile",
+                "FROM busybox:1.37\nCMD [\"sh\", \"-c\", \"echo web says $WEB_GREETING; exec httpd -f -p 8080 -h /\"]\n",
+            ),
+            (
+                "apps/worker/package.json",
+                "{\"name\":\"worker\",\"version\":\"1.0.0\",\"scripts\":{\"start\":\"node index.js\"}}\n",
+            ),
+            (
+                "apps/worker/index.js",
+                "const http = require('http');\nconsole.log('worker says ' + process.env.GREETING);\n\
+                 http.createServer((_, res) => res.end('ok')).listen(process.env.PORT || 3000);\n",
+            ),
+        ],
+    )
+}
+
+fn in_root(mut spec: CreateService, dir: &str) -> CreateService {
+    if let Source::Git { root, .. } = &mut spec.source {
+        *root = dir.into();
+    }
+    spec
 }
 
 async fn wait_finished(api: &Client, id: &str, timeout: Duration) -> Deployment {
@@ -390,4 +436,124 @@ async fn railpack_builds_a_node_app_without_a_dockerfile() {
     );
     let out = logs(&api, &svc.service.id, None, "node says").await;
     assert!(out.contains("node says hello-from-env"), "{out}");
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn monorepo_services_build_the_app_in_their_root() {
+    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let api = daemon.client();
+    let env = environment(&api).await;
+    let root = tempfile::tempdir().unwrap();
+    let repo = monorepo(root.path());
+
+    let app = api
+        .create_service(&in_root(
+            git_service(&env, "api", repo.clone(), BuildMethod::Auto, 8080),
+            "./apps/api/",
+        ))
+        .await
+        .unwrap();
+    let Source::Git { root: saved, .. } = &app.service.source else {
+        panic!("not git");
+    };
+    assert_eq!(saved, "apps/api", "the root is normalized");
+    let (_, log) = deploy(&api, &app.service.id, Duration::from_secs(300)).await;
+    assert!(
+        log.iter().any(|l| l.contains("Building in apps/api"))
+            && log
+                .iter()
+                .any(|l| l.contains("Detected the dockerfile build method from Dockerfile")),
+        "{log:#?}"
+    );
+    let out = logs(&api, &app.service.id, None, "built with").await;
+    assert!(out.contains("api built with hello-from-env"), "{out}");
+    assert!(!out.contains("repository root"), "{out}");
+
+    let web = api
+        .create_service(&in_root(
+            git_service(&env, "web", repo.clone(), BuildMethod::Auto, 8080),
+            "apps/web",
+        ))
+        .await
+        .unwrap();
+    let (_, log) = deploy(&api, &web.service.id, Duration::from_secs(300)).await;
+    assert!(
+        log.iter()
+            .any(|l| l.contains("Detected the compose build method from compose.yaml")),
+        "{log:#?}"
+    );
+    let detail = api.service(&web.service.id).await.unwrap();
+    let names: Vec<_> = detail.compose.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["web"]);
+    let out = logs(&api, &web.service.id, Some("web"), "web says").await;
+    assert!(
+        out.contains("web says from-the-env-file"),
+        "the build context and env file resolve in the root: {out}"
+    );
+
+    // The Dockerfile method with an explicit context and Dockerfile, both relative to the root.
+    let mut spec = in_root(
+        git_service(&env, "site", repo.clone(), BuildMethod::Dockerfile, 8080),
+        "apps/web",
+    );
+    if let Source::Git { context, .. } = &mut spec.source {
+        *context = "site".into();
+    }
+    let site = api.create_service(&spec).await.unwrap();
+    deploy(&api, &site.service.id, Duration::from_secs(300)).await;
+    let out = logs(&api, &site.service.id, None, "web says").await;
+    assert!(out.contains("web says"), "{out}");
+
+    // A root the branch does not have fails the deployment before building.
+    let missing = api
+        .create_service(&in_root(
+            git_service(&env, "missing", repo, BuildMethod::Auto, 8080),
+            "apps/nope",
+        ))
+        .await
+        .unwrap();
+    let d = api.deploy(&missing.service.id, "test").await.unwrap();
+    let d = wait_finished(&api, &d.id, Duration::from_secs(120)).await;
+    assert_eq!(d.status, DeploymentStatus::Failed, "{d:#?}");
+    let mut stream = api.deployment_logs(&d.id, false).await.unwrap();
+    let mut log = Vec::new();
+    while let Some(line) = stream.next().await {
+        log.push(line.unwrap().line);
+    }
+    assert!(
+        log.iter()
+            .any(|l| l.contains("root directory 'apps/nope' does not exist")),
+        "{log:#?}"
+    );
+
+    for svc in [&app, &web, &site, &missing] {
+        api.delete_service(&svc.service.id, true).await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Docker and network access for Railpack"]
+async fn railpack_builds_the_app_in_a_monorepo_root() {
+    let daemon = Daemon::start().await.expect("these tests need Docker");
+    let api = daemon.client();
+    let env = environment(&api).await;
+    let root = tempfile::tempdir().unwrap();
+    let repo = monorepo(root.path());
+    let svc = api
+        .create_service(&in_root(
+            git_service(&env, "worker", repo, BuildMethod::Auto, 3000),
+            "apps/worker",
+        ))
+        .await
+        .unwrap();
+    let (_, log) = deploy(&api, &svc.service.id, Duration::from_secs(900)).await;
+    assert!(
+        log.iter()
+            .any(|l| l.contains("Detected the railpack build method")),
+        "{log:#?}"
+    );
+    let out = logs(&api, &svc.service.id, None, "worker says").await;
+    assert!(out.contains("worker says hello-from-env"), "{out}");
+    api.delete_service(&svc.service.id, true).await.unwrap();
 }

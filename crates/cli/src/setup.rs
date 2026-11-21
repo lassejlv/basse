@@ -534,7 +534,7 @@ async fn first_app(c: &Client, p: &mut Prompt<'_>, info: &DaemonInfo) -> Result<
         let branches = c.source_branches(&git.id, &repo).await?;
         let default = branches.first().map(|b| b.name.clone());
         let branch = p.ask("branch:", default.as_deref())?;
-        let detected = c.detect_build(&git.id, &repo, &branch).await?;
+        let detected = c.detect_build(&git.id, &repo, &branch, "").await?;
         println!(
             "  {} {}",
             muted("builds with"),
@@ -561,6 +561,8 @@ async fn first_app(c: &Client, p: &mut Prompt<'_>, info: &DaemonInfo) -> Result<
                     .filter(|_| detected.method == BuildMethod::Dockerfile)
                     .unwrap_or_else(|| "Dockerfile".into()),
                 context: ".".into(),
+                root: String::new(),
+                watch_paths: true,
                 source_id: Some(git.id.clone()),
                 auto_deploy: true,
                 build: Build {

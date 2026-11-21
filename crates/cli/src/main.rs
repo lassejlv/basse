@@ -442,14 +442,20 @@ enum ServiceCmd {
         /// Dockerfile stage to build; "" clears it.
         #[arg(long)]
         target: Option<String>,
-        /// Compose file in the repository; "" goes back to the default names.
+        /// Compose file in the root directory; "" goes back to the default names.
         #[arg(long)]
         compose_file: Option<String>,
         #[arg(long)]
         dockerfile: Option<String>,
-        /// Build context directory inside the repository.
+        /// Build context directory inside the root directory.
         #[arg(long = "build-context")]
         build_context: Option<String>,
+        /// Directory the service lives in, for monorepos; "" is the repository root.
+        #[arg(long)]
+        root: Option<String>,
+        /// With a root, only deploy on push when a changed file is inside it: true or false.
+        #[arg(long)]
+        watch_paths: Option<bool>,
     },
     Delete {
         service: String,
@@ -486,14 +492,21 @@ struct CreateArgs {
     /// Dockerfile stage to build.
     #[arg(long, requires = "repo")]
     target: Option<String>,
-    /// Compose file in the repository, for --build compose.
+    /// Compose file in the root directory, for --build compose.
     #[arg(long, requires = "repo")]
     compose_file: Option<String>,
+    /// Directory the service lives in, for monorepos, e.g. apps/api. The Dockerfile, build
+    /// context and compose file are relative to it.
+    #[arg(long, requires = "repo")]
+    root: Option<String>,
+    /// Deploy on every push, not only when a file inside --root changed.
+    #[arg(long, requires = "root")]
+    no_watch_paths: bool,
     #[arg(long, default_value = "main", requires = "repo")]
     branch: String,
     #[arg(long, default_value = "Dockerfile", requires = "repo")]
     dockerfile: String,
-    /// Build context directory inside the repository.
+    /// Build context directory inside the root directory.
     #[arg(long = "build-context", default_value = ".", requires = "repo")]
     build_context: String,
     /// One-click database: postgres, mysql, mariadb, redis or mongo, optionally with :version.
@@ -2013,7 +2026,21 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
                 paint(state.0, state.1)
             );
             println!("{}{}", k("source"), d.service.source.label());
-            if let Source::Git { build, .. } = &d.service.source {
+            if let Source::Git {
+                build,
+                root,
+                watch_paths,
+                ..
+            } = &d.service.source
+            {
+                if !root.is_empty() {
+                    let watch = if *watch_paths {
+                        "deploys on pushes that change it"
+                    } else {
+                        "deploys on every push"
+                    };
+                    println!("{}{root} {}", k("root"), muted(format!("({watch})")));
+                }
                 println!("{}{}", k("build"), build_label(&d.service.source, build));
             }
             println!("{}{}", k("server"), d.server.name);
@@ -2063,6 +2090,8 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
             compose_file,
             dockerfile,
             build_context,
+            root,
+            watch_paths,
         } => {
             let (_, _, s) = find(c, &service).await?;
             let mut source = s.source.clone();
@@ -2070,6 +2099,8 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
                 build,
                 dockerfile: df,
                 context,
+                root: current_root,
+                watch_paths: current_watch,
                 ..
             } = &mut source
             else {
@@ -2079,7 +2110,15 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
                 || target.is_some()
                 || compose_file.is_some()
                 || dockerfile.is_some()
-                || build_context.is_some();
+                || build_context.is_some()
+                || root.is_some()
+                || watch_paths.is_some();
+            if let Some(r) = root {
+                *current_root = clean_root(&r).map_err(anyhow::Error::msg)?;
+            }
+            if let Some(w) = watch_paths {
+                *current_watch = w;
+            }
             if let Some(m) = method {
                 build.method = m;
             }
@@ -2118,7 +2157,10 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
             if json {
                 return output::json(&d.service.source);
             }
-            if let Source::Git { build, .. } = &d.service.source {
+            if let Source::Git { build, root, .. } = &d.service.source {
+                if !root.is_empty() {
+                    println!("{} {root}", muted("root"));
+                }
                 println!("{}", build_label(&d.service.source, build));
             }
         }
@@ -2188,6 +2230,9 @@ async fn create_service(c: &Client, args: CreateArgs) -> Result<()> {
             branch: args.branch,
             dockerfile: args.dockerfile,
             context: args.build_context,
+            root: clean_root(args.root.as_deref().unwrap_or_default())
+                .map_err(anyhow::Error::msg)?,
+            watch_paths: !args.no_watch_paths,
             source_id,
             auto_deploy: !args.no_auto_deploy,
             build: Build {

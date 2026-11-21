@@ -66,7 +66,8 @@
 //! | DELETE | `/sources/{id}` | | 204, or 409 while a service uses it |
 //! | GET | `/sources/{id}/repos?q=&page=1&per_page=30` | | `RepoPage` (`q` matches `owner/name`) |
 //! | GET | `/sources/{id}/branches?repo=owner/name` | | `Vec<GitBranch>`, default branch first |
-//! | GET | `/sources/{id}/detect?repo=owner/name&branch=main` | | `BuildDetection` (Dockerfile, else compose file, else Railpack) |
+//! | GET | `/sources/{id}/detect?repo=owner/name&branch=main&root=apps/api` | | `BuildDetection` (Dockerfile, else compose file, else Railpack, looked up in `root`, default the repository root; `file` is relative to `root`) |
+//! | GET | `/sources/{id}/dirs?repo=owner/name&branch=main&path=apps` | | `Vec<String>`, the names of the directories directly under `path` (default the repository root), for picking a `root` |
 //!
 //! GitHub calls these without a bearer token; each checks its own proof instead.
 //!
@@ -88,6 +89,15 @@
 //! env as build args), a compose file deployed as one group (`ServiceDetail.compose` lists its
 //! containers; domains name a `compose_service`), or Railpack. Changing the method with
 //! `PATCH /services/{id}` applies on the next deploy.
+//!
+//! Monorepos set `Source::Git.root`, the directory the service lives in, rather than prefixing
+//! every path with it: `context`, `dockerfile` and `build.compose_file` stay relative to the
+//! root, so a service moves to another directory by changing one field. Compose runs with the
+//! root as its project directory, Railpack builds `root/context`, and auto-detection looks in
+//! the root. The daemon normalizes it with [`crate::clean_root`] on create and update and
+//! rejects `..`, backslashes and NUL with 400. With `watch_paths` (the default), a push only
+//! deploys a service with a root when one of its changed files is inside the root; a push
+//! whose payload lists no files deploys anyway.
 //!
 //! Database services (`Source::Database`) also have these routes; other services get 400.
 //! `ServiceDetail.database` carries their `DatabaseInfo`.

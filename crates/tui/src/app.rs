@@ -3,6 +3,7 @@
 use crate::form::{Field, Form, FormKind};
 use crate::notify::{self, NotifyView, RuleDialog};
 use crate::picker::{GitPick, PickFor, PickItem, PickKind, Picker, repo_item};
+use crate::server_pick;
 use crate::theme;
 use client::{Client, Config};
 use common::api::*;
@@ -24,6 +25,9 @@ const REFRESH: Duration = Duration::from_secs(3);
 const SETTINGS_REFRESH: Duration = Duration::from_secs(15);
 /// Repositories per page of the repository picker.
 pub const REPO_PAGE: u32 = 10;
+/// What the root directory picker says under its folders.
+const DIR_NOTE: &str =
+    "⏎ on a folder opens it. Dockerfile, compose and Railpack all build from the folder you use.";
 /// How long typing in the repository search pauses before the daemon is asked.
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
@@ -119,7 +123,13 @@ pub enum Msg {
         source: Id,
         repo: String,
         branch: String,
+        root: String,
         result: Result<BuildDetection, String>,
+    },
+    /// The folders under `path` for the root directory picker.
+    Dirs {
+        path: String,
+        result: Result<Vec<String>, String>,
     },
 }
 
@@ -1811,10 +1821,26 @@ impl App {
                     Err(e) => git.error = Some(e),
                 }
             }
+            Msg::Dirs { path, result } => {
+                let Some(Overlay::Picker(p)) = &mut self.overlay else {
+                    return;
+                };
+                if p.kind != PickKind::Dir || p.current.as_deref() != Some(path.as_str()) {
+                    return;
+                }
+                match result {
+                    Ok(dirs) => {
+                        p.items = crate::picker::dir_items(&path, &dirs);
+                        p.note = vec![Line::styled(DIR_NOTE, theme::muted())];
+                    }
+                    Err(e) => p.note = vec![Line::styled(format!("✕ {e}"), theme::fg(theme::ERR))],
+                }
+            }
             Msg::Detected {
                 source,
                 repo,
                 branch,
+                root,
                 result,
             } => {
                 let Some(Overlay::Form(form)) = &mut self.overlay else {
@@ -1824,6 +1850,7 @@ impl App {
                     || form.raw("git_source") != source
                     || form.raw("gh_repo") != repo
                     || form.raw("gh_branch") != branch
+                    || form.raw("gh_root") != root
                 {
                     return;
                 }
@@ -4019,6 +4046,8 @@ impl App {
             PickKind::GitSource
             | PickKind::Repo
             | PickKind::Branch
+            | PickKind::Server
+            | PickKind::Dir
             | PickKind::Channel
             | PickKind::Scope => {}
         }
@@ -4259,6 +4288,7 @@ impl App {
                 if form.raw("gh_repo").is_empty() || value != p.current.unwrap_or_default() {
                     set(&mut form, "gh_repo", "", "", "pick a repository");
                     set(&mut form, "gh_branch", "", "", "pick a branch");
+                    set(&mut form, "gh_root", "", "/", "");
                 }
                 form.refresh();
                 self.pick_repo(*form);
@@ -4282,6 +4312,7 @@ impl App {
                     &item.detail,
                     "default",
                 );
+                set(&mut form, "gh_root", "", "/", "");
                 if form.get("name").is_empty()
                     && let Some(name) = form.field_mut("name")
                 {
@@ -4300,22 +4331,175 @@ impl App {
                     form.focus = i;
                     form.move_focus(1);
                 }
-                let (source, repo) = (form.raw("git_source"), form.raw("gh_repo"));
+                self.detect_build(&form);
                 self.overlay = Some(Overlay::Form(*form));
-                self.spawn(move |c| async move {
-                    let result = c
-                        .detect_build(&source, &repo, &value)
-                        .await
-                        .map_err(|e| format!("{e:#}"));
-                    Msg::Detected {
-                        source,
-                        repo,
-                        branch: value,
-                        result,
-                    }
-                });
             }
         }
+    }
+
+    /// Ask what the form's repository, branch and root directory build with.
+    fn detect_build(&mut self, form: &Form) {
+        let (source, repo, branch, root) = (
+            form.raw("git_source"),
+            form.raw("gh_repo"),
+            form.raw("gh_branch"),
+            form.raw("gh_root"),
+        );
+        self.spawn(move |c| async move {
+            let result = c
+                .detect_build(&source, &repo, &branch, &root)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            Msg::Detected {
+                source,
+                repo,
+                branch,
+                root,
+                result,
+            }
+        });
+    }
+
+    /// ⏎ on the root directory field: the folders of the picked branch.
+    fn pick_root(&mut self, mut form: Form) {
+        if form.raw("gh_repo").is_empty() {
+            form.fail("pick a repository first");
+            self.overlay = Some(Overlay::Form(form));
+            return;
+        }
+        let path = form.raw("gh_root");
+        self.open_picker(Picker {
+            title: "Root directory".into(),
+            subtitle: String::new(),
+            kind: PickKind::Dir,
+            items: Vec::new(),
+            row: 0,
+            target: PickFor::Field(Box::new(form), "gh_root"),
+            current: None,
+            note: Vec::new(),
+            busy: false,
+            git: None,
+        });
+        self.open_dir(path);
+    }
+
+    /// Show the folders under `path` in the open root directory picker.
+    fn open_dir(&mut self, path: String) {
+        let Some(Overlay::Picker(p)) = &mut self.overlay else {
+            return;
+        };
+        let PickFor::Field(form, _) = &p.target else {
+            return;
+        };
+        let (source, repo, branch) = (
+            form.raw("git_source"),
+            form.raw("gh_repo"),
+            form.raw("gh_branch"),
+        );
+        let shown = if path.is_empty() {
+            "/".to_string()
+        } else {
+            format!("{path}/")
+        };
+        p.subtitle = format!("{repo}@{branch} · {shown}");
+        p.items = crate::picker::dir_items(&path, &[]);
+        p.row = 0;
+        p.current = Some(path.clone());
+        p.note = vec![Line::styled("loading folders…", theme::fg(theme::INFO))];
+        self.spawn(move |c| async move {
+            let result = c
+                .source_dirs(&source, &repo, &branch, &path)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            Msg::Dirs { path, result }
+        });
+    }
+
+    /// ⏎ in the root directory picker: use the folder, or open the selected one.
+    fn accept_dir(&mut self, p: Picker) {
+        let Some(item) = p.items.get(p.row) else {
+            return;
+        };
+        let path = item.id.clone().unwrap_or_default();
+        if !item.generate {
+            self.overlay = Some(Overlay::Picker(p));
+            return self.open_dir(path);
+        }
+        let PickFor::Field(mut form, key) = p.target else {
+            return;
+        };
+        if let Some(f) = form.field_mut(key) {
+            f.shown = if path.is_empty() {
+                "/".into()
+            } else {
+                path.clone()
+            };
+            f.value = path;
+        }
+        form.error = None;
+        form.refresh();
+        if let Some(i) = form.fields.iter().position(|f| f.key == key) {
+            form.focus = i;
+            form.move_focus(1);
+        }
+        self.detect_build(&form);
+        self.overlay = Some(Overlay::Form(*form));
+    }
+
+    /// ⏎ on the server field of a create form: every server, offline ones last and disabled.
+    fn pick_server(&mut self, form: Form) {
+        let items = server_pick::items(&self.servers, |s| self.server_address(s));
+        let current = Some(form.raw(server_pick::KEY)).filter(|v| !v.is_empty());
+        let row = current
+            .as_ref()
+            .and_then(|c| {
+                items
+                    .iter()
+                    .position(|i| i.id.as_ref() == Some(c) && !i.disabled)
+            })
+            .or_else(|| items.iter().position(|i| !i.disabled))
+            .unwrap_or(0);
+        let mut note = vec![Line::styled(
+            server_pick::picker_note(&self.servers),
+            theme::muted(),
+        )];
+        let compose = form.choice("source") <= 1
+            && form.choice_label("build").as_deref() == Some(BUILD_LABELS[2]);
+        if compose && self.servers.iter().any(|s| s.kind == ServerKind::Ssh) {
+            note.push(Line::styled(server_pick::REMOTE_COMPOSE, theme::muted()));
+        }
+        self.open_picker(Picker {
+            title: "Server".into(),
+            subtitle: format!("new service in {}", form.subtitle),
+            kind: PickKind::Server,
+            items,
+            row,
+            target: PickFor::Field(Box::new(form), server_pick::KEY),
+            current,
+            note,
+            busy: false,
+            git: None,
+        });
+    }
+
+    /// A server picked for a create form; a disabled row leaves the form as it was.
+    fn accept_server(&mut self, p: Picker) {
+        let PickFor::Field(mut form, key) = p.target else {
+            return;
+        };
+        let server = p
+            .items
+            .get(p.row)
+            .filter(|i| !i.disabled)
+            .and_then(|i| self.servers.iter().find(|s| i.id.as_ref() == Some(&s.id)));
+        if let Some(server) = server
+            && let Some(field) = form.field_mut(key)
+        {
+            server_pick::set(field, server, &self.server_address(server));
+            form.error = None;
+            form.move_focus(1);
+        }
+        self.overlay = Some(Overlay::Form(*form));
     }
 
     /// "k" on the Servers screen: the key a server connects with.
@@ -4361,6 +4545,8 @@ impl App {
             "git_source" => return self.pick_git_source(form),
             "gh_repo" => return self.pick_repo(form),
             "gh_branch" => return self.pick_branch(form),
+            server_pick::KEY => return self.pick_server(form),
+            "gh_root" => return self.pick_root(form),
             _ => {}
         }
         let current = Some(form.raw(key)).filter(|v| !v.is_empty());
@@ -4379,7 +4565,12 @@ impl App {
                 "S3 credentials secrets; add them on the Secrets screen.",
                 theme::muted(),
             )],
-            PickKind::Store | PickKind::GitSource | PickKind::Repo | PickKind::Branch => {
+            PickKind::Store
+            | PickKind::GitSource
+            | PickKind::Repo
+            | PickKind::Branch
+            | PickKind::Server
+            | PickKind::Dir => {
                 vec![Line::styled(
                     "Storage connections are managed on the Storage screen (o in Settings).",
                     theme::muted(),
@@ -4434,6 +4625,18 @@ impl App {
         ) {
             if let Some(Overlay::Picker(p)) = self.overlay.take() {
                 self.accept_git_pick(p);
+            }
+            return;
+        }
+        if p.kind == PickKind::Server {
+            if let Some(Overlay::Picker(p)) = self.overlay.take() {
+                self.accept_server(p);
+            }
+            return;
+        }
+        if p.kind == PickKind::Dir {
+            if let Some(Overlay::Picker(p)) = self.overlay.take() {
+                self.accept_dir(p);
             }
             return;
         }
@@ -4565,11 +4768,6 @@ impl App {
     /// The New service form for an environment, or for a new project when `environment` is
     /// `None`.
     pub fn form_new_service_in(&mut self, environment: Option<Id>, subtitle: String) {
-        let servers: Vec<String> = if self.servers.is_empty() {
-            vec!["local".into()]
-        } else {
-            self.servers.iter().map(|s| s.name.clone()).collect()
-        };
         let engines = DatabaseKind::ALL
             .iter()
             .map(|k| k.image().to_string())
@@ -4591,6 +4789,7 @@ impl App {
         gh_repo.placeholder = "pick a repository".into();
         let mut gh_branch = Field::pick("gh_branch", "branch", "", "");
         gh_branch.placeholder = "pick a branch".into();
+        let gh_root = Field::pick("gh_root", "root dir", "", "/").hint("folder in the repo");
         let mut fields = vec![
             Field::choice(
                 "source",
@@ -4603,13 +4802,18 @@ impl App {
                 ],
             )
             .selected(if github { 0 } else { 1 }),
+            server_pick::field(&self.servers, |s| self.server_address(s)),
             source,
             gh_repo,
             gh_branch,
+            gh_root,
             Field::text("repo", "repository")
                 .placeholder("https://github.com/acme/api")
                 .hint("https or ssh url"),
             Field::text("branch", "branch").value("main"),
+            Field::text("root", "root dir")
+                .placeholder("/")
+                .hint("folder in the repo"),
         ];
         fields.extend(build_fields(None, ""));
         fields.extend([
@@ -4624,10 +4828,8 @@ impl App {
                 .placeholder("app.example.com")
                 .hint("optional · https"),
             Field::toggle("auto_deploy", "auto-deploy", true),
+            Field::toggle("watch_paths", "watch paths", true),
         ]);
-        if servers.len() > 1 {
-            fields.push(Field::choice("server", "server", servers));
-        }
         let form = Form::new(
             FormKind::NewService {
                 environment_id: environment,
@@ -4637,6 +4839,7 @@ impl App {
         )
         .subtitle(subtitle)
         .submit("create & deploy", Some("create only"))
+        .note(server_pick::note(&self.servers).into_iter().collect())
         .focus_on(match (github, only) {
             (false, _) => "repo",
             (true, None) => "git_source",
@@ -4664,16 +4867,25 @@ impl App {
                 branch,
                 source_id,
                 auto_deploy,
+                root,
+                watch_paths,
                 ..
             } => {
                 fields.push(Field::text("repo", "repository").value(repo.clone()));
                 fields.push(Field::text("branch", "branch").value(branch.clone()));
+                fields.push(
+                    Field::text("root", "root dir")
+                        .value(root.clone())
+                        .placeholder("/")
+                        .hint("folder in the repo"),
+                );
                 fields.extend(build_fields(Some(&s.source), "applies on next deploy"));
                 if source_id.is_some() {
                     fields.push(
                         Field::toggle("auto_deploy", "auto-deploy", *auto_deploy)
                             .hint("deploys every push"),
                     );
+                    fields.push(Field::toggle("watch_paths", "watch paths", *watch_paths));
                 }
                 git_source = source_id.clone();
             }
@@ -5624,7 +5836,7 @@ fn build_fields(git: Option<&Source>, note: &str) -> Vec<Field> {
         method,
         Field::text("dockerfile", "dockerfile")
             .value(dockerfile)
-            .hint("path in the repo"),
+            .hint("in the context"),
         Field::text("context", "context")
             .value(context)
             .hint("folder sent to build"),
@@ -5728,6 +5940,8 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                             .unwrap_or("main".into()),
                         dockerfile,
                         context,
+                        root: common::clean_root(&form.raw("gh_root"))?,
+                        watch_paths: form.on("watch_paths"),
                         source_id: Some(source_id),
                         auto_deploy: form.on("auto_deploy"),
                         build,
@@ -5749,6 +5963,8 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                         branch: or("branch", "main"),
                         dockerfile,
                         context,
+                        root: common::clean_root(&form.get("root"))?,
+                        watch_paths: true,
                         source_id: None,
                         auto_deploy: false,
                         build,
@@ -5783,7 +5999,7 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
             let port = port(&form.get("port"), !domain.is_empty())?;
             let body = Box::new(CreateService {
                 environment_id: environment_id.clone().unwrap_or_default(),
-                server_id: None,
+                server_id: Some(form.raw(server_pick::KEY)).filter(|id| !id.is_empty()),
                 name,
                 source,
                 port,
@@ -5815,6 +6031,8 @@ fn build_request(form: &Form, alt: bool) -> Result<Request, String> {
                     branch: form.get("branch"),
                     dockerfile,
                     context,
+                    root: common::clean_root(&form.get("root"))?,
+                    watch_paths: source_id.is_none() || form.on("watch_paths"),
                     source_id: source_id.clone(),
                     auto_deploy: source_id.is_none() || form.on("auto_deploy"),
                     build,
@@ -6315,6 +6533,70 @@ mod tests {
         assert!(revealed.contains("-----END OPENSSH PRIVATE KEY-----"));
         assert!(revealed.contains("ctrl+r hide"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn root_dir_is_cleaned_and_must_stay_in_the_repo() {
+        let form = |root: &str| {
+            Form::new(
+                FormKind::NewService {
+                    environment_id: Some("e".into()),
+                },
+                "New service",
+                [
+                    vec![
+                        Field::choice("source", "source", vec!["GitHub".into(), "Git URL".into()])
+                            .selected(1),
+                        Field::text("repo", "repository").value("https://github.com/acme/mono"),
+                        Field::text("branch", "branch").value("main"),
+                        Field::text("root", "root dir").value(root),
+                    ],
+                    build_fields(None, ""),
+                    vec![Field::text("name", "name"), Field::text("port", "port")],
+                ]
+                .concat(),
+            )
+        };
+        let Ok(Request::Service(body)) = build_request(&form("./apps/api/"), false) else {
+            panic!("a create request");
+        };
+        let Source::Git { root, .. } = body.source else {
+            panic!("a git source");
+        };
+        assert_eq!(root, "apps/api");
+        let Err(e) = build_request(&form("apps/../../etc"), false) else {
+            panic!("a root outside the repository is refused");
+        };
+        assert!(e.contains("inside the repository"), "{e}");
+    }
+
+    #[test]
+    fn new_service_sends_the_picked_server() {
+        let form = |server: &str| {
+            Form::new(
+                FormKind::NewService {
+                    environment_id: Some("e".into()),
+                },
+                "New service",
+                vec![
+                    Field::choice(
+                        "source",
+                        "source",
+                        vec!["GitHub".into(), "Git URL".into(), "Docker image".into()],
+                    )
+                    .selected(2),
+                    Field::pick(server_pick::KEY, "server", server, server),
+                    Field::text("image", "image").value("nginx:1"),
+                    Field::text("name", "name"),
+                ],
+            )
+        };
+        let server_id = |form: &Form| match build_request(form, false) {
+            Ok(Request::Service(body)) => body.server_id,
+            _ => panic!("a create request"),
+        };
+        assert_eq!(server_id(&form("edge")).as_deref(), Some("edge"));
+        assert_eq!(server_id(&form("")), None);
     }
 
     #[test]

@@ -217,6 +217,36 @@ async fn contents(
     Json(entries).into_response()
 }
 
+/// `acme/mono`: apps/api has a Dockerfile, apps/web a compose file, apps/worker neither.
+async fn contents_path(
+    Path((_owner, name, path)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if !token_ok(&headers) {
+        return unauthorized();
+    }
+    let entry = |name: &str, kind: &str| json!({"name": name, "type": kind});
+    let entries = match (name.as_str(), path.as_str()) {
+        ("mono", "apps") => vec![
+            entry("worker", "dir"),
+            entry("api", "dir"),
+            entry("web", "dir"),
+            entry("README.md", "file"),
+        ],
+        ("mono", "apps/api") => vec![entry("Dockerfile", "file"), entry("src", "dir")],
+        ("mono", "apps/web") => vec![entry("compose.yaml", "file"), entry("Dockerfile", "dir")],
+        ("mono", "apps/worker") => vec![entry("package.json", "file")],
+        ("mono", "README.md") => {
+            return Json(json!({"name": "README.md", "type": "file", "content": ""}))
+                .into_response();
+        }
+        _ => {
+            return (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"}))).into_response();
+        }
+    };
+    Json(entries).into_response()
+}
+
 async fn branches(
     Path((_owner, _name)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
@@ -247,6 +277,7 @@ async fn mock_github() -> String {
         .route("/repos/{owner}/{name}", get(repo))
         .route("/repos/{owner}/{name}/branches", get(branches))
         .route("/repos/{owner}/{name}/contents", get(contents))
+        .route("/repos/{owner}/{name}/contents/{*path}", get(contents_path))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -483,21 +514,59 @@ async fn manifest_flow_install_repos_and_push_deploys() {
     assert!(api.source_branches(&id, "../etc").await.is_err());
 
     // Build method detection reads the branch's root.
-    let d = api.detect_build(&id, "acme/api", "main").await.unwrap();
+    let d = api.detect_build(&id, "acme/api", "main", "").await.unwrap();
     assert_eq!(
         (d.method, d.file.as_deref()),
         (BuildMethod::Dockerfile, Some("Dockerfile"))
     );
-    let d = api.detect_build(&id, "acme/web", "feat/x").await.unwrap();
+    let d = api
+        .detect_build(&id, "acme/web", "feat/x", "")
+        .await
+        .unwrap();
     assert_eq!(
         (d.method, d.file.as_deref()),
         (BuildMethod::Compose, Some("docker-compose.yml"))
     );
-    let d = api.detect_build(&id, "acme/web", "main").await.unwrap();
+    let d = api.detect_build(&id, "acme/web", "main", "").await.unwrap();
     assert_eq!(
         (d.method, d.file),
         (BuildMethod::Railpack, None),
         "a directory named Dockerfile is not one"
+    );
+
+    // Monorepos: directories to pick a root from, and detection inside a root.
+    let dirs = api
+        .source_dirs(&id, "acme/mono", "main", "apps")
+        .await
+        .unwrap();
+    assert_eq!(dirs, ["api", "web", "worker"]);
+    for (root, method, file) in [
+        ("apps/api", BuildMethod::Dockerfile, Some("Dockerfile")),
+        ("./apps/web/", BuildMethod::Compose, Some("compose.yaml")),
+        ("apps/worker", BuildMethod::Railpack, None),
+    ] {
+        let d = api
+            .detect_build(&id, "acme/mono", "main", root)
+            .await
+            .unwrap();
+        assert_eq!((d.method, d.file.as_deref()), (method, file), "{root}");
+    }
+    let err = api
+        .detect_build(&id, "acme/mono", "main", "apps/../..")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("inside the repository"), "{err}");
+    let err = api
+        .source_dirs(&id, "acme/mono", "main", "README.md")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not a directory"), "{err}");
+    assert!(
+        api.source_dirs(&id, "acme/mono", "main", "nope")
+            .await
+            .is_err()
     );
 
     // A service on the source; the source cannot go while it is used.
@@ -517,9 +586,24 @@ async fn manifest_flow_install_repos_and_push_deploys() {
         branch: branch.into(),
         dockerfile: "Dockerfile".into(),
         context: ".".into(),
+        root: String::new(),
+        watch_paths: true,
         source_id: Some(id.clone()),
         auto_deploy,
         build: Build::default(),
+    };
+    let in_root = |root: &str, watch_paths: bool| {
+        let mut source = git("acme/mono", "main", true);
+        if let Source::Git {
+            root: r,
+            watch_paths: w,
+            ..
+        } = &mut source
+        {
+            *r = root.into();
+            *w = watch_paths;
+        }
+        source
     };
     let service = |name: &str, source: Source| CreateService {
         environment_id: env.id.clone(),
@@ -600,6 +684,80 @@ async fn manifest_flow_install_repos_and_push_deploys() {
             .is_empty()
     );
 
+    // Roots are normalized and kept inside the repository, on create and on update.
+    let err = api
+        .create_service(&service("escape", in_root("apps/../../etc", true)))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("must stay inside the repository"), "{err}");
+    let mono_api = api
+        .create_service(&service("mono-api", in_root("./apps/api/", true)))
+        .await
+        .unwrap();
+    let Source::Git { root, .. } = &mono_api.service.source else {
+        panic!("not git");
+    };
+    assert_eq!(root, "apps/api");
+    let mono_web = api
+        .create_service(&service("mono-web", in_root("apps/web", true)))
+        .await
+        .unwrap();
+    let mono_all = api
+        .create_service(&service("mono-all", in_root("apps/worker", false)))
+        .await
+        .unwrap();
+    let err = api
+        .update_service(
+            &mono_all.service.id,
+            &UpdateService {
+                source: Some(in_root("..", false)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("must stay inside the repository"), "{err}");
+    let moved = api
+        .update_service(
+            &mono_all.service.id,
+            &UpdateService {
+                source: Some(in_root("/apps/worker/", false)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&moved.service.source, Source::Git { root, watch_paths: false, .. } if root == "apps/worker")
+    );
+
+    // Watch paths: a push deploys a service with a root only when it changed a file inside it.
+    let mono_push = |files: Value| {
+        serde_json::to_vec(&json!({
+            "ref": "refs/heads/main", "deleted": false,
+            "repository": {"full_name": "acme/mono"},
+            "commits": [{"added": [], "modified": files, "removed": []}],
+        }))
+        .unwrap()
+    };
+    let count = |svc: &ServiceDetail| {
+        let id = svc.service.id.clone();
+        let api = &api;
+        async move { api.deployments(&id, 10).await.unwrap().len() }
+    };
+    let body = mono_push(json!(["apps/web/compose.yaml", "README.md"]));
+    let res = deliver("push", body.clone(), sign(&body)).await.unwrap();
+    assert_eq!(
+        res.json::<Value>().await.unwrap()["deployments"],
+        2,
+        "mono-web and mono-all, which does not watch paths"
+    );
+    assert_eq!(count(&mono_api).await, 0);
+    assert_eq!(count(&mono_web).await, 1);
+    assert_eq!(count(&mono_all).await, 1);
+
     // Uninstalling the app on GitHub shows up on the source.
     let event = serde_json::to_vec(&json!({
         "action": "deleted", "installation": {"id": INSTALLATION, "account": acme()},
@@ -613,7 +771,7 @@ async fn manifest_flow_install_repos_and_push_deploys() {
     assert_eq!(s.status, GitSourceStatus::NeedsInstall);
     assert_eq!(s.installation_id, None);
 
-    for svc in [&api_svc, &quiet] {
+    for svc in [&api_svc, &quiet, &mono_api, &mono_web, &mono_all] {
         api.delete_service(&svc.service.id, false).await.unwrap();
     }
     api.delete_source(&id).await.unwrap();

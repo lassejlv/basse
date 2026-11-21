@@ -196,7 +196,8 @@ pub async fn setup(
     Ok(page(&format!("{} is connected to GitHub", brand::NAME), &body).into_response())
 }
 
-/// Push events deploy every service that tracks the pushed branch with auto-deploy on.
+/// Push events deploy every service that tracks the pushed branch with auto-deploy on, except
+/// services with a root and watch paths that the push changed no file in.
 pub async fn webhook(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -259,12 +260,18 @@ async fn deploy_push(
         let Source::Git {
             branch: tracked,
             auto_deploy,
+            root,
+            watch_paths,
             ..
         } = &rec.service.source
         else {
             continue;
         };
         if tracked != branch || !auto_deploy {
+            continue;
+        }
+        if *watch_paths && !event.touches(root) {
+            tracing::info!(service = %rec.service.name, "push changed nothing in {root}, not deploying");
             continue;
         }
         match deploy::enqueue(state, &rec, "webhook", Plan::Source).await {

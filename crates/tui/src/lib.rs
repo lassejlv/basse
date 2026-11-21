@@ -9,6 +9,7 @@ mod mouse;
 mod mouse_tests;
 mod notify;
 mod picker;
+mod server_pick;
 mod setup;
 mod theme;
 mod util;
