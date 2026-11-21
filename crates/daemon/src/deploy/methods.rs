@@ -215,7 +215,7 @@ impl Job {
             args.extend(["--label".into(), format!("{k}={v}")]);
         }
         args.push(dir_arg);
-        let env = self.state.docker.cli_env(server);
+        let env = self.state.docker.cli_env(server).await?;
         self.run_logged(Path::new("docker"), &args, &env, &dir)
             .await?;
         self.end(StepKind::Build, Some(tag.to_string())).await;
@@ -244,7 +244,7 @@ impl Job {
             bail!("no compose file at {file}");
         }
         let project = build::compose_project(&svc.id);
-        let mut env = self.state.docker.cli_env(server);
+        let mut env = self.state.docker.cli_env(server).await?;
         env.extend(
             self.state
                 .db
