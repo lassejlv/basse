@@ -30,6 +30,7 @@ fn server(name: &str) -> Server {
         host: None,
         user: None,
         port: None,
+        ssh_key_secret_id: None,
         status: ServerStatus::Online,
         proxy: ProxyStatus::Running,
         docker_version: None,
