@@ -129,6 +129,42 @@ basse logout [context] [--all]          # forgets the token here; rotate it to r
 
 Every command takes `--json` and `--context <name>` (switch between daemons with `basse context use`). Run `basse <command> --help` for the details.
 
+## Instance domain
+
+Give the daemon a domain and the proxy serves its API there with automatic HTTPS, next to your services. GitHub Apps need it, because GitHub calls back to the instance.
+
+```sh
+basse instance domain set deploy.example.com   # routes the domain to the API, prints the DNS records, runs the checks
+basse instance domain check                    # run the checks again after changing DNS
+basse instance domain                          # show the records and the last check
+basse instance domain rm                       # back to IP:port only
+```
+
+Create the records it prints (an `A` record for the public IPv4 address, `AAAA` for IPv6) at your DNS provider, with any CDN proxying turned off. The checks then confirm, in order, that the domain resolves to this server, that ports 80 and 443 accept connections, that a certificate was issued, and that the API answers over HTTPS; each failing step says what to change. Once everything passes, `basse login` and the current context switch to `https://<domain>`. `http://<ip>:7700` keeps working. In the TUI the same guide is Settings → Domain (`d`).
+
+## Git sources
+
+A git source lets services clone private repositories and deploy on push. Basse creates a GitHub App for you with GitHub's manifest flow:
+
+```sh
+basse source github create acme --org acme       # opens GitHub to create the app in the acme organization, then to install it
+basse source github create mine                  # same, on your personal account
+basse source github create corp --github-url https://github.corp.example   # GitHub Enterprise
+basse source github connect old --app-id 12345 --private-key-file app.pem --webhook-secret-file hook.txt
+basse source github token small --token-file pat.txt   # a personal access token; no push deploys
+basse source list
+basse source repos acme --search api             # repositories the installation can see
+basse source branches acme acme/api
+basse source check acme
+basse source rm acme                             # refused while a service clones from it
+
+basse service create shop/production --source acme --repo acme/api --branch main --port 8080
+```
+
+You can have as many sources as you like, for example your personal account plus two organizations. The app's private key, webhook secret and client credentials are stored as a `github_app` secret, encrypted like every other secret, and are never returned by the API. Clones use an installation token that lives for an hour and reaches git through its environment, never a file or the command line. A push to a service's branch deploys it (turn that off with `--no-auto-deploy`); webhook deliveries are checked against the app's webhook secret. Preview deployments for pull requests are not built yet.
+
+Without a source, `--repo` still takes any clone URL: public repositories clone anonymously, and `git@github.com:` URLs use the daemon's SSH key, which you can add to a repository as a deploy key (`basse server key` prints it).
+
 ## Secrets
 
 Secrets hold values the daemon uses but nobody should read in passing: SSH private keys for servers, S3 credentials for storage, and generic values.

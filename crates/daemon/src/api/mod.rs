@@ -2,12 +2,15 @@
 
 mod databases;
 mod deployments;
+mod domain;
+mod github;
 mod instance;
 mod projects;
 mod secrets;
 mod servers;
 mod services;
 mod settings;
+mod sources;
 mod storage;
 mod system;
 
@@ -122,9 +125,26 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/settings/prune", post(settings::prune))
         .route("/settings/version", get(settings::version))
         .route("/settings/update", post(settings::self_update))
+        .route(
+            "/settings/domain",
+            get(domain::get).put(domain::set).delete(domain::remove),
+        )
+        .route("/settings/domain/check", post(domain::check))
+        .route("/sources", get(sources::list))
+        .route("/sources/github", post(sources::create_github_app))
+        .route("/sources/github/connect", post(sources::connect_github_app))
+        .route("/sources/github/token", post(sources::connect_github_token))
+        .route("/sources/{id}", get(sources::get).delete(sources::delete))
+        .route("/sources/{id}/check", post(sources::check))
+        .route("/sources/{id}/repos", get(sources::repos))
+        .route("/sources/{id}/branches", get(sources::branches))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth));
     Router::new()
         .nest(API_PREFIX, api)
+        .route("/github/{id}/start", get(github::start))
+        .route("/github/{id}/callback", get(github::callback))
+        .route("/github/{id}/setup", get(github::setup))
+        .route("/github/{id}/webhook", post(github::webhook))
         .route("/healthz", get(|| async { "ok" }))
         .fallback(|| async { AppError::NotFound("no such route".into()) })
         .with_state(state)

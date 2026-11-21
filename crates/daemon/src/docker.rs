@@ -209,6 +209,8 @@ pub struct ContainerSpec {
     pub published: Vec<(String, u16)>,
     /// Host address the published ports bind to; every interface when unset.
     pub publish_ip: Option<String>,
+    /// `/etc/hosts` entries as `name:address`; `host-gateway` is the Docker host.
+    pub extra_hosts: Vec<String>,
 }
 
 pub async fn create_container(docker: &Docker, spec: &ContainerSpec) -> Result<String> {
@@ -255,6 +257,7 @@ pub async fn create_container(docker: &Docker, spec: &ContainerSpec) -> Result<S
             }),
             port_bindings: (!port_bindings.is_empty()).then_some(port_bindings),
             network_mode: spec.networks.first().map(|(n, _)| n.clone()),
+            extra_hosts: (!spec.extra_hosts.is_empty()).then(|| spec.extra_hosts.clone()),
             ..Default::default()
         }),
         networking_config: Some(NetworkingConfig {
@@ -819,8 +822,37 @@ pub async fn proxy_status(docker: &Docker) -> Result<ProxyStatus> {
     })
 }
 
-/// Creates (or recreates) the proxy container on the shared proxy network.
-pub async fn install_proxy(docker: &Docker) -> Result<()> {
+/// Hostname the proxy reaches the Docker host, and so the daemon, under.
+pub const HOST_GATEWAY: &str = "host.docker.internal";
+
+/// The instance domain served by the proxy: HTTPS on `domain`, forwarded to the daemon's API
+/// on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceRoute {
+    pub domain: String,
+    /// Port the daemon listens on.
+    pub port: u16,
+}
+
+/// Labels on the proxy container itself that route the instance domain to the daemon. Responses
+/// are flushed at once so log streams arrive line by line.
+pub fn instance_route_labels(route: &InstanceRoute) -> HashMap<String, String> {
+    HashMap::from([
+        ("caddy".to_string(), route.domain.clone()),
+        (
+            "caddy.reverse_proxy".to_string(),
+            format!("{HOST_GATEWAY}:{}", route.port),
+        ),
+        (
+            "caddy.reverse_proxy.flush_interval".to_string(),
+            "-1".into(),
+        ),
+    ])
+}
+
+/// Creates (or recreates) the proxy container on the shared proxy network, serving the
+/// instance domain when `route` is set.
+pub async fn install_proxy(docker: &Docker, route: Option<&InstanceRoute>) -> Result<()> {
     ensure_network(docker, brand::PROXY_NETWORK).await?;
     if !image_exists(docker, PROXY_IMAGE).await? {
         pull_image(docker, PROXY_IMAGE, |line| {
@@ -833,7 +865,12 @@ pub async fn install_proxy(docker: &Docker) -> Result<()> {
         name: brand::PROXY_CONTAINER.to_string(),
         image: PROXY_IMAGE.to_string(),
         env: vec![format!("CADDY_INGRESS_NETWORKS={}", brand::PROXY_NETWORK)],
-        labels: HashMap::from([(brand::label("proxy"), "true".to_string())]),
+        labels: {
+            let mut labels = route.map(instance_route_labels).unwrap_or_default();
+            labels.insert(brand::label("proxy"), "true".to_string());
+            labels
+        },
+        extra_hosts: vec![format!("{HOST_GATEWAY}:host-gateway")],
         binds: vec![
             "/var/run/docker.sock:/var/run/docker.sock:ro".to_string(),
             format!("{}:/data", proxy_volume()),
@@ -976,6 +1013,20 @@ mod tests {
         assert_eq!(labels["caddy_1.reverse_proxy"], format!("{alias}:81"));
         assert_eq!(labels["caddy_2"], "c.com");
         assert!(proxy_labels(&[domain("a.com", None, true)], None, "svc").is_empty());
+    }
+
+    #[test]
+    fn the_instance_domain_routes_to_the_daemon_on_the_host() {
+        let labels = instance_route_labels(&InstanceRoute {
+            domain: "deploy.example.com".into(),
+            port: 7700,
+        });
+        assert_eq!(labels["caddy"], "deploy.example.com");
+        assert_eq!(
+            labels["caddy.reverse_proxy"],
+            format!("{HOST_GATEWAY}:7700")
+        );
+        assert_eq!(labels["caddy.reverse_proxy.flush_interval"], "-1");
     }
 
     #[test]

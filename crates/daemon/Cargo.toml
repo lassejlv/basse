@@ -47,6 +47,9 @@ zeroize = "1"
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 flate2 = "1"
 rust-s3 = { version = "0.38", default-features = false, features = ["fail-on-err", "tokio-rustls-tls"] }
+jsonwebtoken = { version = "12.0.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+hmac = "0.12"
+base64 = "0.22"
 
 [dev-dependencies]
 client.workspace = true

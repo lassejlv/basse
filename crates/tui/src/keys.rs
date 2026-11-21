@@ -25,6 +25,9 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         }
         return app.toast("refreshed");
     }
+    if app.screen == Screen::Domain && app.domain.input.is_some() {
+        return domain_input(app, key);
+    }
     if (ctrl && key.code == KeyCode::Char('x') && app.screen == Screen::Service)
         || (key.code == KeyCode::Char('c')
             && (app.screen == Screen::Deploy
@@ -55,6 +58,95 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         Screen::Settings => settings(app, key),
         Screen::Secrets => secrets(app, key),
         Screen::Storage => storage(app, key),
+        Screen::Sources => sources(app, key),
+        Screen::Domain => domain(app, key),
+    }
+}
+
+fn sources(app: &mut App, key: KeyEvent) {
+    let row = app.sources.row;
+    match key.code {
+        KeyCode::Esc => app.close_sources(),
+        KeyCode::Up | KeyCode::Char('k') => app.select_source(row.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') => app.select_source(row + 1),
+        KeyCode::Char('n') => app.form_github_app(),
+        KeyCode::Char('a') => app.form_connect_app(),
+        KeyCode::Char('t') => app.form_github_token(),
+        KeyCode::Char('c') => app.check_source(),
+        KeyCode::Enter => app.continue_setup(),
+        KeyCode::Char('x') | KeyCode::Delete => {
+            let Some(s) = app.sources.selected().cloned() else {
+                return;
+            };
+            let users = match s.used_by.len() {
+                0 => String::new(),
+                1 => format!(" {} uses it, so the daemon refuses.", s.used_by[0].name),
+                n => format!(" {n} services use it, so the daemon refuses."),
+            };
+            let app_note = if s.kind == GitSourceKind::GithubApp {
+                " The app stays on GitHub; uninstall it there."
+            } else {
+                ""
+            };
+            ask_to(
+                app,
+                &format!("Delete source · {}", s.name),
+                format!("Delete {} and its credentials?{users}{app_note}", s.name),
+                true,
+                ConfirmAction::DeleteSource(s.id),
+                "delete",
+            );
+        }
+        _ => {}
+    }
+}
+
+fn domain(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.close_domain(),
+        KeyCode::Char('r') => app.check_domain(),
+        KeyCode::Char('e') => app.edit_domain(),
+        KeyCode::Char('c') => match app.domain.data.as_ref().and_then(|d| d.url.clone()) {
+            Some(url) => app.copy(&url, "the URL"),
+            None => app.error("no https URL until every check passes"),
+        },
+        KeyCode::Char('x') | KeyCode::Delete => {
+            let Some(domain) = app.domain.data.as_ref().and_then(|d| d.domain.clone()) else {
+                return;
+            };
+            ask_to(
+                app,
+                "Remove domain",
+                format!(
+                    "Stop serving the API on {domain}? Logins and GitHub webhooks that use it stop working; the API stays on its IP and port."
+                ),
+                true,
+                ConfirmAction::RemoveDomain,
+                "remove",
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Typing the domain on the guide.
+fn domain_input(app: &mut App, key: KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if app.domain.busy.is_some() && key.code != KeyCode::Esc {
+        return;
+    }
+    let Some(input) = app.domain.input.as_mut() else {
+        return;
+    };
+    match key.code {
+        KeyCode::Esc => app.cancel_domain_input(),
+        KeyCode::Enter => app.save_domain(),
+        KeyCode::Backspace => {
+            input.pop();
+        }
+        KeyCode::Char('u') if ctrl => input.clear(),
+        KeyCode::Char(c) if !ctrl && !c.is_whitespace() => input.push(c),
+        _ => {}
     }
 }
 
@@ -95,6 +187,7 @@ fn secrets(app: &mut App, key: KeyEvent) {
         KeyCode::Down | KeyCode::Char('j') => app.select_secret(row + 1),
         KeyCode::Char('a') => app.form_add_secret(),
         KeyCode::Char('g') => app.form_generate_key(),
+        KeyCode::Char('v' | 'C' | 'n' | 'e') if app.refuse_managed_secret() => {}
         KeyCode::Char('v') => app.toggle_reveal(),
         KeyCode::Char('c') => app.copy_public_part(),
         KeyCode::Char('C') => app.copy_secret_value(),
@@ -224,6 +317,43 @@ fn overlay(app: &mut App, key: KeyEvent) {
             }
             _ => {}
         },
+        Some(Overlay::Picker(p)) if p.git.is_some() => {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            match key.code {
+                KeyCode::Esc => app.picker_cancel(),
+                KeyCode::Enter => app.picker_accept(),
+                KeyCode::Up => p.row = p.row.saturating_sub(1),
+                KeyCode::Down => p.row = (p.row + 1).min(p.items.len().saturating_sub(1)),
+                KeyCode::Left | KeyCode::PageUp => app.picker_page(-1),
+                KeyCode::Right | KeyCode::PageDown => app.picker_page(1),
+                KeyCode::Backspace => app.picker_search(|s| {
+                    s.pop();
+                }),
+                KeyCode::Char('u') if ctrl => app.picker_search(String::clear),
+                KeyCode::Char(c) if !ctrl => app.picker_search(|s| s.push(c)),
+                _ => {}
+            }
+        }
+        Some(Overlay::GithubSetup(setup)) => {
+            let url = setup.url().map(str::to_string);
+            let ready = setup.source.status == GitSourceStatus::Ready;
+            match (key.code, url) {
+                (KeyCode::Char('c'), Some(url)) => app.copy(&url, "the URL"),
+                (KeyCode::Char('o'), Some(url)) => app.open_url(&url),
+                (KeyCode::Esc | KeyCode::Char('q'), _) => app.overlay = None,
+                (KeyCode::Enter, _) if ready => app.overlay = None,
+                _ => {}
+            }
+        }
+        Some(Overlay::DomainNeeded(_)) => match key.code {
+            KeyCode::Enter => {
+                app.overlay = None;
+                app.open_domain();
+            }
+            KeyCode::Char('t') => app.form_github_token(),
+            KeyCode::Esc | KeyCode::Char('q') => app.overlay = None,
+            _ => {}
+        },
         Some(Overlay::Picker(p)) => match key.code {
             KeyCode::Esc => app.picker_cancel(),
             KeyCode::Enter => app.picker_accept(),
@@ -246,6 +376,15 @@ pub fn paste(app: &mut App, text: &str) {
         Some(Overlay::Palette(p)) => {
             p.input.push_str(text.lines().next().unwrap_or_default());
             p.row = 0;
+        }
+        Some(Overlay::Picker(p)) if p.git.is_some() => {
+            let line = text.lines().next().unwrap_or_default().trim().to_string();
+            app.picker_search(|s| s.push_str(&line));
+        }
+        None if app.screen == Screen::Domain => {
+            if let Some(input) = app.domain.input.as_mut() {
+                input.push_str(text.trim());
+            }
         }
         _ => {}
     }
@@ -273,6 +412,8 @@ pub fn run_command(app: &mut App, cmd: Command) {
         Command::Settings => app.open_settings(),
         Command::Secrets => app.open_secrets(),
         Command::Storage => app.open_storage(),
+        Command::Sources => app.open_sources(),
+        Command::Domain => app.open_domain(),
         Command::BackUpInstance => {
             app.open_settings();
             app.form_instance_backup();
@@ -993,6 +1134,8 @@ fn settings(app: &mut App, key: KeyEvent) {
         KeyCode::Char('i') => app.form_public_ip(),
         KeyCode::Char('s') => app.open_secrets(),
         KeyCode::Char('o') => app.open_storage(),
+        KeyCode::Char('d') => app.open_domain(),
+        KeyCode::Char('g') => app.open_sources(),
         KeyCode::Char('m') => {
             let on = !s.manage_proxy;
             app.change_settings(

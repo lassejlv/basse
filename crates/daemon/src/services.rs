@@ -161,6 +161,7 @@ pub async fn create(state: &AppState, body: CreateService) -> ApiResult<ServiceR
         );
     }
     let source = validate_source(body.source)?;
+    check_git_source(state, &source).await?;
     if body.port == Some(0) {
         bad_request!("port must be between 1 and 65535");
     }
@@ -270,6 +271,7 @@ pub async fn update(state: &AppState, id: &str, body: UpdateService) -> ApiResul
     }
     if let Some(source) = body.source {
         s.source = validate_source(source)?;
+        check_git_source(state, &s.source).await?;
     }
     if let Some(port) = body.port {
         s.port = (port != 0).then_some(port);
@@ -432,6 +434,34 @@ pub async fn power(state: &Arc<AppState>, id: &str, action: Power) -> ApiResult<
 
 // Validation
 
+/// A git source that names a source must name one that can clone.
+async fn check_git_source(state: &AppState, source: &Source) -> ApiResult<()> {
+    let Source::Git {
+        source_id: Some(id),
+        ..
+    } = source
+    else {
+        return Ok(());
+    };
+    let rec = state
+        .db
+        .source(id)
+        .await?
+        .ok_or_else(|| AppError::not_found("git source", id))?;
+    if rec.source.status != GitSourceStatus::Ready {
+        bad_request!(
+            "git source '{}' is {}: {}",
+            rec.source.name,
+            rec.source.status.as_str(),
+            rec.source
+                .status_detail
+                .as_deref()
+                .unwrap_or("finish connecting it first")
+        );
+    }
+    Ok(())
+}
+
 fn non_empty(s: Option<String>) -> Option<String> {
     s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
@@ -450,8 +480,15 @@ fn validate_source(source: Source) -> ApiResult<Source> {
             branch,
             dockerfile,
             context,
+            source_id,
+            auto_deploy,
         } => {
             let repo = repo.trim().to_string();
+            let source_id = non_empty(source_id);
+            if source_id.is_some() {
+                crate::github::validate_full_name(&repo)
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?;
+            }
             if repo.is_empty() || repo.starts_with('-') {
                 bad_request!("git source needs a repository URL");
             }
@@ -471,6 +508,8 @@ fn validate_source(source: Source) -> ApiResult<Source> {
                 branch,
                 dockerfile,
                 context,
+                source_id,
+                auto_deploy,
             }
         }
         Source::Database { kind, version } => {

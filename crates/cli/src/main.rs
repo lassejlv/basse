@@ -3,6 +3,7 @@
 mod instance;
 mod output;
 mod resolve;
+mod sources;
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -154,13 +155,19 @@ enum Cmd {
     /// S3-compatible storage connections for backups (AWS S3, R2, B2, MinIO, ...).
     #[command(subcommand)]
     Storage(StorageCmd),
-    /// Encrypted backups of the daemon itself, for disaster recovery.
+    /// Encrypted backups of the daemon itself, and the domain its API is served on.
     #[command(subcommand)]
     Instance(InstanceCmd),
+    /// Git sources services clone from: GitHub Apps and tokens.
+    #[command(subcommand, alias = "sources")]
+    Source(sources::SourceCmd),
 }
 
 #[derive(Subcommand)]
 enum InstanceCmd {
+    /// The domain the API is served on with automatic HTTPS; GitHub Apps need it.
+    #[command(subcommand)]
+    Domain(sources::DomainCmd),
     /// Back up the daemon (store, config, master key, SSH keys) and wait for the result.
     /// The passphrase comes from --passphrase-file or stdin and is never stored.
     Backup {
@@ -417,11 +424,17 @@ struct CreateArgs {
     /// Service name; derived from the source when left out.
     name: Option<String>,
     /// Prebuilt image, e.g. ghcr.io/acme/web:latest.
-    #[arg(long, group = "source")]
+    #[arg(long, group = "origin")]
     image: Option<String>,
-    /// Git repository to build with its Dockerfile.
-    #[arg(long, group = "source")]
+    /// Git repository to build with its Dockerfile: a clone URL, or owner/name with --source.
+    #[arg(long, group = "origin")]
     repo: Option<String>,
+    /// Git source to clone --repo owner/name with (see "source list").
+    #[arg(long, requires = "repo")]
+    source: Option<String>,
+    /// Don't deploy when the branch is pushed (GitHub App sources deploy on push by default).
+    #[arg(long, requires = "source")]
+    no_auto_deploy: bool,
     #[arg(long, default_value = "main", requires = "repo")]
     branch: String,
     #[arg(long, default_value = "Dockerfile", requires = "repo")]
@@ -430,7 +443,7 @@ struct CreateArgs {
     #[arg(long = "build-context", default_value = ".", requires = "repo")]
     build_context: String,
     /// One-click database: postgres, mysql, mariadb, redis or mongo, optionally with :version.
-    #[arg(long, group = "source")]
+    #[arg(long, group = "origin")]
     database: Option<String>,
     /// Port the app listens on inside the container.
     #[arg(long, short)]
@@ -621,6 +634,9 @@ async fn run(cli: Cli) -> Result<()> {
     }
     let (name, ctx) = config.resolve(cli.context.as_deref())?;
     let c = Client::from_context(&ctx)?;
+    if let Some(Cmd::Instance(InstanceCmd::Domain(cmd))) = cli.command {
+        return sources::domain(&mut config, &name, &c, cmd, json).await;
+    }
     match cli.command.unwrap_or(Cmd::Tui) {
         Cmd::Tui => tui::run(c, name).await,
         Cmd::Login { .. }
@@ -740,6 +756,7 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Secrets(cmd) => secrets(&c, cmd, json).await,
         Cmd::Storage(cmd) => storage(&c, cmd, json).await,
         Cmd::Instance(cmd) => instance(&c, cmd, json).await,
+        Cmd::Source(cmd) => sources::source(&c, cmd, json).await,
     }
 }
 
@@ -764,6 +781,19 @@ async fn login(
         .info()
         .await
         .context("could not log in")?;
+    let url = match info.url.as_deref() {
+        Some(domain_url) if domain_url != url.trim_end_matches('/') => {
+            if Client::new(domain_url, &token)?.info().await.is_ok() {
+                output::note(format!(
+                    "using the instance domain {domain_url} instead of {url}"
+                ));
+                domain_url.to_string()
+            } else {
+                url
+            }
+        }
+        _ => url,
+    };
     let name = name.unwrap_or_else(|| info.hostname.clone());
     config.contexts.insert(
         name.clone(),
@@ -1064,6 +1094,10 @@ fn secret_value(
         SecretKind::Generic => SecretValue::Generic {
             value: raw.strip_suffix('\n').unwrap_or(&raw).to_string(),
         },
+        SecretKind::GithubApp => bail!(
+            "GitHub App credentials are added through {}",
+            hint("source github connect")
+        ),
     })
 }
 
@@ -1087,6 +1121,7 @@ fn print_secret(s: &Secret) {
         SecretKind::SshKey => row("public key", s.public_part.clone().unwrap_or_default()),
         SecretKind::S3Credentials => row("access key", s.public_part.clone().unwrap_or_default()),
         SecretKind::Generic => {}
+        SecretKind::GithubApp => row("app", s.public_part.clone().unwrap_or_default()),
     }
     row("used by", used_by(s));
     row("updated", output::ago(s.updated_at));
@@ -1179,6 +1214,7 @@ async fn secrets(c: &Client, cmd: SecretsCmd, json: bool) -> Result<()> {
                     println!("{:<18} {secret_access_key}", muted("secret access key"));
                 }
                 SecretValue::Generic { value } => println!("{value}"),
+                SecretValue::GithubApp { .. } => bail!("GitHub App credentials are never revealed"),
             }
         }
         SecretsCmd::Rename { secret, new_name } => {
@@ -1485,6 +1521,7 @@ fn print_instance_backups(list: &[InstanceBackup], storages: &[StorageConnection
 
 async fn instance(c: &Client, cmd: InstanceCmd, json: bool) -> Result<()> {
     match cmd {
+        InstanceCmd::Domain(_) => unreachable!("handled in run()"),
         InstanceCmd::Backup {
             storage,
             passphrase_file,
@@ -1884,6 +1921,10 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
 async fn create_service(c: &Client, args: CreateArgs) -> Result<()> {
     let tree = c.tree().await?;
     let (_, env) = resolve::environment(&tree, &args.environment)?;
+    let source_id = match &args.source {
+        Some(name) => Some(sources::find_source(c, name).await?.id),
+        None => None,
+    };
     let source = match (args.image, args.repo, args.database) {
         (Some(image), None, None) => Source::Image { image },
         (None, Some(repo), None) => Source::Git {
@@ -1891,6 +1932,8 @@ async fn create_service(c: &Client, args: CreateArgs) -> Result<()> {
             branch: args.branch,
             dockerfile: args.dockerfile,
             context: args.build_context,
+            source_id,
+            auto_deploy: !args.no_auto_deploy,
         },
         (None, None, Some(db)) => {
             let (kind, version) = db

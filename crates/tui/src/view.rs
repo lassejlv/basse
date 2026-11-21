@@ -40,6 +40,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         Screen::Settings => settings(frame, body, app),
         Screen::Secrets => secrets(frame, body, app),
         Screen::Storage => storage(frame, body, app),
+        Screen::Sources => sources(frame, body, app),
+        Screen::Domain => domain(frame, body, app),
     }
     key_bar(frame, keys, app);
     if app.overlay.is_some() {
@@ -66,6 +68,14 @@ pub fn render(frame: &mut Frame, app: &App) {
         Some(Overlay::Picker(p)) => {
             dim(frame, area);
             p.render(frame, area, app.tick);
+        }
+        Some(Overlay::GithubSetup(setup)) => {
+            dim(frame, area);
+            github_setup(frame, area, setup, app.tick);
+        }
+        Some(Overlay::DomainNeeded(heading)) => {
+            dim(frame, area);
+            domain_needed(frame, area, app, heading);
         }
         Some(Overlay::Help) => {
             dim(frame, area);
@@ -406,6 +416,8 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("⏎", "switch"),
             ("x", "remove"),
             ("u", "update"),
+            ("d", "domain"),
+            ("g", "sources"),
             ("i", "public ip"),
             ("m", "auto proxy"),
             ("r", "restart proxy"),
@@ -413,6 +425,20 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("k", "copy key"),
             ("c", "prune"),
         ],
+        Screen::Secrets
+            if app
+                .secrets
+                .selected()
+                .is_some_and(|s| s.kind == SecretKind::GithubApp) =>
+        {
+            vec![
+                ("↑↓", "move"),
+                ("a", "add"),
+                ("g", "generate key"),
+                ("c", "copy app id"),
+                ("x", "delete"),
+            ]
+        }
         Screen::Secrets => {
             let revealed = app.secrets.value().is_some();
             let mut keys = vec![("↑↓", "move"), ("a", "add"), ("g", "generate key")];
@@ -431,12 +457,43 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("t", "test"),
             ("x", "delete"),
         ],
+        Screen::Sources => {
+            let mut keys = vec![
+                ("n", "new GitHub App"),
+                ("a", "connect app"),
+                ("t", "add token"),
+            ];
+            if let Some(s) = app.sources.selected() {
+                keys.insert(0, ("↑↓", "move"));
+                if s.kind == GitSourceKind::GithubApp && s.status != GitSourceStatus::Ready {
+                    keys.push(("⏎", "finish setup"));
+                }
+                keys.extend([("c", "check"), ("x", "delete")]);
+            }
+            keys
+        }
+        Screen::Domain if app.domain.input.is_some() => {
+            vec![("type", "domain"), ("⏎", "save & check")]
+        }
+        Screen::Domain => {
+            let mut keys = Vec::new();
+            if app.domain.data.as_ref().is_some_and(|d| d.url.is_some()) {
+                keys.push(("c", "copy url"));
+            }
+            keys.extend([
+                ("r", "check again"),
+                ("e", "edit domain"),
+                ("x", "remove domain"),
+            ]);
+            keys
+        }
     };
     let right = match app.screen {
         Screen::Overview if app.overview.filtering => vec![],
         Screen::Overview => right,
         Screen::Deploy | Screen::Servers => vec![(":", "command"), ("?", "help"), ("q", "quit")],
         Screen::Service if app.service.as_ref().is_some_and(|v| v.logs.searching) => vec![],
+        Screen::Domain if app.domain.input.is_some() => vec![("esc", "back")],
         _ => vec![
             ("esc", "back"),
             (":", "command"),
@@ -1334,7 +1391,7 @@ fn service(frame: &mut Frame, area: Rect, app: &App) {
         Tab::Env => env_tab(frame, body, view),
         Tab::Domains => domains_tab(frame, body, view),
         Tab::Volumes => volumes_tab(frame, body, view),
-        Tab::Settings => settings_tab(frame, body, view),
+        Tab::Settings => settings_tab(frame, body, app, view),
     }
 }
 
@@ -2362,7 +2419,7 @@ fn volumes_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
     .render(frame, area, rows, view.row);
 }
 
-fn settings_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
+fn settings_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
     let block = panel(
         title("Settings", true),
         Some(Line::styled("⏎ to edit", theme::muted())),
@@ -2388,9 +2445,31 @@ fn settings_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
             branch,
             dockerfile,
             context,
+            source_id,
+            auto_deploy,
         } => {
+            if let Some(id) = source_id {
+                let name = app
+                    .sources
+                    .list
+                    .iter()
+                    .find(|s| &s.id == id)
+                    .map_or(id.clone(), |s| s.name.clone());
+                lines.push(kv("git source", val(name), w));
+            }
             lines.push(kv("repository", val(repo.clone()), w));
             lines.push(kv("branch", val(branch.clone()), w));
+            if source_id.is_some() {
+                lines.push(kv(
+                    "auto-deploy",
+                    if *auto_deploy {
+                        vec![Span::styled("● on", theme::fg(theme::OK))]
+                    } else {
+                        vec![Span::styled("○ off", theme::muted())]
+                    },
+                    w,
+                ));
+            }
             lines.push(kv(
                 "dockerfile",
                 val(format!("{context}/{dockerfile}")
@@ -3265,12 +3344,39 @@ fn settings(frame: &mut Frame, area: Rect, app: &App) {
             .areas(left);
     instance_backups_panel(frame, backups, app);
     contexts_panel(frame, contexts, app);
-    let [secrets, storage, servers] = Layout::vertical([Constraint::Fill(1); 3])
+    let [secrets, storage, sources, servers] = Layout::vertical([Constraint::Fill(1); 4])
         .spacing(1)
         .areas(servers);
     secrets_summary(frame, secrets, app);
     storage_summary(frame, storage, app);
+    sources_summary(frame, sources, app);
     servers_summary(frame, servers, app);
+}
+
+fn sources_summary(frame: &mut Frame, area: Rect, app: &App) {
+    let block = panel(title("Sources", false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let list = &app.sources.list;
+    let ready = app.sources.ready().len();
+    let value = if list.is_empty() {
+        vec![Span::styled(
+            "none yet · public repos need none",
+            theme::muted(),
+        )]
+    } else {
+        vec![
+            Span::styled(list.len().to_string(), theme::text()),
+            Span::styled(
+                format!("  {ready} ready · {} need attention", list.len() - ready),
+                theme::muted(),
+            ),
+        ]
+    };
+    if let Some(row) = lines_of(inner, 1).first() {
+        setting_row(frame, *row, "sources", value, None);
+    }
+    panel_link(frame, inner, "g", "open sources");
 }
 
 /// A key hint on the last line of a summary panel, e.g. "s open secrets".
@@ -3434,9 +3540,24 @@ fn instance_panel(frame: &mut Frame, area: Rect, app: &App, s: &InstanceSettings
             None,
         );
     }
-    let rows = lines_of(right, 3);
+    let rows = lines_of(right, 4);
     let value = |v: String| vec![Span::styled(v, theme::text())];
     setting_row(frame, rows[0], "listen", value(s.listen.clone()), None);
+    let domain = match (&s.domain, s.domain_verified) {
+        (None, _) => vec![Span::styled("not set", theme::muted())],
+        (Some(d), true) => vec![
+            Span::styled(d.clone(), theme::text()),
+            Span::styled("  ● ", theme::fg(theme::OK)),
+            Span::styled("verified", theme::muted()),
+        ],
+        (Some(d), false) => vec![
+            Span::styled(d.clone(), theme::text()),
+            Span::styled("  ✕ ", theme::fg(theme::ERR)),
+            Span::styled("not verified", theme::muted()),
+        ],
+    };
+    let guide = setting_row(frame, rows[3], "domain", domain, Some(("d", "guide")));
+    mouse::key_target(guide, "d");
     setting_row(
         frame,
         rows[1],
@@ -3908,10 +4029,35 @@ fn secret_detail(frame: &mut Frame, area: Rect, app: &App) {
             text(s.public_part.clone().unwrap_or_default()),
             Some(("c", "copy")),
         ),
+        SecretKind::GithubApp => {
+            if let Some(id) = &s.public_part {
+                row(frame, "app id", text(id.clone()), Some(("c", "copy")));
+            }
+            row(
+                frame,
+                "private key",
+                vec![
+                    Span::styled("••••••••••••••••", theme::muted()),
+                    Span::styled(format!("  {}", crate::app::managed_by(s)), theme::text()),
+                ],
+                None,
+            );
+            row(frame, "", Vec::new(), None);
+            row(
+                frame,
+                "",
+                vec![Span::styled(
+                    "The daemon never reveals or edits it. Delete or replace the source instead.",
+                    theme::muted(),
+                )],
+                None,
+            );
+            return;
+        }
         SecretKind::Generic => {}
     }
     let label = match s.kind {
-        SecretKind::SshKey => "private key",
+        SecretKind::SshKey | SecretKind::GithubApp => "private key",
         SecretKind::S3Credentials => "secret key",
         SecretKind::Generic => "value",
     };
@@ -4399,4 +4545,886 @@ fn instance_backups_panel(frame: &mut Frame, area: Rect, app: &App) {
             None,
         );
     }
+}
+
+// Sources
+
+fn source_glyph(s: &GitSource, tick: usize) -> Span<'static> {
+    match s.status {
+        GitSourceStatus::Ready => Span::styled("●", theme::fg(theme::OK)),
+        GitSourceStatus::Pending => Span::styled(util::spinner(tick), theme::fg(theme::INFO)),
+        GitSourceStatus::NeedsInstall => Span::styled("○", theme::muted()),
+        GitSourceStatus::Error => Span::styled("✕", theme::fg(theme::ERR)),
+    }
+}
+
+fn source_status(s: &GitSource) -> Span<'static> {
+    let style = match s.status {
+        GitSourceStatus::Pending => theme::fg(theme::INFO),
+        GitSourceStatus::Error => theme::fg(theme::ERR),
+        GitSourceStatus::Ready | GitSourceStatus::NeedsInstall => theme::text(),
+    };
+    Span::styled(s.status.as_str(), style)
+}
+
+/// "acme  organization", or the Enterprise host instead of the account kind.
+fn source_account(s: &GitSource) -> Line<'static> {
+    let Some(owner) = &s.owner else {
+        return Line::styled("—", theme::muted());
+    };
+    let host = s
+        .html_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/');
+    let note = if host != "github.com" {
+        host.to_string()
+    } else {
+        match s.owner_kind {
+            Some(GitOwnerKind::Organization) => "organization".into(),
+            Some(GitOwnerKind::User) => "personal".into(),
+            None => String::new(),
+        }
+    };
+    Line::from(vec![
+        Span::styled(owner.clone(), theme::text()),
+        Span::styled(format!("  {note}"), theme::muted()),
+    ])
+}
+
+/// What the source can reach: the installation, or why it cannot yet.
+fn source_access(s: &GitSource) -> Span<'static> {
+    match (s.status, s.kind) {
+        (GitSourceStatus::Error, _) => Span::styled(
+            s.status_detail
+                .clone()
+                .unwrap_or_else(|| "check failed".into()),
+            theme::muted(),
+        ),
+        (GitSourceStatus::NeedsInstall, _) => Span::styled("not installed", theme::muted()),
+        (GitSourceStatus::Ready, GitSourceKind::GithubApp) => match s.installation_id {
+            Some(id) => Span::styled(format!("installation {id}"), theme::text()),
+            None => Span::styled(s.owner.clone().unwrap_or_default(), theme::text()),
+        },
+        (GitSourceStatus::Ready, GitSourceKind::GithubToken) => {
+            Span::styled("what the token can read", theme::muted())
+        }
+        (GitSourceStatus::Pending, _) => Span::styled("—", theme::muted()),
+    }
+}
+
+fn used_by(s: &GitSource) -> Line<'static> {
+    match s.used_by.len() {
+        0 => Line::styled("—", theme::muted()),
+        n => Line::from(vec![
+            Span::styled(n.to_string(), theme::text()),
+            Span::styled(
+                if n == 1 { " service" } else { " services" },
+                theme::muted(),
+            ),
+        ]),
+    }
+}
+
+fn sources(frame: &mut Frame, area: Rect, app: &App) {
+    let view = &app.sources;
+    let note = Some(Line::styled(
+        "where services get their code",
+        theme::muted(),
+    ));
+    if view.loaded && view.list.is_empty() {
+        return sources_empty(frame, area, note);
+    }
+    let [list, detail] = Layout::vertical([Constraint::Fill(1), Constraint::Length(9)])
+        .spacing(1)
+        .areas(area);
+    let block = panel(title("Sources", true), note, true);
+    let inner = inside(&block, list);
+    frame.render_widget(block, list);
+    mouse::hit(inner, Hit::List(List::Sources));
+    if !view.loaded {
+        frame.render_widget(
+            Paragraph::new(format!("{} loading", util::spinner(app.tick))).style(theme::muted()),
+            inner,
+        );
+        return;
+    }
+    let rows: Vec<Row> = view
+        .list
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let selected = i == view.row;
+            let status = if view.checking.contains(&s.id) {
+                Span::styled(
+                    format!("{} checking…", util::spinner(app.tick)),
+                    theme::fg(theme::INFO),
+                )
+            } else {
+                source_status(s)
+            };
+            Row::new(vec![
+                Cell::from(source_glyph(s, app.tick)),
+                Cell::from(Span::styled(
+                    s.name.clone(),
+                    if selected {
+                        theme::accent()
+                    } else {
+                        theme::text()
+                    },
+                )),
+                Cell::from(Span::styled(s.kind.label(), theme::muted())),
+                Cell::from(source_account(s)),
+                Cell::from(source_access(s)),
+                Cell::from(status),
+                Cell::from(used_by(s)),
+            ])
+            .style(if selected {
+                theme::selected()
+            } else {
+                Style::new()
+            })
+        })
+        .collect();
+    let offset = scroll_offset(view.row, inner.height.saturating_sub(1) as usize);
+    row_hits(inner, rows.len(), offset, Hit::Item);
+    frame.render_widget(
+        Table::new(
+            rows.into_iter().skip(offset),
+            [
+                Constraint::Length(2),
+                Constraint::Length(18),
+                Constraint::Length(12),
+                Constraint::Length(32),
+                Constraint::Fill(1),
+                Constraint::Length(16),
+                Constraint::Length(12),
+            ],
+        )
+        .header(
+            Row::new(["", "NAME", "KIND", "ACCOUNT", "ACCESS", "STATUS", "USED BY"])
+                .style(theme::muted()),
+        )
+        .column_spacing(2),
+        inner,
+    );
+    source_detail(frame, detail, app);
+}
+
+fn sources_empty(frame: &mut Frame, area: Rect, note: Option<Line<'static>>) {
+    let block = panel(title("Sources", true), note, true);
+    let inner = inside(&block, area).inner(Margin::new(2, 1));
+    frame.render_widget(block, area);
+    let rows = lines_of(inner, 8);
+    frame.render_widget(
+        Paragraph::new("No git sources yet.").style(theme::text()),
+        rows[0],
+    );
+    for (row, (key, label, why)) in rows[2..5].iter().zip([
+        (
+            "n",
+            "create a GitHub App",
+            "private repos and deploy on push",
+        ),
+        (
+            "a",
+            "connect an existing GitHub App",
+            "one you made on GitHub yourself",
+        ),
+        (
+            "t",
+            "add a personal access token",
+            "quickest, but no deploy on push",
+        ),
+    ]) {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!("{key:<4}"), theme::accent()),
+                Span::styled(format!("{label:<36}"), theme::text()),
+                Span::styled(why, theme::muted()),
+            ])),
+            *row,
+        );
+        mouse::key_target(
+            Rect {
+                width: (4 + label.chars().count() as u16).min(row.width),
+                ..*row
+            },
+            key,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new("Public repositories need no source; paste their URL in New service.")
+            .style(theme::muted()),
+        rows[6],
+    );
+}
+
+/// A row of a detail pane: label, value and an optional key hint at the right edge.
+type DetailRow = (
+    &'static str,
+    Vec<Span<'static>>,
+    Option<(&'static str, &'static str)>,
+);
+
+fn source_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(s) = app.sources.selected() else {
+        frame.render_widget(panel(title("source", false), None, false), area);
+        return;
+    };
+    let block = panel(title(&s.name, false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let [left, right] = Layout::horizontal([Constraint::Fill(2), Constraint::Fill(3)])
+        .spacing(4)
+        .areas(inner);
+    let text = |t: String| vec![Span::styled(t, theme::text())];
+    let none = |t: &str| vec![Span::styled(t.to_string(), theme::muted())];
+    let app_source = s.kind == GitSourceKind::GithubApp;
+    let mut kind = text(s.kind.label().to_string());
+    if let Some(id) = s.app_id {
+        kind.push(Span::styled(format!("  app id {id}"), theme::muted()));
+    }
+    let owner = match (&s.owner, s.owner_kind) {
+        (Some(o), Some(GitOwnerKind::Organization)) => vec![
+            Span::styled(o.clone(), theme::text()),
+            Span::styled("  organization", theme::muted()),
+        ],
+        (Some(o), _) => text(o.clone()),
+        (None, _) => none("—"),
+    };
+    let mut lines = vec![("kind", kind)];
+    if app_source {
+        lines.push((
+            "app slug",
+            s.app_slug.clone().map_or_else(|| none("—"), text),
+        ));
+    }
+    lines.extend([("github", text(s.html_url.clone())), ("owner", owner)]);
+    if app_source {
+        lines.push((
+            "installation",
+            match s.installation_id {
+                Some(id) => text(id.to_string()),
+                None => none("not installed"),
+            },
+        ));
+    }
+    for (row, (k, v)) in lines_of(left, left.height).iter().zip(lines) {
+        setting_row(frame, *row, k, v, None);
+    }
+
+    let rows = lines_of(right, right.height);
+    let webhook = match &s.webhook_url {
+        Some(url) => text(url.clone()),
+        None if app_source => none("—"),
+        None => none("none · tokens get no push events"),
+    };
+    let mut check = vec![source_glyph(s, app.tick), Span::raw(" "), source_status(s)];
+    let when = s.last_checked_at.map(util::ago);
+    let detail = match (&s.status_detail, &when) {
+        (Some(d), Some(w)) => format!("  {d} · {w}"),
+        (Some(d), None) => format!("  {d}"),
+        (None, Some(w)) => format!("  {w}"),
+        (None, None) => "  never checked".into(),
+    };
+    check.push(Span::styled(detail, theme::muted()));
+    if app.sources.checking.contains(&s.id) {
+        check = vec![Span::styled(
+            format!("{} checking…", util::spinner(app.tick)),
+            theme::fg(theme::INFO),
+        )];
+    }
+    let names: Vec<&str> = s.used_by.iter().map(|u| u.name.as_str()).collect();
+    let used = match names.len() {
+        0 => none("nothing yet"),
+        n => vec![
+            Span::styled(
+                format!("{n} service{}", if n == 1 { "" } else { "s" }),
+                theme::text(),
+            ),
+            Span::styled(format!("  {}", names.join(", ")), theme::muted()),
+        ],
+    };
+    let info: [DetailRow; 4] = [
+        ("webhook", webhook, None),
+        ("last check", check, Some(("c", "check"))),
+        ("used by", used, None),
+        (
+            "created",
+            text(database::created(s.created_at, chrono::Utc::now())),
+            None,
+        ),
+    ];
+    for (row, (k, v, hint)) in rows.iter().zip(info) {
+        let value = setting_row(frame, *row, k, v, hint);
+        if let Some((key, _)) = hint {
+            mouse::key_target(value, key);
+        }
+    }
+}
+
+/// The setup of a GitHub App: where to go in the browser and the three steps, updated live.
+fn github_setup(frame: &mut Frame, area: Rect, setup: &GithubSetup, tick: usize) {
+    let s = &setup.source;
+    let ready = s.status == GitSourceStatus::Ready;
+    let link_w = setup.url().map_or(0, |u| u.chars().count() as u16);
+    let inner = dialog(
+        frame,
+        area,
+        (link_w + 26).max(92),
+        16,
+        vec![
+            Span::styled("New GitHub App", theme::text()),
+            Span::styled(format!(" · {}", s.name), theme::muted()),
+        ],
+    );
+    let [lead, _, url, _, steps, _, note, _, rule, keys] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let installing_on = s.owner.clone().unwrap_or_else(|| "an account".into());
+    let lead_line = match s.status {
+        GitSourceStatus::Pending => Line::styled(
+            "Open this URL in your browser to create the app:",
+            theme::text(),
+        ),
+        GitSourceStatus::NeedsInstall => Line::styled(
+            format!("Open this URL to install it on {installing_on}:"),
+            theme::text(),
+        ),
+        GitSourceStatus::Ready => {
+            Line::styled("Connected. Services can deploy from it now.", theme::text())
+        }
+        GitSourceStatus::Error => Line::from(vec![
+            Span::styled("✕ ", theme::fg(theme::ERR)),
+            Span::styled(
+                s.status_detail
+                    .clone()
+                    .unwrap_or_else(|| "setup failed".into()),
+                theme::text(),
+            ),
+        ]),
+    };
+    frame.render_widget(Paragraph::new(lead_line), lead);
+
+    frame.render_widget(Block::new().style(Style::new().bg(theme::BG)), url);
+    let link = setup.url();
+    let hints = [("c", "copy"), ("o", "open")];
+    let hints_w = mouse::hints_width(&hints) as u16 + 1;
+    let text_area = Rect {
+        x: url.x + 1,
+        width: url.width.saturating_sub(hints_w + 3),
+        ..url
+    };
+    match link {
+        Some(link) => {
+            let shown = truncate(link, text_area.width as usize);
+            frame.render_widget(
+                Paragraph::new(shown.clone()).style(theme::text().bg(theme::BG)),
+                text_area,
+            );
+            mouse::key_target(
+                Rect {
+                    width: (shown.chars().count() as u16).min(text_area.width),
+                    ..text_area
+                },
+                "c",
+            );
+            mouse::hints(
+                frame,
+                Rect {
+                    width: url.width.saturating_sub(1),
+                    ..url
+                },
+                &hints,
+                Alignment::Right,
+            );
+        }
+        None => frame.render_widget(
+            Paragraph::new("no link to open").style(theme::muted().bg(theme::BG)),
+            text_area,
+        ),
+    }
+
+    let created = s.status != GitSourceStatus::Pending;
+    let step = |done: bool, current: bool, failed: bool| match (done, current, failed) {
+        (_, _, true) => Span::styled("✕", theme::fg(theme::ERR)),
+        (true, _, _) => Span::styled("●", theme::fg(theme::OK)),
+        (false, true, _) => Span::styled(util::spinner(tick), theme::fg(theme::INFO)),
+        _ => Span::styled("○", theme::muted()),
+    };
+    let failed = s.status == GitSourceStatus::Error;
+    let rows = [
+        (
+            step(created, !created, false),
+            "1  Create the app on GitHub".to_string(),
+            true,
+            match (&s.app_slug, created) {
+                (Some(slug), true) => format!("{slug} created"),
+                (_, true) => "created".to_string(),
+                _ => "waiting for you on GitHub".to_string(),
+            },
+        ),
+        (
+            step(ready, s.status == GitSourceStatus::NeedsInstall, failed),
+            format!("2  Install it on {installing_on}"),
+            created,
+            match (s.status, s.installation_id) {
+                (GitSourceStatus::Ready, Some(id)) => format!("installation {id}"),
+                (GitSourceStatus::NeedsInstall, _) => {
+                    "pick all or some repositories on GitHub".to_string()
+                }
+                _ => String::new(),
+            },
+        ),
+        (
+            step(ready, false, false),
+            "3  Connected".to_string(),
+            ready,
+            if ready {
+                "ready".to_string()
+            } else {
+                String::new()
+            },
+        ),
+    ];
+    for (i, (glyph, label, reached, detail)) in rows.into_iter().enumerate() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                glyph,
+                Span::raw(" "),
+                Span::styled(
+                    format!("{label:<34}"),
+                    if reached {
+                        theme::text()
+                    } else {
+                        theme::muted()
+                    },
+                ),
+                Span::styled(detail, theme::muted()),
+            ])),
+            Rect {
+                y: steps.y + i as u16,
+                height: 1,
+                ..steps
+            },
+        );
+    }
+    if !ready {
+        frame.render_widget(
+            Paragraph::new("This updates on its own. Closed, ⏎ on Sources opens it again.")
+                .style(theme::muted()),
+            note,
+        );
+    }
+    frame.render_widget(Paragraph::new(rule_line(rule.width)), rule);
+    let remaining = if ready {
+        action_chip(frame, keys, "⏎", "done", theme::chip())
+    } else {
+        let wait = Line::from(vec![
+            Span::styled(format!("{} ", util::spinner(tick)), theme::fg(theme::INFO)),
+            Span::styled("waiting for GitHub", theme::muted()),
+        ]);
+        let width = wait.width() as u16;
+        frame.render_widget(Paragraph::new(wait).right_aligned(), keys);
+        Rect {
+            width: keys.width.saturating_sub(width + 1),
+            ..keys
+        }
+    };
+    let mut keys_left = Vec::new();
+    if link.is_some() {
+        keys_left.extend([("c", "copy url"), ("o", "open browser")]);
+    }
+    keys_left.push(("esc", "close"));
+    mouse::hints(frame, remaining, &keys_left, Alignment::Left);
+}
+
+/// "n" or "a" on Sources while the instance domain is not verified.
+fn domain_needed(frame: &mut Frame, area: Rect, app: &App, heading: &str) {
+    let inner = dialog(
+        frame,
+        area,
+        76,
+        13,
+        vec![Span::styled(heading.to_string(), theme::text())],
+    );
+    let [lead, _, why, _, domain_row, status_row, _, rule, keys] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new("Set up the instance domain first.").style(theme::text()),
+        lead,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            "GitHub sends the app's setup callback and webhooks to this server over https, so it needs a verified domain.",
+        )
+        .style(theme::muted())
+        .wrap(Wrap { trim: true }),
+        why,
+    );
+    let data = app.domain.data.as_ref();
+    let name = data.and_then(|d| d.domain.clone()).or_else(|| {
+        app.settings
+            .settings
+            .as_ref()
+            .and_then(|s| s.domain.clone())
+    });
+    setting_row(
+        frame,
+        domain_row,
+        "domain",
+        match &name {
+            Some(n) => vec![Span::styled(n.clone(), theme::text())],
+            None => vec![Span::styled("not set", theme::muted())],
+        },
+        None,
+    );
+    let failing = data.and_then(|d| d.checks.iter().find(|c| c.status == CheckStatus::Fail));
+    let status = match (&name, failing) {
+        (None, _) => vec![Span::styled("no domain yet", theme::muted())],
+        (Some(_), Some(c)) => vec![
+            Span::styled("✕ ", theme::fg(theme::ERR)),
+            Span::styled(c.detail.clone(), theme::muted()),
+        ],
+        (Some(_), None) => vec![Span::styled("not verified yet", theme::muted())],
+    };
+    setting_row(frame, status_row, "status", status, None);
+    frame.render_widget(Paragraph::new(rule_line(rule.width)), rule);
+    let remaining = action_chip(frame, keys, "⏎", "open Settings › Domain", theme::chip());
+    mouse::hints(
+        frame,
+        remaining,
+        &[("t", "add a token instead"), ("esc", "cancel")],
+        Alignment::Left,
+    );
+}
+
+// Instance domain
+
+fn domain(frame: &mut Frame, area: Rect, app: &App) {
+    let view = &app.domain;
+    let Some(d) = &view.data else {
+        let status = if app.connection_error.is_some() {
+            "not connected".to_string()
+        } else {
+            format!("{} loading", util::spinner(app.tick))
+        };
+        frame.render_widget(Paragraph::new(status).style(theme::muted()), area);
+        return;
+    };
+    let [header, body] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)])
+        .spacing(1)
+        .areas(area);
+    let mut head = vec![Span::styled("Domain", theme::text())];
+    match (&d.domain, d.verified) {
+        (None, _) => head.push(Span::styled("   not set", theme::muted())),
+        (Some(name), true) => head.extend([
+            Span::styled(format!("   {name}"), theme::text()),
+            Span::styled("   ● ", theme::fg(theme::OK)),
+            Span::styled("verified", theme::muted()),
+        ]),
+        (Some(name), false) => head.extend([
+            Span::styled(format!("   {name}"), theme::text()),
+            Span::styled("   not verified yet", theme::muted()),
+        ]),
+    }
+    if let Some(busy) = view.busy {
+        head.push(Span::styled(
+            format!("   {} {busy}…", util::spinner(app.tick)),
+            theme::fg(theme::INFO),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(head)),
+        header.inner(Margin::new(1, 0)),
+    );
+    match &view.input {
+        Some(input) => domain_input(frame, body, app, d, input),
+        None if d.verified => {
+            let [login, checks] = Layout::vertical([Constraint::Length(5), Constraint::Fill(1)])
+                .spacing(1)
+                .areas(body);
+            domain_login(frame, login, d);
+            domain_checks(frame, checks, app, d, "Checks", false);
+        }
+        None => {
+            let rows = d.records.len().max(1) as u16;
+            let [dns, checks] =
+                Layout::vertical([Constraint::Length(rows + 8), Constraint::Fill(1)])
+                    .spacing(1)
+                    .areas(body);
+            dns_panel(frame, dns, d, &d.records, "1  Point DNS at this server");
+            domain_checks(frame, checks, app, d, "2  Checks", true);
+        }
+    }
+}
+
+fn domain_input(frame: &mut Frame, area: Rect, app: &App, d: &InstanceDomain, input: &str) {
+    let name = Some(input.trim()).filter(|n| !n.is_empty());
+    let records: Vec<DnsRecord> = [("A", &d.public_ipv4), ("AAAA", &d.public_ipv6)]
+        .into_iter()
+        .filter_map(|(kind, ip)| {
+            Some(DnsRecord {
+                kind: kind.into(),
+                name: name.unwrap_or("deploy.example.com").into(),
+                value: ip.clone()?,
+            })
+        })
+        .collect();
+    let [choose, dns, checks] = Layout::vertical([
+        Constraint::Length(6),
+        Constraint::Length(records.len().max(1) as u16 + 8),
+        Constraint::Fill(1),
+    ])
+    .spacing(1)
+    .areas(area);
+    let block = panel(title("1  Choose a domain", true), None, true);
+    let inner = inside(&block, choose);
+    frame.render_widget(block, choose);
+    let rows = lines_of(inner, 4);
+    let input_w = 56u16.min(inner.width.saturating_sub(SETTING_KEY_W as u16));
+    let field = Rect::new(inner.x + SETTING_KEY_W as u16, rows[0].y, input_w, 1);
+    frame.render_widget(Paragraph::new("› domain").style(theme::accent()), rows[0]);
+    let cursor = if app.tick % 8 < 5 { "▏" } else { " " };
+    let mut value = vec![
+        Span::raw(" "),
+        Span::styled(input.to_string(), theme::text()),
+        Span::styled(cursor, theme::accent()),
+    ];
+    if input.is_empty() {
+        value.push(Span::styled("deploy.example.com", theme::muted()));
+    }
+    frame.render_widget(Paragraph::new(Line::from(value)), field);
+    frame.render_widget(
+        Paragraph::new("─".repeat(field.width as usize)).style(theme::accent()),
+        Rect {
+            y: rows[1].y,
+            ..field
+        },
+    );
+    frame.render_widget(
+        Paragraph::new("  a name you control, like deploy.example.com").style(theme::muted()),
+        Rect::new(
+            field.right(),
+            field.y,
+            inner.right().saturating_sub(field.right()),
+            1,
+        ),
+    );
+    frame.render_widget(
+        Paragraph::new("The API moves to https on it, and GitHub sends webhooks there.")
+            .style(theme::muted()),
+        rows[3],
+    );
+    dns_panel(frame, dns, d, &records, "2  Point DNS at this server");
+    let block = panel(title("3  Checks", false), None, false);
+    let inner = inside(&block, checks);
+    frame.render_widget(block, checks);
+    frame.render_widget(
+        Paragraph::new("Run after you save: DNS, port 80, port 443, certificate, API over https.")
+            .style(theme::muted()),
+        inner,
+    );
+}
+
+fn dns_panel(
+    frame: &mut Frame,
+    area: Rect,
+    d: &InstanceDomain,
+    records: &[DnsRecord],
+    heading: &str,
+) {
+    let block = panel(title(heading, false), None, false);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let rows = lines_of(inner, inner.height);
+    let ip = |v: &Option<String>, none: &str| match v {
+        Some(ip) => vec![Span::styled(ip.clone(), theme::text())],
+        None => vec![Span::styled(none.to_string(), theme::muted())],
+    };
+    let mut i = 0;
+    let mut next = || {
+        i += 1;
+        rows.get(i - 1).copied()
+    };
+    if let Some(r) = next() {
+        setting_row(
+            frame,
+            r,
+            "public ipv4",
+            ip(&d.public_ipv4, "not detected"),
+            None,
+        );
+    }
+    if let Some(r) = next() {
+        setting_row(frame, r, "public ipv6", ip(&d.public_ipv6, "none"), None);
+    }
+    next();
+    let cells = |kind: Span<'static>, name: Span<'static>, value: Span<'static>| {
+        Line::from(vec![
+            Span::styled(format!("{:<SETTING_KEY_W$}", kind.content), kind.style),
+            Span::styled(format!("{:<36}", name.content), name.style),
+            value,
+        ])
+    };
+    if let Some(r) = next() {
+        frame.render_widget(
+            Paragraph::new(cells(
+                Span::styled("TYPE", theme::muted()),
+                Span::styled("NAME", theme::muted()),
+                Span::styled("VALUE", theme::muted()),
+            )),
+            r,
+        );
+    }
+    if records.is_empty()
+        && let Some(r) = next()
+    {
+        frame.render_widget(
+            Paragraph::new("no public address detected · set one in Settings (i)")
+                .style(theme::muted()),
+            r,
+        );
+    }
+    for (n, record) in records.iter().enumerate() {
+        let Some(r) = next() else { break };
+        frame.render_widget(
+            Paragraph::new(cells(
+                Span::styled(record.kind.clone(), theme::text()),
+                Span::styled(record.name.clone(), theme::text()),
+                Span::styled(record.value.clone(), theme::text()),
+            )),
+            r,
+        );
+        mouse::hit(r, Hit::Record(n));
+    }
+    next();
+    if let Some(r) = next() {
+        frame.render_widget(
+            Paragraph::new("Create them at your DNS provider. A click copies a value.")
+                .style(theme::muted()),
+            r,
+        );
+    }
+}
+
+fn domain_login(frame: &mut Frame, area: Rect, d: &InstanceDomain) {
+    let block = panel(title("Log in with", true), None, true);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let rows = lines_of(inner, 3);
+    let url = d.url.clone().unwrap_or_default();
+    let value = setting_row(
+        frame,
+        rows[0],
+        "api url",
+        vec![Span::styled(url.clone(), theme::text())],
+        Some(("c", "copy")),
+    );
+    mouse::key_target(value, "c");
+    setting_row(
+        frame,
+        rows[1],
+        "from a shell",
+        vec![Span::styled(
+            format!("{} login {url}", brand::CLI_BIN),
+            theme::text(),
+        )],
+        None,
+    );
+    if let Some(at) = d.verified_at {
+        setting_row(
+            frame,
+            rows[2],
+            "verified",
+            vec![Span::styled(
+                database::created(at, chrono::Utc::now()),
+                theme::muted(),
+            )],
+            None,
+        );
+    }
+}
+
+fn domain_checks(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    d: &InstanceDomain,
+    heading: &str,
+    focused: bool,
+) {
+    let right = match (app.domain.busy, d.checked_at) {
+        (Some(busy), _) => Some(Line::styled(
+            format!("{} {busy}…", util::spinner(app.tick)),
+            theme::fg(theme::INFO),
+        )),
+        (None, Some(at)) => Some(Line::styled(
+            format!("last run {}", util::ago(at)),
+            theme::muted(),
+        )),
+        (None, None) => None,
+    };
+    let block = panel(title(heading, focused), right, focused);
+    let inner = inside(&block, area);
+    frame.render_widget(block, area);
+    let mut lines = Vec::new();
+    for kind in DomainCheckKind::ALL {
+        let check = d.checks.iter().find(|c| c.kind == kind);
+        let (glyph, status) = match check.map(|c| c.status) {
+            Some(CheckStatus::Pass) => (
+                Span::styled("●", theme::fg(theme::OK)),
+                Span::styled("ok", theme::text()),
+            ),
+            Some(CheckStatus::Fail) => (
+                Span::styled("✕", theme::fg(theme::ERR)),
+                Span::styled("failed", theme::fg(theme::ERR)),
+            ),
+            Some(CheckStatus::Skipped) | None => (
+                Span::styled("○", theme::muted()),
+                Span::styled("not run", theme::muted()),
+            ),
+        };
+        let status_w = status.width();
+        lines.push(Line::from(vec![
+            glyph,
+            Span::raw(" "),
+            Span::styled(format!("{:<30}", kind.label()), theme::text()),
+            status,
+            Span::raw(" ".repeat(10usize.saturating_sub(status_w))),
+            Span::styled(
+                check.map(|c| c.detail.clone()).unwrap_or_default(),
+                theme::muted(),
+            ),
+        ]));
+        if let Some(hint) = check
+            .filter(|c| c.status == CheckStatus::Fail)
+            .and_then(|c| c.hint.clone())
+        {
+            lines.push(Line::styled(format!("  {hint}"), theme::text()));
+            lines.push(Line::raw(""));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
