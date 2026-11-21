@@ -150,6 +150,8 @@ mod tests {
             docker_version: Some("27.3".into()),
             last_checked_at: None,
             created_at: Default::default(),
+            checks: Vec::new(),
+            problem: None,
         }
     }
 

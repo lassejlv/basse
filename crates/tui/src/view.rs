@@ -91,6 +91,14 @@ pub fn render(frame: &mut Frame, app: &App) {
             dim(frame, area);
             help(frame, area, app);
         }
+        Some(Overlay::ServerDetail(d)) => {
+            dim(frame, area);
+            crate::problem::render_server_detail(frame, area, d, app.tick);
+        }
+        Some(Overlay::ErrorDetail(e)) => {
+            dim(frame, area);
+            crate::problem::render_error_detail(frame, area, e);
+        }
         None => {}
     }
     mouse::finish_frame(&app.mouse);
@@ -433,6 +441,7 @@ fn keys_for(app: &App) -> (Keys, Keys) {
         }
         Screen::Servers => vec![
             ("↑↓", "move"),
+            ("⏎", "details"),
             ("a", "add server"),
             ("c", "check"),
             ("K", "change key"),
@@ -628,10 +637,17 @@ fn key_bar(frame: &mut Frame, area: Rect, app: &App) {
             };
             let glyph = if t.error { "✕ " } else { "✓ " };
             let max = area.width as usize / 2;
-            Some(Line::from(Span::styled(
-                format!("{glyph}{}", truncate(&t.text, max)),
-                style,
-            )))
+            let text = truncate(&t.text, max);
+            t.truncated.set(t.error && text != t.text);
+            let mut spans = vec![Span::styled(format!("{glyph}{text}"), style)];
+            if t.truncated.get() {
+                spans.extend([
+                    Span::raw("  "),
+                    Span::styled("e", theme::accent()),
+                    Span::styled(" details", theme::muted()),
+                ]);
+            }
+            Some(Line::from(spans))
         }
         None => None,
     };
@@ -650,7 +666,13 @@ fn key_bar(frame: &mut Frame, area: Rect, app: &App) {
         Alignment::Left,
     );
     match toast {
-        Some(line) => frame.render_widget(Paragraph::new(line.right_aligned()), area),
+        Some(line) => {
+            if app.toast.as_ref().is_some_and(|t| t.truncated.get()) {
+                let width = (line.width() as u16).min(area.width);
+                mouse::key_target(Rect::new(area.right() - width, area.y, width, 1), "e");
+            }
+            frame.render_widget(Paragraph::new(line.right_aligned()), area)
+        }
         None => mouse::hints(frame, area, &right, Alignment::Right),
     }
 }
@@ -3069,6 +3091,36 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
     let inner = inside(&block, list);
     frame.render_widget(block, list);
     mouse::hit(list, Hit::List(List::Servers));
+    let selected = app.servers.get(app.server_row);
+    let inner = match selected.and_then(|s| s.problem.as_ref().map(|p| (s, p))) {
+        Some((s, p)) if inner.height > 4 => {
+            let [table, rule, line] = Layout::vertical([
+                Constraint::Fill(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .areas(inner);
+            frame.render_widget(Paragraph::new(rule_line(rule.width)), rule);
+            let hint = [("⏎", "details")];
+            let hint_w = mouse::hints_width(&hint) as u16;
+            let [text, keys] =
+                Layout::horizontal([Constraint::Fill(1), Constraint::Length(hint_w)])
+                    .spacing(2)
+                    .areas(line);
+            let room = (text.width as usize).saturating_sub(s.name.chars().count() + 3);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("✕ ", theme::fg(theme::ERR)),
+                    Span::styled(format!("{} ", s.name), theme::text()),
+                    Span::styled(truncate(&p.summary, room), theme::fg(theme::ERR)),
+                ])),
+                text,
+            );
+            mouse::hints(frame, keys, &hint, Alignment::Right);
+            table
+        }
+        _ => inner,
+    };
     let header = Row::new([
         "", "NAME", "KIND", "HOST", "KEY", "DOCKER", "PROXY", "CHECKED",
     ])
@@ -3102,6 +3154,7 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
                 ),
             };
             let (proxy, pstyle) = match s.proxy {
+                _ if s.problem.is_some() => ("—", theme::muted()),
                 ProxyStatus::Running => ("running", theme::fg(theme::OK)),
                 ProxyStatus::Stopped => ("stopped", theme::fg(theme::ERR)),
                 ProxyStatus::Missing => ("not set up · p", theme::accent()),
@@ -3126,10 +3179,11 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
                 )),
                 Cell::from(host),
                 Cell::from(key),
-                Cell::from(Span::styled(
-                    s.docker_version.clone().unwrap_or("—".into()),
-                    theme::muted(),
-                )),
+                Cell::from(match (&s.problem, &s.docker_version) {
+                    (Some(_), _) => Span::styled("error", theme::fg(theme::ERR)),
+                    (None, Some(v)) => Span::styled(v.clone(), theme::muted()),
+                    (None, None) => Span::styled("—", theme::muted()),
+                }),
                 Cell::from(Span::styled(proxy, pstyle)),
                 Cell::from(Span::styled(
                     s.last_checked_at.map_or("never".into(), util::ago),
@@ -3163,7 +3217,7 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
         .skip(offset)
         .take(inner.height.saturating_sub(1) as usize)
     {
-        if server.proxy == ProxyStatus::Missing {
+        if server.proxy == ProxyStatus::Missing && server.problem.is_none() {
             let proxy = columns[6];
             let row = Rect::new(proxy.x, inner.y + 1 + (i - offset) as u16, proxy.width, 1);
             mouse::span_target(row, 0, "not set up · p".chars().count(), Hit::SetupProxy(i));
@@ -3326,7 +3380,13 @@ fn confirm(frame: &mut Frame, area: Rect, c: &Confirm, tick: usize) {
     mouse::hints(frame, remaining, &[("esc", "keep")], Alignment::Left);
 }
 
-fn action_chip(frame: &mut Frame, area: Rect, key: &str, label: &str, style: Style) -> Rect {
+pub(crate) fn action_chip(
+    frame: &mut Frame,
+    area: Rect,
+    key: &str,
+    label: &str,
+    style: Style,
+) -> Rect {
     let chip = Span::styled(format!(" {key} {label} "), style);
     let width = (chip.width() as u16).min(area.width);
     let rect = Rect::new(area.right() - width, area.y, width, area.height);

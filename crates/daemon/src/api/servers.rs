@@ -6,7 +6,9 @@ use crate::db::new_id;
 use crate::docker;
 use crate::error::{ApiResult, AppError, bad_request, conflict};
 use crate::notify::Event;
+use crate::preflight;
 use crate::services;
+use crate::ssh::Unreachable;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse as _, Response};
@@ -18,7 +20,9 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Duration;
 
-const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+/// Long enough for the preflight, the tunnel and a ping, each bounded on its own.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(45);
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub async fn list(State(state): State<Arc<AppState>>) -> ApiResult<Json<Vec<Server>>> {
     Ok(Json(state.db.servers().await?))
@@ -58,6 +62,8 @@ pub async fn create(
         docker_version: None,
         last_checked_at: None,
         created_at: Utc::now(),
+        checks: Vec::new(),
+        problem: None,
     };
     state.db.insert_server(&server).await?;
     state
@@ -198,6 +204,61 @@ pub async fn proxy(
     Ok(Json(install_proxy(&state, server).await?))
 }
 
+/// Installs Docker on a server where the last check found it missing and the SSH user may
+/// install it, then checks the server again.
+pub async fn install_docker(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Server>> {
+    let server = state.server(&id).await?;
+    if server.kind == ServerKind::Local {
+        bad_request!("the local server runs the daemon's own Docker");
+    }
+    let server = check_server(&state, server).await?;
+    match &server.problem {
+        None => conflict!("docker already runs on {}", server.name),
+        Some(p) if !p.can_install_docker => {
+            conflict!("cannot install docker on {}: {}", server.name, p.summary)
+        }
+        Some(_) => {}
+    }
+    state
+        .activity(
+            ActivityLevel::Info,
+            format!("Installing Docker on {}", server.name),
+            Some("get.docker.com".into()),
+        )
+        .await;
+    if let Err(e) = state
+        .docker
+        .run_script(&server, preflight::INSTALL_SCRIPT, INSTALL_TIMEOUT)
+        .await
+    {
+        let message = format!("{e:#}");
+        state
+            .activity(
+                ActivityLevel::Error,
+                format!("Docker install on {} failed", server.name),
+                Some(message.clone()),
+            )
+            .await;
+        return Err(AppError::Conflict(format!(
+            "cannot install docker on {}: {message}",
+            server.name
+        )));
+    }
+    state.docker.forget(&id);
+    let server = check_server(&state, server).await?;
+    state
+        .activity(
+            ActivityLevel::Success,
+            format!("Docker installed on {}", server.name),
+            server.docker_version.clone(),
+        )
+        .await;
+    Ok(Json(server))
+}
+
 /// Installs or reinstalls the proxy on a server and records the outcome.
 pub async fn install_proxy(state: &AppState, server: Server) -> ApiResult<Server> {
     let docker = state.docker.get(&server).await?;
@@ -290,22 +351,37 @@ pub async fn check_server(state: &AppState, mut server: Server) -> anyhow::Resul
         let proxy = docker::proxy_status(&docker).await?;
         anyhow::Ok((version.version, proxy))
     };
-    match tokio::time::timeout(CHECK_TIMEOUT, probe).await {
-        Ok(Ok((version, proxy))) => {
+    let outcome = match tokio::time::timeout(CHECK_TIMEOUT, probe).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(anyhow::anyhow!(
+            "no answer within {}s",
+            CHECK_TIMEOUT.as_secs()
+        )),
+    };
+    match outcome {
+        Ok((version, proxy)) => {
             server.status = ServerStatus::Online;
             server.docker_version = version;
             server.proxy = proxy;
+            server.checks = state.docker.checks(&server.id);
+            server.problem = None;
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             tracing::warn!(server = %server.name, "server check failed: {e:#}");
             failure = Some(format!("{e:#}"));
             server.status = ServerStatus::Offline;
-            state.docker.forget(&server.id);
-        }
-        Err(_) => {
-            tracing::warn!(server = %server.name, "server check timed out");
-            failure = Some(format!("no answer within {}s", CHECK_TIMEOUT.as_secs()));
-            server.status = ServerStatus::Offline;
+            (server.checks, server.problem) = match e.downcast_ref::<Unreachable>() {
+                Some(u) => (u.checks.clone(), Some(u.problem.clone())),
+                None => (
+                    Vec::new(),
+                    Some(ServerProblem {
+                        summary: e.to_string(),
+                        fix: None,
+                        detail: format!("{e:#}"),
+                        can_install_docker: false,
+                    }),
+                ),
+            };
             state.docker.forget(&server.id);
         }
     }

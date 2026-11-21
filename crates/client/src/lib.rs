@@ -206,6 +206,11 @@ impl Client {
         self.post_empty(&format!("/servers/{id}/proxy")).await
     }
 
+    /// Installs Docker on the server over SSH, then checks it. Takes a minute or two.
+    pub async fn install_docker(&self, id: &str) -> Result<Server> {
+        self.post_empty(&format!("/servers/{id}/docker")).await
+    }
+
     /// Changes the key a server connects with; the daemon reconnects and checks it.
     pub async fn update_server(&self, id: &str, body: &UpdateServer) -> Result<Server> {
         self.patch(&format!("/servers/{id}"), body).await

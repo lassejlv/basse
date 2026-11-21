@@ -163,8 +163,8 @@ impl Db {
 
     pub async fn insert_server(&self, s: &Server) -> Result<()> {
         sqlx::query(
-            r#"INSERT INTO servers (id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at, ssh_key_secret_id)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+            r#"INSERT INTO servers (id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at, ssh_key_secret_id, checks, problem)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
         )
         .bind(&s.id)
         .bind(&s.name)
@@ -178,6 +178,8 @@ impl Db {
         .bind(s.last_checked_at)
         .bind(s.created_at)
         .bind(&s.ssh_key_secret_id)
+        .bind(Json(&s.checks))
+        .bind(s.problem.as_ref().map(Json))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -194,13 +196,16 @@ impl Db {
 
     pub async fn update_server_check(&self, s: &Server) -> Result<()> {
         sqlx::query(
-            "UPDATE servers SET status = $2, proxy = $3, docker_version = $4, last_checked_at = $5 WHERE id = $1",
+            "UPDATE servers SET status = $2, proxy = $3, docker_version = $4, last_checked_at = $5,
+                    checks = $6, problem = $7 WHERE id = $1",
         )
         .bind(&s.id)
         .bind(enum_str(&s.status))
         .bind(enum_str(&s.proxy))
         .bind(&s.docker_version)
         .bind(s.last_checked_at)
+        .bind(Json(&s.checks))
+        .bind(s.problem.as_ref().map(Json))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1981,7 +1986,7 @@ impl Db {
     }
 }
 
-const SERVER_SELECT: &str = r#"SELECT id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at, ssh_key_secret_id FROM servers"#;
+const SERVER_SELECT: &str = r#"SELECT id, name, kind, host, "user", port, status, proxy, docker_version, last_checked_at, created_at, ssh_key_secret_id, checks, problem FROM servers"#;
 
 const SECRET_SELECT: &str =
     "SELECT id, name, kind, public_part, created_at, updated_at FROM secrets";
@@ -2147,6 +2152,10 @@ fn server_from_row(row: &PgRow) -> sqlx::Result<Server> {
         last_checked_at: row.try_get(9)?,
         created_at: row.try_get(10)?,
         ssh_key_secret_id: row.try_get(11)?,
+        checks: row.try_get::<Json<Vec<PreflightCheck>>, _>(12)?.0,
+        problem: row
+            .try_get::<Option<Json<ServerProblem>>, _>(13)?
+            .map(|j| j.0),
     })
 }
 
@@ -2373,6 +2382,8 @@ pub mod tests {
             docker_version: None,
             last_checked_at: None,
             created_at: Utc::now(),
+            checks: Vec::new(),
+            problem: None,
         };
         db.insert_server(&s).await.unwrap();
         s

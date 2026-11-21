@@ -279,8 +279,11 @@ enum SecretsCmd {
         #[arg(long)]
         kind: SecretKind,
         /// File holding the value: the private key, the S3 secret access key, or the value.
-        #[arg(long)]
+        #[arg(long, visible_alias = "from-file")]
         file: Option<PathBuf>,
+        /// Read the value from stdin (the default without --file).
+        #[arg(long, conflicts_with = "file")]
+        stdin: bool,
         /// Access key id of s3 credentials (the secret access key comes from --file or stdin).
         #[arg(long)]
         access_key_id: Option<String>,
@@ -304,8 +307,10 @@ enum SecretsCmd {
     /// Replace the value, read from --file or stdin like `add`.
     Replace {
         secret: String,
-        #[arg(long)]
+        #[arg(long, visible_alias = "from-file")]
         file: Option<PathBuf>,
+        #[arg(long, conflicts_with = "file")]
+        stdin: bool,
         #[arg(long)]
         access_key_id: Option<String>,
     },
@@ -364,6 +369,12 @@ enum ServerCmd {
     /// Install or restart the reverse proxy on a server.
     Proxy {
         name: String,
+    },
+    /// Install Docker on a server that lacks it (get.docker.com, as root or with passwordless sudo).
+    InstallDocker {
+        name: String,
+        #[arg(long, short)]
+        yes: bool,
     },
     /// Stop managing a server. With --purge, first remove everything the daemon put there.
     Remove {
@@ -1248,7 +1259,7 @@ async fn server(c: &Client, cmd: ServerCmd, json: bool) -> Result<()> {
                 })
                 .await?;
             let s = c.check_server(&s.id).await?;
-            report_server_check(&s, key.as_ref());
+            report_server_check(c, s).await?;
         }
         ServerCmd::SetKey { name, secret } => {
             let server = find_server(c, &name).await?;
@@ -1260,11 +1271,22 @@ async fn server(c: &Client, cmd: ServerCmd, json: bool) -> Result<()> {
                 ssh_key_secret_id: Some(key.as_ref().map(|k| k.id.clone()).unwrap_or_default()),
             };
             let s = c.update_server(&server.id, &body).await?;
-            report_server_check(&s, key.as_ref());
+            report_server_check(c, s).await?;
         }
         ServerCmd::Check { name } => {
             let s = c.check_server(&find_server(c, &name).await?.id).await?;
-            print_servers(&[s]);
+            print_servers(std::slice::from_ref(&s));
+            if s.status != ServerStatus::Online {
+                report_server_check(c, s).await?;
+            }
+        }
+        ServerCmd::InstallDocker { name, yes } => {
+            let s = find_server(c, &name).await?;
+            confirm(
+                &format!("Install Docker on {} with get.docker.com over SSH?", s.name),
+                yes,
+            )?;
+            install_docker(c, &s).await?;
         }
         ServerCmd::Proxy { name } => {
             let s = c.setup_proxy(&find_server(c, &name).await?.id).await?;
@@ -1286,25 +1308,82 @@ async fn server(c: &Client, cmd: ServerCmd, json: bool) -> Result<()> {
 }
 
 /// Prints whether a newly added or re-keyed server answers, and what to do when it does not.
-fn report_server_check(s: &Server, key: Option<&Secret>) {
+/// Prints the outcome of a server check: online, or the preflight checklist with the problem
+/// and its fix. Offers to install Docker when the daemon can, and returns the server after it.
+async fn report_server_check(c: &Client, s: Server) -> Result<Server> {
+    use std::io::IsTerminal as _;
     if s.status == ServerStatus::Online {
         output::ok(format!(
             "{} is online (docker {})",
             s.name,
             s.docker_version.clone().unwrap_or_default()
         ));
-        return;
+        return Ok(s);
     }
-    output::note(format!("{} is not reachable yet.", s.name));
-    let source = match key {
-        Some(k) => hint(&format!("secrets show {}", k.name)),
-        None => hint("server key"),
+    print_checks(&s);
+    let Some(problem) = &s.problem else {
+        output::note(format!("{} is not reachable.", s.name));
+        return Ok(s);
     };
-    println!(
-        "{} add the public key from {source} to ~/.ssh/authorized_keys on it, then run {}",
-        muted("next:"),
-        hint(&format!("server check {}", s.name))
-    );
+    println!("{} {}", paint("✕", Tone::Err), problem.summary);
+    if let Some(fix) = &problem.fix {
+        println!("  {} {fix}", muted("fix:"));
+    }
+    if !problem.can_install_docker {
+        println!(
+            "  {} {}",
+            muted("then:"),
+            hint(&format!("server check {}", s.name))
+        );
+        return Ok(s);
+    }
+    if !std::io::stdin().is_terminal() {
+        println!(
+            "  {} {}",
+            muted("or let the daemon do it:"),
+            hint(&format!("server install-docker {} --yes", s.name))
+        );
+        return Ok(s);
+    }
+    if confirm(&format!("Install Docker on {} now?", s.name), false).is_err() {
+        return Ok(s);
+    }
+    install_docker(c, &s).await
+}
+
+fn print_checks(s: &Server) {
+    for check in &s.checks {
+        let glyph = match check.status {
+            CheckStatus::Pass => paint("✓", Tone::Ok),
+            CheckStatus::Fail => paint("✕", Tone::Err),
+            CheckStatus::Skipped => muted("·"),
+        };
+        let label = match check.status {
+            CheckStatus::Skipped => muted(&check.label),
+            _ => check.label.clone(),
+        };
+        match &check.detail {
+            Some(detail) => println!("  {glyph} {label}  {}", muted(detail)),
+            None => println!("  {glyph} {label}"),
+        }
+    }
+}
+
+async fn install_docker(c: &Client, s: &Server) -> Result<Server> {
+    output::note(format!(
+        "installing Docker on {} with get.docker.com, this takes a minute or two…",
+        s.name
+    ));
+    let s = c.install_docker(&s.id).await?;
+    if s.status == ServerStatus::Online {
+        output::ok(format!(
+            "Docker {} installed, {} is online",
+            s.docker_version.clone().unwrap_or_default(),
+            s.name
+        ));
+        return Ok(s);
+    }
+    Box::pin(report_server_check(c, s)).await
 }
 
 async fn find_secret(c: &Client, query: &str) -> Result<Secret> {
@@ -1319,7 +1398,11 @@ async fn find_secret(c: &Client, query: &str) -> Result<Secret> {
 fn read_value(file: Option<&PathBuf>) -> Result<String> {
     use std::io::{IsTerminal as _, Read as _};
     if let Some(path) = file {
-        return std::fs::read_to_string(path)
+        let path = match (path.strip_prefix("~"), std::env::var_os("HOME")) {
+            (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
+            _ => path.clone(),
+        };
+        return std::fs::read_to_string(&path)
             .with_context(|| format!("cannot read {}", path.display()));
     }
     if std::io::stdin().is_terminal() {
@@ -1342,7 +1425,12 @@ fn secret_value(
     }
     let raw = read_value(file)?;
     Ok(match kind {
-        SecretKind::SshKey => SecretValue::SshKey { private_key: raw },
+        SecretKind::SshKey => {
+            common::ssh::inspect_private_key(&raw).map_err(anyhow::Error::msg)?;
+            SecretValue::SshKey {
+                private_key: common::ssh::normalize_private_key(&raw),
+            }
+        }
         SecretKind::S3Credentials => SecretValue::S3Credentials {
             access_key_id: access_key_id.context("s3 credentials need --access-key-id")?,
             secret_access_key: raw.trim().to_string(),
@@ -1425,6 +1513,7 @@ async fn secrets(c: &Client, cmd: SecretsCmd, json: bool) -> Result<()> {
             kind,
             file,
             access_key_id,
+            ..
         } => {
             let value = secret_value(kind, file.as_ref(), access_key_id)?;
             let s = c.create_secret(&CreateSecret { name, value }).await?;
@@ -1486,6 +1575,7 @@ async fn secrets(c: &Client, cmd: SecretsCmd, json: bool) -> Result<()> {
             secret,
             file,
             access_key_id,
+            ..
         } => {
             let s = find_secret(c, &secret).await?;
             let body = UpdateSecret {

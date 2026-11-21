@@ -573,6 +573,8 @@ mod tests {
                 docker_version: Some("29.0.0".into()),
                 last_checked_at: Some(at("2026-11-20T11:00:00.5Z")),
                 created_at: created,
+                checks: Vec::new(),
+                problem: None,
             },
             Server {
                 id: new_id(),
@@ -587,6 +589,8 @@ mod tests {
                 docker_version: None,
                 last_checked_at: None,
                 created_at: created,
+                checks: Vec::new(),
+                problem: None,
             },
         ];
         let project = Project {
@@ -905,6 +909,8 @@ mod tests {
             docker_version: None,
             last_checked_at: None,
             created_at: Utc::now().trunc_subsecs(6),
+            checks: Vec::new(),
+            problem: None,
         };
         insert_server(&conn, &server);
         drop(conn);

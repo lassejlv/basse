@@ -17,6 +17,7 @@ mod instance;
 mod metrics;
 mod notify;
 mod onboarding;
+mod preflight;
 mod prune;
 mod restore;
 mod secrets;
@@ -403,6 +404,8 @@ async fn ensure_local_server(db: &Db) -> Result<()> {
         docker_version: None,
         last_checked_at: None,
         created_at: Utc::now(),
+        checks: Vec::new(),
+        problem: None,
     })
     .await
 }
@@ -477,7 +480,7 @@ async fn serve(dirs: DataDir, listen: Option<String>) -> Result<()> {
     let mut config = Config::load(&dirs)?;
     dirs.create()?;
     secrets::MasterKey::load_or_create(&dirs.master_key())?;
-    ssh::clear_temp_keys(&ssh::paths(&dirs.ssh_dir()));
+    ssh::clear_temp_files(&ssh::paths(&dirs.ssh_dir()));
     if let Ok(entries) = std::fs::read_dir(dirs.builds_dir()) {
         for entry in entries.flatten() {
             let _ = std::fs::remove_dir_all(entry.path());

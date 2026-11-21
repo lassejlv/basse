@@ -681,6 +681,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "ssh-key",
 ]
 
 [[package]]
