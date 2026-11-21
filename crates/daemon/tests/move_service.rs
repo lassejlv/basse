@@ -265,7 +265,11 @@ async fn move_service() {
         ]
     );
     let transfer = step(&d, StepKind::Transfer).detail.clone().unwrap();
-    assert!(transfer.starts_with("image + 1 volume"), "{transfer}");
+    assert_eq!(transfer, "image + volumes");
+    assert!(
+        log.iter().any(|l| l.starts_with("Copied 1 volume (")),
+        "{log:#?}"
+    );
     assert!(
         log.iter().any(|l| l.contains("Moving web from server")),
         "{log:#?}"
@@ -413,7 +417,7 @@ async fn move_service() {
         step(&d, StepKind::Transfer)
             .detail
             .as_deref()
-            .is_some_and(|t| t.contains("1 volume")),
+            .is_some_and(|t| t.ends_with("volumes")),
         "{d:?}"
     );
     assert!(local_all(&pg.id).is_empty());

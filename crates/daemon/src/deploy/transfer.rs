@@ -15,8 +15,10 @@ use common::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Seconds a container gets to shut down before its volumes are copied.
-const STOP_SECS: i32 = 30;
+/// Seconds a container gets to shut down before its volumes are copied; databases get longer
+/// to flush.
+const STOP_SECS: i32 = 10;
+const DATABASE_STOP_SECS: i32 = 30;
 
 /// The old server of a move in flight, and what the move changed so a failure can undo it.
 pub(super) struct Moving {
@@ -109,6 +111,9 @@ impl Job {
             return Ok(());
         };
         self.check_cancelled()?;
+        if self.d.status == DeploymentStatus::Queued {
+            self.set_status(DeploymentStatus::Building).await;
+        }
         self.begin(StepKind::Transfer, None).await;
         let phase = self.phase.clone();
         let mut done = Vec::new();
@@ -150,10 +155,13 @@ impl Job {
             } else {
                 self.stop_source(&source, svc).await?;
                 let mut total = 0;
-                for (name, labels) in &volumes {
+                for (i, (name, labels)) in volumes.iter().enumerate() {
                     self.check_cancelled()?;
-                    self.detail(StepKind::Transfer, format!("volume {name}"))
-                        .await;
+                    self.detail(
+                        StepKind::Transfer,
+                        format!("volume {}/{}", i + 1, volumes.len()),
+                    )
+                    .await;
                     total += self.copy_volume(&source, target, svc, name, labels).await?;
                 }
                 let count = format!(
@@ -163,7 +171,7 @@ impl Job {
                 );
                 self.log
                     .system(format!("Copied {count} ({})", human_size(total)));
-                done.push(count);
+                done.push("volumes".to_string());
             }
         }
         let detail = if done.is_empty() {
@@ -227,7 +235,12 @@ impl Job {
         ));
         for id in running {
             self.check_cancelled()?;
-            docker::stop_container(source, &id, STOP_SECS).await?;
+            let secs = if matches!(svc.source, Source::Database { .. }) {
+                DATABASE_STOP_SECS
+            } else {
+                STOP_SECS
+            };
+            docker::stop_container(source, &id, secs).await?;
             if let Some(m) = &mut self.moving {
                 m.stopped.push(id);
             }

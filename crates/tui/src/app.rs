@@ -4654,10 +4654,18 @@ impl App {
             })
             .or_else(|| items.iter().position(|i| !i.disabled))
             .unwrap_or(0);
-        let mut note = vec![Line::styled(
-            server_pick::picker_note(&self.servers),
-            theme::muted(),
-        )];
+        let all_online = self
+            .servers
+            .iter()
+            .all(|s| s.status != ServerStatus::Offline);
+        let mut note = if moving.is_some() && all_online {
+            Vec::new()
+        } else {
+            vec![Line::styled(
+                server_pick::picker_note(&self.servers),
+                theme::muted(),
+            )]
+        };
         let compose = form.choice("source") <= 1
             && form.choice_label("build").as_deref() == Some(BUILD_LABELS[2]);
         if compose && self.servers.iter().any(|s| s.kind == ServerKind::Ssh) {

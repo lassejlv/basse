@@ -3128,7 +3128,7 @@ async fn settings_move_opens_the_form_picker_confirm_and_live_view() {
         })
         .collect();
     moving.steps[0].status = StepStatus::Done;
-    moving.steps[0].detail = Some("image + 1 volume".into());
+    moving.steps[0].detail = Some("image + volumes".into());
     app.overlay = None;
     app.apply(crate::app::Msg::MoveStarted(
         Box::new(moving),
@@ -3140,7 +3140,7 @@ async fn settings_move_opens_the_form_picker_confirm_and_live_view() {
         "moving #27",
         "→ fixture-worker",
         "transfer",
-        "image + 1 volume",
+        "image + volumes",
         "Move output",
         "fixture-node serves until fixture-wor…",
         "c cancel move",
