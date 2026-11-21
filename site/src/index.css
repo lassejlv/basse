@@ -1,0 +1,98 @@
+@import "tailwindcss";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/jetbrains-mono";
+
+/*
+ * Tokens: a harbor at night under sodium lamps. The same values as the Paper design
+ * (linked in the root README) and crates/tui/src/theme.rs. Every colour on the site
+ * comes from here.
+ */
+@theme {
+  --color-quay: #0e1113;
+  --color-hull: #161a1d;
+  --color-line: #2a3035;
+  --color-fog: #d8dee3;
+  --color-mist: #7c878f;
+  --color-amber: #f5a524;
+  --color-ok: #4fbf7f;
+  --color-info: #6ca6e0;
+  --color-err: #e5534b;
+
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+  --font-sans: var(--font-mono);
+
+  --radius-panel: 4px;
+}
+
+/* shadcn's semantic slots, mapped onto the tokens above. The site is dark only. */
+:root {
+  --background: var(--color-quay);
+  --foreground: var(--color-fog);
+  --card: var(--color-hull);
+  --card-foreground: var(--color-fog);
+  --popover: var(--color-hull);
+  --popover-foreground: var(--color-fog);
+  --primary: var(--color-amber);
+  --primary-foreground: var(--color-quay);
+  --secondary: var(--color-hull);
+  --secondary-foreground: var(--color-fog);
+  --muted: var(--color-hull);
+  --muted-foreground: var(--color-mist);
+  --accent: var(--color-hull);
+  --accent-foreground: var(--color-fog);
+  --destructive: var(--color-err);
+  --border: var(--color-line);
+  --input: var(--color-line);
+  --ring: var(--color-amber);
+  --radius: 4px;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    @apply bg-quay text-fog font-mono antialiased;
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply text-[13px] leading-5;
+  }
+  :focus-visible {
+    @apply outline-1 outline-offset-2 outline-amber;
+  }
+  ::selection {
+    @apply bg-amber text-quay;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+  }
+}
+
+@utility pixelated {
+  image-rendering: pixelated;
+}
