@@ -2,12 +2,12 @@
 
 use crate::app::*;
 use crate::database;
-use crate::mouse::{self, Hit};
+use crate::mouse::{self, Hit, List};
 use crate::theme;
 use crate::util::{self, truncate};
 use common::*;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Margin, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Margin, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
@@ -40,6 +40,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
     key_bar(frame, keys, app);
     if app.overlay.is_some() {
+        mouse::reset();
         mouse::hit(area, Hit::Block);
     }
     match &app.overlay {
@@ -65,6 +66,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         }
         None => {}
     }
+    mouse::finish_frame(&app.mouse);
+    mouse::paint_hover(frame.buffer_mut(), &app.mouse);
     mouse::paint_selection(frame.buffer_mut(), app.mouse.selection.as_ref());
 }
 
@@ -157,9 +160,14 @@ fn top_bar(frame: &mut Frame, area: Rect, app: &App) {
             theme::muted(),
         ),
     });
-    frame.render_widget(Paragraph::new(Line::from(left)), area);
+    let context_offset = left[0].width() + left[1].width();
+    let context_width = left[2].width();
 
-    let Some(info) = &app.info else { return };
+    let Some(info) = &app.info else {
+        mouse::span_target(area, context_offset, context_width, Hit::OpenSettings);
+        frame.render_widget(Paragraph::new(Line::from(left)), area);
+        return;
+    };
     let history: Vec<f64> = info.cpu_history.iter().map(|v| f64::from(*v)).collect();
     let disk = (info.disk_used * 100)
         .checked_div(info.disk_total)
@@ -192,7 +200,18 @@ fn top_bar(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(" caddy", theme::text()),
     ])
     .right_aligned();
-    frame.render_widget(Paragraph::new(right), area);
+    let left_area = Rect {
+        width: area.width.saturating_sub(right.width() as u16),
+        ..area
+    };
+    let left_area = if (left_area.width as usize) < context_offset + context_width {
+        area
+    } else {
+        frame.render_widget(Paragraph::new(right), area);
+        left_area
+    };
+    mouse::span_target(left_area, context_offset, context_width, Hit::OpenSettings);
+    frame.render_widget(Paragraph::new(Line::from(left)), left_area);
 }
 
 type Keys = Vec<(&'static str, &'static str)>;
@@ -313,6 +332,9 @@ fn keys_for(app: &App) -> (Keys, Keys) {
             ("X", "remove + clean up"),
             ("esc", "back"),
         ],
+        Screen::Settings if app.settings.settings.is_none() => {
+            vec![("↑↓", "context"), ("⏎", "switch"), ("x", "remove")]
+        }
         Screen::Settings => vec![
             ("↑↓", "context"),
             ("⏎", "switch"),
@@ -327,68 +349,32 @@ fn keys_for(app: &App) -> (Keys, Keys) {
         ],
     };
     let right = match app.screen {
+        Screen::Overview if app.overview.filtering => vec![],
         Screen::Overview => right,
-        Screen::Deploy => vec![("q", "quit")],
-        _ => vec![("esc", "back"), ("q", "quit")],
+        Screen::Deploy | Screen::Servers => vec![(":", "command"), ("?", "help"), ("q", "quit")],
+        Screen::Service if app.service.as_ref().is_some_and(|v| v.logs.searching) => vec![],
+        _ => vec![
+            ("esc", "back"),
+            (":", "command"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
     };
     (left, right)
 }
 
-fn key_spans(keys: &[(&'static str, &'static str)]) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    for (i, (k, l)) in keys.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::raw("   "));
-        }
-        spans.push(Span::styled(*k, theme::accent()));
-        spans.push(Span::styled(format!(" {l}"), theme::muted()));
-    }
-    spans
-}
-
-/// Make each key hint clickable; `x` is where the first hint starts.
-fn key_hits(keys: &[(&'static str, &'static str)], mut x: u16, y: u16) {
-    for (i, (k, l)) in keys.iter().enumerate() {
-        if i > 0 {
-            x += 3;
-        }
-        let w = (k.chars().count() + 1 + l.chars().count()) as u16;
-        if let Some((code, mods)) = mouse::key_for_label(k) {
-            mouse::hit(Rect::new(x, y, w, 1), Hit::Key(code, mods));
-        }
-        x += w;
-    }
-}
-
-fn keys_width(keys: &[(&'static str, &'static str)]) -> u16 {
-    let text: usize = keys
-        .iter()
-        .map(|(k, l)| k.chars().count() + 1 + l.chars().count())
-        .sum();
-    (text + keys.len().saturating_sub(1) * 3) as u16
-}
-
 fn key_bar(frame: &mut Frame, area: Rect, app: &App) {
     let (left, right) = keys_for(app);
-    frame.render_widget(Paragraph::new(Line::from(key_spans(&left))), area);
-    key_hits(&left, area.x, area.y);
-    if app.toast.is_none() {
-        key_hits(
-            &right,
-            area.right().saturating_sub(keys_width(&right)),
-            area.y,
-        );
-    }
-    let right = match &app.toast {
+    let toast = match &app.toast {
         Some(t) if t.busy => {
             let max = area.width as usize / 2;
-            Line::from(vec![
+            Some(Line::from(vec![
                 Span::styled(
                     format!("{} ", util::spinner(app.tick)),
                     theme::fg(theme::INFO),
                 ),
                 Span::styled(truncate(&t.text, max), theme::muted()),
-            ])
+            ]))
         }
         Some(t) => {
             let style = if t.error {
@@ -398,14 +384,31 @@ fn key_bar(frame: &mut Frame, area: Rect, app: &App) {
             };
             let glyph = if t.error { "✕ " } else { "✓ " };
             let max = area.width as usize / 2;
-            Line::from(Span::styled(
+            Some(Line::from(Span::styled(
                 format!("{glyph}{}", truncate(&t.text, max)),
                 style,
-            ))
+            )))
         }
-        None => Line::from(key_spans(&right)),
+        None => None,
     };
-    frame.render_widget(Paragraph::new(right.right_aligned()), area);
+    let right_width = toast
+        .as_ref()
+        .map_or_else(|| mouse::hints_width(&right), Line::width);
+    let left_width =
+        (area.width as usize).saturating_sub(right_width + usize::from(right_width > 0)) as u16;
+    mouse::hints(
+        frame,
+        Rect {
+            width: left_width,
+            ..area
+        },
+        &left,
+        Alignment::Left,
+    );
+    match toast {
+        Some(line) => frame.render_widget(Paragraph::new(line.right_aligned()), area),
+        None => mouse::hints(frame, area, &right, Alignment::Right),
+    }
 }
 
 // Overview
@@ -419,7 +422,7 @@ fn overview(frame: &mut Frame, area: Rect, app: &App) {
         return empty_state(frame, main);
     }
     let services = app.env_services();
-    let table_h = (services.len() as u16 + 4).clamp(6, main.height / 2);
+    let table_h = (services.len() as u16 + 4).max(6).min(main.height / 2);
     let [table, lower] = Layout::vertical([Constraint::Length(table_h), Constraint::Fill(1)])
         .spacing(1)
         .areas(main);
@@ -433,14 +436,14 @@ fn overview(frame: &mut Frame, area: Rect, app: &App) {
             let block = panel(title("service", false), None, false);
             let inner = inside(&block, detail);
             frame.render_widget(block, detail);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("no services here yet · press ", theme::muted()),
-                    Span::styled("n", theme::accent()),
-                    Span::styled(" to add one", theme::muted()),
-                ])),
-                inner,
-            );
+            if !app.overview.filtering {
+                mouse::hints(
+                    frame,
+                    inner,
+                    &[("n", "add the first service")],
+                    Alignment::Left,
+                );
+            }
         }
     }
     activity_panel(frame, activity, app);
@@ -450,32 +453,17 @@ fn empty_state(frame: &mut Frame, area: Rect) {
     let block = panel(title("Welcome", true), None, true);
     let inner = inside(&block, area).inner(Margin::new(2, 1));
     frame.render_widget(block, area);
-    let lines = vec![
-        Line::styled("Nothing deployed yet.", theme::text()),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("N", theme::accent()),
-            Span::styled(
-                "  create a project, with a production environment",
-                theme::muted(),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("n", theme::accent()),
-            Span::styled(
-                "  add a service from a git repo, an image or a database",
-                theme::muted(),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("S", theme::accent()),
-            Span::styled(
-                "  servers and the proxy that serves your domains",
-                theme::muted(),
-            ),
-        ]),
-    ];
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(
+        Paragraph::new("Nothing deployed yet.").style(theme::text()),
+        inner,
+    );
+    for (line, hint) in lines_of(inner, 5).into_iter().skip(2).zip([
+        ("N", "create a project, with a production environment"),
+        ("n", "add a service from a git repo, an image or a database"),
+        ("S", "servers and the proxy that serves your domains"),
+    ]) {
+        mouse::hints(frame, line, &[hint], Alignment::Left);
+    }
 }
 
 fn sidebar(frame: &mut Frame, area: Rect, app: &App) {
@@ -488,6 +476,8 @@ fn sidebar(frame: &mut Frame, area: Rect, app: &App) {
     let block = panel(title("Projects", focused), None, focused);
     let inner = inside(&block, projects);
     frame.render_widget(block, projects);
+    mouse::hit(projects, Hit::Pane(Pane::Sidebar));
+    sidebar_servers(frame, servers, app);
 
     let Some(tree) = &app.tree else {
         frame.render_widget(
@@ -496,7 +486,6 @@ fn sidebar(frame: &mut Frame, area: Rect, app: &App) {
         );
         return;
     };
-    mouse::hit(projects, Hit::Pane(Pane::Sidebar));
     let items = app.side_items();
     let mut lines = Vec::new();
     let mut item_lines = Vec::new();
@@ -563,13 +552,13 @@ fn sidebar(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(line.style(row_style));
     }
     if lines.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("N", theme::accent()),
-            Span::styled(" new project", theme::muted()),
-        ]));
+        mouse::hints(frame, inner, &[("N", "new project")], Alignment::Left);
+        return;
     }
     let offset = scroll_offset(
-        app.overview.side + app.overview.side.min(tree.projects.len()),
+        item_lines
+            .get(app.overview.side)
+            .map_or(0, |&(line, _)| line),
         inner.height as usize,
     );
     frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), inner);
@@ -578,20 +567,31 @@ fn sidebar(frame: &mut Frame, area: Rect, app: &App) {
             .checked_sub(offset)
             .filter(|dy| *dy < inner.height as usize)
         {
-            mouse::hit(
-                Rect::new(inner.x, inner.y + dy as u16, inner.width, 1),
-                Hit::Side(i),
-            );
+            let row = Rect::new(inner.x, inner.y + dy as u16, inner.width, 1);
+            mouse::hit(row, Hit::Side(i));
+            if matches!(items[i], SideItem::Project(_)) {
+                mouse::span_target(row, 1, 1, Hit::Fold(i));
+            }
         }
     }
+}
 
+fn sidebar_servers(frame: &mut Frame, servers: Rect, app: &App) {
     let block = panel(title("Servers", false), None, false);
     let inner = inside(&block, servers);
     frame.render_widget(block, servers);
+    mouse::hit(servers, Hit::OpenServers);
+    mouse::span_target(servers, 2, "Servers".len(), Hit::OpenServers);
     let lines: Vec<Line> = app
         .servers
         .iter()
-        .map(|s| {
+        .take(inner.height as usize)
+        .enumerate()
+        .map(|(i, s)| {
+            mouse::hit(
+                Rect::new(inner.x, inner.y + i as u16, inner.width, 1),
+                Hit::SidebarServer(i),
+            );
             let (glyph, style) = match s.status {
                 ServerStatus::Online => ("●", theme::fg(theme::OK)),
                 ServerStatus::Offline => ("○", theme::fg(theme::ERR)),
@@ -602,7 +602,7 @@ fn sidebar(frame: &mut Frame, area: Rect, app: &App) {
                 (ServerKind::Local, _) => "local",
                 (ServerKind::Ssh, _) => "ssh",
             };
-            let name = truncate(&s.name, inner.width as usize - 12);
+            let name = truncate(&s.name, (inner.width as usize).saturating_sub(12));
             let pad = (inner.width as usize).saturating_sub(3 + name.chars().count() + meta.len());
             Line::from(vec![
                 Span::styled(format!(" {glyph} "), style),
@@ -683,9 +683,19 @@ fn services_table(frame: &mut Frame, area: Rect, app: &App, services: &[&Service
     } else {
         Line::styled("filter: all", theme::muted())
     };
+    let filter_width = right.width();
     let block = panel(heading, Some(right), focused);
     let inner = inside(&block, area);
     frame.render_widget(block, area);
+    mouse::hit(area, Hit::Pane(Pane::Services));
+    if filter_width + 4 <= area.width as usize {
+        mouse::span_target(
+            area,
+            area.width as usize - filter_width - 2,
+            filter_width,
+            Hit::Filter,
+        );
+    }
 
     let header =
         Row::new(["", "NAME", "SOURCE", "DOMAIN", "DEPLOYED", "CPU", "MEM"]).style(theme::muted());
@@ -750,7 +760,6 @@ fn services_table(frame: &mut Frame, area: Rect, app: &App, services: &[&Service
         .collect();
     let empty = rows.is_empty();
     let offset = scroll_offset(app.overview.row, inner.height.saturating_sub(1) as usize);
-    mouse::hit(area, Hit::Pane(Pane::Services));
     row_hits(inner, rows.len(), offset, Hit::Service);
     let table = Table::new(
         rows.into_iter().skip(offset),
@@ -767,20 +776,16 @@ fn services_table(frame: &mut Frame, area: Rect, app: &App, services: &[&Service
     .header(header)
     .column_spacing(2);
     frame.render_widget(table, inner);
-    if empty {
-        let msg = if app.overview.filter.is_empty() {
-            "no services yet · n to add one"
+    if empty && inner.height > 1 {
+        let row = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+        if app.overview.filter.is_empty() && !app.overview.filtering {
+            mouse::hints(frame, row, &[("n", "add a service")], Alignment::Left);
         } else {
-            "nothing matches the filter"
-        };
-        frame.render_widget(
-            Paragraph::new(msg).style(theme::muted()),
-            Rect {
-                y: inner.y + 1,
-                height: 1,
-                ..inner
-            },
-        );
+            frame.render_widget(
+                Paragraph::new("nothing matches the filter").style(theme::muted()),
+                row,
+            );
+        }
     }
 }
 
@@ -1022,8 +1027,25 @@ fn service_detail(frame: &mut Frame, area: Rect, app: &App, s: &Service) {
     let inner = inside(&block, area);
     frame.render_widget(block, area);
     let detail = app.details.get(&s.id);
+    domain_targets(inner, detail);
     frame.render_widget(Paragraph::new(service_lines(app, detail, s)), inner);
     charts(frame, inner, app.stats.get(&s.id));
+}
+
+fn domain_targets(area: Rect, detail: Option<&ServiceDetail>) {
+    let Some(detail) = detail.filter(|d| d.database.is_none()) else {
+        return;
+    };
+    for (i, domain) in detail
+        .domains
+        .iter()
+        .take(area.height.saturating_sub(1) as usize)
+        .enumerate()
+    {
+        let row = Rect::new(area.x, area.y + 1 + i as u16, area.width, 1);
+        let width = Span::raw(crate::keys::domain_url(domain)).width();
+        mouse::span_target(row, 10, width, Hit::Domain(i));
+    }
 }
 
 fn activity_panel(frame: &mut Frame, area: Rect, app: &App) {
@@ -1034,11 +1056,28 @@ fn activity_panel(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(Paragraph::new("quiet so far").style(theme::muted()), inner);
         return;
     }
+    let height = inner.height as usize;
+    let offset = app
+        .overview
+        .activity_offset
+        .min(app.activity.len().saturating_sub(height));
+    mouse::hit(area, Hit::List(List::Activity(height)));
     let lines: Vec<Line> = app
         .activity
         .iter()
-        .take(inner.height as usize)
-        .map(|a| {
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .map(|(i, a)| {
+            if a.service_id
+                .as_ref()
+                .is_some_and(|id| app.all_services().any(|s| s.id == *id))
+            {
+                mouse::hit(
+                    Rect::new(inner.x, inner.y + (i - offset) as u16, inner.width, 1),
+                    Hit::Activity(i),
+                );
+            }
             let name = a.service_name.clone().unwrap_or_default();
             let room = (inner.width as usize).saturating_sub(7 + 12);
             let msg = truncate(&a.message, room);
@@ -1123,12 +1162,6 @@ fn service(frame: &mut Frame, area: Rect, app: &App) {
                 Some(p) => format!("public :{p}"),
                 None => "internal only".into(),
             });
-        } else if let Some(dom) = view.detail.as_ref().and_then(|d| d.domains.first()) {
-            meta.push(format!(
-                "{}://{}",
-                if dom.tls { "https" } else { "http" },
-                dom.host
-            ));
         }
         if !meta.is_empty() {
             spans.push(Span::styled(
@@ -1136,15 +1169,29 @@ fn service(frame: &mut Frame, area: Rect, app: &App) {
                 theme::muted(),
             ));
         }
+        if info.is_none()
+            && let Some(domain) = view.detail.as_ref().and_then(|d| d.domains.first())
+        {
+            let separator = if meta.is_empty() { "   " } else { " · " };
+            spans.push(Span::styled(separator, theme::muted()));
+            let url = Span::styled(crate::keys::domain_url(domain), theme::muted());
+            mouse::span_target(
+                head,
+                spans.iter().map(Span::width).sum(),
+                url.width(),
+                Hit::Domain(0),
+            );
+            spans.push(url);
+        }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), head);
 
     let mut tab_spans = vec![Span::raw(" ")];
-    let mut x = tabs.x + 1;
+    let mut offset = 1;
     for t in view.tabs() {
-        let w = t.title().chars().count() as u16;
-        mouse::hit(Rect::new(x, tabs.y, w, 1), Hit::Tab(t));
-        x += w + 4;
+        let w = Span::raw(t.title()).width();
+        mouse::span_target(tabs, offset, w, Hit::Tab(t));
+        offset += w + 4;
         let style = if t == view.tab {
             theme::accent().add_modifier(ratatui::style::Modifier::UNDERLINED)
         } else {
@@ -1202,7 +1249,7 @@ fn container_panel(frame: &mut Frame, c_area: Rect, view: &ServiceView) {
             kv(
                 "image",
                 vec![Span::styled(
-                    truncate(&c.image, inner.width as usize - 10),
+                    truncate(&c.image, (inner.width as usize).saturating_sub(10)),
                     theme::text(),
                 )],
                 10,
@@ -1264,11 +1311,24 @@ fn deployments_panel(frame: &mut Frame, d_area: Rect, app: &App, view: &ServiceV
     let block = panel(title("Deployments", false), None, false);
     let inner = inside(&block, d_area);
     frame.render_widget(block, d_area);
-    let mut lines: Vec<Line> = view
+    let height = inner.height as usize;
+    mouse::hit(d_area, Hit::List(List::Deployments));
+    let offset = scroll_offset(
+        view.deployment_row
+            .min(view.deployments.len().saturating_sub(1)),
+        height,
+    );
+    let lines: Vec<Line> = view
         .deployments
         .iter()
-        .take(inner.height.saturating_sub(2) as usize)
-        .map(|d| {
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .map(|(i, d)| {
+            mouse::hit(
+                Rect::new(inner.x, inner.y + (i - offset) as u16, inner.width, 1),
+                Hit::DeployRow(i),
+            );
             let label = d
                 .commit
                 .as_deref()
@@ -1287,14 +1347,23 @@ fn deployments_panel(frame: &mut Frame, d_area: Rect, app: &App, view: &ServiceV
                     theme::muted(),
                 ),
             ])
+            .style(if i == view.deployment_row {
+                theme::selected()
+            } else {
+                Style::new()
+            })
         })
         .collect();
     if lines.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("never deployed · ", theme::muted()),
-            Span::styled("d", theme::accent()),
-            Span::styled(" to deploy", theme::muted()),
-        ]));
+        if !view.logs.searching {
+            mouse::hints(
+                frame,
+                inner,
+                &[("d", "deploy this service")],
+                Alignment::Left,
+            );
+        }
+        return;
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -1305,6 +1374,7 @@ fn service_overview(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView
         let block = panel(title("Overview", true), None, true);
         let inner = inside(&block, main).inner(Margin::new(1, 1));
         frame.render_widget(block, main);
+        domain_targets(inner, Some(d));
         frame.render_widget(
             Paragraph::new(service_lines(app, Some(d), &d.service)),
             inner,
@@ -1314,20 +1384,15 @@ fn service_overview(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView
     rail(frame, rail_area, app, view);
 }
 
-/// A clickable key hint drawn at `(x, y)`; returns its width.
-fn hint_at(frame: &mut Frame, x: u16, y: u16, key: &'static str, label: &str) -> u16 {
-    let w = (key.chars().count() + 1 + label.chars().count()) as u16;
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(key, theme::accent()),
-            Span::styled(format!(" {label}"), theme::muted()),
-        ])),
-        Rect::new(x, y, w, 1),
-    );
-    if let Some((code, mods)) = mouse::key_for_label(key) {
-        mouse::hit(Rect::new(x, y, w, 1), Hit::Key(code, mods));
-    }
-    w
+fn hint_at(frame: &mut Frame, area: Rect, column: u16, row: u16, key: &str, label: &str) {
+    let rect = Rect::new(
+        area.x + column,
+        area.y + row,
+        area.width.saturating_sub(column),
+        1,
+    )
+    .intersection(area);
+    mouse::hints(frame, rect, &[(key, label)], Alignment::Left);
 }
 
 fn rule_line(width: u16) -> Line<'static> {
@@ -1434,24 +1499,31 @@ fn database_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         ),
         (None, None) => Span::styled("not exposed", theme::muted()),
     };
+    let public_width = public.width();
     lines.push(kv("public", vec![public], w));
+    let internal_width = lines[internal_y as usize].spans[1].width();
     frame.render_widget(Paragraph::new(lines), inner);
 
-    if inner.height > pw_y {
-        hint_at(
-            frame,
-            inner.x + w as u16 + pw_w + 3,
-            inner.y + pw_y,
-            "v",
-            if view.reveal { "hide" } else { "reveal" },
-        );
-    }
-    let copy_x = inner.right().saturating_sub(6);
-    if inner.height > internal_y + 1 {
-        hint_at(frame, copy_x, inner.y + internal_y, "c", "copy");
-        if info.public_url.is_some() {
-            hint_at(frame, copy_x, inner.y + internal_y + 1, "C", "copy");
-        }
+    let w = w as u16;
+    let rows = lines_of(inner, internal_y + 2);
+    let value = |row: u16, width: u16| {
+        Rect::new(inner.x + w, inner.y + row, width, 1).intersection(rows[row as usize])
+    };
+    mouse::key_target(value(pw_y, pw_w), "v");
+    hint_at(
+        frame,
+        inner,
+        w + pw_w + 3,
+        pw_y,
+        "v",
+        if view.reveal { "hide" } else { "reveal" },
+    );
+    let copy_x = inner.width.saturating_sub(6);
+    mouse::key_target(value(internal_y, internal_width as u16), "c");
+    hint_at(frame, inner, copy_x, internal_y, "c", "copy");
+    if info.public_url.is_some() {
+        mouse::key_target(value(internal_y + 1, public_width as u16), "C");
+        hint_at(frame, inner, copy_x, internal_y + 1, "C", "copy");
     }
     if inner.height > internal_y + 4 {
         frame.render_widget(
@@ -1495,7 +1567,7 @@ fn database_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         } else {
             "expose on a server port"
         };
-        hint_at(frame, inner.x, inner.y + 3, "p", label);
+        hint_at(frame, inner, 0, 3, "p", label);
     }
 
     let block = panel(title("Password", false), None, false);
@@ -1511,7 +1583,7 @@ fn database_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         inner,
     );
     if inner.height >= 3 {
-        hint_at(frame, inner.x, inner.y + 2, "R", "rotate password");
+        hint_at(frame, inner, 0, 2, "R", "rotate password");
     }
     container_panel(frame, container_a, view);
 }
@@ -1596,7 +1668,7 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
             Constraint::Length(6),
             Constraint::Fill(1),
         ],
-        empty: "no backups yet · b to back up now",
+        empty: ("b", "back up now"),
     }
     .render(frame, main, rows, view.row);
 
@@ -1605,13 +1677,6 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
     let block = panel(title("Schedule", false), None, false);
     let inner = inside(&block, sched_a);
     frame.render_widget(block, sched_a);
-    mouse::hit(
-        sched_a,
-        Hit::Key(
-            crossterm::event::KeyCode::Char('e'),
-            crossterm::event::KeyModifiers::NONE,
-        ),
-    );
     let Some(s) = app.schedules.get(&view.id) else {
         frame.render_widget(
             Paragraph::new(format!("{} loading", util::spinner(app.tick))).style(theme::muted()),
@@ -1619,6 +1684,7 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
         );
         return;
     };
+    mouse::key_target(sched_a, "e");
     let w = 10;
     let local = database::local_hour(
         s.hour_utc,
@@ -1664,7 +1730,7 @@ fn backups_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
     ];
     frame.render_widget(Paragraph::new(lines), inner);
     if inner.height >= 6 {
-        hint_at(frame, inner.x, inner.y + 5, "e", "edit schedule");
+        hint_at(frame, inner, 0, 5, "e", "edit schedule");
     }
 }
 
@@ -1733,8 +1799,12 @@ fn log_view(
     let matches = logs.matches();
     let current = matches.get(logs.match_idx).copied();
     let height = area.height as usize;
-    let end = visible.len().saturating_sub(logs.offset);
-    let start = end.saturating_sub(height);
+    let (start, end) = if let Some(start) = logs.step_anchor {
+        (start, (start + height).min(visible.len()))
+    } else {
+        let end = visible.len() - logs.offset.min(visible.len().saturating_sub(height));
+        (end.saturating_sub(height), end)
+    };
     let lines: Vec<Line> = visible[start..end]
         .iter()
         .enumerate()
@@ -1750,8 +1820,10 @@ fn log_view(
     let mut p = Paragraph::new(Text::from(lines));
     if logs.wrap {
         p = p.wrap(Wrap { trim: false });
-        let rendered = p.line_count(area.width);
-        p = p.scroll((rendered.saturating_sub(height) as u16, 0));
+        if logs.step_anchor.is_none() {
+            let rendered = p.line_count(area.width);
+            p = p.scroll((rendered.saturating_sub(height) as u16, 0));
+        }
     }
     frame.render_widget(p, area);
 }
@@ -1783,52 +1855,60 @@ fn logs_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView) {
     );
     let inner = inside(&block, main);
     frame.render_widget(block, main);
-    let show_bar = logs.searching || !logs.search.is_empty() || logs.ended.is_some();
-    let [lines_a, bar] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(if show_bar { 2 } else { 0 }),
-    ])
-    .areas(inner);
+    mouse::hit(main, Hit::Logs);
+    let [lines_a, bar] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(2)]).areas(inner);
     let empty = match &logs.ended {
         Some(e) => format!("no logs · {e}"),
         None => format!("{} waiting for output", util::spinner(app.tick)),
     };
     log_view(frame, lines_a, logs, &empty, &app.log_viewport);
-    if show_bar {
+    if !bar.is_empty() {
         let [rule, line] =
             Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(bar);
         frame.render_widget(
             Paragraph::new("─".repeat(rule.width as usize)).style(theme::fg(theme::LINE)),
             rule,
         );
-        if logs.searching || !logs.search.is_empty() {
-            let mut left = vec![
-                Span::styled("/ ", theme::accent()),
-                Span::styled(logs.search.clone(), theme::text()),
-            ];
-            if logs.searching {
-                left.push(Span::styled("▏", theme::accent()));
-            }
-            frame.render_widget(Paragraph::new(Line::from(left)), line);
+        mouse::hit(line, Hit::Search);
+        let mut left = vec![Span::styled("/ ", theme::accent())];
+        let mut left_area = line;
+        if logs.search.is_empty() && !logs.searching {
+            left.push(Span::styled("search logs", theme::muted()));
+        } else {
+            left.push(Span::styled(logs.search.clone(), theme::text()));
+        }
+        if logs.searching {
+            left.push(Span::styled("▏", theme::accent()));
+        }
+        if !logs.search.is_empty() && !logs.searching {
             let n = logs.matches().len();
             let info = if n == 0 {
                 "no matches".to_string()
             } else {
-                format!(
-                    "{} of {n} matches · n next · N prev",
-                    logs.match_idx.min(n - 1) + 1
-                )
+                format!("{} of {n} matches", logs.match_idx.min(n - 1) + 1)
             };
-            frame.render_widget(
-                Paragraph::new(info).style(theme::muted()).right_aligned(),
-                line,
-            );
-        } else if let Some(e) = &logs.ended {
-            frame.render_widget(
-                Paragraph::new(format!("○ {e} · ctrl+r to reconnect")).style(theme::muted()),
-                line,
-            );
+            let hints = [("n", "next"), ("N", "prev")];
+            let width = mouse::hints_width(&hints) as u16;
+            if n > 0 && line.width >= width + 20 {
+                mouse::hints(frame, line, &hints, Alignment::Right);
+                left_area.width -= width + 3;
+            }
+            if left_area.width >= Span::raw(&info).width() as u16 + 10 {
+                frame.render_widget(
+                    Paragraph::new(info.clone())
+                        .style(theme::muted())
+                        .right_aligned(),
+                    left_area,
+                );
+                left_area.width -= Span::raw(info).width() as u16 + 2;
+            }
+        } else if logs.ended.is_some() && !logs.searching && line.width >= 34 {
+            let hints = [("ctrl+r", "reconnect")];
+            mouse::hints(frame, line, &hints, Alignment::Right);
+            left_area.width -= mouse::hints_width(&hints) as u16 + 3;
         }
+        frame.render_widget(Paragraph::new(Line::from(left)), left_area);
     }
     rail(frame, rail_area, app, view);
 }
@@ -1844,6 +1924,7 @@ fn deployments_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView)
     );
     let inner = inside(&block, area);
     frame.render_widget(block, area);
+    mouse::hit(area, Hit::List(List::Service));
     let header = Row::new([
         "", "#", "STATUS", "COMMIT", "MESSAGE", "TRIGGER", "STARTED", "TOOK",
     ])
@@ -1904,9 +1985,11 @@ fn deployments_tab(frame: &mut Frame, area: Rect, app: &App, view: &ServiceView)
         })
         .collect();
     if rows.is_empty() {
-        frame.render_widget(
-            Paragraph::new("no deployments yet · d to deploy").style(theme::muted()),
+        mouse::hints(
+            frame,
             inner,
+            &[("d", "deploy this service")],
+            Alignment::Left,
         );
         return;
     }
@@ -1936,7 +2019,7 @@ struct ListPanel<'a> {
     note: &'a str,
     header: Row<'a>,
     widths: Vec<Constraint>,
-    empty: &'a str,
+    empty: (&'a str, &'a str),
 }
 
 impl ListPanel<'_> {
@@ -1948,11 +2031,9 @@ impl ListPanel<'_> {
         );
         let inner = inside(&block, area);
         frame.render_widget(block, area);
+        mouse::hit(area, Hit::List(List::Service));
         if rows.is_empty() {
-            frame.render_widget(
-                Paragraph::new(self.empty.to_string()).style(theme::muted()),
-                inner,
-            );
+            mouse::hints(frame, inner, &[self.empty], Alignment::Left);
             return;
         }
         let offset = scroll_offset(row, inner.height.saturating_sub(1) as usize);
@@ -2018,7 +2099,7 @@ fn env_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
             Constraint::Fill(1),
             Constraint::Length(8),
         ],
-        empty: "no variables · a to add one",
+        empty: ("a", "add a variable"),
     }
     .render(frame, area, rows, view.row);
 }
@@ -2071,7 +2152,7 @@ fn domains_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
             Constraint::Length(8),
             Constraint::Length(10),
         ],
-        empty: "no domains · a to add one, then point its A record at this server",
+        empty: ("a", "add a domain, then point its A record at this server"),
     }
     .render(frame, area, rows, view.row);
 }
@@ -2118,7 +2199,7 @@ fn volumes_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
             Constraint::Fill(1),
             Constraint::Fill(1),
         ],
-        empty: "no volumes · a to add one",
+        empty: ("a", "add a volume"),
     }
     .render(frame, area, rows, view.row);
 }
@@ -2132,6 +2213,9 @@ fn settings_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
     let inner = inside(&block, area).inner(Margin::new(1, 1));
     frame.render_widget(block, area);
     let Some(d) = &view.detail else { return };
+    if area.width >= 23 {
+        mouse::key_target(Rect::new(area.right() - 11, area.y, 9, 1), "⏎");
+    }
     let s = &d.service;
     let w = 14;
     let val = |v: String| vec![Span::styled(v, theme::text())];
@@ -2186,6 +2270,18 @@ fn settings_tab(frame: &mut Frame, area: Rect, view: &ServiceView) {
             Span::styled("  delete this service and its containers", theme::muted()),
         ]),
     ]);
+    let delete_row = lines.len() as u16 - 1;
+    if delete_row < inner.height {
+        mouse::key_target(
+            Rect::new(
+                inner.x,
+                inner.y + delete_row,
+                (lines[delete_row as usize].width() as u16).min(inner.width),
+                1,
+            ),
+            "X",
+        );
+    }
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -2262,10 +2358,27 @@ fn deploy(frame: &mut Frame, area: Rect, app: &App) {
     let block = panel(title("Pipeline", false), None, false);
     let inner = inside(&block, pipe).inner(Margin::new(0, 1));
     frame.render_widget(block, pipe);
+    let show_progress = inner.height > 6;
+    let step_area = Rect {
+        height: inner.height - if show_progress { 4 } else { 0 },
+        ..inner
+    };
+    let step_count = step_area.height.div_ceil(2) as usize;
+    let offset = view
+        .pipeline_offset
+        .min(d.steps.len().saturating_sub(step_count));
+    mouse::hit(pipe, Hit::List(List::Pipeline(step_count)));
     let lines: Vec<Line> = d
         .steps
         .iter()
-        .flat_map(|s| {
+        .skip(offset)
+        .take(step_count)
+        .enumerate()
+        .flat_map(|(i, s)| {
+            mouse::hit(
+                Rect::new(step_area.x, step_area.y + i as u16 * 2, step_area.width, 1),
+                Hit::Pipeline(s.kind),
+            );
             let took = match (s.started_at, s.finished_at) {
                 (Some(a), Some(b)) => util::duration((b - a).num_seconds()),
                 (Some(a), None) if s.status == StepStatus::Running => {
@@ -2297,7 +2410,7 @@ fn deploy(frame: &mut Frame, area: Rect, app: &App) {
             ]
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), step_area);
 
     let total = d
         .steps
@@ -2315,7 +2428,7 @@ fn deploy(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         done * 100 / total
     };
-    if inner.height > 6 {
+    if show_progress {
         let foot = Rect {
             y: inner.bottom().saturating_sub(4),
             height: 4,
@@ -2374,6 +2487,7 @@ fn deploy(frame: &mut Frame, area: Rect, app: &App) {
     );
     let inner = inside(&block, out);
     frame.render_widget(block, out);
+    mouse::hit(out, Hit::Logs);
     log_view(
         frame,
         inner,
@@ -2403,6 +2517,7 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
     );
     let inner = inside(&block, list);
     frame.render_widget(block, list);
+    mouse::hit(list, Hit::List(List::Servers));
     let header =
         Row::new(["", "NAME", "KIND", "HOST", "DOCKER", "PROXY", "CHECKED"]).style(theme::muted());
     let rows: Vec<Row> = app
@@ -2466,39 +2581,60 @@ fn servers(frame: &mut Frame, area: Rect, app: &App) {
             })
         })
         .collect();
-    row_hits(inner, rows.len(), 0, Hit::Server);
+    let offset = scroll_offset(app.server_row, inner.height.saturating_sub(1) as usize);
+    let widths = [
+        Constraint::Length(2),
+        Constraint::Length(16),
+        Constraint::Length(6),
+        Constraint::Fill(1),
+        Constraint::Length(10),
+        Constraint::Length(15),
+        Constraint::Length(10),
+    ];
+    row_hits(inner, rows.len(), offset, Hit::Server);
+    let columns = Layout::horizontal(widths).spacing(2).split(inner);
+    for (i, server) in app
+        .servers
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(inner.height.saturating_sub(1) as usize)
+    {
+        if server.proxy == ProxyStatus::Missing {
+            let proxy = columns[5];
+            let row = Rect::new(proxy.x, inner.y + 1 + (i - offset) as u16, proxy.width, 1);
+            mouse::span_target(row, 0, "not set up · p".chars().count(), Hit::SetupProxy(i));
+        }
+    }
     frame.render_widget(
-        Table::new(
-            rows,
-            [
-                Constraint::Length(2),
-                Constraint::Length(16),
-                Constraint::Length(6),
-                Constraint::Fill(1),
-                Constraint::Length(10),
-                Constraint::Length(15),
-                Constraint::Length(10),
-            ],
-        )
-        .header(header)
-        .column_spacing(2),
+        Table::new(rows.into_iter().skip(offset), widths)
+            .header(header)
+            .column_spacing(2),
         inner,
     );
     if let Some(key) = key {
         let block = panel(title("Daemon SSH key", false), None, false);
         let inner = inside(&block, key_area);
         frame.render_widget(block, key_area);
+        let [description, value, hints] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::styled(
-                    "Add this key to ~/.ssh/authorized_keys on a server before adding it:",
-                    theme::muted(),
-                ),
-                Line::styled(key, theme::text()),
-            ])
-            .wrap(Wrap { trim: true }),
-            inner,
+            Paragraph::new("Add this key to ~/.ssh/authorized_keys on a server before adding it:")
+                .style(theme::muted()),
+            description,
         );
+        frame.render_widget(
+            Paragraph::new(key)
+                .style(theme::text())
+                .wrap(Wrap { trim: true }),
+            value,
+        );
+        mouse::key_target(value, "ctrl+k");
+        mouse::hints(frame, hints, &[("ctrl+k", "copy key")], Alignment::Right);
     }
 }
 
@@ -2515,6 +2651,7 @@ fn dialog(
         Constraint::Length(width.min(area.width.saturating_sub(4))),
         Constraint::Length(height.min(area.height)),
     );
+    mouse::modal(rect);
     frame.render_widget(Clear, rect);
     let mut spans = vec![Span::raw(" ")];
     spans.extend(heading);
@@ -2573,33 +2710,20 @@ fn confirm(frame: &mut Frame, area: Rect, c: &Confirm, tick: usize) {
         );
         return;
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("esc", theme::accent()),
-            Span::styled(" keep", theme::muted()),
-        ])),
-        keys,
-    );
-    let chip = format!(" y {} ", c.verb);
-    let chip_w = chip.chars().count() as u16;
-    frame.render_widget(
-        Paragraph::new(Span::styled(chip, style)).right_aligned(),
-        keys,
-    );
-    mouse::hit(
-        Rect::new(keys.x, keys.y, 8, 1),
-        Hit::Key(
-            crossterm::event::KeyCode::Esc,
-            crossterm::event::KeyModifiers::NONE,
-        ),
-    );
-    mouse::hit(
-        Rect::new(keys.right().saturating_sub(chip_w), keys.y, chip_w, 1),
-        Hit::Key(
-            crossterm::event::KeyCode::Char('y'),
-            crossterm::event::KeyModifiers::NONE,
-        ),
-    );
+    let remaining = action_chip(frame, keys, "y", c.verb, style);
+    mouse::hints(frame, remaining, &[("esc", "keep")], Alignment::Left);
+}
+
+fn action_chip(frame: &mut Frame, area: Rect, key: &str, label: &str, style: Style) -> Rect {
+    let chip = Span::styled(format!(" {key} {label} "), style);
+    let width = (chip.width() as u16).min(area.width);
+    let rect = Rect::new(area.right() - width, area.y, width, area.height);
+    frame.render_widget(Paragraph::new(chip), rect);
+    mouse::key_target(rect, key);
+    Rect {
+        width: area.width.saturating_sub(width + 1),
+        ..area
+    }
 }
 
 /// A secret shown once, with copy.
@@ -2643,31 +2767,20 @@ fn reveal(frame: &mut Frame, area: Rect, r: &Reveal) {
     );
     frame.render_widget(note, note_a);
     frame.render_widget(Paragraph::new(rule_line(rule.width)), rule);
-    hint_at(
+    let width = (Span::raw(&r.value).width() + 1).min(value.width as usize) as u16;
+    mouse::key_target(Rect { width, ..value }, "c");
+    let remaining = action_chip(frame, keys, "⏎", "done", theme::chip());
+    mouse::hints(
         frame,
-        keys.x,
-        keys.y,
-        "c",
-        &format!("copy {}", r.what.trim_start_matches("the ")),
-    );
-    let chip = " ⏎ done ";
-    let chip_w = chip.chars().count() as u16;
-    frame.render_widget(
-        Paragraph::new(Span::styled(chip, theme::chip())).right_aligned(),
-        keys,
-    );
-    mouse::hit(
-        Rect::new(keys.right().saturating_sub(chip_w), keys.y, chip_w, 1),
-        Hit::Key(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
-        ),
+        remaining,
+        &[("c", &format!("copy {}", r.what.trim_start_matches("the ")))],
+        Alignment::Left,
     );
 }
 
 fn palette(frame: &mut Frame, area: Rect, p: &Palette) {
     let commands = p.commands();
-    let h = commands.len() as u16 + 6;
+    let h = commands.len() as u16 + 7;
     let inner = dialog(
         frame,
         area,
@@ -2675,17 +2788,41 @@ fn palette(frame: &mut Frame, area: Rect, p: &Palette) {
         h,
         vec![Span::styled("Command", theme::text())],
     );
-    let mut lines = vec![
-        Line::from(vec![
+    let [input, _, rows, hints] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    mouse::hit(input, Hit::PaletteInput);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
             Span::styled(": ", theme::accent()),
             Span::styled(p.input.clone(), theme::text()),
             Span::styled("▏", theme::accent()),
-        ]),
-        Line::raw(""),
-    ];
-    for (i, c) in commands.iter().enumerate() {
+        ])),
+        input,
+    );
+    mouse::hit(rows, Hit::List(List::Palette));
+    let offset = scroll_offset(p.row, rows.height as usize);
+    let mut lines = Vec::new();
+    for (i, c) in commands
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(rows.height as usize)
+    {
         let selected = i == p.row;
-        let label = format!(" {:<width$}", c.label(), width = inner.width as usize - 10);
+        let label = format!(
+            " {:<width$}",
+            c.label(),
+            width = (inner.width as usize).saturating_sub(10)
+        );
+        mouse::hit(
+            Rect::new(rows.x, rows.y + (i - offset) as u16, rows.width, 1),
+            Hit::PaletteRow(i),
+        );
         lines.push(
             Line::from(vec![
                 Span::styled(
@@ -2705,85 +2842,55 @@ fn palette(frame: &mut Frame, area: Rect, p: &Palette) {
             }),
         );
     }
-    for i in 0..commands.len() {
-        let y = inner.y + 2 + i as u16;
-        if y < inner.bottom() {
-            mouse::hit(Rect::new(inner.x, y, inner.width, 1), Hit::PaletteRow(i));
-        }
-    }
     if commands.is_empty() {
         lines.push(Line::styled(" no command matches", theme::muted()));
     }
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), rows);
+    mouse::hints(
+        frame,
+        hints,
+        &[("⏎", "run"), ("esc", "close")],
+        Alignment::Left,
+    );
 }
 
 fn help(frame: &mut Frame, area: Rect, app: &App) {
-    let sections: [(&str, &[(&str, &str)]); 4] = [
-        (
-            "everywhere",
-            &[
-                (":", "command palette"),
-                ("?", "this help"),
-                ("S", "servers"),
-                (",", "settings"),
-                ("ctrl+r", "refresh"),
-                ("esc", "back"),
-                ("q", "quit"),
-                ("click", "select · double-click opens"),
-                ("wheel", "scroll lists and logs"),
-                ("drag", "select text, copied on release"),
-                ("⇧ drag", "terminal's own selection"),
-            ],
-        ),
-        (
-            "overview",
-            &[
-                ("↑↓ jk", "move"),
-                ("←→ tab", "switch pane"),
-                ("⏎", "open / fold"),
-                ("n", "new service"),
-                ("N", "new project"),
-                ("E", "new environment"),
-                ("x", "delete selected"),
-                ("/", "filter"),
-            ],
-        ),
-        (
-            "service",
-            &[
-                ("tab 1-7", "switch tab"),
-                ("d", "deploy"),
-                ("r", "restart"),
-                ("s", "stop / start"),
-                ("l", "logs"),
-                ("a", "add (env, domain, volume)"),
-            ],
-        ),
-        (
-            "logs",
-            &[
-                ("f", "follow"),
-                ("/", "search"),
-                ("n N", "next / prev match"),
-                ("t", "timestamps"),
-                ("w", "wrap"),
-                ("e", "errors only"),
-                ("g G", "top / bottom"),
-            ],
-        ),
+    let mut global = vec![
+        (":", "command palette"),
+        ("S", "servers"),
+        (",", "settings"),
+        ("ctrl+r", "refresh"),
+        ("q", "quit"),
     ];
-    let height = sections
-        .iter()
-        .map(|(_, k)| k.len() as u16 + 2)
-        .sum::<u16>()
-        + 2;
-    mouse::hit(
-        area,
-        Hit::Key(
-            crossterm::event::KeyCode::Esc,
-            crossterm::event::KeyModifiers::NONE,
-        ),
-    );
+    global.retain(|(key, _)| {
+        !matches!(
+            (app.screen, *key),
+            (Screen::Settings, ",") | (Screen::Servers, "S")
+        )
+    });
+    let (mut screen_keys, _) = keys_for(app);
+    screen_keys.retain(|(key, _)| !matches!(*key, ":" | "esc"));
+    match app.screen {
+        Screen::Overview => screen_keys.extend([
+            ("tab", "switch pane"),
+            ("N", "new project"),
+            ("E", "new environment"),
+            ("x", "delete selected"),
+        ]),
+        Screen::Service => {
+            screen_keys.push(("⇧tab", "previous tab"));
+            if app.service.as_ref().is_some_and(|v| v.tab == Tab::Logs) {
+                screen_keys.extend([
+                    ("n", "next match"),
+                    ("N", "previous match"),
+                    ("g", "top"),
+                    ("G", "bottom"),
+                ]);
+            }
+        }
+        _ => {}
+    }
+    let height = (global.len().max(screen_keys.len()) + 9) as u16;
     let inner = dialog(
         frame,
         area,
@@ -2801,18 +2908,33 @@ fn help(frame: &mut Frame, area: Rect, app: &App) {
             ),
         ],
     );
-    let mut lines = Vec::new();
-    for (name, keys) in sections {
-        lines.push(Line::styled(name, theme::muted()));
-        for (k, l) in keys {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {k:<10}"), theme::accent()),
-                Span::styled(*l, theme::text()),
-            ]));
+    let [body, instructions, close] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(3),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let [left, right] = Layout::horizontal([Constraint::Fill(1); 2])
+        .spacing(2)
+        .areas(body);
+    for (column, heading, hints) in [
+        (left, "everywhere", global),
+        (right, "this screen", screen_keys),
+    ] {
+        frame.render_widget(Paragraph::new(heading).style(theme::muted()), column);
+        for (row, (key, label)) in hints.into_iter().enumerate() {
+            hint_at(frame, column, 0, row as u16 + 1, key, label);
         }
-        lines.push(Line::raw(""));
     }
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled("click to select · double-click to open", theme::muted()),
+            Line::styled("wheel to scroll · drag to copy text", theme::muted()),
+            Line::styled("shift-drag uses the terminal’s selection", theme::muted()),
+        ]),
+        instructions,
+    );
+    mouse::hints(frame, close, &[("esc", "close help")], Alignment::Right);
 }
 
 // Settings
@@ -2826,13 +2948,12 @@ fn setting_row(
     key: &str,
     value: Vec<Span<'static>>,
     hint: Option<(&'static str, &'static str)>,
-) {
+) -> Rect {
     if line.height == 0 || line.width == 0 {
-        return;
+        return Rect::ZERO;
     }
-    let hint_w = hint.map_or(0, |(k, l)| {
-        (k.chars().count() + 1 + l.chars().count()) as u16
-    });
+    let hint_w = hint.map_or(0, |hint| mouse::hints_width(&[hint]) as u16);
+    let content_width = value.iter().map(Span::width).sum::<usize>();
     let mut spans = vec![Span::styled(
         format!("{key:<SETTING_KEY_W$}"),
         theme::muted(),
@@ -2846,44 +2967,33 @@ fn setting_row(
             ..line
         },
     );
-    if let Some((k, l)) = hint {
-        let rect = Rect::new(
-            line.right().saturating_sub(hint_w),
-            line.y,
-            hint_w.min(line.width),
-            1,
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(k, theme::accent()),
-                Span::styled(format!(" {l}"), theme::muted()),
-            ])),
-            rect,
-        );
-        if let Some((code, mods)) = mouse::key_for_label(k) {
-            mouse::hit(rect, Hit::Key(code, mods));
-        }
+    if let Some(hint) = hint {
+        mouse::hints(frame, line, &[hint], Alignment::Right);
     }
+    let value_x = SETTING_KEY_W as u16;
+    Rect::new(
+        line.x + value_x.min(value_w),
+        line.y,
+        (content_width as u16).min(value_w.saturating_sub(value_x)),
+        1,
+    )
 }
 
 /// The rows of a panel body, one line each.
 fn lines_of(area: Rect, n: u16) -> Vec<Rect> {
-    (0..n.min(area.height))
-        .map(|i| Rect::new(area.x, area.y + i, area.width, 1))
+    (0..n)
+        .map(|i| {
+            Rect::new(
+                area.x,
+                area.y + i.min(area.height),
+                area.width,
+                u16::from(i < area.height),
+            )
+        })
         .collect()
 }
 
 fn settings(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(s) = &app.settings.settings else {
-        let block = panel(title("Settings", true), None, true);
-        let inner = inside(&block, area);
-        frame.render_widget(block, area);
-        frame.render_widget(
-            Paragraph::new(format!("{} loading", util::spinner(app.tick))).style(theme::muted()),
-            inner,
-        );
-        return;
-    };
     let [row1, row2, row3] = Layout::vertical([
         Constraint::Length(6),
         Constraint::Length(5),
@@ -2891,13 +3001,25 @@ fn settings(frame: &mut Frame, area: Rect, app: &App) {
     ])
     .spacing(1)
     .areas(area);
-    instance_panel(frame, row1, app, s);
-    let [proxy, security, maintenance] = Layout::horizontal([Constraint::Fill(1); 3])
-        .spacing(1)
-        .areas(row2);
-    proxy_panel(frame, proxy, s);
-    security_panel(frame, security, s);
-    maintenance_panel(frame, maintenance, s);
+    if let Some(s) = &app.settings.settings {
+        instance_panel(frame, row1, app, s);
+        let [proxy, security, maintenance] = Layout::horizontal([Constraint::Fill(1); 3])
+            .spacing(1)
+            .areas(row2);
+        proxy_panel(frame, proxy, s);
+        security_panel(frame, security, s);
+        maintenance_panel(frame, maintenance, s);
+    } else {
+        let block = panel(title("Instance", false), None, false);
+        let inner = inside(&block, row1);
+        frame.render_widget(block, row1);
+        let status = if app.connection_error.is_some() {
+            "not connected".into()
+        } else {
+            format!("{} loading", util::spinner(app.tick))
+        };
+        frame.render_widget(Paragraph::new(status).style(theme::muted()), inner);
+    }
     let [contexts, servers] = Layout::horizontal([Constraint::Fill(2), Constraint::Fill(1)])
         .spacing(1)
         .areas(row3);
@@ -3031,7 +3153,7 @@ fn proxy_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
         vec![Span::styled(image.to_string(), theme::muted())],
         None,
     );
-    setting_row(
+    let toggle = setting_row(
         frame,
         rows[2],
         "auto-manage",
@@ -3042,6 +3164,7 @@ fn proxy_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
         }],
         Some(("m", "toggle")),
     );
+    mouse::key_target(toggle, "m");
 }
 
 /// `ssh-ed25519 AAAAC3Nz…q9Lk` and the key's comment.
@@ -3078,13 +3201,16 @@ fn security_panel(frame: &mut Frame, area: Rect, s: &InstanceSettings) {
         .as_deref()
         .map(short_key)
         .unwrap_or_else(|| ("none".into(), String::new()));
-    setting_row(
+    let public_key = setting_row(
         frame,
         rows[1],
         "ssh key",
         vec![Span::styled(key, theme::text())],
         s.ssh_public_key.as_ref().map(|_| ("k", "copy")),
     );
+    if s.ssh_public_key.is_some() {
+        mouse::key_target(public_key, "k");
+    }
     setting_row(
         frame,
         rows[2],
@@ -3154,19 +3280,43 @@ fn contexts_panel(frame: &mut Frame, area: Rect, app: &App) {
     let block = panel(title("Contexts", true), None, true);
     let inner = inside(&block, area);
     frame.render_widget(block, area);
+    mouse::hit(area, Hit::List(List::Contexts));
     let names = app.settings.context_names();
     let name_w = 18;
+    let offset = scroll_offset(app.settings.row, inner.height.saturating_sub(1) as usize);
+    row_hits(inner, names.len(), offset, Hit::Context);
     let mut lines = vec![Line::styled(
         format!("  {:<name_w$}URL", "NAME"),
         theme::muted(),
     )];
-    for (i, name) in names.iter().enumerate() {
+    for (i, name) in names
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(inner.height.saturating_sub(1) as usize)
+    {
         let current = *name == app.context;
         let selected = i == app.settings.row;
         let url = app.settings.contexts.contexts[name].url.clone();
         let tag = if current { "current" } else { "" };
-        let used = 2 + name_w + url.chars().count() + tag.len();
+        let name = Span::styled(
+            format!("{:<name_w$}", truncate(name, name_w - 1)),
+            if selected {
+                theme::accent()
+            } else {
+                theme::text()
+            },
+        );
+        let url = Span::styled(url, theme::muted());
+        let url_start = 2 + name.width();
+        let used = url_start + url.width() + tag.len();
         let pad = (inner.width as usize).saturating_sub(used);
+        mouse::span_target(
+            Rect::new(inner.x, inner.y + 1 + (i - offset) as u16, inner.width, 1),
+            url_start,
+            url.width(),
+            Hit::ContextUrl(i),
+        );
         lines.push(
             Line::from(vec![
                 Span::styled(
@@ -3177,15 +3327,8 @@ fn contexts_panel(frame: &mut Frame, area: Rect, app: &App) {
                         theme::muted()
                     },
                 ),
-                Span::styled(
-                    format!("{:<name_w$}", truncate(name, name_w - 1)),
-                    if selected {
-                        theme::accent()
-                    } else {
-                        theme::text()
-                    },
-                ),
-                Span::styled(url, theme::muted()),
+                name,
+                url,
                 Span::raw(" ".repeat(pad)),
                 Span::styled(tag, theme::text()),
             ])
@@ -3205,7 +3348,6 @@ fn contexts_panel(frame: &mut Frame, area: Rect, app: &App) {
             theme::muted(),
         ));
     }
-    row_hits(inner, names.len(), 0, Hit::Context);
     frame.render_widget(Paragraph::new(lines), inner);
     if inner.height > names.len() as u16 + 2
         && let Ok(path) = client::Config::path()
@@ -3221,6 +3363,8 @@ fn servers_summary(frame: &mut Frame, area: Rect, app: &App) {
     let block = panel(title("Servers", false), None, false);
     let inner = inside(&block, area);
     frame.render_widget(block, area);
+    mouse::hit(area, Hit::OpenServers);
+    mouse::span_target(area, 2, "Servers".len(), Hit::OpenServers);
     let online = app
         .servers
         .iter()
@@ -3254,19 +3398,11 @@ fn servers_summary(frame: &mut Frame, area: Rect, app: &App) {
     );
     if inner.height > 3 {
         let line = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("S", theme::accent()),
-                Span::styled(" open the servers screen", theme::muted()),
-            ])),
+        mouse::hints(
+            frame,
             line,
-        );
-        mouse::hit(
-            Rect { width: 25, ..line },
-            Hit::Key(
-                crossterm::event::KeyCode::Char('S'),
-                crossterm::event::KeyModifiers::NONE,
-            ),
+            &[("S", "open the servers screen")],
+            Alignment::Left,
         );
     }
 }

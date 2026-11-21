@@ -5,7 +5,7 @@ use crate::theme;
 use common::Id;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
@@ -353,23 +353,29 @@ impl Form {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, tick: usize) {
-        let visible: Vec<&Field> = self.fields.iter().filter(|f| f.visible).collect();
-        let roomy = area.height as usize >= visible.len() * 2 + 9;
-        let rows_per_field = if roomy { 2 } else { 1 };
+        let area = area.intersection(frame.area());
+        let visible: Vec<_> = self
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| field.visible)
+            .collect();
         let width = area.width.saturating_sub(4).min(92);
         let warning_rows = if self.warning.is_empty() {
             0
         } else {
             self.warning.len() + 1
         };
-        let height =
-            (visible.len() * rows_per_field + 6 + warning_rows + usize::from(self.error.is_some()))
-                as u16;
+        let status_rows = warning_rows + usize::from(self.error.is_some());
+        let roomy = area.height as usize >= visible.len() * 2 + 9 + status_rows;
+        let rows_per_field = if roomy { 2 } else { 1 };
+        let height = visible.len() * rows_per_field + 6 + status_rows;
         let rect = area.centered(
             Constraint::Length(width),
-            Constraint::Length(height.min(area.height)),
+            Constraint::Length(height.min(usize::from(area.height)) as u16),
         );
 
+        mouse::modal(rect);
         frame.render_widget(Clear, rect);
         let mut title = vec![
             Span::raw(" "),
@@ -388,29 +394,55 @@ impl Form {
             .border_style(theme::muted())
             .style(theme::text().bg(theme::SURFACE))
             .title_top(Line::from(title));
-        let inner = block.inner(rect).inner(ratatui::layout::Margin::new(2, 1));
+        let content = block.inner(rect);
         frame.render_widget(block, rect);
+        if content.is_empty() {
+            return;
+        }
+        let pad_x = if content.width > 4 { 2 } else { 0 };
+        let pad_top = u16::from(content.height > 3);
+        let inner = Rect::new(
+            content.x + pad_x,
+            content.y + pad_top,
+            content.width - 2 * pad_x,
+            content.height - pad_top,
+        );
+        let actions = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
+        let show_rule = inner.height >= 3;
+        let body_bottom = actions.y - u16::from(show_rule);
+        let body_rows = usize::from(body_bottom - inner.y);
+        mouse::hit(
+            Rect::new(inner.x, inner.y, inner.width, body_rows as u16),
+            Hit::List(mouse::List::Form),
+        );
+        let field_rows = rows_per_field.min(body_rows);
+        let error_rows = usize::from(self.error.is_some() && body_rows > field_rows);
+        let warnings = self.warning.len().min(body_rows - field_rows - error_rows);
+        let capacity = (body_rows - error_rows - warnings) / rows_per_field;
+        let start = visible
+            .iter()
+            .position(|(i, _)| *i == self.focus)
+            .unwrap_or(0)
+            .saturating_sub(capacity.saturating_sub(1));
 
         let hint_w: u16 = if inner.width >= 76 { 24 } else { 0 };
-        let label_w: u16 = 16;
+        let label_w = 16.min(inner.width / 2);
         let mut y = inner.y;
-        for (i, field) in self.fields.iter().enumerate().filter(|(_, f)| f.visible) {
+        for (i, field) in visible.into_iter().skip(start).take(capacity) {
             let focused = i == self.focus;
             let hint_w = if matches!(field.kind, FieldKind::Choice(_)) {
                 0
             } else {
                 hint_w
             };
+            let row = Rect::new(inner.x, y, inner.width, 1);
             let [label_a, value_a, hint_a] = Layout::horizontal([
                 Constraint::Length(label_w),
                 Constraint::Fill(1),
                 Constraint::Length(hint_w),
             ])
-            .areas(Rect::new(inner.x, y, inner.width, 1));
-            mouse::hit(
-                Rect::new(inner.x, y, inner.width, if roomy { 2 } else { 1 }),
-                Hit::FormField(i),
-            );
+            .areas(row);
+            mouse::hit(row, Hit::FormField(i));
             let label = if focused {
                 format!("› {}", field.label)
             } else {
@@ -429,12 +461,9 @@ impl Form {
                     let mut spans = Vec::new();
                     let mut x = value_a.x;
                     for (j, opt) in options.iter().enumerate() {
-                        let w = opt.chars().count() as u16 + 2;
-                        mouse::hit(
-                            Rect::new(x, y, w, 1).intersection(value_a),
-                            Hit::FormChoice(i, j),
-                        );
-                        x += w + 1;
+                        if x >= value_a.right() {
+                            break;
+                        }
                         let style = if j == field.choice {
                             if focused {
                                 theme::chip()
@@ -444,7 +473,14 @@ impl Form {
                         } else {
                             theme::muted()
                         };
-                        spans.push(Span::styled(format!(" {opt} "), style));
+                        let chip = Span::styled(format!(" {opt} "), style);
+                        let width = u16::try_from(chip.width()).unwrap_or(u16::MAX);
+                        mouse::hit(
+                            Rect::new(x, y, width.min(value_a.right() - x), 1),
+                            Hit::FormChoice(i, j),
+                        );
+                        x = x.saturating_add(width).saturating_add(1);
+                        spans.push(chip);
                         spans.push(Span::raw(" "));
                     }
                     Line::from(spans)
@@ -502,28 +538,25 @@ impl Form {
                     hint_a,
                 );
             }
-            if roomy {
-                if field.kind == FieldKind::Text {
-                    let rule = "─".repeat(value_a.width as usize);
-                    let style = if focused {
-                        theme::accent()
-                    } else {
-                        theme::fg(theme::LINE)
-                    };
-                    frame.render_widget(
-                        Paragraph::new(rule).style(style),
-                        Rect::new(value_a.x, y + 1, value_a.width, 1),
-                    );
-                }
-                y += 2;
-            } else {
-                y += 1;
+            if roomy && field.kind == FieldKind::Text {
+                let rule = "─".repeat(value_a.width as usize);
+                let style = if focused {
+                    theme::accent()
+                } else {
+                    theme::fg(theme::LINE)
+                };
+                let underline = Rect::new(value_a.x, y + 1, value_a.width, 1);
+                frame.render_widget(Paragraph::new(rule).style(style), underline);
+                mouse::hit(underline, Hit::FormField(i));
             }
+            y += rows_per_field as u16;
         }
 
-        if !self.warning.is_empty() {
-            y += 1;
-            for (i, line) in self.warning.iter().enumerate() {
+        if warnings > 0 {
+            if usize::from(body_bottom - y) > warnings + error_rows {
+                y += 1;
+            }
+            for (i, line) in self.warning.iter().take(warnings).enumerate() {
                 let spans = if i == 0 {
                     vec![
                         Span::styled("▲ ", theme::fg(theme::ERR)),
@@ -540,67 +573,76 @@ impl Form {
             }
         }
 
-        if let Some(error) = &self.error {
+        if let Some(error) = &self.error
+            && error_rows > 0
+        {
             frame.render_widget(
                 Paragraph::new(format!("✕ {error}")).style(theme::fg(theme::ERR)),
                 Rect::new(inner.x, y, inner.width, 1),
             );
-            y += 1;
         }
 
-        let actions_y = (y + 1).min(inner.bottom().saturating_sub(1));
-        let rule = Rect::new(inner.x, actions_y, inner.width, 1);
-        frame.render_widget(
-            Paragraph::new("─".repeat(inner.width as usize)).style(theme::fg(theme::LINE)),
-            rule,
-        );
-        let actions = Rect::new(inner.x, actions_y + 1, inner.width, 1);
-        let mut left = vec![];
-        for (k, l) in [("tab", "next"), ("⇧tab", "prev"), ("esc", "cancel")] {
-            left.push(Span::styled(k, theme::accent()));
-            left.push(Span::styled(format!(" {l}   "), theme::muted()));
-        }
-        frame.render_widget(Paragraph::new(Line::from(left)), actions);
-        let mut x = actions.x;
-        for (k, l) in [("tab", "next"), ("⇧tab", "prev"), ("esc", "cancel")] {
-            let w = (k.chars().count() + 1 + l.chars().count()) as u16;
-            if let Some((code, mods)) = mouse::key_for_label(k) {
-                mouse::hit(Rect::new(x, actions.y, w, 1), Hit::Key(code, mods));
-            }
-            x += w + 3;
-        }
-        let mut right = vec![];
-        if let Some(alt) = self.alt_label {
-            right.push(Span::styled("ctrl+s", theme::accent()));
-            right.push(Span::styled(format!(" {alt}   "), theme::muted()));
+        if show_rule {
+            frame.render_widget(
+                Paragraph::new("─".repeat(inner.width as usize)).style(theme::fg(theme::LINE)),
+                Rect::new(inner.x, body_bottom, inner.width, 1),
+            );
         }
         let submit = if self.busy {
             format!(" {} working… ", crate::util::spinner(tick))
         } else {
             format!(" ⏎ {} ", self.submit_label)
         };
-        let submit_w = submit.chars().count() as u16;
-        right.push(Span::styled(submit, theme::chip()));
-        let submit_x = actions.right().saturating_sub(submit_w);
-        mouse::hit(
-            Rect::new(submit_x, actions.y, submit_w, 1),
-            Hit::Key(crossterm::event::KeyCode::Enter, KeyModifiers::NONE),
-        );
-        if let Some(alt) = self.alt_label {
-            let w = (7 + alt.chars().count()) as u16;
-            mouse::hit(
-                Rect::new(submit_x.saturating_sub(w + 3), actions.y, w, 1),
-                Hit::Key(KeyCode::Char('s'), KeyModifiers::CONTROL),
-            );
+        let submit = Line::styled(submit, theme::chip()).right_aligned();
+        let submit_w = submit.width().min(usize::from(actions.width)) as u16;
+        let submit_area = Rect::new(actions.right() - submit_w, actions.y, submit_w, 1);
+        frame.render_widget(submit, submit_area);
+        if !self.busy {
+            mouse::key_target(submit_area, "⏎");
         }
-        frame.render_widget(Paragraph::new(Line::from(right).right_aligned()), actions);
+        let mut left_w = (submit_area.x - actions.x).saturating_sub(3);
+        if let Some(alt) = self.alt_label {
+            let alt = Line::from(vec![
+                Span::styled("ctrl+s", theme::accent()),
+                Span::styled(format!(" {alt}"), theme::muted()),
+            ])
+            .right_aligned();
+            let alt_w = alt.width().min(usize::from(left_w)) as u16;
+            left_w -= alt_w;
+            let alt_area = Rect::new(actions.x + left_w, actions.y, alt_w, 1);
+            frame.render_widget(alt, alt_area);
+            if !self.busy {
+                mouse::key_target(alt_area, "ctrl+s");
+            }
+            left_w = left_w.saturating_sub(3);
+        }
+        let navigation = [("tab", "next"), ("⇧tab", "prev"), ("esc", "cancel")];
+        let compact = [navigation[0], navigation[2]];
+        let hints = if mouse::hints_width(&navigation) <= usize::from(left_w) {
+            navigation.as_slice()
+        } else if mouse::hints_width(&compact) <= usize::from(left_w) {
+            compact.as_slice()
+        } else {
+            &navigation[2..]
+        };
+        mouse::hints(
+            frame,
+            Rect::new(actions.x, actions.y, left_w, 1),
+            hints,
+            Alignment::Left,
+        );
+        if self.busy {
+            mouse::hit(inner, Hit::Block);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyEvent;
+    use crate::app::{App, Overlay};
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
     fn service_form() -> Form {
         Form::new(
@@ -625,6 +667,123 @@ mod tests {
                 Field::text("domain", "domain"),
             ],
         )
+    }
+
+    fn fixture(form: Form) -> App {
+        let client = client::Client::new("http://localhost", "test").unwrap();
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(client, "test".into(), tx);
+        app.overlay = Some(Overlay::Form(form));
+        app
+    }
+
+    fn click(app: &mut App, (column, row): (u16, u16)) {
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            mouse::handle(
+                app,
+                MouseEvent {
+                    kind,
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                },
+            );
+        }
+    }
+
+    fn draw<'a>(terminal: &'a mut Terminal<TestBackend>, app: &App) -> &'a Buffer {
+        let Some(Overlay::Form(form)) = &app.overlay else {
+            panic!("expected a form overlay");
+        };
+        mouse::reset();
+        terminal
+            .draw(|frame| {
+                form.render(frame, frame.area(), 0);
+                mouse::finish_frame(&app.mouse);
+            })
+            .unwrap()
+            .buffer
+    }
+
+    #[test]
+    fn compact_form_footer_advances_to_fields_below_the_initial_view() {
+        let mut app = fixture(
+            service_form()
+                .submit("create & deploy", Some("create only"))
+                .focus_on("port"),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 7)).unwrap();
+        let row = |buf: &Buffer, y| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let buf = draw(&mut terminal, &app);
+        let modal = mouse::modal_bounds(&app.mouse).unwrap();
+        assert!(
+            mouse::targets(&app.mouse)
+                .iter()
+                .all(|(target, _)| modal.intersection(*target) == *target)
+        );
+        assert!(row(buf, 3).contains("› port"));
+        assert!(row(buf, 6).contains('╯'));
+        let footer = row(buf, 5);
+        assert!(footer.contains("ctrl+s create only"));
+        assert!(footer.contains("⏎ create & deploy"));
+        let alt_x = footer.find("ctrl+s").unwrap() as u16;
+        assert_eq!(
+            mouse::hit_at(&app.mouse, alt_x, 5),
+            Some(Hit::Key(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        );
+        let tab_x = footer.find("tab next").unwrap() as u16;
+        click(&mut app, (tab_x, 5));
+
+        let buf = draw(&mut terminal, &app);
+        assert!(row(buf, 3).contains("› domain"));
+        let cancel_x = row(buf, 5).find("esc cancel").unwrap() as u16;
+        click(&mut app, (cancel_x, 5));
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn wide_choice_cells_and_toggle_rows_follow_what_is_drawn() {
+        let form = Form::new(
+            FormKind::NewProject,
+            "Mouse fixture",
+            vec![
+                Field::choice("source", "source", vec!["界界".into(), "Image".into()]).selected(1),
+                Field::toggle("tls", "https", false),
+            ],
+        );
+        let mut app = fixture(form);
+        let mut terminal = Terminal::new(TestBackend::new(90, 16)).unwrap();
+        let buf = draw(&mut terminal, &app);
+        let symbol = |name| {
+            buf.pos_of(
+                buf.content()
+                    .iter()
+                    .rposition(|c| c.symbol() == name)
+                    .unwrap(),
+            )
+        };
+        let (wide_x, wide_y) = symbol("界");
+        let (toggle_x, toggle_y) = symbol("○");
+        click(&mut app, (wide_x + 1, wide_y));
+        click(&mut app, (toggle_x, toggle_y + 1));
+        let Some(Overlay::Form(form)) = &app.overlay else {
+            panic!("expected a form overlay");
+        };
+        assert_eq!(form.choice("source"), 0);
+        assert!(!form.on("tls"));
+
+        click(&mut app, (toggle_x, toggle_y));
+        let Some(Overlay::Form(form)) = &app.overlay else {
+            panic!("expected a form overlay");
+        };
+        assert!(form.on("tls"));
     }
 
     #[test]
