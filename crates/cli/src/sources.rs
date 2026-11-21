@@ -303,7 +303,7 @@ fn print_source(s: &GitSource, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn read_secret_file(path: Option<&PathBuf>, what: &str) -> Result<String> {
+pub(crate) fn read_secret_file(path: Option<&PathBuf>, what: &str) -> Result<String> {
     let raw = match path {
         Some(p) => {
             std::fs::read_to_string(p).with_context(|| format!("cannot read {}", p.display()))?

@@ -1,6 +1,7 @@
 //! Command line interface. With no subcommand it opens the TUI.
 
 mod instance;
+mod lb;
 mod notify;
 mod output;
 mod resolve;
@@ -192,6 +193,9 @@ enum Cmd {
     /// Git sources services clone from: GitHub Apps and tokens.
     #[command(subcommand, alias = "sources")]
     Source(sources::SourceCmd),
+    /// Cloud accounts for managed load balancers: Hetzner Cloud and Cloudflare.
+    #[command(subcommand, alias = "providers")]
+    Provider(lb::ProviderCmd),
 }
 
 #[derive(Subcommand)]
@@ -539,6 +543,24 @@ enum ServiceCmd {
         #[arg(long)]
         watch_paths: Option<bool>,
     },
+    /// Show or set which servers the replicas run on. Each server's proxy routes to its own
+    /// replicas; the image is copied from the service's server.
+    Placement {
+        service: String,
+        /// Servers, in order of preference; give the flag once per server.
+        #[arg(long = "server")]
+        servers: Vec<String>,
+        /// spread (even, the default) or pack (fill in order).
+        #[arg(long)]
+        strategy: Option<PlacementStrategy>,
+        /// Let a service with volumes run on several servers, each with its own copy: true or
+        /// false.
+        #[arg(long)]
+        volumes_per_server: Option<bool>,
+    },
+    /// A managed load balancer in front of the service's servers: Hetzner or Cloudflare.
+    #[command(subcommand)]
+    Lb(lb::LbCmd),
     /// Run a service on another server. The old server keeps serving until the new one is
     /// healthy; a failed move leaves everything as it was.
     Move {
@@ -1000,6 +1022,7 @@ async fn dispatch(c: Client, name: String, command: Cmd, json: bool) -> Result<(
         Cmd::Storage(cmd) => storage(&c, cmd, json).await,
         Cmd::Instance(cmd) => instance(&c, cmd, json).await,
         Cmd::Notify(cmd) => notify::run(&c, cmd, json).await,
+        Cmd::Provider(cmd) => lb::provider(&c, cmd, json).await,
         Cmd::Source(cmd) => sources::source(&c, cmd, json).await,
     }
 }
@@ -2773,6 +2796,15 @@ async fn service(c: &Client, cmd: ServiceCmd, json: bool) -> Result<()> {
                 println!("{}", build_label(&d.service.source, build));
             }
         }
+        ServiceCmd::Placement {
+            service,
+            servers,
+            strategy,
+            volumes_per_server,
+        } => {
+            lb::placement(c, &service, servers, strategy, volumes_per_server, json).await?;
+        }
+        ServiceCmd::Lb(cmd) => lb::lb(c, cmd, json).await?,
         ServiceCmd::Move {
             service,
             server,

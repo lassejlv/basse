@@ -141,6 +141,7 @@ fn fixture() -> App {
             container: None,
             compose: Vec::new(),
             replicas: Vec::new(),
+            lb: None,
             database: None,
         },
     );
@@ -3180,6 +3181,7 @@ fn replicas_fixture() -> App {
             cpu_percent: Some(70),
             ..Default::default()
         },
+        placement: Default::default(),
     };
     let replica = |index: u16| common::Replica {
         index,
@@ -3367,6 +3369,7 @@ async fn scaling_panel_rows_hints_and_the_scale_dialog_have_targets() {
             mem_free: 800 << 20,
             per_replica: 85 << 20,
             fits_more: 9,
+            servers: Vec::new(),
         }),
     ));
     let buf = draw(&app, 160, 40);

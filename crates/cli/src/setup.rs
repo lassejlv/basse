@@ -986,6 +986,7 @@ mod tests {
                     database: None,
                     compose: Vec::new(),
                     replicas: Vec::new(),
+                    lb: None,
                 })
             }
             ("GET", "/services/s1/deployments") => ok(vec![deployment(DeploymentStatus::Building)]),

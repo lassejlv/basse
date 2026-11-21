@@ -473,9 +473,84 @@ impl Client {
         .await
     }
 
-    /// Room for more replicas on the service's server.
+    /// Room for more replicas on each server the service may run on.
     pub async fn scale_capacity(&self, id: &str) -> Result<ScaleCapacity> {
         self.get(&format!("/services/{id}/capacity")).await
+    }
+
+    /// Sets which servers the replicas run on; they move in the background.
+    pub async fn set_placement(&self, id: &str, placement: &Placement) -> Result<ServiceDetail> {
+        Self::json(
+            self.req(Method::PUT, &format!("/services/{id}/placement"))
+                .json(placement),
+        )
+        .await
+    }
+
+    pub async fn providers(&self) -> Result<Vec<lb::Provider>> {
+        self.get("/providers").await
+    }
+
+    pub async fn provider(&self, id: &str) -> Result<lb::Provider> {
+        self.get(&format!("/providers/{id}")).await
+    }
+
+    pub async fn create_provider(&self, body: &lb::CreateProvider) -> Result<lb::Provider> {
+        self.post("/providers", body).await
+    }
+
+    pub async fn check_provider(&self, id: &str) -> Result<lb::Provider> {
+        self.post_empty(&format!("/providers/{id}/check")).await
+    }
+
+    pub async fn discover_provider(&self, id: &str) -> Result<lb::ProviderDiscovery> {
+        self.get(&format!("/providers/{id}/discover")).await
+    }
+
+    pub async fn delete_provider(&self, id: &str) -> Result<()> {
+        self.delete(&format!("/providers/{id}")).await
+    }
+
+    /// The service's load balancer, or `None` when it has none.
+    pub async fn service_lb(&self, id: &str) -> Result<Option<lb::ServiceLb>> {
+        let res = self
+            .req(Method::GET, &format!("/services/{id}/lb"))
+            .send()
+            .await?;
+        if res.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Self::json(self.req(Method::GET, &format!("/services/{id}/lb")))
+            .await
+            .map(Some)
+    }
+
+    /// What turning on a load balancer would create and cost; changes nothing.
+    pub async fn plan_lb(&self, id: &str, config: &lb::LbConfig) -> Result<lb::LbPlan> {
+        self.post(&format!("/services/{id}/lb/plan"), config).await
+    }
+
+    pub async fn enable_lb(&self, id: &str, body: &lb::EnableLb) -> Result<lb::ServiceLb> {
+        Self::json(
+            self.req(Method::PUT, &format!("/services/{id}/lb"))
+                .json(body),
+        )
+        .await
+    }
+
+    /// Syncs the load balancer now; `force` overwrites changes made by hand.
+    pub async fn sync_lb(&self, id: &str, force: bool) -> Result<lb::ServiceLb> {
+        self.post_empty(&format!("/services/{id}/lb/sync?force={force}"))
+            .await
+    }
+
+    /// Turns the load balancer off, deleting what the daemon created with `delete_resources`.
+    pub async fn disable_lb(&self, id: &str, delete_resources: bool) -> Result<lb::LbTeardown> {
+        Self::json(self.req(
+            Method::DELETE,
+            &format!("/services/{id}/lb?delete_resources={delete_resources}"),
+        ))
+        .await
     }
 
     pub async fn set_env(&self, id: &str, vars: &[EnvVar]) -> Result<Vec<EnvVar>> {
