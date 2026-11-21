@@ -4202,7 +4202,7 @@ impl App {
         let note = server_pick::picker_note(&self.servers, blocked);
         self.open_picker(Picker {
             title: "Server".into(),
-            subtitle: form.subtitle.clone(),
+            subtitle: format!("new service in {}", form.subtitle),
             kind: PickKind::Server,
             items,
             row,

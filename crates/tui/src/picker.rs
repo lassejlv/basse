@@ -408,7 +408,11 @@ impl Picker {
         .areas(inner);
 
         let name_w = if self.kind == PickKind::Scope { 40 } else { 24 };
-        let note_w = 22usize;
+        let note_w = if self.kind == PickKind::Server {
+            30
+        } else {
+            22
+        };
         let detail_w = (list.width as usize).saturating_sub(name_w + note_w + 4);
         mouse::hit(list, Hit::List(List::Picker));
         let mut lines = Vec::new();
